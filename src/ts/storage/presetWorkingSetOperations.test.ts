@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Database, botPreset } from './database.svelte'
+import { DBState } from '../stores.svelte'
+import { readPresetBodies, type Database, type botPreset } from './database.svelte'
 import {
     createPresetWorkingSetController,
     capturePresetNames,
@@ -17,7 +18,7 @@ vi.mock('../translator/presets', () => ({ normalizeTranslatorPresetState: vi.fn(
 vi.mock('../model/modellist', () => ({ LLMFlags: {}, LLMFormat: {}, LLMTokenizer: {} }))
 vi.mock('../process/modules', () => ({ moduleUpdate: vi.fn() }))
 vi.mock('../process/scripts', () => ({ resetScriptCache: vi.fn() }))
-vi.mock('../parser/parser.svelte', () => ({}))
+vi.mock('../parser/parser.svelte', async () => (await import('../parser/parser.testSupport')).parserStubModule())
 vi.mock('../process/memory/hypav3', () => ({ createHypaV3Preset: vi.fn() }))
 const runtime = vi.hoisted(() => ({
     mutatePersistentPresets: vi.fn(),
@@ -273,8 +274,6 @@ it('rejects a confirmed same-name replacement before entering the mutation queue
 })
 
 it.each(['unchanged', 'replace-during-read'] as const)('reads a preset after its own save publication: %s', async mode => {
-    const { DBState } = await import('../stores.svelte')
-    const { readPresetBodies } = await import('./database.svelte')
     DBState.db = { botPresetsId: 0, botPresets: [preset('X', 'A'), preset('X', 'B')], mainPrompt: 'edited A' } as Database
     const expected = capturePresetNames(DBState.db.botPresets)
     expect(DBState.db.botPresets[1]).toBe(DBState.db.botPresets[1])

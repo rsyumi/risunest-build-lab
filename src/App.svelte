@@ -356,7 +356,14 @@
             </div>
         {:then module}
             {@const Settings = module.default}
-            <Settings />
+            {#if $MobileGUI}
+                <div class="w-full h-full flex flex-col">
+                    <MobileHeader />
+                    <div class="flex-1 min-h-0"><Settings /></div>
+                </div>
+            {:else}
+                <Settings />
+            {/if}
         {:catch}
             <LazyScreenError message={language.risuNest.lazy.settings} onRetry={() => { settingsPromise = undefined; lazyRetry++ }} backLabel={language.close} onBack={() => { settingsPromise = undefined; $settingsOpen = false }} />
         {/await}

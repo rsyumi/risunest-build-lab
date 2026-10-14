@@ -1,4 +1,4 @@
-import { safeStructuredClone } from '../polyfill'
+import { safeStructuredClone } from '../safeStructuredClone'
 import type { Chat } from '../storage/database.svelte'
 import type {
     ConversationMessageMetadata,

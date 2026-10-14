@@ -4,12 +4,12 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { assertInventory, discoverTestEntries, normalizePath, selectNodeTests } from './suiteOwnership.mjs'
+import { assertInventory, assertListedTestsExist, discoverTestEntries, normalizePath, selectNodeTests } from './suiteOwnership.mjs'
 
 export function parseVitestInventory(output, root, owner) {
   const entries = JSON.parse(output)
   if (!Array.isArray(entries) || entries.length === 0) throw new Error(`Empty or invalid ${owner ?? 'root'} Vitest inventory`)
-  const result = owner ? { [owner]: [] } : { app: [], 'app-extended': [], harness: [] }
+  const result = owner ? { [owner]: [] } : { app: [], 'app-node': [], 'app-extended': [], harness: [] }
   for (const entry of entries) {
     if (!entry || typeof entry.file !== 'string') throw new Error('Unexpected Vitest list output')
     const name = owner ?? entry.projectName
@@ -63,11 +63,13 @@ export function browserInventory(root) {
 export async function main() {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
   const files = await discoverTestEntries(root)
+  assertListedTestsExist(files)
   const inventories = {
     ...vitestInventory(root),
     ...vitestInventory(root, 'server/manager/gui', 'manager'),
     ...vitestInventory(root, 'server/endpoint-registry', 'registry'),
     node: selectNodeTests(files),
+    'harness-node': selectNodeTests(files, 'harness-node'),
     browser: browserInventory(root),
   }
   assertInventory(files, inventories)

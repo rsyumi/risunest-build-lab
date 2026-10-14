@@ -110,11 +110,13 @@ export async function installLocalBackup(
         publishAcceptedRevision: () => Promise<void>
         relaunch: () => void | Promise<void>
         upstreamImportWarnings?: string[]
+        firstRun?: boolean
     },
 ): Promise<CommittedApplyOutcome> {
     const outcome = await dependencies.replaceDatabase(prepareUpstreamImport(database), 'local-backup', {
         publishOfficial: true, upstreamImport:true,
         ...(dependencies.upstreamImportWarnings ? {upstreamImportWarnings:dependencies.upstreamImportWarnings} : {}),
+        ...(dependencies.firstRun ? {firstRun:true} : {}),
     })
     if (outcome.projection === 'refresh-required') return outcome
     return finishCommittedRestore(outcome, async () => {

@@ -104,6 +104,20 @@ pub(crate) fn native_download_handoff_cleanup(
     )
 }
 
+pub(crate) fn write_native(state: &NativeFileJobState, write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> Result<(), String>) -> Result<String, String> {
+    let path = create(&state.root).map_err(|_| "network-log-export-failed")?;
+    let result = (|| {
+        let output = OpenOptions::new().write(true).open(&path).map_err(|_| "network-log-export-failed")?;
+        let mut writer = std::io::BufWriter::new(output);
+        write(&mut writer)?;
+        writer.flush().map_err(|_| "network-log-export-failed")?;
+        writer.get_ref().sync_all().map_err(|_| "network-log-export-failed")?;
+        Ok::<_, String>(())
+    })();
+    if let Err(error) = result { let _ = fs::remove_file(&path); return Err(error); }
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

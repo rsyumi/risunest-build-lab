@@ -2,16 +2,19 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import { publishRelease } from "../../scripts/release/publication.mjs";
+import { renderReadme } from "../../scripts/release/readme.mjs";
 import { catalogFixture, productFixture, entryFixture } from "./fixtures.mjs";
 import { createSigner } from "./signing.mjs";
 
 function setup({ latest = true, product = "app", version = "1.1.0" } = {}) {
   const signer = createSigner();
   const release = productFixture(product, version);
+  release.notes = "# Synthetic release\n\n## English\n\n- Improved downloads.\n\n## 한국어\n\n- 다운로드 개선.";
+  release.localizedNotes = { en: "- Improved downloads.", ko: "- 다운로드 개선." };
   const productBytes = Buffer.from(JSON.stringify(release));
   const old = catalogFixture();
   const oldRelease = { id: 1, tag_name: old.publicationTag, draft: false, prerelease: false, target_commitish: "a".repeat(40) };
-  const nextRelease = { id: 2, tag_name: release.tag, draft: true, prerelease: false, target_commitish: release.sourceCommit };
+  const nextRelease = { id: 2, tag_name: release.tag, draft: true, prerelease: false, target_commitish: release.sourceCommit, body: release.notes };
   const assets = new Map();
   if (latest) {
     const bytes = Buffer.from(JSON.stringify(old));
@@ -29,7 +32,7 @@ function setup({ latest = true, product = "app", version = "1.1.0" } = {}) {
     async listPublishedStable() { return [oldRelease, nextRelease].filter(release => !release.draft); },
     async downloadAsset(r, name) { const bytes = assets.get(`${r.id}/${name}`); if (!bytes) throw new Error("missing-asset"); return bytes; },
     async uploadAsset(r, name, bytes) { events.push(name); assets.set(`${r.id}/${name}`, bytes); },
-    async publish() { events.push("publish"); nextRelease.draft = false; this.latest = nextRelease; },
+    async publish(_id, body) { events.push("publish"); nextRelease.body = body; nextRelease.draft = false; this.latest = nextRelease; },
     async makeLatest() { events.push("make-latest"); this.latest = nextRelease; },
   };
   const options = { github, releaseId: nextRelease.id, productBytes, productSignature: signer.sign(productBytes), publicKey: signer.key,
@@ -39,14 +42,28 @@ function setup({ latest = true, product = "app", version = "1.1.0" } = {}) {
   return { options, events, assets, nextRelease, signer, release };
 }
 
-test("only publishes after artifact validation and signed catalog readback", async () => {
-  const t = setup();
+for (const product of ["app", "sync"]) test(`${product} publication appends the README download table after verified notes`, async () => {
+  const t = setup({ product });
   assert.equal((await publishRelease(t.options)).status, "published");
   assert.equal(t.events[0], "verify-assets");
   assert.equal(t.events.at(-1), "publish");
   const catalog = JSON.parse(t.assets.get("2/manifest.json"));
-  assert.deepEqual(catalog.products.sync, catalogFixture().products.sync);
-  assert.equal(catalog.products.app.manifestSha256, createHash("sha256").update(t.options.productBytes).digest("hex"));
+  const other = product === "app" ? "sync" : "app";
+  assert.deepEqual(catalog.products[other], catalogFixture().products[other]);
+  assert.equal(catalog.products[product].manifestSha256, createHash("sha256").update(t.options.productBytes).digest("hex"));
+  assert.deepEqual(catalog.products[product].release, t.release);
+  assert.deepEqual(t.assets.get("2/product-manifest.json"), t.options.productBytes);
+  const template = ["app", "sync"].map(name =>
+    `<!-- release-downloads:${name}:start -->\n<!-- release-downloads:${name}:end -->`).join("\n");
+  const readme = renderReadme(template, catalog, "en");
+  const section = readme.split(`<!-- release-downloads:${product}:start -->`)[1]
+    .split(`<!-- release-downloads:${product}:end -->`)[0];
+  const table = section.trim().split("\n").filter(line => line.startsWith("|")).join("\n");
+  assert.ok(table.startsWith("| Platform | aarch64 (arm64) | x86_64 (x64) |"));
+  assert.equal(t.nextRelease.body, `${t.release.notes}\n\n## Downloads / 다운로드\n\n${table}`);
+  const body = t.nextRelease.body;
+  assert.equal((await publishRelease(t.options)).status, "already-published");
+  assert.equal(t.nextRelease.body, body);
 });
 
 test("missing or corrupted old catalog never becomes a bootstrap", async () => {
@@ -86,10 +103,11 @@ test("failed assets, changed source or invalid new signature cannot publish", as
 test("lost publish response is resolved by reading actual state", async () => {
   const t = setup();
   const original = t.options.github.publish.bind(t.options.github);
-  t.options.github.publish = async () => { await original(); throw new Error("connection-lost"); };
+  t.options.github.publish = async (...args) => { await original(...args); throw new Error("connection-lost"); };
   assert.equal((await publishRelease(t.options)).status, "published");
   assert.equal((await publishRelease(t.options)).status, "already-published");
   assert.equal(t.events.filter(event => event === "publish").length, 1);
+  assert.equal(t.nextRelease.body.split("## Downloads / 다운로드").length, 2);
 });
 
 test("a lost latest pointer is repaired without rewriting immutable assets", async () => {

@@ -407,10 +407,24 @@ impl InstallTransaction {
 
     pub fn load(root: &Path, expected_install: &Path) -> Result<Option<Self>> {
         let path = state_path(root);
-        if !path.exists() {
-            return Ok(None);
-        }
-        let bytes = fs::read(&path).map_err(|_| "update-transaction-invalid".to_owned())?;
+        #[cfg(windows)]
+        let retry_deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        let bytes = loop {
+            match fs::read(&path) {
+                Ok(bytes) => break bytes,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                #[cfg(windows)]
+                Err(error)
+                    if error.kind() == io::ErrorKind::PermissionDenied
+                        && std::time::Instant::now() < retry_deadline =>
+                {
+                    // Windows denies opens while a removed journal is pending deletion.
+                    // Retry the read without treating persistent access errors as absence.
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(_) => return Err("update-transaction-invalid".into()),
+            }
+        };
         let value: Self =
             serde_json::from_slice(&bytes).map_err(|_| "update-transaction-invalid".to_owned())?;
         if value.schema != TRANSACTION_SCHEMA || value.install_path != expected_install {
@@ -785,6 +799,79 @@ pub fn finish_rollback_recovery(root: &Path, expected_install: &Path) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn journal_removal_during_polling_is_absence_not_corruption() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let install = temp.path().join("install");
+        let tx = InstallTransaction::new(
+            "1.0.0".into(),
+            "2.0.0".into(),
+            TransactionKind::Files,
+            install.clone(),
+            temp.path().join(".risunest-sync-update-stage"),
+            temp.path().join(".risunest-sync-update-backup"),
+            vec![PathBuf::from("server.exe")],
+            true,
+        )
+        .unwrap();
+        let journal = state_path(&root);
+        fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        let template = root.join("synthetic-transaction-template");
+        fs::write(&template, serde_json::to_vec(&tx).unwrap()).unwrap();
+        fs::hard_link(&template, &journal).unwrap();
+        InstallTransaction::load(&root, &install).unwrap().unwrap();
+        fs::remove_file(&journal).unwrap();
+        let done = AtomicBool::new(false);
+        let mut failure = None;
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(|| {
+                let outcome = (|| -> io::Result<()> {
+                    for _ in 0..1_000 {
+                        fs::hard_link(&template, &journal)?;
+                        std::thread::yield_now();
+                        fs::remove_file(&journal)?;
+                    }
+                    Ok(())
+                })();
+                done.store(true, Ordering::Release);
+                outcome
+            });
+            while !done.load(Ordering::Acquire) {
+                if let Err(error) = InstallTransaction::load(&root, &install) {
+                    failure.get_or_insert(error);
+                }
+                std::thread::yield_now();
+            }
+            writer.join().unwrap().unwrap();
+        });
+        assert_eq!(failure, None);
+        assert!(InstallTransaction::load(&root, &install).unwrap().is_none());
+    }
+
+    #[test]
+    fn only_a_missing_journal_is_treated_as_absent() {
+        let temp = tempfile::tempdir().unwrap();
+        let install = temp.path().join("install");
+        assert!(InstallTransaction::load(temp.path(), &install)
+            .unwrap()
+            .is_none());
+        let journal = state_path(temp.path());
+        fs::create_dir_all(&journal).unwrap();
+        assert_eq!(
+            InstallTransaction::load(temp.path(), &install).unwrap_err(),
+            "update-transaction-invalid"
+        );
+        fs::remove_dir(&journal).unwrap();
+        fs::write(&journal, b"synthetic malformed journal").unwrap();
+        assert_eq!(
+            InstallTransaction::load(temp.path(), &install).unwrap_err(),
+            "update-transaction-invalid"
+        );
+    }
 
     fn file(path: &Path, value: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();

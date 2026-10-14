@@ -9,7 +9,7 @@ import {
     type CommitTransportDependencies,
     type SharedWebview,
 } from './nativeCommitTransport'
-import { MAX_NATIVE_REQUEST_BYTES, PayloadTooLargeError } from './nativePersistenceValue'
+import { PayloadTooLargeError } from './nativePersistenceValue'
 
 it('transfers encoded pages instead of structured-cloning the commit or callable hooks to its worker', async () => {
     vi.useFakeTimers()
@@ -62,6 +62,9 @@ function fixture(large = true): CommitEnvelope {
         assetAliases: [],
     }
 }
+// Above the staging budget, as the native limit is, so requests between the two still chunk on Android.
+const REQUEST_LIMIT = 2 * STAGED_REQUEST_BYTES
+
 function harness(
     options: {
         windows?: boolean
@@ -122,6 +125,7 @@ function harness(
         invoke,
         encode,
         shared: () => webview,
+        maxRequestBytes: REQUEST_LIMIT,
     })
     return { transport, invoke, encode, webview, received }
 }
@@ -228,10 +232,10 @@ describe('native commit transport', () => {
         'refuses a commit above the request limit on %s before sending anything',
         async (os) => {
             const h = harness({ windows: os === 'windows', [os]: true })
-            h.encode.mockResolvedValueOnce(new Uint8Array(MAX_NATIVE_REQUEST_BYTES + 1))
+            h.encode.mockResolvedValueOnce(new Uint8Array(REQUEST_LIMIT + 1))
             const refused = h.transport.commit(fixture())
             await expect(refused).rejects.toBeInstanceOf(PayloadTooLargeError)
-            await expect(refused).rejects.toMatchObject({ code: 'payload-too-large', kind: 'commit', byteLength: MAX_NATIVE_REQUEST_BYTES + 1 })
+            await expect(refused).rejects.toMatchObject({ code: 'payload-too-large', kind: 'commit', byteLength: REQUEST_LIMIT + 1 })
             expect(h.invoke).not.toHaveBeenCalled()
             expect(h.webview.addEventListener).not.toHaveBeenCalled()
             await expect(h.transport.commit(fixture(false))).resolves.toBeDefined()
@@ -240,7 +244,7 @@ describe('native commit transport', () => {
 
     it.each(['linux', 'ios', 'macos'] as const)('sends a commit at the request limit raw on %s', async (os) => {
         const h = harness({ windows: false, [os]: true })
-        const bytes = new Uint8Array(MAX_NATIVE_REQUEST_BYTES)
+        const bytes = new Uint8Array(REQUEST_LIMIT)
         h.encode.mockResolvedValueOnce(bytes)
         await h.transport.commit(fixture())
         expect(h.invoke).toHaveBeenCalledTimes(1)
@@ -421,7 +425,7 @@ describe('staged replace requests', () => {
     const overBudget = request('한글 🐿️'.repeat(Math.ceil(STAGED_REQUEST_BYTES / 14)))
 
     it('refuses a request above the native limit on every target before sending it', async () => {
-        const large = request('x'.repeat(MAX_NATIVE_REQUEST_BYTES))
+        const large = request('x'.repeat(REQUEST_LIMIT))
         for (const target of ['windows', 'android', 'linux', 'ios', 'macos'] as const) {
             const h = harness({ windows: false, [target]: true })
             const error = await h.transport.stage('pds_replace_put_root', 'root', large).catch((caught) => caught)
@@ -432,7 +436,7 @@ describe('staged replace requests', () => {
     })
 
     it('sends a request whose body is exactly at the limit', async () => {
-        const fill = MAX_NATIVE_REQUEST_BYTES - head.length - JSON.stringify(request('')).length - 1
+        const fill = REQUEST_LIMIT - head.length - JSON.stringify(request('')).length - 1
         const h = harness({ windows: false, linux: true })
         const exact = request('x'.repeat(fill))
         await h.transport.stage('pds_replace_put_root', 'root', exact)
@@ -440,7 +444,7 @@ describe('staged replace requests', () => {
         expect(h.invoke.mock.calls[0][0]).toBe('pds_replace_put_root')
         expect(h.invoke.mock.calls[0][1]).toBe(exact)
         await expect(h.transport.stage('pds_replace_put_root', 'root', request('x'.repeat(fill + 1))))
-            .rejects.toMatchObject({ code: 'payload-too-large', byteLength: MAX_NATIVE_REQUEST_BYTES + 1 })
+            .rejects.toMatchObject({ code: 'payload-too-large', byteLength: REQUEST_LIMIT + 1 })
         expect(h.invoke).toHaveBeenCalledTimes(1)
     })
 

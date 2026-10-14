@@ -72,7 +72,7 @@ test('an IME composition covers its line in the line font and hides while the li
     const composition = (line: number) => page.evaluate(line => window.monacoDriver.composition(line), line)
 
     await compose('ㅇ', '아', '안')
-    await expect.poll(() => composition(12)).toEqual({ composing: true, background: 'rgb(33, 34, 44)', fontMatchesLine: true, visible: true, onLine: true })
+    await expect.poll(() => composition(12)).toEqual({ composing: true, themeBackground: true, fontMatchesLine: true, visible: true, onLine: true })
     await page.evaluate(() => window.monacoDriver.scrollBy(600))
     await expect.poll(() => composition(12)).toMatchObject({ composing: true, visible: false })
     await page.evaluate(() => window.monacoDriver.scrollBy(-600))

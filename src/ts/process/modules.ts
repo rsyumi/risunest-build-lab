@@ -14,7 +14,7 @@ import {get} from "svelte/store"
 import { convertCharacterToModule, convertModuleToCharacter } from "../interchangeability"
 import { exportCharacterCard, importCharacterProcess } from "../characterCards"
 import { isTauri, isTauriDesktop, isTauriAndroid, isTauriIOS } from '../platform'
-import { open } from '@tauri-apps/plugin-dialog'
+import { open } from '../storage/fileSelection'
 import { readFile } from '@tauri-apps/plugin-fs'
 import type { NativeFileJobOptions, NativeFileJobSource } from '../storage/nativeFileJobs'
 import { importDesktopNativeModulePath } from '../storage/nativeModuleFileRoute'
@@ -348,7 +348,7 @@ export async function importModule() {
                 {},
                 (error) => {
                     console.error(error)
-                    alertError(error instanceof StdioModuleImportError ? error : language.errors.noData)
+                    alertError(error instanceof Error ? error : String(error))
                 },
             )
             return

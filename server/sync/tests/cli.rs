@@ -1,19 +1,44 @@
 use std::process::{Command, Output};
 
-fn cli(dir: &std::path::Path, args: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_risunest-sync-server"));
+fn command() -> Command {
+    let command = Command::new(env!("CARGO_BIN_EXE_risunest-sync-server"));
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+        let mut command = command;
         command.creation_flags(0x08000000);
+        command
     }
+    #[cfg(not(windows))]
     command
+}
+
+fn cli(dir: &std::path::Path, args: &[&str]) -> Output {
+    command()
         .args(args)
         .arg("--data-dir")
         .arg(dir)
         .output()
         .unwrap()
 }
+
+#[test]
+fn binary_version_does_not_require_or_create_storage() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = command()
+        .arg("--version")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        format!("risunest-sync-server {}", env!("CARGO_PKG_VERSION"))
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
 #[test]
 fn independent_binary_initializes_registers_reports_and_revokes() {
     let dir = tempfile::tempdir().unwrap();

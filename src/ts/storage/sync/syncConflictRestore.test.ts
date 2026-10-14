@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { language } from 'src/lang'
 
 const mocks = vi.hoisted(() => ({
     backupStore: {
@@ -18,31 +19,19 @@ const mocks = vi.hoisted(() => ({
     capturePersistentMutationToken: vi.fn(),
     runtime: { store: {}, revision: 7, flushPendingData: vi.fn() },
     native: { enabled: false },
+    characters: vi.fn(),
     beginReplacement: vi.fn(),
     confirmReplacement: vi.fn(),
     release: vi.fn(),
     hold: vi.fn(),
 }))
-vi.mock('../../platform', () => ({ get isTauri() { return mocks.native.enabled } }))
+vi.mock('../../platform', async () => (await import('../../platform.testSupport')).platformModule(() => ({ runtime: mocks.native.enabled ? 'tauri' : 'web', os: 'windows' })))
+vi.mock('../libraryCharacters', () => ({ hasLibraryCharacters: mocks.characters }))
 vi.mock('./serverSyncProduction', () => ({
     getServerSyncController: () => ({ beginReplacement: mocks.beginReplacement, confirmReplacement: mocks.confirmReplacement }),
     holdServerSyncAfterRestore: mocks.hold,
 }))
 
-vi.mock('src/lang', () => ({
-    language: {
-        syncBackupSideLocal: 'local',
-        syncBackupSideRemote: 'remote',
-        syncBackupEntry: '{date} {side} {count}',
-        syncBackupDatabaseOnly: 'database only, no assets/cold/inlays',
-        syncConflictBackups: 'backups',
-        syncConflictNoBackups: 'no backups',
-        syncConflictRestoreConfirm: 'restore database only?',
-        syncConflictRestoreScope: 'assets, cold storage and inlays are not included',
-        syncConflictBackupUnreadable: 'unreadable backup',
-        risuNest: { backup: { actionFailed: 'restore failed', syncUnavailable: 'connect sync first' } },
-    },
-}))
 vi.mock('../../alert', () => ({
     alertSelect: mocks.alertSelect,
     alertConfirm: mocks.alertConfirm,
@@ -91,6 +80,7 @@ describe('openSyncConflictBackups', () => {
         mocks.backupStore.save.mockReset().mockResolvedValue(undefined)
         mocks.alertSelect.mockReset().mockResolvedValue('0')
         mocks.alertConfirm.mockReset().mockResolvedValue(true)
+        mocks.characters.mockReset().mockResolvedValue(true)
         mocks.alertError.mockReset()
         mocks.alertNormal.mockReset()
         mocks.decodeRisuSave.mockReset().mockResolvedValue({
@@ -118,10 +108,10 @@ describe('openSyncConflictBackups', () => {
         )
         expect(mocks.backupStore.save).not.toHaveBeenCalled()
         expect(mocks.alertSelect).toHaveBeenCalledWith(
-            [expect.stringContaining('database only, no assets/cold/inlays')],
-            'backups',
+            [expect.stringContaining(language.syncBackupDatabaseOnly)],
+            language.syncConflictBackups,
         )
-        expect(mocks.alertConfirm).toHaveBeenCalledWith('restore database only?')
+        expect(mocks.alertConfirm).toHaveBeenCalledWith(language.syncConflictRestoreConfirm)
         expect(mocks.replacePersistentDatabase).toHaveBeenCalledWith(
             expect.objectContaining({ characters: expect.any(Array) }),
             'local-backup',
@@ -136,12 +126,26 @@ describe('openSyncConflictBackups', () => {
         expect(mocks.hold).not.toHaveBeenCalled()
     })
 
+    it('restores over a library without characters without asking on the web', async () => {
+        mocks.characters.mockResolvedValue(false)
+        await (await import('./syncConflictRestore')).openSyncConflictBackups()
+        expect(mocks.alertConfirm).not.toHaveBeenCalled()
+        expect(mocks.installLocalBackup).toHaveBeenCalledOnce()
+    })
+
+    it('keeps the library when the web confirmation is declined', async () => {
+        mocks.alertConfirm.mockResolvedValue(false)
+        await (await import('./syncConflictRestore')).openSyncConflictBackups()
+        expect(mocks.alertConfirm).toHaveBeenCalledWith(language.syncConflictRestoreConfirm)
+        expect(mocks.installLocalBackup).not.toHaveBeenCalled()
+    })
+
     it.each(['missing', 'decode', 'shape'])('localizes an unreadable %s backup without beginning replacement', async (failure) => {
         if (failure === 'missing') mocks.backupStore.read.mockResolvedValue(undefined)
         if (failure === 'decode') mocks.decodeRisuSave.mockRejectedValue(new Error('bad payload'))
         if (failure === 'shape') mocks.decodeRisuSave.mockResolvedValue({})
         await (await import('./syncConflictRestore')).openSyncConflictBackups()
-        expect(mocks.alertError).toHaveBeenCalledWith('unreadable backup')
+        expect(mocks.alertError).toHaveBeenCalledWith(language.syncConflictBackupUnreadable)
         expect(mocks.installLocalBackup).not.toHaveBeenCalled()
     })
 
@@ -190,7 +194,7 @@ describe('openSyncConflictBackups', () => {
         expect(mocks.installLocalBackup).toHaveBeenCalledWith(
             expect.anything(),
             expect.objectContaining({
-                upstreamImportWarnings: ['assets, cold storage and inlays are not included'],
+                upstreamImportWarnings: [language.syncConflictRestoreScope],
             }),
         )
         expect(mocks.hold).toHaveBeenCalledOnce()
@@ -213,7 +217,7 @@ describe('openSyncConflictBackups', () => {
             Object.assign(new Error('Sync is unavailable for library replacement'), { code: 'sync-unavailable' }),
         )
         await (await import('./syncConflictRestore')).openSyncConflictBackups()
-        expect(mocks.alertError).toHaveBeenCalledWith('connect sync first')
+        expect(mocks.alertError).toHaveBeenCalledWith(language.risuNest.backup.syncUnavailable)
         expect(mocks.hold).not.toHaveBeenCalled()
         expect(mocks.release).toHaveBeenCalledOnce()
     })
@@ -225,6 +229,6 @@ describe('openSyncConflictBackups', () => {
         await (await import('./syncConflictRestore')).openSyncConflictBackups()
         expect(mocks.hold).not.toHaveBeenCalled()
         expect(mocks.release).toHaveBeenCalledOnce()
-        expect(mocks.alertError).toHaveBeenCalledWith('restore failed')
+        expect(mocks.alertError).toHaveBeenCalledWith(language.risuNest.backup.actionFailed)
     })
 })

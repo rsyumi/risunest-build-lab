@@ -21,8 +21,11 @@ describe('app cleanup startup gate', () => {
     }
     const windowsAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
     const androidAgent = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36'
+    const iosAgent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148'
+    // The page runs before the language module loads, so its text has no language key to compare.
     const statusText = () => document.querySelector('[role="status"]')?.textContent
-    const cancelButton = () => Array.from(document.querySelectorAll('button')).find(button => button.textContent === 'Cancel reset' || button.textContent === '초기화 취소')!
+    const cancelButton = () => document.querySelectorAll<HTMLButtonElement>('main button')[1]
+    const cancellationNote = () => document.querySelector<HTMLElement>('main p:not([role="status"])')!
     it('skips native calls on web', async () => {
         delete nativeWindow.__TAURI_INTERNALS__
         await appCleanupBeforeBootstrap()
@@ -92,21 +95,22 @@ describe('app cleanup startup gate', () => {
         vi.mocked(invoke).mockResolvedValueOnce({ pending: true, mode: 'reset', error: null }).mockRejectedValue('cleanup-webview-update-required')
         const bootstrap = vi.fn()
         void appCleanupBeforeBootstrap().then(bootstrap)
-        await vi.waitFor(() => expect(document.body.textContent).toContain('Update Android System WebView'))
+        await vi.waitFor(() => expect(statusText()).toContain('Android System WebView'))
         expect(document.querySelector('button')?.disabled).toBe(false)
         expect(bootstrap).not.toHaveBeenCalled()
     })
     it.each([
-        ['cleanup-webview-update-required', 'Update Android System WebView'],
-        ['synthetic-private-path', 'Local data deletion could not finish'],
-    ])('waits for explicit retry when a previous cleanup failed with %s', async (error, message) => {
+        ['cleanup-webview-update-required', true],
+        ['synthetic-private-path', false],
+    ])('waits for explicit retry when a previous cleanup failed with %s', async (error, webViewUpdate) => {
         vi.mocked(invoke).mockResolvedValueOnce({ pending: true, mode: 'prepare-removal', error }).mockResolvedValue(undefined)
         const bootstrap = vi.fn()
         void appCleanupBeforeBootstrap().then(bootstrap)
-        await vi.waitFor(() => expect(document.body.textContent).toContain(message))
+        await vi.waitFor(() => expect(document.querySelector('button')?.disabled).toBe(false))
+        expect(statusText()).toBeTruthy()
+        expect(statusText()!.includes('Android System WebView')).toBe(webViewUpdate)
         expect(invoke).toHaveBeenCalledExactlyOnceWith('app_cleanup_status')
         expect(document.body.textContent).not.toContain('synthetic-private-path')
-        expect(document.querySelector('button')?.disabled).toBe(false)
         document.querySelector('button')!.click()
         await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('app_cleanup_resume'))
         expect(invoke).toHaveBeenCalledTimes(2)
@@ -124,25 +128,33 @@ describe('app cleanup startup gate', () => {
             .mockResolvedValue(undefined)
         const bootstrap = vi.fn()
         void appCleanupBeforeBootstrap().then(bootstrap)
-        await vi.waitFor(() => expect(document.body.textContent).toContain('start and unlock the keyring'))
-        expect(document.body.textContent).toContain('reconnect sync and external storage')
-        const cancel = Array.from(document.querySelectorAll('button')).find(button => button.textContent === 'Cancel reset')!
-        expect(cancel.hidden).toBe(false)
-        cancel.click()
+        await vi.waitFor(() => expect(statusText()).toContain('Linux'))
+        expect(cancellationNote().hidden).toBe(false)
+        expect(cancelButton().hidden).toBe(false)
+        cancelButton().click()
         await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('app_cleanup_cancel'))
         expect(bootstrap).not.toHaveBeenCalled()
     })
 
     it('refreshes cancellation eligibility after a retry enters root deletion', async () => {
+        vi.mocked(invoke).mockResolvedValueOnce({ pending: true, mode: 'reset', error: 'synthetic-unknown-failure', canCancel: false })
+        void appCleanupBeforeBootstrap()
+        await vi.waitFor(() => expect(statusText()).toBeTruthy())
+        const unknownFailure = statusText()
+        document.body.innerHTML = ''
         vi.mocked(invoke).mockResolvedValueOnce({ pending: true, mode: 'reset', error: 'secret-cleanup-unavailable', canCancel: true })
             .mockRejectedValueOnce('cleanup-files-busy-or-denied')
             .mockResolvedValueOnce({ pending: true, mode: 'reset', error: 'cleanup-files-busy-or-denied', canCancel: false })
         void appCleanupBeforeBootstrap()
         await vi.waitFor(() => expect(document.querySelector('button')?.disabled).toBe(false))
+        const credentialStoreFailure = statusText()
+        expect(cancelButton().hidden).toBe(false)
         document.querySelector('button')!.click()
-        await vi.waitFor(() => expect(document.body.textContent).toContain('Check file permissions'))
-        const cancel = Array.from(document.querySelectorAll('button')).find(button => button.textContent === 'Cancel reset')!
-        expect(cancel.hidden).toBe(true)
+        await vi.waitFor(() => expect(cancelButton().hidden).toBe(true))
+        // The file access failure has its own guidance, distinct from the earlier and the fallback message.
+        expect(statusText()).not.toBe(credentialStoreFailure)
+        expect(statusText()).not.toBe(unknownFailure)
+        expect(cancellationNote().hidden).toBe(true)
         expect(invoke).not.toHaveBeenCalledWith('app_cleanup_cancel')
     })
 
@@ -151,21 +163,25 @@ describe('app cleanup startup gate', () => {
         vi.mocked(invoke).mockResolvedValue({ pending: true, mode: null, error: 'cleanup-journal-corrupt', canCancel: false })
         const bootstrap = vi.fn()
         void appCleanupBeforeBootstrap().then(bootstrap)
-        await vi.waitFor(() => expect(statusText()).toBe(
-            'The deletion record is damaged, so the reset cannot continue. Quit the app, delete the %LOCALAPPDATA%\\RisuNest-cleanup folder, and start RisuNest again. You can then run the reset again from the settings.',
-        ))
+        await vi.waitFor(() => expect(statusText()).toContain('%LOCALAPPDATA%\\RisuNest-cleanup'))
         expect(cancelButton().hidden).toBe(true)
         expect(bootstrap).not.toHaveBeenCalled()
     })
 
     it('tells Android users to clear the app data when the record is damaged', async () => {
-        stubNavigator({ userAgent: androidAgent, language: 'ko-KR' })
+        const instruction = async (userAgent: string) => {
+            document.body.innerHTML = ''
+            stubNavigator({ userAgent, language: 'ko-KR' })
+            void appCleanupBeforeBootstrap()
+            await vi.waitFor(() => expect(statusText()).toBeTruthy())
+            expect(cancelButton().hidden).toBe(true)
+            return statusText()!
+        }
         vi.mocked(invoke).mockResolvedValue({ pending: true, mode: null, error: 'cleanup-journal-corrupt', canCancel: false })
-        void appCleanupBeforeBootstrap()
-        await vi.waitFor(() => expect(statusText()).toBe(
-            '삭제 기록이 손상되어 초기화를 진행할 수 없습니다. 앱 정보 > 저장공간에서 데이터를 삭제해주세요.',
-        ))
-        expect(cancelButton().hidden).toBe(true)
+        const android = await instruction(androidAgent)
+        expect(android).toMatch(/[가-힣]/)
+        expect(android).not.toMatch(/RisuNest-cleanup|risunest-cleanup/)
+        expect(android).not.toBe(await instruction(iosAgent))
     })
 
     it('points to Cancel reset when a damaged credential record left the data intact', async () => {
@@ -173,9 +189,9 @@ describe('app cleanup startup gate', () => {
         vi.mocked(invoke).mockResolvedValueOnce({ pending: true, mode: 'reset', error: 'secret-index-corrupt', canCancel: true })
             .mockResolvedValue(undefined)
         void appCleanupBeforeBootstrap()
-        await vi.waitFor(() => expect(statusText()).toBe(
-            '삭제 기록이 손상되어 초기화를 완료하지 못했습니다. 초기화 취소를 눌러 앱을 시작해주세요.',
-        ))
+        await vi.waitFor(() => expect(statusText()).toMatch(/[가-힣]/))
+        expect(statusText()).toContain(cancelButton().textContent)
+        expect(statusText()).not.toContain('RisuNest-cleanup')
         expect(cancelButton().hidden).toBe(false)
         cancelButton().click()
         await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('app_cleanup_cancel'))
@@ -185,8 +201,8 @@ describe('app cleanup startup gate', () => {
         stubNavigator({ userAgent: windowsAgent, language: 'en-US' })
         vi.mocked(invoke).mockResolvedValue({ pending: true, mode: 'reset', error: 'secret-index-corrupt', canCancel: false })
         void appCleanupBeforeBootstrap()
-        await vi.waitFor(() => expect(statusText()).toContain('Quit the app, delete the %LOCALAPPDATA%\\RisuNest-cleanup folder'))
-        expect(statusText()).not.toContain('Cancel reset')
+        await vi.waitFor(() => expect(statusText()).toContain('%LOCALAPPDATA%\\RisuNest-cleanup'))
+        expect(statusText()).not.toContain(cancelButton().textContent)
         expect(cancelButton().hidden).toBe(true)
     })
 

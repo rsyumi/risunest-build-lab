@@ -20,6 +20,9 @@
     "createUpdaterArtifacts": false,
     "windows": {
       "nsis": {
+        "template": "windows-installer.nsi",
+        "languages": ["English", "Korean"],
+        "displayLanguageSelector": false,
         "installerIcon": "icons/icon.ico",
         "installerHooks": "windows.nsh"
       }
@@ -80,7 +83,7 @@
   },
   "productName": "RisuNest",
   "mainBinaryName": "RisuNest",
-  "version": "1.0.0",
+  "version": "1.0.4",
   "identifier": "io.github.rsyumi.risunest",
   "plugins": {
     "updater": {

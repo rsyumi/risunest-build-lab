@@ -1047,6 +1047,15 @@ mod tests {
         );
         let (fingerprint, entries) = source_identity();
         assert_eq!(fingerprint.len(), 64);
+        let identity = entries
+            .iter()
+            .find(|entry| entry["path"] == "server/sync/src/identity.rs")
+            .expect("the UUID implementation must be part of the compiled source identity");
+        assert_eq!(identity["role"], "server");
+        assert_eq!(
+            identity["sha256"],
+            hex::encode(Sha256::digest(include_bytes!("identity.rs")))
+        );
         for path in [
             "crates/small-object-store/src/lib.rs",
             "crates/sync-wire/src/delta.rs",
@@ -1142,7 +1151,7 @@ mod tests {
         assert!(root.exists());
         send_command(
             &mut input,
-            json!({"op":"register","requestId":"registration","name":"Synthetic protocol device","registrationRequestId":"a".repeat(64)}),
+            json!({"op":"register","requestId":"registration","name":"Synthetic protocol device","registrationRequestId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}),
         );
         let registration = receive.recv_timeout(DRAIN_LIMIT).unwrap();
         assert_eq!(registration["type"], "registration");

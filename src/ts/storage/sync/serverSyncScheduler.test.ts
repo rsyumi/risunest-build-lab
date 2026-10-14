@@ -8,6 +8,49 @@ function fixture() {
     return { ...dependencies, scheduler: createServerSyncScheduler(dependencies) }
 }
 describe('server LWW foreground scheduler', () => {
+    it('defers every automatic trigger while unavailable, retains explicit receive and resumes on release', async () => {
+        const f = fixture()
+        let available = false
+        const publishHidden = vi.fn(async () => {})
+        const scheduler = createServerSyncScheduler({ ...f, publishHidden, automaticSyncAvailable: () => available })
+        await scheduler.foreground(true)
+        scheduler.localChange(true); scheduler.remoteHint(); scheduler.socket(false)
+        await scheduler.conversationOpened(); await scheduler.retry()
+        await vi.advanceTimersByTimeAsync(65_000)
+        expect(f.push).not.toHaveBeenCalled(); expect(f.pull).not.toHaveBeenCalled(); expect(f.connect).not.toHaveBeenCalled()
+        await scheduler.receiveAvailableChanges()
+        expect(f.pull).toHaveBeenCalledExactlyOnceWith(true)
+        f.pull.mockClear()
+        await scheduler.foreground(false, true)
+        expect(publishHidden).not.toHaveBeenCalled()
+        await scheduler.foreground(true)
+        available = true
+        await scheduler.resumeAutomaticSync()
+        await vi.advanceTimersByTimeAsync(0)
+        expect(f.push).toHaveBeenCalledOnce(); expect(f.pull).toHaveBeenCalledOnce(); expect(f.connect).toHaveBeenCalledOnce()
+        scheduler.dispose()
+    })
+
+    it('does not start a queued clock repair after file work becomes unavailable', async () => {
+        const f = fixture()
+        let available = true
+        let finishDisconnect!: () => void
+        f.disconnect.mockImplementationOnce(() => new Promise<void>(resolve => { finishDisconnect = resolve }))
+        const scheduler = createServerSyncScheduler({ ...f, automaticSyncAvailable: () => available })
+        await scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0)
+        scheduler.reportFailure({ code: 'clock-skew' })
+        const resumed = scheduler.resumeAutomaticSync()
+        available = false
+        finishDisconnect()
+        await resumed; await scheduler.waitForIdle()
+        expect(f.retryClock).not.toHaveBeenCalled()
+        expect(scheduler.blockedCode()).toBe('clock-skew')
+        available = true
+        await scheduler.resumeAutomaticSync()
+        expect(f.retryClock).toHaveBeenCalledOnce()
+        scheduler.dispose()
+    })
+
     it('debounces from the last durable edit and flushes generation completion immediately', async () => {
         const f = fixture(); await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0); f.push.mockClear()
         f.scheduler.localChange(); await vi.advanceTimersByTimeAsync(1500); f.scheduler.localChange()

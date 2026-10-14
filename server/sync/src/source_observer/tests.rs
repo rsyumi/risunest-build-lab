@@ -484,11 +484,11 @@ fn actual_fitting_full_and_delta_transfer_sha_domains_are_observed() {
     );
     assert_eq!(
         full.hash_domains["transfer-full-encode-sha256"].hash_bytes,
-        2 * file.len() as u64
+        file.len() as u64
     );
     assert_eq!(
         full.hash_domains["transfer-full-encode-sha256"].hash_calls,
-        2
+        1
     );
     conserved(&full);
     begin(
@@ -511,6 +511,8 @@ fn actual_fitting_full_and_delta_transfer_sha_domains_are_observed() {
         ingress.hash_domains["transfer-full-decode-sha256"].hash_bytes,
         inline.len() as u64
     );
+    assert_eq!(ingress.hash_domains["frame-ingress-sha256"].hash_calls, 1);
+    assert!(!ingress.hash_domains.contains_key("object-ingress-sha256"));
     conserved(&ingress);
 }
 

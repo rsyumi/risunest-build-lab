@@ -1,7 +1,21 @@
+import { readdirSync, readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { parseReleaseNotes, selectLocalizedNotes } from './notes'
 
 describe('release notes', () => {
+    it.each(['app', 'sync'])('keeps the title, sections and items of every %s release when rendering fallback notes', (product) => {
+        const files = readdirSync(`release-notes/${product}`).filter(name => name.endsWith('.md'))
+        expect(files.length).toBeGreaterThan(0)
+        for (const file of files) {
+            const notes = readFileSync(`release-notes/${product}/${file}`, 'utf8')
+            const blocks = parseReleaseNotes(selectLocalizedNotes({}, 'ko', notes))
+            expect(blocks[0], file).toMatchObject({ type: 'heading', level: 1 })
+            expect(blocks.filter(block => block.type === 'heading' && block.level === 2), file).toHaveLength(2)
+            const items = notes.split(/\r?\n/).filter(line => /^\s*(?:[-*+]|\d+\.)\s/.test(line))
+            expect(blocks.filter(block => block.type === 'list-item'), file).toHaveLength(items.length)
+        }
+    })
+
     it('selects locale, English, first locale, then default notes', () => {
         const notes = { en: 'English', ko: '한국어' }
         expect(selectLocalizedNotes(notes, 'ko-KR', 'Default')).toBe('한국어')

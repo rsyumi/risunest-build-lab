@@ -1,5 +1,5 @@
 import type { Chat, Message } from './storage/database.svelte'
-import { safeStructuredClone } from './polyfill'
+import { safeStructuredClone } from './safeStructuredClone'
 import { toWindowIndex } from './process/historyWindowIndex'
 
 export type MessageSnapshot = Omit<Message, 'responseVariants'>

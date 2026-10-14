@@ -124,6 +124,7 @@ pub(crate) struct CycleFixture {
     pub a: PersistentStore,
     pub b: PersistentStore,
     pub provider: Arc<FakeProvider>,
+    pub clock: Arc<fake::FakeLeaseClock>,
     pub sender: ExternalLwwEngine,
     pub receiver: ExternalLwwEngine,
 }
@@ -142,15 +143,16 @@ impl CycleFixture {
         let descriptor = risunest_external_storage_format::format::Descriptor::new(
             "synthetic-lww-library".into(), Some(risunest_external_storage_format::format::Strategy::Cas)).unwrap();
         let now = super::runtime::now_ms();
-        super::leases::observe_time_sample(super::leases::TimeSample { date_ms: Some(now),
-            local_before_ms: now, local_after_ms: now, round_trip_ms: 0,
-            cache_bypassed: true, cache_hit: false, age_ms: None, status: 200 });
+        let clock = Arc::new(fake::FakeLeaseClock::new(now));
+        crate::persistent_store::lww::test_clock::register(&a, clock.clone());
+        crate::persistent_store::lww::test_clock::register(&b, clock.clone());
         let engine = |id: &str, root: &std::path::Path| ExternalLwwEngine {
             provider: provider.clone(),
             repository: fake::repository(),
             library: "synthetic-lww-library".into(),
             root_key: zeroize::Zeroizing::new([7; 32]),
-            admission: Some(Admission::synthetic(super::runtime::now_ms())),
+            admission: Some(Admission::synthetic(now)),
+            test_lease_clock: Some(clock.clone()),
             connection_id: id.into(),
             connection_root: root.into(),
             capabilities: capabilities.clone(),
@@ -164,6 +166,7 @@ impl CycleFixture {
             a,
             b,
             provider,
+            clock,
             sender,
             receiver,
         }
@@ -173,6 +176,9 @@ impl CycleFixture {
         let placeholder = tempfile::tempdir().unwrap();
         drop(std::mem::replace(&mut self.a, PersistentStore::open(placeholder.path()).unwrap()));
         self.a = PersistentStore::open(self.directory_a.path()).unwrap();
+    }
+    pub(crate) fn now_ms(&self) -> u64 {
+        super::leases::LeaseClock::reading(self.clock.as_ref()).wall_ms
     }
     pub(crate) async fn publish_a(&mut self) -> super::lww_engine::PublicationResult {
         self.sender
@@ -199,6 +205,30 @@ fn set(store: &mut PersistentStore, key: &[&str], value: serde_json::Value) {
         })
         .unwrap();
 }
+
+#[test]
+fn cycle_clock_follows_reopened_stores_across_threads_without_affecting_other_cycles() {
+    let mut first = CycleFixture::new();
+    let second = CycleFixture::new();
+    let first_now = first.now_ms();
+    let second_now = second.now_ms();
+    set(&mut first.a, &["root", "language"], serde_json::json!("ko"));
+    assert_eq!(first.a.lww_clock_state().unwrap().issued.unwrap().physical_ms.0, first_now);
+    first.clock.advance(60_000);
+    std::thread::scope(|scope| {
+        let root = first.directory_a.path();
+        scope.spawn(move || {
+            let mut reopened = PersistentStore::open(root).unwrap();
+            set(&mut reopened, &["root", "language"], serde_json::json!("en"));
+            assert_eq!(reopened.lww_clock_state().unwrap().issued.unwrap().physical_ms.0, first_now + 60_000);
+        }).join().unwrap();
+    });
+    assert_eq!(second.now_ms(), second_now);
+    first.restart_a();
+    set(&mut first.a, &["root", "language"], serde_json::json!("ja"));
+    assert_eq!(first.a.lww_clock_state().unwrap().issued.unwrap().physical_ms.0, first_now + 60_000);
+}
+
 fn conversation(store: &mut PersistentStore) {
     store
         .commit(&WorkingSetCommit {
@@ -524,7 +554,7 @@ fn real_publish_and_receive_continue_while_checkpoint_inputs_are_paused() {
         super::lww_compaction::install_compaction_barrier(id,barrier.clone());
         let writer=f.a.lww_clock_state().unwrap().writer_id;
         let caps=fake::capabilities(true); let cancel=Cancellation::default();
-        let compactor=ExternalLwwEngine{provider:f.provider.clone(),repository:fake::repository(),library:f.sender.library.clone(),root_key:zeroize::Zeroizing::new([7;32]),admission:Some(Admission::synthetic(super::runtime::now_ms())),connection_id:"compactor".into(),connection_root:job.path().into(),capabilities:f.sender.capabilities.clone(),descriptor:f.sender.descriptor.clone()};
+        let compactor=ExternalLwwEngine{provider:f.provider.clone(),repository:fake::repository(),library:f.sender.library.clone(),root_key:zeroize::Zeroizing::new([7;32]),admission:f.sender.admission,test_lease_clock:f.sender.test_lease_clock.clone(),connection_id:"compactor".into(),connection_root:job.path().into(),capabilities:f.sender.capabilities.clone(),descriptor:f.sender.descriptor.clone()};
         let compactor_directory=tempfile::tempdir().unwrap();let mut compactor_store=PersistentStore::open(compactor_directory.path()).unwrap();
         let compaction=compactor.compact_published(&mut compactor_store,job.path(),id,&writer,&caps,&cancel,None);
         let routine=async {
@@ -2433,6 +2463,7 @@ fn switching_to_another_repository_never_sends_a_pending_segment_there() {
                 library: "synthetic-elsewhere-library".into(),
                 root_key: f.sender.root_key.clone(),
                 admission: Some(Admission::synthetic(super::runtime::now_ms())),
+                test_lease_clock: f.sender.test_lease_clock.clone(),
                 connection_id: id.into(),
                 connection_root: root.into(),
                 capabilities: f.sender.capabilities.clone(),
@@ -2502,12 +2533,14 @@ fn a_segment_left_by_an_earlier_binding_never_gives_away_a_sequence_already_seen
 fn third_device(f: &CycleFixture) -> (tempfile::TempDir, PersistentStore, ExternalLwwEngine) {
     let directory = tempfile::tempdir().unwrap();
     let store = PersistentStore::open(directory.path()).unwrap();
+    crate::persistent_store::lww::test_clock::register(&store, f.clock.clone());
     let engine = ExternalLwwEngine {
         provider: f.provider.clone(),
         repository: fake::repository(),
         library: f.receiver.library.clone(),
         root_key: f.receiver.root_key.clone(),
         admission: Some(Admission::synthetic(super::runtime::now_ms())),
+        test_lease_clock: f.receiver.test_lease_clock.clone(),
         connection_id: "third".into(),
         connection_root: directory.path().into(),
         capabilities: f.receiver.capabilities.clone(),

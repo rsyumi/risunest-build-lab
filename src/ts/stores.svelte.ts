@@ -1,8 +1,7 @@
 import { writable } from "svelte/store";
 import type { character, Database } from "./storage/database.svelte";
 import { type simpleCharacterArgument } from "./parser/parser.svelte";
-import type { alertData } from "./alert";
-import { createAlertQueue } from "./alertQueue";
+export { alertStore } from "./alertQueue";
 import { moduleUpdate } from "./process/modules";
 import { resetScriptCache } from "./process/scripts";
 import type { hubType } from "./characterCards";
@@ -58,6 +57,8 @@ export const MobileSideBar = writable(0)
 export const SettingsMenuIndex = writable(-1)
 export const ReloadGUIPointer = writable(0)
 export const ReloadChatPointer = writable({} as Record<number, number>)
+/** Advanced when a script's variable change refreshes the rows that read it. */
+export const ScriptDisplayRefreshPointer = writable(0)
 export const ScrollToMessageStore = writable<CapturedChatMessageTarget | null>(null)
 export const OpenRealmStore = writable(false)
 export const RealmInitialOpenChar = writable<null | hubType>(null)
@@ -69,10 +70,6 @@ export const SafeModeStore = writable(false)
 export const MobileSearch = writable('')
 export const CharConfigSubMenu = writable(0)
 export const CustomGUISettingMenuStore = writable(false)
-export const alertStore = createAlertQueue({
-    type: 'none',
-    msg: 'n',
-} as alertData)
 export const hypaV3ModalOpen = writable(false)
 export const hypaV3ProgressStore = writable({
     open: false,
@@ -196,15 +193,13 @@ ReloadGUIPointer.subscribe(() => {
     resetScriptCache()
 })
 
+ScriptDisplayRefreshPointer.subscribe(() => {
+    resetScriptCache()
+})
+
 $effect.root(() => {
     selectedCharID.subscribe((v) => {
         selIdState.selId = v
-
-        if (DBState?.db?.characters?.[selIdState.selId]) {
-            if (DBState.db.hypaV3 && DBState.db.hypaV3Presets?.[DBState.db.hypaV3PresetId]?.settings?.alwaysToggleOn) {
-                DBState.db.characters[selIdState.selId].supaMemory = true;
-            }
-        }
     })
     $effect(() => {
         $state.snapshot(DBState.db.modules)

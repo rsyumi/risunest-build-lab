@@ -1,20 +1,18 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 import { writable } from 'svelte/store'
-import { languageEnglish } from '../../lang/en'
 import { DBState } from 'src/ts/stores.svelte'
 import Toggles from './Toggles.svelte'
 import { doingChat } from 'src/ts/process/generationState'
 
 const syntax = vi.hoisted(() => ({ type: 'toggle' }))
 
-vi.mock('src/lang', () => ({ language: languageEnglish }))
 vi.mock('src/ts/stores.svelte', () => {
     const DBState = $state({ db: {} })
     return { DBState, selectedCharID: writable(0) }
 })
 vi.mock('src/ts/storage/database.svelte', () => ({
-    getCurrentChat: () => DBState.db.characters[0].chats[0],
+    getCurrentChat: () => DBState.db.characters[0].chats[DBState.db.characters[0].chatPage],
 }))
 vi.mock('src/ts/process/modules', () => ({ getModuleToggles: () => '' }))
 // The persistent writes are covered by Chat.windowedInteractions.test.ts; here they apply in memory.
@@ -133,6 +131,58 @@ it('tints toggles whose value differs from the chat binding unless binding is di
     DBState.db.disableToggleBinding = true
     await tick()
     expect(row().classList.contains('bg-draculared/15')).toBe(false)
+})
+
+it.each(['toggle', 'select', 'text'])('stages a bound %s input without changing applied or saved values', async type => {
+    syntax.type = type
+    DBState.db.customPromptTemplateToggle = 'refresh'
+    chat().savedToggleValues = { toggle_example: '0' }
+    await tick()
+    if (type === 'toggle') customSwitch().click()
+    else {
+        const input = document.querySelector<HTMLInputElement | HTMLSelectElement>(type === 'select' ? 'select' : 'input[type="text"]')!
+        input.value = '1'
+        input.dispatchEvent(new Event('change', { bubbles: true }))
+    }
+    await tick()
+    expect(DBState.db.globalChatVariables.toggle_example).toBe('0')
+    expect(chat().savedToggleValues).toEqual({ toggle_example: '0' })
+    if (type === 'toggle') expect(customSwitch().checked).toBe(true)
+    else expect(document.querySelector<HTMLInputElement | HTMLSelectElement>(type === 'select' ? 'select' : 'input[type="text"]')!.value).toBe('1')
+
+    DBState.db.disableToggleBinding = true
+    await tick()
+    if (type === 'toggle') expect(customSwitch().checked).toBe(false)
+    else expect(document.querySelector<HTMLInputElement | HTMLSelectElement>(type === 'select' ? 'select' : 'input[type="text"]')!.value).toBe('0')
+})
+
+it('discards unapplied input when leaving and returning to the bound conversation', async () => {
+    chat().savedToggleValues = { toggle_example: '0' }
+    DBState.db.characters[0].chats.push({ savedToggleValues: { toggle_example: '0' } } as any)
+    await tick()
+    customSwitch().click()
+    await tick()
+    expect(customSwitch().checked).toBe(true)
+    DBState.db.characters[0].chatPage = 1
+    await tick()
+    expect(customSwitch().checked).toBe(false)
+    DBState.db.characters[0].chatPage = 0
+    await tick()
+    expect(customSwitch().checked).toBe(false)
+    expect(chat().savedToggleValues).toEqual({ toggle_example: '0' })
+})
+
+it('previews replacing a local override without removing it before the binding is saved', async () => {
+    chat().savedToggleValues = { toggle_example: '0' }
+    chat().GLGlobalVariables = { toggle_example: '1' }
+    await tick()
+    expect(customSwitch().checked).toBe(true)
+    customSwitch().click()
+    await tick()
+    expect(customSwitch().checked).toBe(false)
+    expect(chat().GLGlobalVariables).toEqual({ toggle_example: '1' })
+    expect(chat().savedToggleValues).toEqual({ toggle_example: '0' })
+    expect(DBState.db.globalChatVariables.toggle_example).toBe('0')
 })
 
 it('holds local toggle edits and unpinning while a response is generating', async () => {

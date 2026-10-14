@@ -1,6 +1,97 @@
 use super::*;
 
 #[test]
+fn imported_owner_units_commit_atomically_and_survive_reopen() {
+    for assets in [None, Some(json!([])), Some(json!([["synthetic", "assets/imported", "bin"]]))] {
+        for kind in ["module", "persona", "character"] {
+            let (directory, mut store, _) = open_fixture();
+            let mut module = json!({"id":"imported-module", "name":"Imported", "description":""});
+            if let Some(assets) = &assets { module["assets"] = assets.clone(); }
+            let (owner, mutations) = match kind {
+                "module" => (AssetOwnerLocator::RootModuleAssets { module_id: "imported-module".into() }, json!([
+                    {"key":"[\"exists\",\"modules\",\"imported-module\"]","type":"set","value":true},
+                    {"key":"[\"record\",\"modules\",\"imported-module\"]","type":"set","value":module},
+                    {"key":"[\"order\",\"modules\"]","type":"set","value":["imported-module"]}
+                ])),
+                "persona" => (AssetOwnerLocator::PersonaEmbeddedModuleAssets { persona_id: "imported-persona".into(), module_id: "imported-module".into() }, json!([
+                    {"key":"[\"exists\",\"persona\",\"imported-persona\"]","type":"set","value":true},
+                    {"key":"[\"persona\",\"imported-persona\",\"embeddedModule\"]","type":"set","value":module}
+                ])),
+                _ => (AssetOwnerLocator::CharacterAdditionalAssets { character_id: "char-a".into() }, json!([
+                    if let Some(assets) = &assets {
+                        json!({"key":"[\"character\",\"char-a\",\"additionalAssets\"]","type":"set","value":assets})
+                    } else {
+                        json!({"key":"[\"character\",\"char-a\",\"additionalAssets\"]","type":"delete"})
+                    }
+                ])),
+            };
+            let head = if let Some(assets) = &assets {
+                AssetOwnerHead::present(owner.clone(), "ab".repeat(32), assets.as_array().unwrap().len() as i64)
+            } else { AssetOwnerHead::absent(owner.clone()) };
+            let input: WorkingSetCommit = serde_json::from_value(json!({
+                "expectedRevision":1, "unitMutations":mutations, "assetOwnerHeads":[head]
+            })).unwrap();
+            store.commit(&input).unwrap_or_else(|error| panic!("{kind} import: {error:?}"));
+            assert_eq!(store.read_asset_owner_head(&owner, None).unwrap().unwrap().value, head);
+            let mut invalid = input.clone();
+            invalid.expected_revision = 2;
+            invalid.asset_owner_heads.as_mut().unwrap()[0].entry_count += 1;
+            assert!(store.commit(&invalid).is_err());
+            assert_eq!(store.revision().unwrap(), 2);
+            drop(store);
+            let reopened = PersistentStore::open(directory.path()).unwrap();
+            assert_eq!(reopened.read_asset_owner_head(&owner, None).unwrap().unwrap().value, head);
+        }
+    }
+}
+
+#[test]
+fn owner_units_preserve_unchanged_heads_and_drop_replaced_assets() {
+    for kind in ["module", "persona", "character"] {
+        let (_directory, mut store, database) = open_fixture();
+        let assets = json!([["synthetic", "assets/imported", "bin"]]);
+        let mut root = root(&database);
+        root["modules"] = json!([{"id":"imported-module","name":"Imported","assets":assets}]);
+        root["personas"] = json!([{"id":"imported-persona","embeddedModule":{"id":"embedded","assets":assets}}]);
+        let mut character = store.read_character("char-a", None).unwrap().unwrap().value;
+        character["additionalAssets"] = assets;
+        let (owner, key, unchanged, changed) = match kind {
+            "module" => (AssetOwnerLocator::RootModuleAssets { module_id: "imported-module".into() },
+                "[\"record\",\"modules\",\"imported-module\"]", root["modules"][0].clone(), json!({"id":"imported-module","assets":[]})),
+            "persona" => (AssetOwnerLocator::PersonaEmbeddedModuleAssets { persona_id: "imported-persona".into(), module_id: "embedded".into() },
+                "[\"persona\",\"imported-persona\",\"embeddedModule\"]", root["personas"][0]["embeddedModule"].clone(), json!({"id":"embedded","assets":[]})),
+            _ => (AssetOwnerLocator::CharacterAdditionalAssets { character_id: "char-a".into() },
+                "[\"character\",\"char-a\",\"additionalAssets\"]", character["additionalAssets"].clone(), json!([])),
+        };
+        let head = AssetOwnerHead::present(owner.clone(), "ab".repeat(32), 1);
+        let heads: Vec<_> = [
+            AssetOwnerLocator::RootModuleAssets { module_id: "imported-module".into() },
+            AssetOwnerLocator::PersonaEmbeddedModuleAssets { persona_id: "imported-persona".into(), module_id: "embedded".into() },
+            AssetOwnerLocator::CharacterAdditionalAssets { character_id: "char-a".into() },
+        ].into_iter().map(|owner| AssetOwnerHead::present(owner, "ab".repeat(32), 1)).collect();
+        store.commit(&WorkingSetCommit { root:Some(root), character:Some(character), asset_owner_heads:Some(heads.clone()), ..empty_working_set_commit(1) }).unwrap();
+        let lease = store.acquire_revision(2).unwrap();
+        for (revision, value) in [(2, unchanged.clone()), (3, changed)] {
+            let input = serde_json::from_value(json!({"expectedRevision":revision, "unitMutations":[{"key":key,"type":"set","value":value}]})).unwrap();
+            store.commit(&input).unwrap();
+            let stored = store.read_asset_owner_head(&owner, None).unwrap();
+            if revision == 2 { assert_eq!(stored.unwrap().value, head); }
+            else { assert!(stored.is_none(), "{kind} retained a stale asset manifest"); }
+        }
+        let restore = serde_json::from_value(json!({"expectedRevision":4, "unitMutations":[{"key":key,"type":"set","value":unchanged}], "assetOwnerHeads":[head]})).unwrap();
+        store.commit(&restore).unwrap();
+        let remove = serde_json::from_value(json!({"expectedRevision":5, "unitMutations":[{"key":key,"type":"delete"}]})).unwrap();
+        store.commit(&remove).unwrap();
+        assert!(store.read_asset_owner_head(&owner, None).unwrap().is_none());
+        assert_eq!(store.read_asset_owner_head(&owner, Some(&lease.lease)).unwrap().unwrap().value, head);
+        for other in heads.iter().filter(|head| head.owner != owner) {
+            assert_eq!(store.read_asset_owner_head(&other.owner, None).unwrap().unwrap().value, *other);
+        }
+        store.release_revision(&lease.lease).unwrap();
+    }
+}
+
+#[test]
 fn ordinary_parent_saves_preserve_owner_heads_by_stable_module_identity() {
     let (_directory, mut store, database) = open_fixture();
     let mut value = root(&database);

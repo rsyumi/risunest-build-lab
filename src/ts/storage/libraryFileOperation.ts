@@ -1,22 +1,23 @@
 /** Admission only. The existing native file job manager owns execution/cancellation. */
 let reservation: symbol | undefined;
+let selections = 0;
 const releasedListeners = new Set<() => void>();
-let waitForSync: (() => Promise<void>) | undefined;
+const gates = new Set<() => Promise<void>>();
 
 export function registerLibraryFileOperationGate(gate: () => Promise<void>): () => void {
-  waitForSync = gate;
-  return () => { if (waitForSync === gate) waitForSync = undefined; };
+  gates.add(gate);
+  return () => { gates.delete(gate); };
 }
 
 export function waitForLibraryFileOperation(signal: AbortSignal): Promise<void> | undefined {
   signal.throwIfAborted();
-  if (!waitForSync) return;
+  if (!gates.size) return;
   let abort!: () => void;
   const cancelled = new Promise<never>((_, reject) => {
     abort = () => reject(signal.reason ?? new DOMException("Operation cancelled", "AbortError"));
     signal.addEventListener("abort", abort, { once: true });
   });
-  return Promise.race([Promise.resolve().then(waitForSync), cancelled]).then(() => {
+  return Promise.race([Promise.all([...gates].map(gate => Promise.resolve().then(gate))), cancelled]).then(() => {
     signal.throwIfAborted();
   }).finally(() => {
     signal.removeEventListener("abort", abort);
@@ -29,7 +30,22 @@ export function subscribeLibraryFileOperationReleased(listener: () => void): () 
 }
 
 export function isLibraryFileOperationReserved(): boolean {
-  return reservation !== undefined;
+  return reservation !== undefined || selections > 0;
+}
+
+function notifyReleased(): void {
+  if (isLibraryFileOperationReserved()) return;
+  for (const listener of releasedListeners) {
+    // A scheduling notification must not undo a settled file operation.
+    try { listener(); } catch {}
+  }
+}
+
+/** Keep the picker in the user gesture, including when it is nested in a file job. */
+export async function withLibraryFileSelection<T>(select: () => Promise<T>): Promise<T> {
+  selections++;
+  try { return await select(); }
+  finally { selections--; notifyReleased(); }
 }
 
 export function reserveLibraryFileOperation(): () => void {
@@ -39,9 +55,6 @@ export function reserveLibraryFileOperation(): () => void {
   return () => {
     if (reservation !== token) return;
     reservation = undefined;
-    for (const listener of releasedListeners) {
-      // A scheduling notification must not undo a settled file operation.
-      try { listener(); } catch {}
-    }
+    notifyReleased();
   };
 }

@@ -1,7 +1,7 @@
 import { v4 } from 'uuid'
 import type { Database } from './database.svelte'
 import { prepareImportedIdentityState } from './effectiveIdentityState'
-import { safeStructuredClone } from '../polyfill'
+import { safeStructuredClone } from '../safeStructuredClone'
 
 export function prepareUpstreamImport(database: Database): Database {
     const candidate = safeStructuredClone(database)

@@ -591,6 +591,53 @@ describe('ActiveConversationSession', () => {
         expect(session.version).toBe(0)
     })
 
+    it('merges an operation over variables written since its baseline and rejects content changes', () => {
+        const conversation = chat()
+        conversation.scriptstate = { $a: '1', $b: '1', $gone: 'x' }
+        const { session } = createSession(conversation)
+        const expectedMetadata = cloneConversationMetadata(conversation)
+        const position = session.positionAt(0)
+        const locator = session.locate(3)
+
+        session.updateChatVariables(new Map([['a', '2'], ['c', 'new']]))
+        session.applyOperation({
+            expectedVersion: 0,
+            expectedMetadata,
+            metadata: { ...expectedMetadata, scriptstate: { $a: '1', $b: '1', $gone: 'x', $plugin: 'y' } },
+        })
+        expect(session.contentVersion).toBe(0)
+        expect(session.canContinueGenerationFrom(0)).toBe(true)
+        expect(session.readMessage(locator).data).toBe('three')
+
+        session.applyOperation({
+            expectedVersion: 0,
+            expectedMetadata,
+            metadata: { ...expectedMetadata, scriptstate: { $a: '1', $b: '2' } },
+            range: {
+                position,
+                deleteCount: 1,
+                messages: [message('duplicate', 'parsed zero')],
+            },
+        })
+
+        expect(conversation.message[0].data).toBe('parsed zero')
+        expect(conversation.scriptstate).toEqual({ $a: '2', $b: '2', $c: 'new', $plugin: 'y' })
+        expect(session.contentVersion).toBe(3)
+
+        const staleMetadata = cloneConversationMetadata(conversation)
+        session.applyOperation({
+            expectedVersion: 3,
+            expectedMetadata: staleMetadata,
+            metadata: { ...staleMetadata, name: 'Renamed' },
+        })
+        expect(() => session.applyOperation({
+            expectedVersion: 3,
+            expectedMetadata: staleMetadata,
+            metadata: { ...staleMetadata, scriptstate: { $a: 'late' } },
+        })).toThrow(ConversationSessionStaleError)
+        expect(conversation.scriptstate).toEqual({ $a: '2', $b: '2', $c: 'new', $plugin: 'y' })
+    })
+
     it('adopts a trigger replacement only against the captured version and message array', () => {
         const { conversation, onMutation, session } = createSession()
         const expectedMessages = conversation.message
@@ -916,6 +963,68 @@ describe('ActiveConversationSession', () => {
                 bookmarkNames: { tail: 'After' },
             },
         })
+    })
+
+    it('writes chat variables per key without a version check and keeps the message and content versions', () => {
+        const conversation = chat()
+        conversation.scriptstate = { $kept: 'same', $open: '0' }
+        const { onMutation, session } = createSession(conversation)
+        session.append(message('appended', 'four'))
+        const messageVersion = session.messageVersion
+        expect(messageVersion).toBe(1)
+        const locator = session.locate(0)
+
+        expect(session.updateChatVariables(new Map([['kept', 'same']]))).toEqual([])
+        expect(session.version).toBe(1)
+        expect(session.updateChatVariables(new Map([
+            ['kept', 'same'],
+            ['open', '1'],
+            ['created', 'new'],
+        ]))).toEqual(['open', 'created'])
+
+        expect(conversation.scriptstate).toEqual({ $kept: 'same', $open: '1', $created: 'new' })
+        expect(session.version).toBe(2)
+        expect(session.messageVersion).toBe(messageVersion)
+        expect(session.readChatVariable('open')).toBe('1')
+        const event = onMutation.mock.calls.at(-1)![0]
+        expect(event).toMatchObject({
+            previousVersion: 1,
+            sessionVersion: 2,
+            commands: ['update-metadata'],
+            mutations: [{ start: 5, deleteCount: 0, messages: [], sessionVersion: 2 }],
+            variableUpdate: { keys: ['open', 'created'] },
+            conversation: { scriptstate: { $kept: 'same', $open: '1', $created: 'new' } },
+        })
+        expect(event.displayVariableUpdate).toBeUndefined()
+
+        session.updateChatVariables(new Map([['open', '2']]), { origin: 'display' })
+        expect(onMutation.mock.calls.at(-1)![0]).toMatchObject({
+            displayVariableUpdate: true,
+            variableUpdate: { keys: ['open'], origin: 'display' },
+        })
+
+        onMutation.mockImplementationOnce(() => {
+            throw new Error('publication failed')
+        })
+        expect(() => session.updateChatVariables(new Map([
+            ['open', '3'],
+            ['rolledBack', 'value'],
+        ]))).toThrow('publication failed')
+        expect(conversation.scriptstate).toEqual({ $kept: 'same', $open: '2', $created: 'new' })
+        expect(session.version).toBe(3)
+        expect(session.contentVersion).toBe(1)
+        expect(session.isContentUnchangedSince(1)).toBe(true)
+        expect(session.canContinueGenerationFrom(1)).toBe(true)
+        expect(session.locate(0).locatorToken).toBe(locator.locatorToken)
+        expect(session.readMessage(locator).data).toBe('zero')
+
+        session.transaction((transaction) =>
+            transaction.edit(locator, message('duplicate', 'edited')))
+        expect(session.messageVersion).toBe(4)
+        expect(session.contentVersion).toBe(4)
+        expect(session.isContentUnchangedSince(3)).toBe(false)
+        expect(session.canContinueGenerationFrom(3)).toBe(false)
+        expect(() => session.readMessage(locator)).toThrow(ConversationSessionStaleError)
     })
 
     it('preserves untouched legacy message identities across edits and appends', () => {

@@ -89,6 +89,8 @@ pub(crate) struct OneDrive {
 pub(crate) struct AuthorizedSecret {
     pub secret: SecretRef,
     pub account_id: String,
+    /// The signed-in user's mail address or sign-in name, when Graph reports one.
+    pub account_label: Option<String>,
 }
 
 pub(crate) struct SetupDrive {
@@ -713,12 +715,13 @@ impl OneDrive {
         }
         let identity: graph::SignedInUser = graph::json(&mut response, cancel).await?;
         let account_id = config::account_id(&identity.id)?;
+        let account_label = identity.mail.filter(|value| !value.trim().is_empty()).or(identity.user_principal_name);
         let authenticated = AccountKey::new(config::PROVIDER_ID, &settings.endpoint, &account_id)?;
         self.deps
             .requests
             .resolve_pending(&account, &authenticated)?;
         let secret = self.deps.vault.store(&tokens::encode(&granted)?).await?;
-        Ok(AuthorizedSecret { secret, account_id })
+        Ok(AuthorizedSecret { secret, account_id, account_label })
     }
 
     fn locator(&self, context: &Context, folder: &str, path: String) -> RemoteLocator {

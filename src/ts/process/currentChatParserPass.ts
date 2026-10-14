@@ -12,7 +12,7 @@ import type {
     character,
 } from '../storage/database.svelte'
 import { getChatVarFromConversation, setChatVarOnConversation } from '../parser/chatVar.svelte'
-import { safeStructuredClone } from '../polyfill'
+import { safeStructuredClone } from '../safeStructuredClone'
 
 const CURRENT_CHAT_PARSE_PAGE_SIZE = 128
 

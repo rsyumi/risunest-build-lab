@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-vi.mock('../platform', () => ({ isTauri: true }))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule({ runtime: 'tauri', os: 'windows' }))
 import type { Database } from './database.svelte'
 import { capturePersistentRoot } from './persistentDataRuntime'
 import { createPersistenceCanonicalCapture } from './reactivePersistenceCapture.svelte'

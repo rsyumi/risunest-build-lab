@@ -46,6 +46,7 @@ const shapeOf = (owner: unknown, field: string) => {
 
 export class SyncDriver {
   private readonly errors: string[] = [];
+  private readonly dialogOrigins = new WeakMap<object, string[]>();
   private current = "start";
   private readonly orderEvents: Record<string, unknown>[] = [];
   private syncController: Awaited<ReturnType<typeof import("../../src/ts/storage/sync/serverSyncProduction").getServerSyncController>> | undefined;
@@ -106,6 +107,13 @@ export class SyncDriver {
 
   async mountProduct() {
     document.getElementById("benchmark")?.remove();
+    const { alertStore } = await import("../../src/ts/stores.svelte");
+    alertStore.subscribe((value) => {
+      if (value.type !== "none" && alertStore.dialogVisible() && !this.dialogOrigins.has(value)) {
+        this.dialogOrigins.set(value, (new Error().stack ?? "").split(/\r?\n/).slice(1, 12)
+          .map((frame) => frame.trim().replace(/[A-Za-z0-9_-]{32,}/g, "<redacted>").slice(0, 200)));
+      }
+    });
     const app = await import("../../src/main");
     await app.default;
     const { getPersistentDataRuntime } = await import("../../src/ts/storage/persistentDataRuntime.svelte");
@@ -264,6 +272,7 @@ export class SyncDriver {
     // A message the string table does not hold is an error or a filled template; long values are redacted.
     return {
       alertType: value.type, messageKey,
+      messageLength: text.length, origin: this.dialogOrigins.get(value) ?? [],
       ...(messageKey === "unrecognized" ? { message: redact(text) } : {}),
       ...(value.stackTrace ? { stack: frames(value.stackTrace) } : {}),
     };

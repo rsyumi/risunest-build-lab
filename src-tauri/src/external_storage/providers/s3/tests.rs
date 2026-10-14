@@ -1708,30 +1708,15 @@ fn a_foreign_handle_or_locator_never_reaches_the_service() {
 
 #[test]
 fn cancellation_during_a_body_stops_the_transfer() {
+    use crate::external_storage::provider_contract::{a_read_cancelled_during_its_body_stops, held_body};
     runtime().block_on(async {
         let test = dependencies();
-        let server = WireServer::start(vec![one_descriptor(), Reply::DelayedBody]);
+        let (held, _release) = held_body();
+        let server = WireServer::start(vec![one_descriptor(), held]);
         let (provider, handle) = opened(&test, "r2", &server).await;
         let locator = provider.head_locator(&handle).unwrap();
-        let cancel = Cancellation::default();
-        let directory = tempfile::tempdir().unwrap();
-        let mut sink = SpoolSink::create(&directory.path().join("partial"), 100).unwrap();
-        let read = provider.read_object(&handle, &locator, None, &mut sink, &cancel);
-        let trigger = async {
-            while server.requests.lock().unwrap().len() < 2 {
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            cancel.cancel();
-        };
-        let (result, ()) = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            futures::future::join(read, trigger),
-        )
-        .await
-        .unwrap();
-        assert_eq!(result.unwrap_err().kind, ErrorKind::Cancelled);
-        assert!(!sink.is_verified());
+        a_read_cancelled_during_its_body_stops(provider.as_ref(), &handle, &locator, &Cancellation::default())
+            .await;
     });
 }
 

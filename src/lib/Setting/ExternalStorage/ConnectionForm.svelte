@@ -10,6 +10,7 @@
     import { openUrl } from '@tauri-apps/plugin-opener'
     import { type as osType } from '@tauri-apps/plugin-os'
     import { isTauriAndroid, isTauriIOS } from 'src/ts/platform'
+    import { selectDomFiles } from 'src/ts/storage/fileSelection'
     import { createQrScanner, isQrScanCancelled } from 'src/ts/ui/qrScanner'
     import { getExternalStorageBridge } from 'src/ts/storage/sync/external/bridge'
     import {
@@ -33,6 +34,7 @@
         ExternalFolderSelection,
     } from 'src/ts/storage/sync/external/types'
     import {
+        externalConnectionFolder,
         externalEndpointWarning,
         externalErrorMessage,
         externalErrorKind,
@@ -100,6 +102,9 @@
     let authorizationStatus = $state('')
     let destroyed = false
     let authorizationCompletionInFlight = $state(false)
+    let readyAuthorizationId = $state<string | null>(null)
+    let authorizationListener: Promise<void> | null = null
+    let stopAuthorizationListener: (() => void) | null = null
     let cancellationId: string | null = null
     let cancellationPromise: Promise<boolean> | null = null
     let folder = $state<ExternalFolderSelection | null>(null)
@@ -135,6 +140,7 @@
         selectingFolder ? 'selecting' : folder ? 'selected' : folderError ? 'invalid' : 'empty',
     )
     const accountHint = $derived(folder?.accountHint ?? folderSelector?.accountHint ?? prepared?.endpoint.accountHint)
+    const repositoryName = $derived(prepared ? externalConnectionFolder(strings, { providerId: prepared.endpoint.providerId, endpoint: prepared.endpoint }) : '')
     const authorizationAvailable = $derived(
         providerDescriptors.find(provider => provider.id === providerId)?.authorizationAvailable ?? true,
     )
@@ -161,6 +167,28 @@
 
     $effect(() => onbusychange(busy))
 
+    $effect(() => {
+        if (!destroyed && !busy && readyAuthorizationId && readyAuthorizationId === pendingAuthorizationId) {
+            readyAuthorizationId = null
+            if (selectingFolder) void finishFolderSelection()
+            else void connect()
+        }
+    })
+
+    async function watchAuthorization(): Promise<void> {
+        if (!isTauriAndroid) return
+        authorizationListener ??= bridge.onAuthorizationReady(id => {
+            if (!destroyed && id === pendingAuthorizationId) readyAuthorizationId = id
+        }).then(stop => {
+            if (destroyed) stop()
+            else stopAuthorizationListener = stop
+        }).catch(reason => {
+            authorizationListener = null
+            throw reason
+        })
+        await authorizationListener
+    }
+
     onMount(async () => {
         if (renewalConnection) busy = true
         try {
@@ -179,6 +207,7 @@
     })
     onDestroy(() => {
         destroyed = true
+        stopAuthorizationListener?.()
         const authorizationId = pendingAuthorizationId
         if (authorizationId) {
             void cancelNativeAuthorization(authorizationId)
@@ -275,23 +304,10 @@
         resetPrepared()
     }
 
-    function readConnectionSettingsFile(): Promise<string | null> {
-        return new Promise(resolve => {
-            const input = document.createElement('input')
-            input.type = 'file'
-            // The Android picker hides extensions it does not know, so it stays
-            // open there and the contents are checked when the key is read.
-            if (!isTauriAndroid) input.accept = '.rnconnection,text/plain'
-            input.style.display = 'none'
-            const finish = async (file?: File) => {
-                input.remove()
-                resolve(file ? await file.text() : null)
-            }
-            input.addEventListener('cancel', () => void finish())
-            input.addEventListener('change', () => void finish(input.files?.[0] ?? undefined))
-            document.body.appendChild(input)
-            input.click()
-        })
+    async function readConnectionSettingsFile(): Promise<string | null> {
+        // The Android picker hides extensions it does not know.
+        const [file] = await selectDomFiles({ accept: isTauriAndroid ? '' : '.rnconnection,text/plain' })
+        return file ? file.text() : null
     }
 
     async function loadConnectionSettingsFile(): Promise<void> {
@@ -448,6 +464,8 @@
         endpointConfirmed = false
         selectingFolder = true
         try {
+            await watchAuthorization()
+            if (destroyed) return
             const pending = await bridge.beginAuthorization(
                 prepared.preparationId,
                 prepared.requiresPlatformOAuthClient ? currentPlatformClientId.trim() : undefined,
@@ -535,7 +553,7 @@
     }
 
     async function connect(): Promise<void> {
-        if (!prepared || !endpointConfirmed) return
+        if (!prepared || !endpointConfirmed || busy) return
         if (folderSelection && !folder) return
         if (!folderSelection && !prepared.requiresOAuth && !fromTransfer
             && reportMissingFields(definition.secretFields)) return
@@ -550,6 +568,8 @@
             }
             if (prepared.requiresOAuth) {
                 if (!pendingAuthorizationId) {
+                    await watchAuthorization()
+                    if (destroyed) return
                     const pending = await bridge.beginAuthorization(
                         prepared.preparationId,
                         prepared.requiresPlatformOAuthClient
@@ -765,8 +785,8 @@
                         {/if}
                         {#if folderError}<span class="field-error" role="alert">{folderError}</span>{/if}
                     </dd>
-                {:else}
-                    <dt>{strings.repository}</dt><dd>{prepared.endpoint.repositoryHint}</dd>
+                {:else if repositoryName}
+                    <dt>{strings.repository}</dt><dd>{repositoryName}</dd>
                 {/if}
                 {#if mode === 'create'}
                     <dt>{strings.purposeReview}</dt>

@@ -10,7 +10,7 @@ const state = vi.hoisted(() => ({
 
 vi.mock('../transformers', () => ({ runEmbedding: vi.fn() }))
 // The app graph runs store effects on import that a loaded database would feed.
-vi.mock('src/ts/parser/parser.svelte', async () => (await import('../tests/sendChatTestHarness')).parserModule())
+vi.mock('src/ts/parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
 
 vi.mock('./contextualEmbedding', () => ({
     isContextModel: (model: string) => model === 'voyageContext3',

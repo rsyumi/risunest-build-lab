@@ -1,7 +1,8 @@
 import { expect, it, vi } from 'vitest'
 const previousFiles = vi.hoisted(() => ({ confirm: vi.fn(), download: vi.fn() }))
 vi.mock('./bindingDialog', () => ({ confirmSyncBindingReplacement: vi.fn(async () => true), confirmPreviousStorageFiles: previousFiles.confirm, downloadPreviousStorageFiles: previousFiles.download }))
-vi.mock('./bindingLocalData', () => ({ hasLocalBindingData: vi.fn(async () => true), hasLocalSharedBindingData: vi.fn(async () => true) }))
+vi.mock('./bindingLocalData', () => ({ hasLocalSharedBindingData: vi.fn(async () => true) }))
+vi.mock('../libraryCharacters', () => ({ hasLibraryCharacters: vi.fn(async () => true) }))
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
 import { IndexedDbPersistentDataStore } from '../indexedDbPersistentDataStore'
 import { createPersistentDataRuntime, capturePersistentRoot, capturePersistentPresets, capturePersistentPluginStorage } from '../persistentDataRuntime'
@@ -140,7 +141,7 @@ async function harness() {
         beginActivatedLibraryGuard: () => runtime.beginActivatedLibraryGuard(pausedToken()),
         refreshActivatedLibrary: async () => { expect((await runtime.refreshActivatedLibraryUnderPause(pausedToken())).projection).toBe('applied') },
         recovery: createSyncBindingRecoveryRegistration(() => runtime, pausedToken),
-        hasNonDefaultData: async () => true, hasNonDefaultSharedData: async () => true, confirmReplacement: async () => true,
+        hasLocalCharacters: async () => true, hasNonDefaultSharedData: async () => true, confirmReplacement: async () => true,
         plugins: { fenceExecution: async () => {}, invalidateCaches: async () => {}, restart: async () => { events.push('restart') } },
     }
     let replacementRevision: number | undefined

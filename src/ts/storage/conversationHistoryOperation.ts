@@ -9,7 +9,7 @@ import {
     type MessageLocator,
 } from './activeConversationSession'
 import type { DataRevision } from './persistentDataStore'
-import { safeStructuredClone } from '../polyfill'
+import { safeStructuredClone } from '../safeStructuredClone'
 
 export type ConversationHistoryOperationSource = 'active-session' | 'compatibility-snapshot'
 
@@ -62,17 +62,11 @@ class SessionConversationHistoryOperation implements ConversationHistoryOperatio
     }
 
     readLatest(limit: number): ActiveConversationWindow {
-        const session = this.requireCurrentSession()
-        const result = session.readLatest(limit)
-        this.assertResultVersion(result.sessionVersion)
-        return result
+        return this.requireCurrentSession().readLatest(limit)
     }
 
     readRange(startIndex: number, limit: number): ActiveConversationWindow {
-        const session = this.requireCurrentSession()
-        const result = session.readRange(startIndex, limit)
-        this.assertResultVersion(result.sessionVersion)
-        return result
+        return this.requireCurrentSession().readRange(startIndex, limit)
     }
 
     scanBackward(
@@ -80,11 +74,9 @@ class SessionConversationHistoryOperation implements ConversationHistoryOperatio
         limit?: number,
     ): ActiveConversationBackwardScan {
         const session = this.requireCurrentSession()
-        const result = limit === undefined
+        return limit === undefined
             ? session.scanBackward(startIndexExclusive)
             : session.scanBackward(startIndexExclusive, limit)
-        this.assertResultVersion(result.sessionVersion)
-        return result
     }
 
     resolveMessage(locator: MessageLocator): Message {
@@ -123,16 +115,11 @@ class SessionConversationHistoryOperation implements ConversationHistoryOperatio
         const session = this.session
         if (!session) throw new ConversationHistoryOperationDisposedError()
         if (!session.isActive) throw new ConversationSessionInactiveError()
-        if (session.version !== this.sessionVersion) {
+        // Variable-only commits leave the messages this operation reads in place.
+        if (!session.isContentUnchangedSince(this.sessionVersion)) {
             throw new ConversationSessionStaleError(this.sessionVersion, session.version)
         }
         return session
-    }
-
-    private assertResultVersion(version: number): void {
-        if (version !== this.sessionVersion) {
-            throw new ConversationSessionStaleError(this.sessionVersion, version)
-        }
     }
 }
 

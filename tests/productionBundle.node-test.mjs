@@ -29,7 +29,6 @@ test("rejects a test module in a dynamic chunk and a test framework", () => {
   for (const id of [
     "/src/foo.test.ts",
     "/src/lib/ChatScreens/chatMountProbe.testSupport.ts",
-    "/src/ts/process/luaWorkerPilotClient.testSupport.ts",
     "/src/lib/ComponentHarness.test.svelte",
     "/src/lib/state.test.svelte.ts",
     "/src/ts/database.testUtils.ts",
@@ -173,12 +172,10 @@ test("rejects retired GGUF code while preserving Pyodide scripting", () => {
 });
 
 test("worker maps reject test support even when worker code has no marker", () => {
-  for (const source of ['../../src/lib/ChatScreens/chatMountProbe.testSupport.ts', '../../src/ts/process/luaWorkerPilotClient.testSupport.ts']) {
-    assert.throws(() => assertProductionBundle([
-      { type: 'asset', fileName: 'assets/worker.js', source: 'postMessage(1)' },
-      { ...map([source]), fileName: 'assets/worker.js.map' },
-    ]), /Verification source/);
-  }
+  assert.throws(() => assertProductionBundle([
+    { type: 'asset', fileName: 'assets/worker.js', source: 'postMessage(1)' },
+    { ...map(['../../src/lib/ChatScreens/chatMountProbe.testSupport.ts']), fileName: 'assets/worker.js.map' },
+  ]), /Verification source/);
 });
 
 test("rejects isolated appearance and plugin probes in product workers and source maps", () => {

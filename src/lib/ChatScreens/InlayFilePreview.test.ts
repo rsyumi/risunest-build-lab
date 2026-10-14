@@ -13,7 +13,7 @@ const inlayMocks = vi.hoisted(() => ({
 
 vi.mock('src/ts/process/files/inlays', () => inlayMocks)
 const platform = vi.hoisted(() => ({ isTauri: true }))
-vi.mock('src/ts/platform', () => ({ get isTauri() { return platform.isTauri } }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule(() => ({ runtime: platform.isTauri ? 'tauri' : 'web', os: 'windows' })))
 
 import InlayFilePreview from './InlayFilePreview.svelte'
 import InlayFilePreviewHarness from './InlayFilePreviewHarness.test.svelte'

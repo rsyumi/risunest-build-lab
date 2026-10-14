@@ -136,7 +136,7 @@ describe('SynchronousSessionConversationViewportSource', () => {
         expect(source.snapshot().rowAt(0)?.message.data).toBe('edited')
     })
 
-    it('still invalidates rows for externally changed variables', async () => {
+    it('invalidates rows for variables an operation changed and keeps them for variable commits', async () => {
         const { conversation, session, source } = harness([
             message('first', 'first'),
         ])
@@ -149,6 +149,15 @@ describe('SynchronousSessionConversationViewportSource', () => {
         expect(listener).toHaveBeenCalledOnce()
         expect(source.snapshot().version).toBe(1)
         expect(source.snapshot().rowAt(0)).toBeUndefined()
+
+        await source.ensureRange({ startIndex: 0, limit: 1, reason: 'viewport' })
+        const loaded = source.snapshot()
+        listener.mockClear()
+        session.updateChatVariables(new Map([['button', 'again']]))
+        expect(conversation.scriptstate).toEqual({ $button: 'again' })
+        expect(listener).not.toHaveBeenCalled()
+        expect(source.snapshot().version).toBe(loaded.version)
+        expect(source.snapshot().rowAt(0)).toBe(loaded.rowAt(0))
     })
 
     it('exposes absolute totals and only publishes rows from ensured ranges', async () => {

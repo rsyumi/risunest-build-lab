@@ -210,6 +210,7 @@ export function message(error: unknown): string {
 
 export function updateReason(reason: string): string {
   return ({
+    "already-current": "이미 최신 버전입니다.",
     "update-recovery-schedule-mismatch": "관리 앱을 다시 실행한 뒤 업데이트를 다시 확인하세요.",
     "management-active": "관리 작업이 끝난 뒤 다시 확인하세요.",
     "management-app-open-or-install-locked": "다른 관리 앱을 닫거나 설치가 끝난 뒤 다시 확인하세요.",

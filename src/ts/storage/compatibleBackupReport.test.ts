@@ -27,19 +27,24 @@ const report: NativeCompatibilityReport = {
 
 describe('compatibility backup report', () => {
     it('renders exact native decimal values, known zero and unknown distinctly', () => {
-        const text = formatCompatibilityBackupReport(report, {
+        const labels = {
             ...languageEnglish.portableBackup,
             ...languageEnglish.compatibilityBackupReport,
-        })
-        expect(text).toContain('Compatibility export report (PocketRisu)')
+        }
+        const text = formatCompatibilityBackupReport(report, labels)
+        expect(text).toContain(`${labels.report} (PocketRisu)`)
         expect(text).toContain('9,007,199,254,740,993')
         expect(text).toContain('18,446,744,073,709,551,615 B')
-        expect(text).toContain('Affected conversations: Not determined')
-        expect(text).toContain('Affected conversations: 0')
-        expect(text).toContain('Excluded\nNone')
+        expect(text).toContain(`${labels.conversations}: ${labels.unknown}`)
+        expect(text).toContain(`${labels.conversations}: 0`)
+        expect(text).toContain(`${labels.excluded}\n${labels.none}`)
     })
 
     it('uses translated categories and a human-readable fallback without exposing codes', () => {
+        const labels = {
+            ...languageKorean.portableBackup,
+            ...languageKorean.compatibilityBackupReport,
+        }
         const text = formatCompatibilityBackupReport(
             {
                 ...report,
@@ -53,16 +58,13 @@ describe('compatibility backup report', () => {
                     },
                 ],
             },
-            {
-                ...languageKorean.portableBackup,
-                ...languageKorean.compatibilityBackupReport,
-            },
+            labels,
         )
-        expect(text).toContain('호환 내보내기 보고서 (RisuAI)')
-        expect(text).toContain('첨부 파일')
-        expect(text).toContain('인레이 식별자 변경')
-        expect(text).toContain('기타 호환성 항목')
-        expect(text).toContain('영향받는 대화: 집계 불가')
+        expect(text).toContain(`${labels.report} (RisuAI)`)
+        expect(text).toContain(labels.categories['attachment-files'])
+        expect(text).toContain(labels.categories['inlay-ids-remapped'])
+        expect(text).toContain(labels.otherCategory)
+        expect(text).toContain(`${labels.conversations}: ${labels.unknown}`)
         expect(text).not.toContain('future-internal-code')
     })
 })

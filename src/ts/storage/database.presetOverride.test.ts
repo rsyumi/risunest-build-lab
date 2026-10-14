@@ -5,13 +5,7 @@ const runtime = vi.hoisted(() => ({
     readPreset: vi.fn(async (_id: string): Promise<{ revision: number, value: unknown } | null> => null),
 }))
 
-vi.mock('../parser/parser.svelte', () => ({
-    assetRegex: /$^/,
-    hasher: vi.fn(async () => 'hash'),
-    parseMarkdownSafe: (value: string) => value,
-    ParseMarkdown: vi.fn(async (value: string) => value),
-    risuChatParser: (value: string) => value,
-}))
+vi.mock('../parser/parser.svelte', async () => (await import('../parser/parser.testSupport')).parserStubModule())
 vi.mock('./persistentDataRuntime.svelte', async (importOriginal) => ({
     ...await importOriginal<typeof import('./persistentDataRuntime.svelte')>(),
     flushPendingData: runtime.flushPendingData,

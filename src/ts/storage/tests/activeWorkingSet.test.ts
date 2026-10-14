@@ -10,13 +10,10 @@ import {
 } from '../persistentDataRuntime'
 import { isCatalogCharacterStub } from '../workingSetCatalog'
 import { WorkingSetResidencyRegistry } from '../workingSetResidency'
-import type {
-    ConversationPage,
-    PersistentConversationMetadata,
-    PersistentDataStore,
-    PersistentRevisionLease,
-} from '../persistentDataStore'
+import type { PersistentConversationMetadata } from '../persistentDataStore'
+import { createLeaseStub } from '../persistentDataStore.testSupport'
 import { fixtureDatabase } from './persistentDataFixtures'
+import { createPersistentStoreHarness } from '../../../../tests/support/persistentStoreHarness'
 
 function makeCharacter(id: string, chats: Chat[] = []): character {
     return {
@@ -31,11 +28,6 @@ function makeChat(id: string): Chat {
     return { id, name: id, note: '', localLore: [], message: [] }
 }
 
-function makeCharacterDetail(id: string): Omit<character, 'chats'> {
-    const { chats: _chats, ...detail } = makeCharacter(id)
-    return detail
-}
-
 function deferred<T>() {
     let resolve!: (value: T) => void
     let reject!: (error: unknown) => void
@@ -46,97 +38,44 @@ function deferred<T>() {
     return { promise, resolve, reject }
 }
 
-function makeLease(input: {
-    revision?: number
-    characterId: string
-    chats?: Chat[]
-    readCharacter?: PersistentRevisionLease['readCharacter']
-    readConversation?: PersistentRevisionLease['readConversation']
-}): PersistentRevisionLease {
-    const revision = input.revision ?? 1
-    const chats = input.chats ?? []
-    return {
-        revision,
-        queryPresets: vi.fn(async () => ({ revision, items: [] })),
-        readPreset: vi.fn(async () => null),
-        readRoot: vi.fn(),
-        queryCharacters: vi.fn(),
-        readCharacterSummary: vi.fn(async () => null),
-        readCharacter:
-            input.readCharacter ??
-            vi.fn(async () => ({
-                revision,
-                value: makeCharacterDetail(input.characterId),
-            })),
-        queryConversations: vi.fn(async ({ cursor }) => {
-            const index = cursor ? Number(cursor) : 0
-            const pageChats = chats.slice(index, index + 1)
-            return {
-                revision,
-                items: pageChats.map((chat, offset) => ({
-                    id: chat.id!,
-                    characterId: input.characterId,
-                    name: chat.name,
-                    folderId: chat.folderId,
-                    bindedPersona: chat.bindedPersona,
-                    configuredIndex: index + offset,
-                    recentAt: 0,
-                    messageCount: chat.message.length,
-                })),
-                nextCursor: index + 1 < chats.length ? String(index + 1) : undefined,
-            } satisfies ConversationPage
-        }),
-        readConversation:
-            input.readConversation ??
-            vi.fn(async (_characterId, conversationId) => {
-                const chat = chats.find((candidate) => candidate.id === conversationId)
-                return chat ? { revision, value: structuredClone(chat) } : null
-            }),
-        readConversationMetadata: vi.fn(async () => null),
-        readConversationWindow: vi.fn(),
-        readPluginStorageValues: vi.fn(async () => ({ revision, items: [], nextCursor: null })),
-        queryPluginStorage: vi.fn(async () => ({ revision, items: [] })),
-        readPluginStorage: vi.fn(async () => null),
-        readAssetAlias: vi.fn(async () => null),
-        readAssetAliasesByKeys: vi.fn(async () => ({ revision, value: [] })),
-        listAssetAliases: vi.fn(async () => ({ revision, items: [] })),
-        readAssetOwnerHead: vi.fn(async () => null),
-        release: vi.fn(async () => undefined),
-    }
-}
-
-function makeHarness(
-    lease: PersistentRevisionLease,
-    options: { hydrateFullCharacter?: boolean } = {},
+async function makeHarness(
+    options: {
+        characters?: character[]
+        hydrateFullCharacter?: boolean
+        conversationPageSize?: number
+    } = {},
 ) {
+    const previous = makeCharacter('previous', [makeChat('previous-chat')])
     const database = {
         username: 'Fixture',
-        characters: [makeCharacter('previous', [makeChat('previous-chat')])],
+        characters: [structuredClone(previous)],
     } as unknown as Database
+    const storage = await createPersistentStoreHarness({
+        username: 'Fixture',
+        botPresets: [],
+        characters: [previous, ...(options.characters ?? [makeCharacter('char-a')])],
+    } as unknown as Database)
+    const readCharacter = storage.spy('readCharacter')
+    const queryConversations = storage.spy('queryConversations')
+    const readConversation = storage.spy('readConversation')
+    const acquireRevision = storage.spy('acquireRevision').mockRejectedValue(
+        new Error('navigation acquired a snapshot'),
+    )
+    const open = storage.spy('open')
     let selectedCharacterId = 'previous'
     const coordinator = {
-        revision: 1,
+        revision: storage.revision,
         mutationGeneration: 0,
         initialize: vi.fn(),
         flushPendingData: vi.fn(() => Promise.resolve()),
         retireWindowedSelectedConversation: vi.fn(),
         replacePersistentDatabase: vi.fn(async () => ({
-            kind: 'committed', revision: 1, projection: 'applied',
+            kind: 'committed', revision: storage.revision, projection: 'applied',
         } as const)),
         adoptHydratedCharacter: vi.fn(() => true),
         markPersistentDataDirty: vi.fn(),
         recordActiveConversationMutation: vi.fn(),
     }
-    const store = {
-        open: vi.fn(async () => undefined),
-        readRoot: vi.fn(async () => ({ revision: 1, value: { username: 'Fixture' } })),
-        readCharacter: vi.fn((id: string) => lease.readCharacter(id)),
-        queryConversations: vi.fn((input) => lease.queryConversations(input)),
-        readConversation: vi.fn((characterId: string, conversationId: string) =>
-            lease.readConversation(characterId, conversationId),
-        ),
-        acquireRevision: vi.fn(() => Promise.reject(new Error('navigation acquired a snapshot'))),
-    } as unknown as PersistentDataStore
     const publishedCharacters: character[] = []
     const publishedConversations: Array<{ characterId: string; conversation: Chat }> = []
     const publishCharacter = vi.fn((value: character) => {
@@ -148,7 +87,7 @@ function makeHarness(
     let workingSetActivationAllowed = true
     let workingSetReleaseAllowed = true
     const workingSet = new ActiveWorkingSet({
-        store,
+        store: storage.store,
         coordinator: coordinator as never,
         getSelectedCharacterId: () => selectedCharacterId,
         getResidentCharacter: (id) =>
@@ -172,10 +111,17 @@ function makeHarness(
             releaseAllowed && !character.chats.find(
                 (conversation) => conversation.id === conversationId,
             )?.isStreaming,
+        conversationPageSize: options.conversationPageSize,
     })
     return {
         workingSet,
-        store,
+        storage,
+        revision: storage.revision,
+        readCharacter,
+        queryConversations,
+        readConversation,
+        acquireRevision,
+        open,
         coordinator,
         database,
         publishedCharacters,
@@ -197,7 +143,7 @@ function makeHarness(
     }
 }
 
-function makeWindowedHarness(input: {
+async function makeWindowedHarness(input: {
     characters: character[]
     selectedCharacterId?: string | null
     adoptionResult?: boolean
@@ -206,108 +152,21 @@ function makeWindowedHarness(input: {
         username: 'Windowed fixture',
         characters: structuredClone(input.characters),
     } as unknown as Database
-    const authoritative = structuredClone(input.characters)
+    const storage = await createPersistentStoreHarness({
+        username: 'Windowed fixture',
+        botPresets: [],
+        characters: structuredClone(input.characters),
+    } as unknown as Database)
+    const store = storage.store
     let selectedCharacterId = input.selectedCharacterId ?? null
-    let storeRevision = 1
     let windowedAllowed = true
     let operationActive = false
-    const readConversation = vi.fn(async () => {
-        throw new Error(
-            'windowed activation performed a full conversation read',
-        )
-    })
-    const readConversationMetadata = vi.fn(
-        async (characterId: string, conversationId: string) => {
-            const owner = authoritative.find(
-                (candidate) => candidate.chaId === characterId,
-            )
-            const conversation = owner?.chats.find(
-                (candidate) => candidate.id === conversationId,
-            )
-            if (!conversation) return null
-            const { message, ...metadata } = structuredClone(conversation)
-            return {
-                revision: storeRevision,
-                value: {
-                    characterId,
-                    conversationId,
-                    conversation: metadata,
-                    totalMessages: message.length,
-                } satisfies PersistentConversationMetadata,
-            }
-        },
+    // Windowed activation reads bounded windows; a full conversation read fails it.
+    const readConversation = storage.spy('readConversation').mockRejectedValue(
+        new Error('windowed activation performed a full conversation read'),
     )
-    const store = {
-        readCharacter: vi.fn(async (id: string) => {
-            const owner = authoritative.find(
-                (candidate) => candidate.chaId === id,
-            )
-            if (!owner) return null
-            const { chats: _chats, ...detail } = owner
-            return { revision: storeRevision, value: detail }
-        }),
-        queryConversations: vi.fn(
-            async ({ characterId }: { characterId: string }) => {
-                const owner = authoritative.find(
-                    (candidate) => candidate.chaId === characterId,
-                )
-                return {
-                    revision: storeRevision,
-                    items: (owner?.chats ?? []).map(
-                        (conversation, configuredIndex) => ({
-                            id: conversation.id!,
-                            characterId,
-                            name: conversation.name,
-                            folderId: conversation.folderId,
-                            bindedPersona: conversation.bindedPersona,
-                            configuredIndex,
-                            recentAt: conversation.lastDate ?? 17,
-                            messageCount: conversation.message.length,
-                            fmIndex: conversation.fmIndex,
-                        }),
-                    ),
-                }
-            },
-        ),
-        readConversationMetadata,
-        readConversation,
-        readConversationWindow: vi.fn(
-            async ({
-                characterId,
-                conversationId,
-                startIndex = 0,
-                limit = 64,
-            }) => {
-                const owner = authoritative.find(
-                    (candidate) => candidate.chaId === characterId,
-                )
-                const conversation = owner?.chats.find(
-                    (candidate) => candidate.id === conversationId,
-                )
-                if (!conversation) return null
-                const messages = conversation.message.slice(
-                    startIndex,
-                    startIndex + limit,
-                )
-                return {
-                    revision: storeRevision,
-                    value: {
-                        characterId,
-                        conversationId,
-                        messages,
-                        startIndex,
-                        endIndex: startIndex + messages.length,
-                        totalMessages: conversation.message.length,
-                        hasMoreBefore: startIndex > 0,
-                        hasMoreAfter:
-                            startIndex + messages.length <
-                            conversation.message.length,
-                    },
-                }
-            },
-        ),
-    } as unknown as PersistentDataStore
-    store.acquireRevision = vi.fn(async () => ({ ...store, revision: storeRevision, release: vi.fn() }) as unknown as PersistentRevisionLease)
+    const readConversationMetadata = storage.spy('readConversationMetadata')
+    const readCharacter = storage.spy('readCharacter')
     let workingSet!: ActiveWorkingSet
     const coordinator = {
         revision: 1,
@@ -403,13 +262,19 @@ function makeWindowedHarness(input: {
         workingSet,
         database,
         coordinator,
-        readCharacter: (store as unknown as { readCharacter: ReturnType<typeof vi.fn> }).readCharacter,
+        storage,
+        readCharacter,
         readConversation,
         readConversationMetadata,
         captureActivationRollback,
         publishConversation,
-        setStoreRevision(revision: number) {
-            storeRevision = revision
+        /** Commits an unrelated root edit, as background persistence would, and returns the new revision. */
+        async commitBackgroundEdit() {
+            const { revision } = await store.readRoot()
+            return (await store.commit({
+                expectedRevision: revision,
+                rootMutations: [{ type: 'set', key: 'username', value: `Background ${revision}` }],
+            })).revision
         },
         setWindowedAllowed(allowed: boolean) {
             windowedAllowed = allowed
@@ -429,7 +294,7 @@ describe('ActiveWorkingSet', () => {
         ] as Message[]
         const other = makeChat('chat-b')
         other.message = [{ role: 'user', data: 'other', chatId: 'c' }] as Message[]
-        const harness = makeWindowedHarness({ characters: [makeCharacter('a', [selected, other])] })
+        const harness = await makeWindowedHarness({ characters: [makeCharacter('a', [selected, other])] })
         await expect(harness.workingSet.activateCharacter('a')).resolves.toBe(true)
         expect(harness.workingSet.selectedConversationMode).toBe('windowed')
         const resident = harness.database.characters[0]
@@ -496,7 +361,7 @@ describe('ActiveWorkingSet', () => {
     it('edits a middle row with bounded reads and unchanged viewport ownership', async () => {
         const full = makeChat('chat-a')
         full.message = Array.from({ length: 5000 }, (_, index) => ({ role: 'user', data: 'x'.repeat(4096), chatId: String(index) })) as Message[]
-        const harness = makeWindowedHarness({ characters: [makeCharacter('a', [full])] })
+        const harness = await makeWindowedHarness({ characters: [makeCharacter('a', [full])] })
         await harness.workingSet.activateCharacter('a')
         const source = harness.workingSet.activeConversationViewportSource
         const target = harness.workingSet.captureSelectedConversationTarget()!
@@ -523,20 +388,23 @@ describe('ActiveWorkingSet', () => {
             { role: 'user', data: 'outside', chatId: 'a' },
             { role: 'user', data: 'tail', chatId: 'b' },
         ] as Message[]
-        const harness = makeWindowedHarness({ characters: [makeCharacter('a', [full])] })
+        const harness = await makeWindowedHarness({ characters: [makeCharacter('a', [full])] })
         await harness.workingSet.activateCharacter('a')
         const target = harness.workingSet.captureSelectedConversationTarget()!
         const local = { ...structuredClone(full), message: [structuredClone(full.message[1])] }
         const controller = harness.workingSet.captureWindowedConversationMutationController(target, local, 1)!
-        const reader = makeLease({ characterId: 'a', revision: 2 })
-        reader.readConversationWindow = vi.fn(async () => ({
+        const reader = createLeaseStub({
             revision: 2,
-            value: {
-                characterId: 'a', conversationId: 'chat-a', startIndex: 1, endIndex: 2, totalMessages: 2,
-                hasMoreBefore: true, hasMoreAfter: false,
-                messages: [{ ...full.message[1], data: change === 'content' ? 'changed' : 'tail', __plugin: 'stored' }],
-            },
-        }))
+            readConversation: vi.fn(),
+            readConversationWindow: vi.fn(async () => ({
+                revision: 2,
+                value: {
+                    characterId: 'a', conversationId: 'chat-a', startIndex: 1, endIndex: 2, totalMessages: 2,
+                    hasMoreBefore: true, hasMoreAfter: false,
+                    messages: [{ ...full.message[1], data: change === 'content' ? 'changed' : 'tail', __plugin: 'stored' }],
+                },
+            })),
+        })
         const adopt = await harness.workingSet.prepareWindowedMetadataAdoption(reader)
         if (change === 'navigation') harness.workingSet.fenceNavigation()
         else harness.workingSet.advanceStoreRevision(2)
@@ -561,7 +429,7 @@ describe('ActiveWorkingSet', () => {
             { role: 'user', data: 'covered', chatId: 'a' },
             { role: 'user', data: 'tail', chatId: 'b' },
         ] as Message[]
-        const harness = makeWindowedHarness({ characters: [makeCharacter('a', [full])] })
+        const harness = await makeWindowedHarness({ characters: [makeCharacter('a', [full])] })
         await harness.workingSet.activateCharacter('a')
         const target = harness.workingSet.captureSelectedConversationTarget()!
         const local = { ...structuredClone(full), message: [structuredClone(full.message[1])] }
@@ -579,7 +447,7 @@ describe('ActiveWorkingSet', () => {
             { role: 'char', data: 'covered-b', chatId: 'b' },
             { role: 'user', data: 'tail', chatId: 'c' },
         ] as Message[]
-        const harness = makeWindowedHarness({ characters: [makeCharacter('a', [full])] })
+        const harness = await makeWindowedHarness({ characters: [makeCharacter('a', [full])] })
         await expect(harness.workingSet.activateCharacter('a')).resolves.toBe(true)
         const target = harness.workingSet.captureSelectedConversationTarget()!
         const local = { ...structuredClone(full), message: [structuredClone(full.message[2])] }
@@ -640,7 +508,7 @@ describe('ActiveWorkingSet', () => {
             { role: 'user', data: 'kept', chatId: 'c' },
             { role: 'char', data: 'tail', chatId: 'd' },
         ] as Message[]
-        const harness = makeWindowedHarness({ characters: [makeCharacter('a', [full])] })
+        const harness = await makeWindowedHarness({ characters: [makeCharacter('a', [full])] })
         await expect(harness.workingSet.activateCharacter('a')).resolves.toBe(true)
         const target = harness.workingSet.captureSelectedConversationTarget()!
         const local = { ...structuredClone(full), message: structuredClone(full.message.slice(1)) }
@@ -662,7 +530,7 @@ describe('ActiveWorkingSet', () => {
             { role: 'user', data: 'covered', chatId: 'a' },
             { role: 'char', data: 'tail', chatId: 'b' },
         ] as Message[]
-        const harness = makeWindowedHarness({ characters: [makeCharacter('a', [full])] })
+        const harness = await makeWindowedHarness({ characters: [makeCharacter('a', [full])] })
         await expect(harness.workingSet.activateCharacter('a')).resolves.toBe(true)
         const target = harness.workingSet.captureSelectedConversationTarget()!
         const local = { ...structuredClone(full), message: [structuredClone(full.message[1])] }
@@ -684,7 +552,7 @@ describe('ActiveWorkingSet', () => {
     })
 
     it('propagates a windowed transition failure after restoring the previous selection', async () => {
-        const harness = makeWindowedHarness({
+        const harness = await makeWindowedHarness({
             characters: [makeCharacter('a', [makeChat('chat-a')]), makeCharacter('b', [makeChat('chat-b')])],
         })
         await expect(harness.workingSet.activateCharacter('a')).resolves.toBe(true)
@@ -700,15 +568,13 @@ describe('ActiveWorkingSet', () => {
     })
 
     it('waits for background persistence queued during hydration before publishing', async () => {
-        const harness = makeWindowedHarness({
+        const harness = await makeWindowedHarness({
             characters: [makeCharacter('a', [makeChat('chat-a')])],
         })
         const { coordinator } = harness
-        const { readCharacter } = harness
-        const read = readCharacter.getMockImplementation() as (id: string) => Promise<unknown>
-        readCharacter.mockImplementationOnce(async (id: string) => {
-            coordinator.hasPendingPersistenceWork = true
-            return read(id)
+        let reads = 0
+        const readCharacter = harness.storage.observe('readCharacter', () => {
+            if (reads++ === 0) coordinator.hasPendingPersistenceWork = true
         })
         coordinator.flushPendingData.mockImplementation(async () => {
             coordinator.hasPendingPersistenceWork = false
@@ -727,15 +593,13 @@ describe('ActiveWorkingSet', () => {
     })
 
     it('does not publish a new selection when persistence remains busy after settling', async () => {
-        const harness = makeWindowedHarness({
+        const harness = await makeWindowedHarness({
             characters: [makeCharacter('a', [makeChat('chat-a')]), makeCharacter('b', [makeChat('chat-b')])],
         })
         await expect(harness.workingSet.activateCharacter('a')).resolves.toBe(true)
         const previous = harness.database.characters[0]
-        const read = harness.readCharacter.getMockImplementation() as (id: string) => Promise<unknown>
-        harness.readCharacter.mockImplementation(async (id: string) => {
+        harness.storage.observe('readCharacter', () => {
             harness.coordinator.hasPendingPersistenceWork = true
-            return read(id)
         })
         harness.coordinator.runSelectedConversationTransition.mockClear()
         harness.coordinator.runSelectedConversationTransition.mockImplementation(<T>(transition: () => T) => {
@@ -750,21 +614,18 @@ describe('ActiveWorkingSet', () => {
     })
 
     it('reads the character again when background persistence moves the revision', async () => {
-        const harness = makeWindowedHarness({
+        const harness = await makeWindowedHarness({
             characters: [makeCharacter('a', [makeChat('chat-a')])],
         })
         const { coordinator } = harness
-        const { readCharacter } = harness
-        const read = readCharacter.getMockImplementation() as (id: string) => Promise<unknown>
-        readCharacter.mockImplementationOnce(async (id: string) => {
-            coordinator.hasPendingPersistenceWork = true
-            return read(id)
+        let reads = 0
+        const readCharacter = harness.storage.observe('readCharacter', () => {
+            if (reads++ === 0) coordinator.hasPendingPersistenceWork = true
         })
         coordinator.flushPendingData.mockImplementation(async () => {
             if (!coordinator.hasPendingPersistenceWork) return
             coordinator.hasPendingPersistenceWork = false
-            coordinator.revision = 2
-            harness.setStoreRevision(2)
+            coordinator.revision = await harness.commitBackgroundEdit()
         })
         coordinator.runSelectedConversationTransition.mockImplementation(<T>(transition: () => T) => {
             if (coordinator.hasPendingPersistenceWork) throw new Error('Selected conversation authority transition has pending persistence')
@@ -789,7 +650,7 @@ describe('ActiveWorkingSet', () => {
             })),
         } as Chat
         const target = makeCharacter('char-large', [conversation])
-        const harness = makeWindowedHarness({ characters: [target] })
+        const harness = await makeWindowedHarness({ characters: [target] })
 
         await expect(
             harness.workingSet.activateCharacter('char-large'),
@@ -829,7 +690,7 @@ describe('ActiveWorkingSet', () => {
                 message: [{ role: 'user', data: 'persisted' }],
             } as Chat,
         ])
-        const harness = makeWindowedHarness({ characters: [target] })
+        const harness = await makeWindowedHarness({ characters: [target] })
         await harness.workingSet.activateCharacter('char-a')
         const staleTarget =
             harness.workingSet.captureSelectedConversationTarget()!
@@ -864,7 +725,7 @@ describe('ActiveWorkingSet', () => {
             message: [{ role: 'char', data: 'second' }],
         } as Chat
         const target = makeCharacter('char-a', [chatA, chatB])
-        const harness = makeWindowedHarness({ characters: [target] })
+        const harness = await makeWindowedHarness({ characters: [target] })
         await harness.workingSet.activateCharacter('char-a')
         const previousSource =
             harness.workingSet.activeConversationViewportSource!
@@ -905,7 +766,7 @@ describe('ActiveWorkingSet', () => {
                 message: [{ role: 'char', data: 'second' }],
             } as Chat,
         ])
-        const harness = makeWindowedHarness({
+        const harness = await makeWindowedHarness({
             characters: [characterA, characterB],
         })
         await harness.workingSet.activateCharacter('char-a')
@@ -948,14 +809,14 @@ describe('ActiveWorkingSet', () => {
                 message: [{ role: 'char', data: 'second' }],
             } as Chat,
         ])
-        const harness = makeWindowedHarness({
+        const harness = await makeWindowedHarness({
             characters: [characterA, characterB],
         })
         await harness.workingSet.activateCharacter('char-a')
         const preFlushSource =
             harness.workingSet.activeConversationViewportSource!
         let postFlushSource = preFlushSource
-        harness.setStoreRevision(2)
+        await harness.commitBackgroundEdit()
         harness.coordinator.flushPendingData.mockImplementationOnce(
             async () => {
                 harness.coordinator.revision = 2
@@ -998,7 +859,7 @@ describe('ActiveWorkingSet', () => {
                 } as Chat,
             ]),
         )
-        const harness = makeWindowedHarness({ characters })
+        const harness = await makeWindowedHarness({ characters })
         await harness.workingSet.activateCharacter('char-a')
         let newerNavigation: Promise<boolean> | null = null
 
@@ -1035,7 +896,7 @@ describe('ActiveWorkingSet', () => {
             ...makeChat('chat-b'),
             message: [{ role: 'char', data: 'second' }],
         } as Chat
-        const harness = makeWindowedHarness({
+        const harness = await makeWindowedHarness({
             characters: [makeCharacter('char-a', [chatA, chatB])],
         })
         await harness.workingSet.activateCharacter('char-a')
@@ -1082,7 +943,7 @@ describe('ActiveWorkingSet', () => {
             ]),
             lastInteraction: 1,
         } as character
-        const harness = makeWindowedHarness({ characters: [target] })
+        const harness = await makeWindowedHarness({ characters: [target] })
 
         await expect(
             harness.workingSet.activateCharacter('char-a', {
@@ -1146,20 +1007,14 @@ describe('ActiveWorkingSet', () => {
             ...makeChat('chat-b'),
             message: [{ role: 'user', data: 'selected body' }],
         } as Chat
-        const lease = makeLease({
-            characterId: 'char-a',
-            chats: [chatA, chatB],
-            readCharacter: vi.fn(async () => ({
-                revision: 1,
-                value: { ...makeCharacterDetail('char-a'), chatPage: 1 },
-            })),
+        const harness = await makeHarness({
+            characters: [{ ...makeCharacter('char-a', [chatA, chatB]), chatPage: 1 } as character],
         })
-        const harness = makeHarness(lease)
 
         expect(await harness.workingSet.activateCharacter('char-a')).toBe(true)
 
-        expect(lease.readConversation).toHaveBeenCalledOnce()
-        expect(lease.readConversation).toHaveBeenCalledWith('char-a', 'chat-b')
+        expect(harness.readConversation).toHaveBeenCalledOnce()
+        expect(harness.readConversation).toHaveBeenCalledWith('char-a', 'chat-b')
         expect(harness.publishedCharacters[0]).toMatchObject({
             chaId: 'char-a',
             chatPage: 1,
@@ -1177,7 +1032,7 @@ describe('ActiveWorkingSet', () => {
     })
 
     it('flushes before releasing all active characters on leave', async () => {
-        const harness = makeHarness(makeLease({ characterId: 'char-a' }))
+        const harness = await makeHarness()
         await harness.workingSet.activateCharacter('char-a')
         harness.releaseInactiveCharacter.mockClear()
         harness.coordinator.flushPendingData.mockClear()
@@ -1198,7 +1053,7 @@ describe('ActiveWorkingSet', () => {
     })
 
     it('keeps dirty active characters resident when leave flush fails', async () => {
-        const harness = makeHarness(makeLease({ characterId: 'char-a' }))
+        const harness = await makeHarness()
         await harness.workingSet.activateCharacter('char-a')
         harness.releaseInactiveCharacter.mockClear()
         harness.coordinator.flushPendingData.mockRejectedValueOnce(new Error('flush failed'))
@@ -1211,7 +1066,7 @@ describe('ActiveWorkingSet', () => {
     })
 
     it('keeps a streaming character active until a later leave after settlement', async () => {
-        const harness = makeHarness(makeLease({ characterId: 'char-a' }))
+        const harness = await makeHarness()
         await harness.workingSet.activateCharacter('char-a')
         harness.releaseInactiveCharacter.mockClear()
         harness.setReleaseAllowed(false)
@@ -1228,10 +1083,10 @@ describe('ActiveWorkingSet', () => {
     })
 
     it('keeps the selected conversation target current when leave becomes blocked during flush', async () => {
-        const harness = makeHarness(makeLease({
-            characterId: 'char-a',
-            chats: [makeChat('chat-a')],
-        }), { hydrateFullCharacter: true })
+        const harness = await makeHarness({
+            characters: [makeCharacter('char-a', [makeChat('chat-a')])],
+            hydrateFullCharacter: true,
+        })
         await harness.workingSet.activateCharacter('char-a')
         const flushing = deferred<void>()
         harness.coordinator.flushPendingData.mockReturnValueOnce(flushing.promise)
@@ -1252,10 +1107,10 @@ describe('ActiveWorkingSet', () => {
     })
 
     it('keeps the selected conversation target current when activation becomes blocked during flush', async () => {
-        const harness = makeHarness(makeLease({
-            characterId: 'char-a',
-            chats: [makeChat('chat-a'), makeChat('chat-b')],
-        }), { hydrateFullCharacter: true })
+        const harness = await makeHarness({
+            characters: [makeCharacter('char-a', [makeChat('chat-a'), makeChat('chat-b')])],
+            hydrateFullCharacter: true,
+        })
         await harness.workingSet.activateCharacter('char-a')
         const flushing = deferred<void>()
         harness.coordinator.flushPendingData.mockReturnValueOnce(flushing.promise)
@@ -1276,7 +1131,7 @@ describe('ActiveWorkingSet', () => {
     })
 
     it('keeps the active character resident while generation is busy before streaming starts', async () => {
-        const harness = makeHarness(makeLease({ characterId: 'char-a' }))
+        const harness = await makeHarness()
         await harness.workingSet.activateCharacter('char-a')
         harness.releaseInactiveCharacter.mockClear()
         harness.coordinator.flushPendingData.mockClear()
@@ -1290,7 +1145,7 @@ describe('ActiveWorkingSet', () => {
     })
 
     it('allows maximum compatibility to leave while retaining complete data', async () => {
-        const harness = makeHarness(makeLease({ characterId: 'char-a' }))
+        const harness = await makeHarness()
         await harness.workingSet.activateCharacter('char-a')
         harness.releaseInactiveCharacter.mockClear()
         harness.releaseInactiveCharacter.mockReturnValueOnce(false)
@@ -1312,8 +1167,12 @@ describe('ActiveWorkingSet', () => {
                 message: [{ role: 'char', data: 'full B' }],
             } as Chat,
         ]
-        const lease = makeLease({ characterId: 'char-a', chats })
-        const harness = makeHarness(lease, { hydrateFullCharacter: true })
+        // One conversation per page, so both bodies arrive only if every page is read.
+        const harness = await makeHarness({
+            characters: [makeCharacter('char-a', chats)],
+            hydrateFullCharacter: true,
+            conversationPageSize: 1,
+        })
 
         expect(await harness.workingSet.activateCharacter('char-a')).toBe(true)
 
@@ -1321,11 +1180,11 @@ describe('ActiveWorkingSet', () => {
             chaId: 'char-a',
             chats,
         })
-        expect(lease.readConversation).toHaveBeenCalledTimes(2)
-        expect(lease.queryConversations).toHaveBeenCalledTimes(2)
-        expect(harness.store.acquireRevision).not.toHaveBeenCalled()
+        expect(harness.readConversation).toHaveBeenCalledTimes(2)
+        expect(harness.queryConversations).toHaveBeenCalledTimes(2)
+        expect(harness.acquireRevision).not.toHaveBeenCalled()
         expect(harness.coordinator.adoptHydratedCharacter).toHaveBeenCalledWith(
-            1,
+            harness.revision,
             0,
             harness.publishedCharacters[0],
         )
@@ -1335,8 +1194,9 @@ describe('ActiveWorkingSet', () => {
     })
 
     it('releases the previous character only after the hydrated target is published', async () => {
-        const lease = makeLease({ characterId: 'char-a', chats: [makeChat('chat-a')] })
-        const harness = makeHarness(lease)
+        const harness = await makeHarness({
+            characters: [makeCharacter('char-a', [makeChat('chat-a')])],
+        })
 
         expect(await harness.workingSet.activateCharacter('char-a')).toBe(true)
 
@@ -1356,44 +1216,17 @@ describe('ActiveWorkingSet', () => {
                 personality: `body-${id}`,
             })),
         } as unknown as Database
-        const authoritative = structuredClone(database.characters)
+        const storage = await createPersistentStoreHarness({
+            username: 'Fixture',
+            botPresets: [],
+            characters: structuredClone(database.characters),
+        } as unknown as Database)
         let selectedCharacterId = 'char-a'
         const residency = new WorkingSetResidencyRegistry()
-        const store = {
-            readCharacter: vi.fn(async (id: string) => {
-                const character = authoritative.find((candidate) => candidate.chaId === id)
-                if (!character) return null
-                const { chats: _chats, ...detail } = character
-                return { revision: 1, value: detail }
-            }),
-            queryConversations: vi.fn(async ({ characterId }: { characterId: string }) => {
-                const character = authoritative.find((candidate) => candidate.chaId === characterId)!
-                return {
-                    revision: 1,
-                    items: character.chats.map((chat, configuredIndex) => ({
-                        id: chat.id!,
-                        characterId,
-                        name: chat.name,
-                        configuredIndex,
-                        recentAt: 0,
-                        messageCount: chat.message.length,
-                    })),
-                }
-            }),
-            readConversation: vi.fn(async (characterId: string, conversationId: string) => {
-                const character = authoritative.find((candidate) => candidate.chaId === characterId)!
-                return {
-                    revision: 1,
-                    value: structuredClone(
-                        character.chats.find((chat) => chat.id === conversationId)!,
-                    ),
-                }
-            }),
-        } as unknown as PersistentDataStore
         const workingSet = new ActiveWorkingSet({
-            store,
+            store: storage.store,
             coordinator: {
-                revision: 1,
+                revision: storage.revision,
                 mutationGeneration: 0,
                 initialize: vi.fn(),
                 flushPendingData: vi.fn(async () => undefined),
@@ -1427,37 +1260,20 @@ describe('ActiveWorkingSet', () => {
 
     it('hydrates conversations concurrently while preserving configured order', async () => {
         const chats = ['chat-a', 'chat-b', 'chat-c', 'chat-d', 'chat-e'].map(makeChat)
-        const pending = new Map<
-            string,
-            ReturnType<typeof deferred<{ revision: number; value: Chat } | null>>
-        >()
-        const lease = makeLease({
-            characterId: 'char-a',
-            chats,
-            readConversation: vi.fn((_characterId: string, conversationId: string) => {
-                const entry = deferred<{ revision: number; value: Chat } | null>()
-                pending.set(conversationId, entry)
-                return entry.promise
-            }),
+        const harness = await makeHarness({
+            characters: [makeCharacter('char-a', chats)],
+            hydrateFullCharacter: true,
         })
-        const harness = makeHarness(lease, { hydrateFullCharacter: true })
-        vi.mocked(lease.queryConversations).mockResolvedValue({
-            revision: 1,
-            items: chats.map((chat, index) => ({
-                id: chat.id!,
-                characterId: 'char-a',
-                name: chat.name,
-                configuredIndex: index,
-                recentAt: 0,
-                messageCount: 0,
-            })),
+        const pending = new Map<string, ReturnType<typeof deferred<void>>>()
+        harness.storage.observe('readConversation', (_characterId, conversationId) => {
+            const entry = deferred<void>()
+            pending.set(conversationId, entry)
+            return entry.promise
         })
 
         const activation = harness.workingSet.activateCharacter('char-a')
         await vi.waitFor(() => expect(pending.size).toBe(chats.length))
-        for (const chat of [...chats].reverse()) {
-            pending.get(chat.id!)!.resolve({ revision: 1, value: structuredClone(chat) })
-        }
+        for (const chat of [...chats].reverse()) pending.get(chat.id!)!.resolve()
 
         expect(await activation).toBe(true)
         expect(harness.publishedCharacters[0].chats.map((chat) => chat.id)).toEqual([
@@ -1470,74 +1286,41 @@ describe('ActiveWorkingSet', () => {
     })
 
     it('publishes only the newest rapid character navigation', async () => {
-        const a = deferred<ReturnType<PersistentRevisionLease['readCharacter']> extends Promise<infer T> ? T : never>()
-        const leaseA = makeLease({
-            characterId: 'char-a',
-            readCharacter: vi.fn(() => a.promise),
+        const harness = await makeHarness({
+            characters: [makeCharacter('char-a'), makeCharacter('char-b')],
         })
-        const leaseB = makeLease({ characterId: 'char-b' })
-        const harness = makeHarness(leaseA)
-        vi.mocked(harness.store.readCharacter).mockImplementation((id) =>
-            id === 'char-a' ? leaseA.readCharacter(id) : leaseB.readCharacter(id),
-        )
-        vi.mocked(harness.store.queryConversations).mockImplementation((input) =>
-            input.characterId === 'char-a'
-                ? leaseA.queryConversations(input)
-                : leaseB.queryConversations(input),
-        )
-        vi.mocked(harness.store.readConversation).mockImplementation((characterId, conversationId) =>
-            characterId === 'char-a'
-                ? leaseA.readConversation(characterId, conversationId)
-                : leaseB.readConversation(characterId, conversationId),
-        )
+        const a = harness.storage.gate('readCharacter')
 
         const first = harness.workingSet.activateCharacter('char-a')
-        await vi.waitFor(() => expect(leaseA.readCharacter).toHaveBeenCalledTimes(1))
+        await a.entered
         const second = harness.workingSet.activateCharacter('char-b')
         await second
-        a.resolve({ revision: 1, value: makeCharacterDetail('char-a') })
+        a.release()
 
         expect(await first).toBe(false)
         expect(harness.publishedCharacters.map((characterValue) => characterValue.chaId)).toEqual([
             'char-b',
         ])
-        expect(harness.store.acquireRevision).not.toHaveBeenCalled()
+        expect(harness.acquireRevision).not.toHaveBeenCalled()
     })
 
     it('does not publish navigation invalidated by activated database adoption', async () => {
-        const detail = deferred<{ revision: number; value: Omit<character, 'chats'> } | null>()
-        const lease = makeLease({
-            characterId: 'char-a',
-            readCharacter: vi.fn(() => detail.promise),
-        })
-        const harness = makeHarness(lease)
+        const harness = await makeHarness()
+        const detail = harness.storage.gate('readCharacter')
 
         const activation = harness.workingSet.activateCharacter('char-a')
-        await vi.waitFor(() => expect(harness.store.readCharacter).toHaveBeenCalledOnce())
+        await detail.entered
         harness.workingSet.invalidateNavigation()
-        detail.resolve({ revision: 1, value: makeCharacterDetail('char-a') })
+        detail.release()
 
         expect(await activation).toBe(false)
         expect(harness.publishedCharacters).toEqual([])
     })
 
     it('does not replace from stale character preparation after newer navigation starts', async () => {
-        const leaseA = makeLease({ characterId: 'char-a' })
-        const leaseB = makeLease({ characterId: 'char-b' })
-        const harness = makeHarness(leaseA)
-        vi.mocked(harness.store.readCharacter).mockImplementation((id) =>
-            id === 'char-a' ? leaseA.readCharacter(id) : leaseB.readCharacter(id),
-        )
-        vi.mocked(harness.store.queryConversations).mockImplementation((input) =>
-            input.characterId === 'char-a'
-                ? leaseA.queryConversations(input)
-                : leaseB.queryConversations(input),
-        )
-        vi.mocked(harness.store.readConversation).mockImplementation((characterId, conversationId) =>
-            characterId === 'char-a'
-                ? leaseA.readConversation(characterId, conversationId)
-                : leaseB.readConversation(characterId, conversationId),
-        )
+        const harness = await makeHarness({
+            characters: [makeCharacter('char-a'), makeCharacter('char-b')],
+        })
         const preparation = deferred<{ database: Database; reason: string } | null>()
         const prepare = vi.fn(() => preparation.promise)
 
@@ -1555,41 +1338,27 @@ describe('ActiveWorkingSet', () => {
     })
 
     it('preserves selection when character preparation produces no candidate', async () => {
-        const lease = makeLease({ characterId: 'char-a' })
-        const harness = makeHarness(lease)
+        const harness = await makeHarness()
 
         expect(await harness.workingSet.activateCharacter('char-a', {
             prepare: async () => null,
         })).toBe(false)
 
-        expect(harness.store.readCharacter).not.toHaveBeenCalled()
+        expect(harness.readCharacter).not.toHaveBeenCalled()
         expect(harness.coordinator.replacePersistentDatabase).not.toHaveBeenCalled()
         expect(harness.publishedCharacters).toEqual([])
     })
 
     it('does not publish an older character when newer navigation starts during replacement', async () => {
-        const leaseA = makeLease({ characterId: 'char-a' })
-        const leaseB = makeLease({ characterId: 'char-b' })
-        const harness = makeHarness(leaseA)
-        vi.mocked(harness.store.readCharacter).mockImplementation((id) =>
-            id === 'char-a' ? leaseA.readCharacter(id) : leaseB.readCharacter(id),
-        )
-        vi.mocked(harness.store.queryConversations).mockImplementation((input) =>
-            input.characterId === 'char-a'
-                ? leaseA.queryConversations(input)
-                : leaseB.queryConversations(input),
-        )
-        vi.mocked(harness.store.readConversation).mockImplementation((characterId, conversationId) =>
-            characterId === 'char-a'
-                ? leaseA.readConversation(characterId, conversationId)
-                : leaseB.readConversation(characterId, conversationId),
-        )
+        const harness = await makeHarness({
+            characters: [makeCharacter('char-a'), makeCharacter('char-b')],
+        })
         const replacement = deferred<void>()
         let replacementStarted = false
         harness.coordinator.replacePersistentDatabase.mockImplementation(async () => {
             replacementStarted = true
             await replacement.promise
-            return { kind: 'committed', revision: 1, projection: 'applied' }
+            return { kind: 'committed', revision: harness.revision, projection: 'applied' }
         })
         harness.coordinator.flushPendingData.mockImplementation(() =>
             replacementStarted ? replacement.promise : Promise.resolve(),
@@ -1615,11 +1384,7 @@ describe('ActiveWorkingSet', () => {
     })
 
     it('preserves the previous selection when hydration fails', async () => {
-        const lease = makeLease({
-            characterId: 'char-a',
-            readCharacter: vi.fn(async () => null),
-        })
-        const harness = makeHarness(lease)
+        const harness = await makeHarness({ characters: [] })
 
         await expect(harness.workingSet.activateCharacter('char-a')).rejects.toThrow(
             'Character char-a was not found',
@@ -1627,30 +1392,26 @@ describe('ActiveWorkingSet', () => {
 
         expect(harness.publishedCharacters).toEqual([])
         expect(harness.releaseInactiveCharacter).not.toHaveBeenCalled()
-        expect(harness.store.acquireRevision).not.toHaveBeenCalled()
+        expect(harness.acquireRevision).not.toHaveBeenCalled()
     })
 
     it('does not release the current character when exact hydration is cancelled', async () => {
-        const detail = deferred<{ revision: number; value: Omit<character, 'chats'> } | null>()
-        const lease = makeLease({
-            characterId: 'char-a',
-            readCharacter: vi.fn(() => detail.promise),
-        })
-        const harness = makeHarness(lease)
+        const harness = await makeHarness()
+        const detail = harness.storage.gate('readCharacter')
 
         const activation = harness.workingSet.activateCharacter('char-a')
-        await vi.waitFor(() => expect(harness.store.readCharacter).toHaveBeenCalledOnce())
+        await detail.entered
         harness.workingSet.invalidateNavigation()
-        detail.resolve({ revision: 1, value: makeCharacterDetail('char-a') })
+        detail.release()
 
         expect(await activation).toBe(false)
         expect(harness.releaseInactiveCharacter).not.toHaveBeenCalled()
     })
 
     it('rejects conversation navigation when the selected character changes during flush', async () => {
-        const chat = makeChat('chat-a')
-        const lease = makeLease({ characterId: 'char-a', chats: [chat] })
-        const harness = makeHarness(lease)
+        const harness = await makeHarness({
+            characters: [makeCharacter('char-a', [makeChat('chat-a')])],
+        })
         harness.setSelectedCharacterId('char-a')
         const pendingFlush = deferred<void>()
         harness.coordinator.flushPendingData.mockReturnValueOnce(pendingFlush.promise)
@@ -1661,28 +1422,26 @@ describe('ActiveWorkingSet', () => {
         pendingFlush.resolve()
         expect(await activation).toBe(false)
 
-        expect(lease.readConversation).not.toHaveBeenCalled()
+        expect(harness.readConversation).not.toHaveBeenCalled()
         expect(harness.publishedConversations).toEqual([])
         expect(harness.coordinator.adoptHydratedCharacter).not.toHaveBeenCalled()
-        expect(harness.store.acquireRevision).not.toHaveBeenCalled()
+        expect(harness.acquireRevision).not.toHaveBeenCalled()
     })
 
     it('coalesces duplicate stable-ID conversation hydration into one flight', async () => {
-        const conversationRead = deferred<{ revision: number; value: Chat } | null>()
-        const lease = makeLease({
-            characterId: 'char-a',
-            readConversation: vi.fn(() => conversationRead.promise),
+        const harness = await makeHarness({
+            characters: [makeCharacter('char-a', [makeChat('chat-a')])],
         })
-        const harness = makeHarness(lease)
+        const conversationRead = harness.storage.gate('readConversation')
         harness.setSelectedCharacterId('char-a')
 
         const first = harness.workingSet.activateConversation('chat-a')
         const second = harness.workingSet.activateConversation('chat-a')
-        await vi.waitFor(() => expect(lease.readConversation).toHaveBeenCalled())
-        conversationRead.resolve({ revision: 1, value: makeChat('chat-a') })
+        await conversationRead.entered
+        conversationRead.release()
 
         await expect(Promise.all([first, second])).resolves.toEqual([true, true])
-        expect(lease.readConversation).toHaveBeenCalledOnce()
+        expect(harness.readConversation).toHaveBeenCalledOnce()
         expect(harness.publishedConversations).toHaveLength(1)
     })
 
@@ -1691,12 +1450,14 @@ describe('ActiveWorkingSet', () => {
         const chatC = deferred<{ revision: number; value: Chat } | null>()
         const latestB = deferred<{ revision: number; value: Chat } | null>()
         const bReads = [firstB, latestB]
-        const readConversation = vi.fn((_characterId: string, conversationId: string) => {
-            if (conversationId === 'chat-c') return chatC.promise
-            return bReads.shift()!.promise
-        })
-        const lease = makeLease({ characterId: 'char-a', readConversation })
-        const harness = makeHarness(lease)
+        const harness = await makeHarness()
+        // Each read of chat-b answers with its own body, so the published one shows which flight won.
+        const readConversation = harness.readConversation.mockImplementation(
+            (_characterId, conversationId) => {
+                if (conversationId === 'chat-c') return chatC.promise
+                return bReads.shift()!.promise
+            },
+        )
         harness.setSelectedCharacterId('char-a')
 
         const staleBActivation = harness.workingSet.activateConversation('chat-b')
@@ -1706,12 +1467,12 @@ describe('ActiveWorkingSet', () => {
         const latestBActivation = harness.workingSet.activateConversation('chat-b')
 
         await vi.waitFor(() => expect(readConversation).toHaveBeenCalledTimes(3))
-        firstB.resolve({ revision: 1, value: {
+        firstB.resolve({ revision: harness.revision, value: {
             ...makeChat('chat-b'),
             message: [{ role: 'char', data: 'stale B' }],
         } as Chat })
-        chatC.resolve({ revision: 1, value: makeChat('chat-c') })
-        latestB.resolve({ revision: 1, value: {
+        chatC.resolve({ revision: harness.revision, value: makeChat('chat-c') })
+        latestB.resolve({ revision: harness.revision, value: {
             ...makeChat('chat-b'),
             message: [{ role: 'char', data: 'latest B' }],
         } as Chat })
@@ -1743,9 +1504,16 @@ describe('ActiveWorkingSet', () => {
         resident.chatPage = 0
         const flush = deferred<void>()
         const events: string[] = []
-        const lease = makeLease({ characterId: 'char-a', chats: [chatA, chatB] })
+        const storage = await createPersistentStoreHarness({
+            username: 'Fixture',
+            botPresets: [],
+            characters: [makeCharacter('char-a', [chatA, chatB])],
+        } as unknown as Database)
+        storage.observe('readConversation', () => {
+            events.push('read')
+        })
         const coordinator = {
-            revision: 1,
+            revision: storage.revision,
             mutationGeneration: 4,
             initialize: vi.fn(),
             flushPendingData: vi.fn(async () => {
@@ -1761,12 +1529,7 @@ describe('ActiveWorkingSet', () => {
             markPersistentDataDirty: vi.fn(),
         }
         const workingSet = new ActiveWorkingSet({
-            store: {
-                readConversation: vi.fn(async () => {
-                    events.push('read')
-                    return { revision: 1, value: structuredClone(chatB) }
-                }),
-            } as unknown as PersistentDataStore,
+            store: storage.store,
             coordinator,
             getSelectedCharacterId: () => 'char-a',
             getResidentCharacter: () => resident,
@@ -1800,8 +1563,13 @@ describe('ActiveWorkingSet', () => {
         } as Chat
         let resident = makeCharacter('char-a', [chatA, makeChat('chat-b')])
         resident.chatPage = 0
+        const storage = await createPersistentStoreHarness({
+            username: 'Fixture',
+            botPresets: [],
+            characters: [makeCharacter('char-a', [chatA, chatB])],
+        } as unknown as Database)
         const coordinator = {
-            revision: 1,
+            revision: storage.revision,
             mutationGeneration: 0,
             initialize: vi.fn(),
             flushPendingData: vi.fn(async () => undefined),
@@ -1811,9 +1579,7 @@ describe('ActiveWorkingSet', () => {
             recordActiveConversationMutation: vi.fn(),
         }
         const workingSet = new ActiveWorkingSet({
-            store: {
-                readConversation: vi.fn(async () => ({ revision: 1, value: chatB })),
-            } as unknown as PersistentDataStore,
+            store: storage.store,
             coordinator,
             getSelectedCharacterId: () => 'char-a',
             getResidentCharacter: () => resident,
@@ -1826,7 +1592,7 @@ describe('ActiveWorkingSet', () => {
         await expect(workingSet.activateConversation('chat-b')).resolves.toBe(true)
 
         const session = workingSet.activeConversationSession!
-        expect(session.storeRevision).toBe(1)
+        expect(session.storeRevision).toBe(storage.revision)
         expect(session.materializeCompatibilityArray()).toBe(resident.chats[1].message)
         const appended = session.append({
             role: 'char',
@@ -1849,7 +1615,7 @@ describe('ActiveWorkingSet', () => {
             conversationId: 'chat-b',
             sessionToken: mutation.sessionToken,
             sessionVersion: 1,
-            revision: 2,
+            revision: storage.revision + 1,
         })).toBe(true)
         persistence!.release()
         expect(session.pinCount('pending-save')).toBe(0)
@@ -1889,10 +1655,15 @@ describe('ActiveWorkingSet', () => {
             username: 'Fixture',
             characters: [resident],
         } as unknown as Database
-        const readConversation = vi.fn()
+        const storage = await createPersistentStoreHarness({
+            username: 'Fixture',
+            botPresets: [],
+            characters: [makeCharacter('char-a', [makeChat('chat-a'), makeChat('chat-b')])],
+        } as unknown as Database)
+        const readConversation = storage.spy('readConversation')
         const publishConversation = vi.fn()
         const coordinator = {
-            revision: 1,
+            revision: storage.revision,
             mutationGeneration: 1,
             initialize: vi.fn(),
             flushPendingData: vi.fn(async () => { throw new Error('commit failed') }),
@@ -1902,7 +1673,7 @@ describe('ActiveWorkingSet', () => {
             recordActiveConversationMutation: vi.fn(),
         }
         const workingSet = new ActiveWorkingSet({
-            store: { readConversation } as unknown as PersistentDataStore,
+            store: storage.store,
             coordinator,
             getSelectedCharacterId: () => 'char-a',
             getResidentCharacter: () => resident,
@@ -1910,7 +1681,7 @@ describe('ActiveWorkingSet', () => {
             publishCharacter: vi.fn(),
             publishConversation,
         })
-        workingSet.installCommittedWorkingSet(database, 1)
+        workingSet.installCommittedWorkingSet(database, storage.revision)
         const session = workingSet.activeConversationSession!
         session.append({ role: 'char', data: 'pending command' })
 
@@ -1946,12 +1717,15 @@ describe('ActiveWorkingSet', () => {
         } as Chat
         let resident = makeCharacter('char-a', [streaming, makeChat('chat-b')])
         resident.chatPage = 0
+        const storage = await createPersistentStoreHarness({
+            username: 'Fixture',
+            botPresets: [],
+            characters: [makeCharacter('char-a', [makeChat('chat-a'), target])],
+        } as unknown as Database)
         const workingSet = new ActiveWorkingSet({
-            store: {
-                readConversation: vi.fn(async () => ({ revision: 1, value: target })),
-            } as unknown as PersistentDataStore,
+            store: storage.store,
             coordinator: {
-                revision: 1,
+                revision: storage.revision,
                 mutationGeneration: 0,
                 initialize: vi.fn(),
                 flushPendingData: vi.fn(async () => undefined),
@@ -1975,7 +1749,7 @@ describe('ActiveWorkingSet', () => {
         expect(resident.chats[0].message).toEqual([
             { role: 'char', data: 'partial stream' },
         ])
-        expect(resident.chats[1]).toBe(target)
+        expect(resident.chats[1]).toEqual(target)
     })
 
     it('keeps the committed previous body authoritative after a later selected save', async () => {
@@ -2209,41 +1983,33 @@ describe('ActiveWorkingSet', () => {
     })
 
     it('discards hydration when the coordinator revision changes', async () => {
-        const lease = makeLease({ revision: 1, characterId: 'char-a' })
-        const harness = makeHarness(lease)
-        Object.defineProperty(harness.coordinator, 'revision', { value: 2, writable: true })
+        const harness = await makeHarness()
+        harness.coordinator.revision = harness.revision + 1
 
         expect(await harness.workingSet.activateCharacter('char-a')).toBe(false)
         expect(harness.publishedCharacters).toEqual([])
-        expect(harness.store.acquireRevision).not.toHaveBeenCalled()
+        expect(harness.acquireRevision).not.toHaveBeenCalled()
     })
 
     it('discards a result when the revision changes during hydration', async () => {
-        const detail = deferred<{ revision: number; value: Omit<character, 'chats'> } | null>()
-        const lease = makeLease({
-            revision: 1,
-            characterId: 'char-a',
-            readCharacter: vi.fn(() => detail.promise),
-        })
-        const harness = makeHarness(lease)
+        const harness = await makeHarness()
+        const detail = harness.storage.gate('readCharacter')
 
         const activation = harness.workingSet.activateCharacter('char-a')
-        await vi.waitFor(() => expect(harness.store.readCharacter).toHaveBeenCalledTimes(1))
-        harness.coordinator.revision = 2
-        detail.resolve({ revision: 1, value: makeCharacterDetail('char-a') })
+        await detail.entered
+        harness.coordinator.revision++
+        detail.release()
 
         expect(await activation).toBe(false)
         expect(harness.publishedCharacters).toEqual([])
-        expect(harness.store.acquireRevision).not.toHaveBeenCalled()
+        expect(harness.acquireRevision).not.toHaveBeenCalled()
     })
 
     it('does not publish a stale conversation after the resident chat changes', async () => {
-        const conversationRead = deferred<{ revision: number; value: Chat } | null>()
-        const lease = makeLease({
-            characterId: 'char-a',
-            readConversation: vi.fn(() => conversationRead.promise),
+        const harness = await makeHarness({
+            characters: [makeCharacter('char-a', [makeChat('chat-a')])],
         })
-        const harness = makeHarness(lease)
+        const conversationRead = harness.storage.gate('readConversation')
         harness.setSelectedCharacterId('char-a')
         const previous = {
             ...makeChat('chat-old'),
@@ -2254,9 +2020,9 @@ describe('ActiveWorkingSet', () => {
         harness.database.characters = [resident]
 
         const activation = harness.workingSet.activateConversation('chat-a')
-        await vi.waitFor(() => expect(harness.store.readConversation).toHaveBeenCalledOnce())
+        await conversationRead.entered
         harness.coordinator.mutationGeneration++
-        conversationRead.resolve({ revision: 1, value: makeChat('chat-a') })
+        conversationRead.release()
 
         expect(await activation).toBe(false)
         expect(harness.publishedConversations).toEqual([])
@@ -2267,12 +2033,10 @@ describe('ActiveWorkingSet', () => {
     })
 
     it('keeps the previous body resident when the selected character changes during hydration', async () => {
-        const conversationRead = deferred<{ revision: number; value: Chat } | null>()
-        const lease = makeLease({
-            characterId: 'char-a',
-            readConversation: vi.fn(() => conversationRead.promise),
+        const harness = await makeHarness({
+            characters: [makeCharacter('char-a', [makeChat('chat-a')])],
         })
-        const harness = makeHarness(lease)
+        const conversationRead = harness.storage.gate('readConversation')
         harness.setSelectedCharacterId('char-a')
         const previous = {
             ...makeChat('chat-old'),
@@ -2283,9 +2047,9 @@ describe('ActiveWorkingSet', () => {
         harness.database.characters = [resident]
 
         const activation = harness.workingSet.activateConversation('chat-a')
-        await vi.waitFor(() => expect(lease.readConversation).toHaveBeenCalledOnce())
+        await conversationRead.entered
         harness.setSelectedCharacterId('char-b')
-        conversationRead.resolve({ revision: 1, value: makeChat('chat-a') })
+        conversationRead.release()
 
         expect(await activation).toBe(false)
         expect(harness.publishedConversations).toEqual([])
@@ -2293,18 +2057,13 @@ describe('ActiveWorkingSet', () => {
     })
 
     it('does not adopt a hydrated body after the resident working set changes', async () => {
-        const detail = deferred<{ revision: number; value: Omit<character, 'chats'> } | null>()
-        const lease = makeLease({
-            revision: 1,
-            characterId: 'char-a',
-            readCharacter: vi.fn(() => detail.promise),
-        })
-        const harness = makeHarness(lease)
+        const harness = await makeHarness()
+        const detail = harness.storage.gate('readCharacter')
 
         const activation = harness.workingSet.activateCharacter('char-a')
-        await vi.waitFor(() => expect(harness.store.readCharacter).toHaveBeenCalledOnce())
+        await detail.entered
         harness.coordinator.mutationGeneration++
-        detail.resolve({ revision: 1, value: makeCharacterDetail('char-a') })
+        detail.release()
 
         expect(await activation).toBe(false)
         expect(harness.coordinator.adoptHydratedCharacter).not.toHaveBeenCalled()
@@ -2313,18 +2072,13 @@ describe('ActiveWorkingSet', () => {
     })
 
     it('does not publish or release when generation starts during character hydration', async () => {
-        const detail = deferred<{ revision: number; value: Omit<character, 'chats'> } | null>()
-        const lease = makeLease({
-            revision: 1,
-            characterId: 'char-a',
-            readCharacter: vi.fn(() => detail.promise),
-        })
-        const harness = makeHarness(lease)
+        const harness = await makeHarness()
+        const detail = harness.storage.gate('readCharacter')
 
         const activation = harness.workingSet.activateCharacter('char-a')
-        await vi.waitFor(() => expect(harness.store.readCharacter).toHaveBeenCalledOnce())
+        await detail.entered
         harness.setWorkingSetActivationAllowed(false)
-        detail.resolve({ revision: 1, value: makeCharacterDetail('char-a') })
+        detail.release()
 
         expect(await activation).toBe(false)
         expect(harness.coordinator.adoptHydratedCharacter).not.toHaveBeenCalled()
@@ -2333,23 +2087,22 @@ describe('ActiveWorkingSet', () => {
     })
 
     it('does not publish when the hydrated baseline can no longer be adopted', async () => {
-        const lease = makeLease({ characterId: 'char-a' })
-        const harness = makeHarness(lease)
+        const harness = await makeHarness()
         harness.coordinator.adoptHydratedCharacter.mockReturnValueOnce(false)
 
         expect(await harness.workingSet.activateCharacter('char-a')).toBe(false)
 
         expect(harness.publishedCharacters).toEqual([])
-        expect(harness.store.acquireRevision).not.toHaveBeenCalled()
+        expect(harness.acquireRevision).not.toHaveBeenCalled()
     })
 
     it('opens the store revision and initializes coordinator baselines', async () => {
-        const harness = makeHarness(makeLease({ characterId: 'char-a' }))
+        const harness = await makeHarness()
 
         await harness.workingSet.initializeActiveWorkingSet(harness.database)
 
-        expect(harness.store.open).toHaveBeenCalledTimes(1)
-        expect(harness.coordinator.initialize).toHaveBeenCalledWith(1, harness.database)
+        expect(harness.open).toHaveBeenCalledTimes(1)
+        expect(harness.coordinator.initialize).toHaveBeenCalledWith(harness.revision, harness.database)
     })
 
     it('rehydrates after reopen through bounded reads without writing IndexedDB', async () => {

@@ -10,10 +10,7 @@ fn helper_task_prefix(root: &Path) -> String {
 fn valid_helper_task(root: &Path, task_name: &str) -> bool {
     let prefix = helper_task_prefix(root);
     task_name.starts_with(&prefix)
-        && task_name.len() == prefix.len() + 64
-        && task_name[prefix.len()..]
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && risunest_sync_server::identity::is_uuid_v4(&task_name[prefix.len()..])
 }
 
 fn quote_argument(value: &str) -> String {
@@ -126,7 +123,7 @@ pub(super) fn finish_update_helper(root: &Path, task_name: &str) -> Result<()> {
 }
 
 pub(super) fn sweep_stale_update_helpers(root: &Path) -> Result<()> {
-    const SWEEP: &str = r#"$ErrorActionPreference='Stop';$s=New-Object -ComObject 'Schedule.Service';$s.Connect();$f=$s.GetFolder('\');foreach($t in @($f.GetTasks(1))){$n=$t.Name;if(!$n.StartsWith($env:RISUNEST_HELPER_PREFIX,[StringComparison]::Ordinal)){continue};$x=$n.Substring($env:RISUNEST_HELPER_PREFIX.Length);if($x -cnotmatch '^[0-9a-f]{64}$'){continue};if($t.Definition.RegistrationInfo.Description -ne $env:RISUNEST_HELPER_DESCRIPTION){continue};if($t.State -eq 4 -or $t.GetInstances(0).Count -ne 0){continue};$date=[DateTime]::MinValue;if(![DateTime]::TryParse($t.Definition.RegistrationInfo.Date,[ref]$date)){continue};if($date.ToUniversalTime() -gt [DateTime]::UtcNow.AddMinutes(-15)){continue};$f.DeleteTask($n,0)}"#;
+    const SWEEP: &str = r#"$ErrorActionPreference='Stop';$s=New-Object -ComObject 'Schedule.Service';$s.Connect();$f=$s.GetFolder('\');foreach($t in @($f.GetTasks(1))){$n=$t.Name;if(!$n.StartsWith($env:RISUNEST_HELPER_PREFIX,[StringComparison]::Ordinal)){continue};$x=$n.Substring($env:RISUNEST_HELPER_PREFIX.Length);if($x -cnotmatch '\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z'){continue};if($t.Definition.RegistrationInfo.Description -ne $env:RISUNEST_HELPER_DESCRIPTION){continue};if($t.State -eq 4 -or $t.GetInstances(0).Count -ne 0){continue};$date=[DateTime]::MinValue;if(![DateTime]::TryParse($t.Definition.RegistrationInfo.Date,[ref]$date)){continue};if($date.ToUniversalTime() -gt [DateTime]::UtcNow.AddMinutes(-15)){continue};$f.DeleteTask($n,0)}"#;
     let status = process("powershell.exe")
         .args([
             "-NoLogo",
@@ -150,7 +147,7 @@ pub(super) fn sweep_stale_update_helpers(root: &Path) -> Result<()> {
 }
 
 pub(super) fn cleanup_update_helpers(root: &Path) -> Result<()> {
-    const CLEAN: &str = r#"$ErrorActionPreference='Stop';$s=New-Object -ComObject 'Schedule.Service';$s.Connect();$f=$s.GetFolder('\');foreach($t in @($f.GetTasks(1))){$n=$t.Name;if(!$n.StartsWith($env:RISUNEST_HELPER_PREFIX,[StringComparison]::Ordinal)){continue};$x=$n.Substring($env:RISUNEST_HELPER_PREFIX.Length);if($x.Length -ne 64 -or $x -cnotmatch '^[0-9a-f]{64}$'){continue};if($t.Definition.RegistrationInfo.Description -ne $env:RISUNEST_HELPER_DESCRIPTION){continue};foreach($i in @($t.GetInstances(0))){$i.Stop()};$f.DeleteTask($n,0)}"#;
+    const CLEAN: &str = r#"$ErrorActionPreference='Stop';$s=New-Object -ComObject 'Schedule.Service';$s.Connect();$f=$s.GetFolder('\');foreach($t in @($f.GetTasks(1))){$n=$t.Name;if(!$n.StartsWith($env:RISUNEST_HELPER_PREFIX,[StringComparison]::Ordinal)){continue};$x=$n.Substring($env:RISUNEST_HELPER_PREFIX.Length);if($x.Length -ne 36 -or $x -cnotmatch '\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z'){continue};if($t.Definition.RegistrationInfo.Description -ne $env:RISUNEST_HELPER_DESCRIPTION){continue};foreach($i in @($t.GetInstances(0))){$i.Stop()};$f.DeleteTask($n,0)}"#;
     let status = process("powershell.exe")
         .args([
             "-NoLogo",
@@ -273,7 +270,8 @@ try {
 "#;
 
 pub(super) fn startup(root: &Path, executable: &Path, action: &str) -> Result<StartupStatus> {
-    let mut file = tempfile::NamedTempFile::new().map_err(|_| "startup-file-unavailable")?;
+    let mut file = tempfile::NamedTempFile::new()
+        .map_err(|_| format!("startup-file-create-failed: {}", std::env::temp_dir().display()))?;
     let definition = task_xml(root, executable)?;
     let definition = if action == "manual" {
         definition.replace("<Triggers><LogonTrigger><Enabled>true</Enabled><UserId>__CURRENT_SID__</UserId></LogonTrigger></Triggers>", "<Triggers/>")
@@ -281,7 +279,7 @@ pub(super) fn startup(root: &Path, executable: &Path, action: &str) -> Result<St
         definition
     };
     file.write_all(definition.as_bytes())
-        .map_err(|_| "startup-file-unavailable")?;
+        .map_err(|_| format!("startup-file-write-failed: {}", file.path().display()))?;
     // Close the delete-on-close handle before .NET opens the definition. Its
     // default FileShare.Read cannot coexist with that Windows DELETE access.
     let path = file.into_temp_path();
@@ -307,18 +305,9 @@ pub(super) fn startup(root: &Path, executable: &Path, action: &str) -> Result<St
         .env("RISUNEST_TASK_XML", &path)
         .stdin(Stdio::null())
         .output()
-        .map_err(|_| "task-scheduler-unavailable")?;
+        .map_err(|error| format!("task-scheduler-launch-failed: {error}"))?;
     if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr);
-        let detail = detail.trim();
-        if detail.len() < 80
-            && detail
-                .chars()
-                .all(|c| c.is_ascii_hexdigit() || c.is_ascii_lowercase() || c == '-' || c == ':')
-        {
-            return Err(format!("task-scheduler-operation-failed:{detail}"));
-        }
-        return Err("task-scheduler-operation-failed".into());
+        return Err(scheduler_error("task-scheduler-operation-failed", &output.stderr));
     }
     let value: serde_json::Value =
         serde_json::from_slice(&output.stdout).map_err(|_| "task-scheduler-response-invalid")?;
@@ -352,9 +341,10 @@ pub(super) fn update_schedule(
     if effective == "install" && !program.is_file() {
         return Err("manager-executable-missing".into());
     }
-    let mut file = tempfile::NamedTempFile::new().map_err(|_| "update-task-file-unavailable")?;
+    let mut file = tempfile::NamedTempFile::new()
+        .map_err(|_| format!("update-task-file-create-failed: {}", std::env::temp_dir().display()))?;
     file.write_all(update_task_xml(root, &program, server)?.as_bytes())
-        .map_err(|_| "update-task-file-unavailable")?;
+        .map_err(|_| format!("update-task-file-write-failed: {}", file.path().display()))?;
     let path = file.into_temp_path();
     let arguments = format!(
         "--data-dir \"{}\" --server \"{}\" update scheduled",
@@ -380,9 +370,9 @@ pub(super) fn update_schedule(
         .env("RISUNEST_TASK_XML", &path)
         .stdin(Stdio::null())
         .output()
-        .map_err(|_| "task-scheduler-unavailable")?;
+        .map_err(|error| format!("task-scheduler-launch-failed: {error}"))?;
     if !output.status.success() {
-        return Err("update-task-scheduler-operation-failed".into());
+        return Err(scheduler_error("update-task-scheduler-operation-failed", &output.stderr));
     }
     let value: serde_json::Value =
         serde_json::from_slice(&output.stdout).map_err(|_| "task-scheduler-response-invalid")?;
@@ -399,9 +389,50 @@ pub(super) fn update_schedule(
     })
 }
 
+fn scheduler_error(code: &str, stderr: &[u8]) -> String {
+    let detail = String::from_utf8_lossy(stderr);
+    let detail = detail.trim();
+    if !detail.is_empty() && detail.len() < 80
+        && detail.chars().all(|c| c.is_ascii_hexdigit() || c.is_ascii_lowercase() || c == '-' || c == ':')
+    {
+        format!("{code}:{detail}")
+    } else {
+        code.to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scheduler_failures_keep_the_stage_and_hresult_without_arbitrary_output() {
+        assert_eq!(scheduler_error("update-task-scheduler-operation-failed", b"register:80070005\r\n"),
+            "update-task-scheduler-operation-failed:register:80070005");
+        assert_eq!(scheduler_error("task-scheduler-operation-failed", b"unexpected private output"),
+            "task-scheduler-operation-failed");
+    }
+
+    #[test]
+    fn helper_names_require_own_root_and_canonical_uuid() {
+        let root = Path::new("synthetic-instance");
+        let prefix = helper_task_prefix(root);
+        let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        assert!(valid_helper_task(root, &format!("{prefix}{id}")));
+        assert!(!valid_helper_task(
+            Path::new("other-instance"),
+            &format!("{prefix}{id}")
+        ));
+        for invalid in [
+            id.to_uppercase(),
+            id.replace("-4aaa-", "-7aaa-"),
+            id.replace("-8aaa-", "-0aaa-"),
+            format!("{id}\n"),
+            "a".repeat(64),
+        ] {
+            assert!(!valid_helper_task(root, &format!("{prefix}{invalid}")));
+        }
+    }
     #[test]
     fn helper_arguments_preserve_spaces_quotes_and_trailing_slashes() {
         assert_eq!(quote_argument("plain"), "plain");

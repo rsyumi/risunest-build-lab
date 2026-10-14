@@ -2,9 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const platform = vi.hoisted(() => ({ android: true }))
 
-vi.mock('./platform', () => ({
-    get isTauriAndroid() { return platform.android },
-}))
+vi.mock('./platform', async () => (await import('./platform.testSupport')).platformModule(() => ({
+    runtime: 'tauri', os: platform.android ? 'android' : 'windows',
+})))
 
 import {
     beginAndroidGenerationKeepAlive,

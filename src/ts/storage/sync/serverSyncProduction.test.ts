@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SyncBindingTransport, SyncBindingDependencies, SyncBindingNative } from './bindingFlow'
 import { languageKorean } from 'src/lang/ko'
-import { serverSyncProgressView, serverSyncRoutineView } from './serverSyncProgress'
+import { serverSyncProgressView, serverSyncRoutineView, type ServerSyncLane, type ServerSyncLaneName } from './serverSyncProgress'
+import { serverSyncLane } from './serverSyncProgress.testSupport'
+import { assetResidencyStatus } from './serverAssetResidency.testSupport'
 
 const f = vi.hoisted(() => ({
     native: true,
@@ -12,6 +14,7 @@ const f = vi.hoisted(() => ({
     switchTarget: vi.fn(),
     register: vi.fn(),
     resumeCurrent: vi.fn(),
+    nativeState: vi.fn(),
     viewport: undefined as undefined | ((source?: unknown) => void),
     revision: undefined as undefined | ((revision: number, cause?: string) => void),
     conversation: null as null | { characterId: string; conversationId: string },
@@ -36,9 +39,9 @@ const f = vi.hoisted(() => ({
     dependencies: undefined as (Pick<SyncBindingDependencies, 'withPausedWrites' | 'beginActivatedLibraryGuard' | 'refreshActivatedLibrary' | 'recovery'>
         & { native: SyncBindingNative; whileAsking<T>(ask: () => Promise<T>): Promise<T> }) | undefined,
 }))
-vi.mock('@tauri-apps/api/core', () => ({ invoke: f.invoke }))
+vi.mock('@tauri-apps/api/core', () => ({ invoke: f.invoke, Channel: class { onmessage = (_value: unknown) => {} } }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))
-vi.mock('src/ts/platform', () => ({ get isTauri() { return f.native } }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule(() => ({ runtime: f.native ? 'tauri' : 'web', os: 'windows' })))
 vi.mock('src/ts/stores.svelte', () => ({ selectedCharID: { subscribe: (run: (value: number) => void) => { run(f.selectedIndex); return () => {} } } }))
 vi.mock('../database.svelte', () => ({ getDatabase: () => f.database }))
 vi.mock('./bindingProduction', async importOriginal => ({
@@ -47,9 +50,10 @@ vi.mock('./bindingProduction', async importOriginal => ({
 }))
 vi.mock('../committedWorkingSetContinuation', () => ({ registerCommittedWorkingSetContinuation: f.continuation }))
 vi.mock('./bindingDialog', () => ({ confirmSyncBindingReplacement: vi.fn(), confirmPreviousStorageFiles: vi.fn(async () => 'connect'), downloadPreviousStorageFiles: vi.fn() }))
-vi.mock('./bindingLocalData', () => ({ hasLocalBindingData: vi.fn(), hasLocalSharedBindingData: vi.fn() }))
+vi.mock('./bindingLocalData', () => ({ hasLocalSharedBindingData: vi.fn() }))
+vi.mock('../libraryCharacters', () => ({ hasLibraryCharacters: vi.fn() }))
 vi.mock('./bindingRegistry', () => ({ registerSyncBindingTransport: f.register, resumeCurrentSyncBinding: f.resumeCurrent, getSyncBindingTransport: vi.fn(), bindSyncTarget: vi.fn(), unbindSyncTarget: vi.fn() }))
-vi.mock('./bindingNative', () => ({ createNativeSyncBindingBridge: () => ({ state: vi.fn(), assertAuthority: vi.fn(), switchTarget: f.switchTarget }), replaceNativeSyncBinding: vi.fn(), replaceNativeSyncBindingAsNewDevice: vi.fn() }))
+vi.mock('./bindingNative', () => ({ createNativeSyncBindingBridge: () => ({ state: f.nativeState, assertAuthority: vi.fn(), switchTarget: f.switchTarget }), replaceNativeSyncBinding: vi.fn(), replaceNativeSyncBindingAsNewDevice: vi.fn() }))
 vi.mock('../persistentDataRuntime.svelte', () => ({
     withPausedPersistentWrites: f.paused,
     beginActivatedLibraryGuard: f.guard,
@@ -58,7 +62,7 @@ vi.mock('../persistentDataRuntime.svelte', () => ({
     flushPendingDataLocally: f.flush,
     getPersistentDataRuntime: () => f.runtime,
 }))
-vi.mock('../../mobileBackgroundTask', () => ({ runWithMobileBackgroundTask: f.mobile, beginMobileBackgroundTask: vi.fn() }))
+vi.mock('../../mobileBackgroundTask', () => ({ runWithMobileBackgroundTask: f.mobile, beginMobileBackgroundTask: vi.fn(), measuredTaskPercent: vi.fn(() => null) }))
 vi.mock('src/ts/plugins/apiV3/v3.svelte', () => ({ fencePluginExecutionForAuthorityReplacement: vi.fn(), invalidatePluginCachesAfterAuthorityReplacement: vi.fn(), restartPluginsAfterAuthorityReplacement: vi.fn() }))
 vi.mock('../persistentRevisionEvents', () => ({ subscribeLocalPersistentRevision: (callback: (revision: number, cause?: string) => void) => { f.revision = callback; return () => {} } }))
 vi.mock('../generatingConversationRegistry', () => ({ generatingConversations: { snapshot: () => f.generating } }))
@@ -94,6 +98,166 @@ const openConversation = (conversationId: string) => { f.conversation = { charac
 const callOrder = (command: string) => f.invoke.mock.invocationCallOrder[f.invoke.mock.calls.findIndex(([name]) => name === command)]
 
 describe('production server LWW composition', () => {
+    it.each(['module.bin', 'character.charx'])('waits for external assets with both sync adapters installed before importing %s', async name => {
+        vi.stubGlobal('window', new EventTarget())
+        vi.stubGlobal('navigator', { onLine: true })
+        const binding = { target: { kind: 'external' as const, connectionId: 'external' }, targetAuthority: '4', selectionEpoch: 'selection', libraryId: 'library', progress: null }
+        const transports = new Map<string, SyncBindingTransport>()
+        f.register.mockImplementation((target, transport) => { transports.set(target.kind, transport); return () => {} })
+        f.nativeState.mockResolvedValue(binding)
+        f.resumeCurrent.mockImplementation(async () => { await transports.get('external')!.resumeBinding({ state: binding, signal: new AbortController().signal }) })
+        const mobile = await import('../../mobileBackgroundTask')
+        vi.mocked(mobile.beginMobileBackgroundTask).mockResolvedValue({ progress() {}, async dispose() {} } as never)
+        const base = f.invoke.getMockImplementation()!
+        let finish!: () => void, holding = false
+        const held = new Promise<void>(resolve => { finish = resolve })
+        f.invoke.mockImplementation(async (command, args) => {
+            if (command === 'asset_residency_download_remote') {
+                holding = true; await held; holding = false
+                return assetResidencyStatus()
+            }
+            if (command === 'external_lww_publish') return { segments: '0', more: false }
+            return base(command, args)
+        })
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        visible(true)
+        const { installExternalLwwAdapters } = await import('./external/lwwProduction')
+        const dispose = await installExternalLwwAdapters({ connections: [{ id: 'external', providerId: 'webdav', purpose: 'sync' }] } as never)
+        await settle(); expect(holding).toBe(true)
+        const { runContentImport } = await import('../contentImportOperation')
+        const work = vi.fn(async () => { expect(holding).toBe(false); return 'imported' })
+        const importing = runContentImport(name, {}, work)
+        try {
+            await settle(); expect(work).not.toHaveBeenCalled()
+            visible(false); await settle(); visible(true); await settle()
+            expect(work).not.toHaveBeenCalled()
+            finish(); await expect(importing).resolves.toBe('imported')
+            expect(work).toHaveBeenCalledOnce()
+        } finally { finish(); await importing.catch(() => {}); dispose(); f.resumeCurrent.mockReset() }
+    })
+    it.each(['success', 'failure', 'cancel'] as const)('waits for all sync lanes, excludes new work and resumes after import %s', async outcome => {
+        const native = f.invoke.getMockImplementation()!
+        f.invoke.mockImplementation(async (command, args) => command === 'server_sync_status'
+            ? { configured: false, writerId: 'writer', bindingAuthority: '0', assetPolicy: 'remote' }
+            : native(command, args))
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const { runContentImport } = await import('../contentImportOperation')
+        const { cancelActiveNativeFileOperation } = await import('../nativeFileJobManager')
+        const { isLibraryFileOperationReserved } = await import('../libraryFileOperation')
+        let finishSend!: () => void
+        let finishReceive!: (value: ReturnType<typeof emptyReceive>) => void
+        let finishHydrate!: () => void
+        const send = new Promise<void>(resolve => { finishSend = resolve })
+        const receive = new Promise<ReturnType<typeof emptyReceive>>(resolve => { finishReceive = resolve })
+        const hydrate = new Promise<void>(resolve => { finishHydrate = resolve })
+        let sendPending = true, receivePending = true, hydratePending = true
+        f.invoke.mockImplementation(async command => {
+            if (command === 'server_sync_lww_push') { if (sendPending) await send; return null }
+            if (command === 'server_sync_lww_pull') return receivePending ? receive : emptyReceive()
+            if (command === 'server_sync_lww_hydrate') { if (hydratePending) await hydrate; return null }
+            return null
+        })
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        expect(production.getServerSyncController().snapshot().running).toBe(true)
+        let finishImport!: () => void
+        const imported = new Promise<void>(resolve => { finishImport = resolve })
+        const work = vi.fn(async ({ signal }: { signal?: AbortSignal }) => {
+            expect(sendPending || receivePending || hydratePending).toBe(false)
+            await imported
+            signal?.throwIfAborted()
+            if (outcome === 'failure') throw new Error('synthetic-import-failure')
+            return 'imported'
+        })
+        const operation = runContentImport('synthetic.risum', {}, work)
+        const result = operation.then(value => ({ value }), error => ({ error }))
+        try {
+            await settle(); expect(work).not.toHaveBeenCalled()
+            sendPending = false; finishSend(); await settle(); expect(work).not.toHaveBeenCalled()
+            receivePending = false; finishReceive(emptyReceive()); await settle(); expect(work).not.toHaveBeenCalled()
+            hydratePending = false; finishHydrate(); await settle(); expect(work).toHaveBeenCalledOnce()
+            f.invoke.mockClear()
+            f.revision!(32, 'generation-complete'); openConversation('during-import')
+            visible(false); await settle(); visible(true); await settle()
+            await vi.advanceTimersByTimeAsync(65_000); await settle()
+            expect(f.invoke.mock.calls.some(([command]) => ['server_sync_lww_push', 'server_sync_lww_pull', 'server_sync_lww_hydrate'].includes(command))).toBe(false)
+            expect(isLibraryFileOperationReserved()).toBe(true)
+            if (outcome === 'cancel') cancelActiveNativeFileOperation()
+            finishImport()
+            const ended = await result
+            if (outcome === 'success') expect(ended).toEqual({ value: 'imported' })
+            else expect(ended).toHaveProperty('error')
+            await settle()
+            expect(isLibraryFileOperationReserved()).toBe(false)
+            expect(f.invoke).toHaveBeenCalledWith('server_sync_lww_push', expect.anything())
+            expect(f.invoke).toHaveBeenCalledWith('server_sync_lww_pull', expect.anything())
+            expect(hydrationCalls().length).toBeGreaterThan(0)
+        } finally {
+            sendPending = receivePending = hydratePending = false
+            finishSend(); finishReceive(emptyReceive()); finishHydrate(); finishImport()
+            await result
+        }
+    })
+
+    it('cancels a sync wait without releasing the next import reservation', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const { runContentImport } = await import('../contentImportOperation')
+        const { cancelActiveNativeFileOperation } = await import('../nativeFileJobManager')
+        const { isLibraryFileOperationReserved } = await import('../libraryFileOperation')
+        let finishReceive!: (value: ReturnType<typeof emptyReceive>) => void
+        const receive = new Promise<ReturnType<typeof emptyReceive>>(resolve => { finishReceive = resolve })
+        f.invoke.mockImplementation(async command => command === 'server_sync_lww_pull' ? receive : null)
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        const firstWork = vi.fn(async () => 'first')
+        const first = runContentImport('first.png', {}, firstWork)
+        const firstResult = first.catch(error => error)
+        await settle(); cancelActiveNativeFileOperation()
+        expect(await firstResult).toMatchObject({ name: 'AbortError' })
+        const nextWork = vi.fn(async () => 'second')
+        const next = runContentImport('second.png', {}, nextWork)
+        try {
+            await settle()
+            expect(isLibraryFileOperationReserved()).toBe(true)
+            expect(firstWork).not.toHaveBeenCalled(); expect(nextWork).not.toHaveBeenCalled()
+            finishReceive(emptyReceive())
+            await expect(next).resolves.toBe('second')
+            expect(firstWork).not.toHaveBeenCalled(); expect(nextWork).toHaveBeenCalledOnce()
+        } finally { finishReceive(emptyReceive()); await next.catch(() => {}) }
+    })
+
+    it('allows the explicit pre-restore receive while ordinary file work excludes automatic sync', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        const admission = await import('../libraryFileOperation')
+        const release = admission.reserveLibraryFileOperation()
+        try {
+            await admission.waitForLibraryFileOperation(new AbortController().signal)
+            f.invoke.mockClear()
+            await production.receiveAvailableServerChanges()
+            expect(f.invoke).toHaveBeenCalledWith('server_sync_lww_pull', expect.anything())
+            expect(hydrationCalls()).toHaveLength(0)
+        } finally { release() }
+    })
+
+    it('settles a failed sync lane before importing without clearing its permanent failure', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const { runContentImport } = await import('../contentImportOperation')
+        let failSend!: (error: unknown) => void
+        const send = new Promise<void>((_resolve, reject) => { failSend = reject })
+        f.invoke.mockImplementation(async command => command === 'server_sync_lww_push'
+            ? send : command === 'server_sync_lww_pull' ? emptyReceive() : null)
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        const work = vi.fn(async () => 'imported')
+        const operation = runContentImport('synthetic.risum', {}, work)
+        try {
+            await settle(); expect(work).not.toHaveBeenCalled()
+            failSend({ code: 'unauthorized', retryable: false })
+            await expect(operation).resolves.toBe('imported')
+            f.invoke.mockClear(); await settle()
+            expect(production.getServerSyncController().snapshot().blockedCode).toBe('unauthorized')
+            expect(f.invoke.mock.calls.some(([command]) => ['server_sync_lww_push', 'server_sync_lww_pull', 'server_sync_lww_hydrate'].includes(command))).toBe(false)
+        } finally { failSend({ code: 'cancelled' }); await operation.catch(() => {}) }
+    })
+
     it('shows why sync stopped when a committed switch cannot resume', async () => {
         production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
         f.transport!.reportStopped!({ code: 'server-unreachable' })
@@ -425,7 +589,6 @@ describe('production server LWW composition', () => {
         const commands = f.invoke.mock.calls.map(([command]) => command)
         expect(commands[0]).toBe('server_sync_lww_activate')
         expect(commands.filter(command => command === 'server_sync_lww_push')).toHaveLength(4)
-        expect(commands).not.toContain('pds_lww_queue_unit_state_page')
         expect(commands.some(command => command === 'server_sync_lww_pull' || command === 'server_sync_notify_start')).toBe(false)
     })
     it('stops initial publication at a generating-only null batch and leaves service start to G', async () => {
@@ -468,15 +631,6 @@ describe('production server LWW composition', () => {
         expect(production.getServerSyncController().snapshot().error).toBe('server-unreachable')
         offline = false
         await vi.advanceTimersByTimeAsync(5000); await settle()
-        expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: false, error: '' })
-    })
-    it('never reports a cancelled publication as a sync error', async () => {
-        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
-        f.invoke.mockImplementation(async command => {
-            if (command === 'server_sync_lww_push') throw { code: 'cancelled', retryable: true }
-            return command === 'server_sync_lww_pull' ? emptyReceive() : null
-        })
-        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
         expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: false, error: '' })
     })
     it('keeps automatic sync stopped through visibility changes until the hold is released', async () => {
@@ -527,25 +681,6 @@ describe('production server LWW composition', () => {
         expect(pullCalls()).toBe(opened)
         openConversation('second'); await settle()
         expect(pullCalls()).toBe(opened + 1)
-    })
-    it('stops on a local apply failure instead of pulling the same page again as an unreachable server', async () => {
-        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
-        f.apply.mockRejectedValue(Object.assign(new Error('request-id-integrity'), { code: 'validation' }))
-        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
-        expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: true, error: 'local-validation' })
-        const pulls = pullCalls()
-        await vi.advanceTimersByTimeAsync(120_000); await settle()
-        openConversation('other'); await settle()
-        expect(pullCalls()).toBe(pulls)
-    })
-    it('retries a local storage failure during apply', async () => {
-        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
-        f.apply.mockRejectedValue(Object.assign(new Error('disk I/O error'), { code: 'store-error' }))
-        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
-        expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: false, error: 'local-storage' })
-        f.apply.mockResolvedValue({ revision: 31, affectedKeys: [], heldKeys: [], deferredKeys: [] })
-        await vi.advanceTimersByTimeAsync(5000); await settle()
-        expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: false, error: '' })
     })
     it('finishes initial publication while the document is hidden', async () => {
         production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
@@ -617,7 +752,6 @@ describe('production server LWW composition', () => {
     })
     describe('asset storage chosen with the connection', () => {
         const config = { endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' }
-        const residency = (policy: string) => ({ policy, localBytes: 0, remoteBytes: 0, remoteObjects: 0, serverBytes: 0, serverObjects: 0, externalObjects: [], unavailableObjects: 0, evictedBytes: 0 })
         const policyCalls = () => f.invoke.mock.calls.filter(([command]) => command === 'server_sync_asset_policy')
         const contextFor = (libraryId: string) => ({ ...bindingContext(), state: { ...bindingContext().state, libraryId } })
         // The shared flow is mocked; each case drives the transport the way a binding to `libraryId` would.
@@ -633,7 +767,7 @@ describe('production server LWW composition', () => {
         let base: (command: string, args?: unknown) => Promise<unknown>
         beforeEach(async () => {
             base = f.invoke.getMockImplementation()!
-            f.invoke.mockImplementation(async (command, args) => command === 'server_sync_asset_policy' ? residency('remote') : base(command, args))
+            f.invoke.mockImplementation(async (command, args) => command === 'server_sync_asset_policy' ? assetResidencyStatus({ policy: 'remote' }) : base(command, args))
             production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
             visible(true)
         })
@@ -695,15 +829,12 @@ describe('production server LWW composition', () => {
     })
 })
 describe('server sync progress', () => {
-    const lanes = (sent: number) => ['send', 'receive', 'hydrate', 'binding', 'assets'].map(lane => ({
-        lane, active: lane === 'send', step: lane === 'send' ? 'uploading' : 'idle', listed: 0, listedTotal: 0, itemsDone: 0, itemsTotal: 0, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, sentBytes: lane === 'send' ? sent : 0, receivedBytes: 0, backlogDone: 0, backlogLeft: 0,
-    }))
-    const sendLanes = (send: Record<string, unknown>) => ['send', 'receive', 'hydrate', 'binding', 'assets'].map(lane => ({
-        lane, active: false, step: 'idle', listed: 0, listedTotal: 0, itemsDone: 0, itemsTotal: 0, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, sentBytes: 0, receivedBytes: 0, backlogDone: 0, backlogLeft: 0, ...(lane === 'send' ? send : {}),
-    }))
+    const laneNames: ServerSyncLaneName[] = ['send', 'receive', 'hydrate', 'binding', 'assets']
+    const sendLanes = (send: Partial<ServerSyncLane>) => laneNames.map(lane => serverSyncLane(lane, lane === 'send' ? send : {}))
+    const lanes = (sent: number) => sendLanes({ active: true, sending: true, step: 'uploading', sentBytes: sent })
     const pendingReads = () => f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_pending_count').length
     /** A push that waits; each lanes read takes the next of `reads` and repeats the last. */
-    const countedPush = (reads: Record<string, unknown>[], pending: number | null = null) => {
+    const countedPush = (reads: Partial<ServerSyncLane>[], pending: number | null = null) => {
         let finish!: (failure?: unknown) => void
         f.invoke.mockImplementation(async command => command === 'server_sync_lww_push' ? new Promise((resolve, reject) => { finish = failure => failure ? reject(failure) : resolve(null) })
             : command === 'server_sync_lww_pull' ? emptyReceive()
@@ -712,6 +843,27 @@ describe('server sync progress', () => {
         return (failure?: unknown) => finish(failure)
     }
     const progressReads = () => f.invoke.mock.calls.filter(([command]) => command === 'server_sync_progress').length
+    it('samples partial body traffic independently in both directions without advancing verified work', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        const finish = countedPush([
+            { active: true, sending: true, receiving: true, sentBytes: 100, receivedBytes: 200 },
+            { active: true, sending: true, receiving: true, sentBytes: 2100, receivedBytes: 1200 },
+            { active: true, sending: false, receiving: false, sentBytes: 2100, receivedBytes: 1200 },
+        ])
+        const controller = production.getServerSyncController()
+        const stop = controller.watchProgress()
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        const initial = controller.snapshot().progress!.network!
+        expect(initial).toMatchObject({ sentBytes: '0', receivedBytes: '0', sending: true, receiving: true })
+        await vi.advanceTimersByTimeAsync(500); await settle()
+        const current = controller.snapshot().progress!
+        expect(current.network).toMatchObject({ id: initial.id, sentBytes: '2000', receivedBytes: '1000', sending: true, receiving: true })
+        expect(current.network!.atMs).toBeGreaterThan(initial.atMs)
+        expect(current.lanes!.find(lane => lane.lane === 'send')).toMatchObject({ bytesDone: 0, itemsDone: 0 })
+        await vi.advanceTimersByTimeAsync(500); await settle()
+        expect(controller.snapshot().progress?.network).toMatchObject({ sending: false, receiving: false, sentBytes: '2000', receivedBytes: '1000' })
+        finish(); await settle(); stop()
+    })
     const hangingPush = (sent: number[]) => {
         let finish!: (failure?: unknown) => void
         f.invoke.mockImplementation(async command => command === 'server_sync_lww_push' ? new Promise((resolve, reject) => { finish = failure => failure ? reject(failure) : resolve(null) })

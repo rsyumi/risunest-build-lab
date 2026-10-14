@@ -1,7 +1,6 @@
 import { beforeEach, expect, test, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({ confirm: vi.fn(), values: new Map<string, string>(), flush: vi.fn(async () => {}) }))
 vi.mock('../../alert', () => ({ alertConfirm: mocks.confirm }))
-vi.mock('src/lang', () => ({ language: { mcpStdioRegisterConfirm: 'Run this local MCP?' } }))
 vi.mock('../../storage/deviceMarkers', () => ({ getDeviceMarkers: () => ({
     getItem: (key: string) => mocks.values.get(key) ?? null,
     setItem: (key: string, value: string) => { mocks.values.set(key, value) },

@@ -231,12 +231,12 @@ impl Scenario {
         })
     }
 
-    fn install_startup(&self) -> Result<(), String> {
+    fn install_and_start(&self) -> Result<(), String> {
         let status = platform::startup(&self.root, &self.server, "install")?;
         if !status.registered || !status.enabled || !status.action_matches {
             return Err("synthetic LaunchAgent did not reach the expected state".into());
         }
-        Ok(())
+        platform::start(&self.root, &self.server)
     }
 
     async fn stop(&self) -> Result<(), String> {
@@ -577,9 +577,9 @@ async fn wait_rolled_back(scenario: &Scenario, target: &str) -> Result<(), Strin
     loop {
         let transaction = InstallTransaction::load(&scenario.root, &scenario.install)?;
         let status = load_status(&scenario.root)?;
-        if transaction
-            .as_ref()
-            .is_some_and(|value| value.phase == TransactionPhase::RolledBack)
+        if transaction.is_none()
+            && !scenario.staged.exists()
+            && !scenario.backup.exists()
             && status.phase == UpdatePhase::Failed
             && status.last_failed_version.as_deref() == Some(target)
         {
@@ -644,7 +644,7 @@ async fn successful_update(
     let scenario = Scenario::new(fixture, suffix)?;
     let data_hash = file_hash(&scenario.data_probe)?;
     let source_inode = inode(&scenario.install)?;
-    scenario.install_startup()?;
+    scenario.install_and_start()?;
     wait_healthy(&scenario.root, &fixture.version).await?;
     scenario.stop().await?;
     prepare_transaction(&scenario, &fixture.version, &fixture.version, was_running)?;
@@ -687,7 +687,7 @@ async fn failing_update_rolls_back(fixture: &VerifiedFixture) -> Result<(), Stri
     let scenario = Scenario::new(fixture, "rollback")?;
     let data_hash = file_hash(&scenario.data_probe)?;
     let source_inode = inode(&scenario.install)?;
-    scenario.install_startup()?;
+    scenario.install_and_start()?;
     wait_healthy(&scenario.root, &fixture.version).await?;
     scenario.stop().await?;
     let injected_target = format!("{}-synthetic-health-mismatch", fixture.version);
@@ -723,11 +723,15 @@ async fn failing_update_rolls_back(fixture: &VerifiedFixture) -> Result<(), Stri
     }
     wait_helper_job_gone(&scenario.root, &helper_label).await?;
     tokio::time::sleep(Duration::from_secs(16)).await;
+    let status = load_status(&scenario.root)?;
     if launchd_job_loaded(&helper_label)?
         || helper_lock_active(&scenario.root)?
-        || InstallTransaction::load(&scenario.root, &scenario.install)?
-            .is_none_or(|value| value.phase != TransactionPhase::RolledBack)
-        || load_status(&scenario.root)?.phase != UpdatePhase::Failed
+        || InstallTransaction::load(&scenario.root, &scenario.install)?.is_some()
+        || scenario.staged.exists()
+        || scenario.backup.exists()
+        || status.phase != UpdatePhase::Failed
+        || status.last_failed_version.as_deref() != Some(injected_target.as_str())
+        || status.reason.as_deref() != Some("updated-server-health-failed")
     {
         return Err("failed one-shot helper restarted after launchd throttle".into());
     }
@@ -739,7 +743,7 @@ async fn failing_update_rolls_back(fixture: &VerifiedFixture) -> Result<(), Stri
 async fn failed_helper_exec_is_cleaned_up(fixture: &VerifiedFixture) -> Result<(), String> {
     let scenario = Scenario::new(fixture, "no-helper-claim")?;
     let data_hash = file_hash(&scenario.data_probe)?;
-    scenario.install_startup()?;
+    scenario.install_and_start()?;
     wait_healthy(&scenario.root, &fixture.version).await?;
     scenario.stop().await?;
     prepare_transaction(&scenario, &fixture.version, &fixture.version, true)?;

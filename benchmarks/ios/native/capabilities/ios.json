@@ -59,6 +59,7 @@
     "ios-native:allow-notify",
     "ios-native:allow-open-settings",
     "ios-native:allow-pick-file",
+    "ios-native:allow-pick-files",
     "ios-native:allow-pick-backup-source",
     "ios-native:allow-discard-backup-source",
     "ios-native:allow-materialize-backup-source",

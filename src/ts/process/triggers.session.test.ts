@@ -5,6 +5,7 @@ import { DBState, selectedCharID } from '../stores.svelte'
 import { processMultiCommand } from './command'
 import { createConversationOperationContext } from './conversationOperationContext'
 import { createChatParserDependencyStamp } from '../chatRenderIdentity'
+import { DisplayReadRecord, recordAmbientChatVariableReads } from './scriptVariableReads'
 
 const runtime = vi.hoisted(() => ({
     unexpectedNativeRuntimeAccess: () => {
@@ -24,9 +25,7 @@ vi.mock('./modules', async (importOriginal) => ({
     getModuleTriggers: () => [],
 }))
 vi.mock('../tokenizer', () => ({ tokenize: vi.fn(async () => 0) }))
-vi.mock('../parser/parser.svelte', () => ({
-    risuChatParser: (value: string) => value,
-}))
+vi.mock('../parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
 vi.mock('./command', () => ({ processMultiCommand: vi.fn() }))
 vi.mock('./request/request', () => ({ requestChatData: vi.fn() }))
 vi.mock('./stableDiff', () => ({ generateAIImage: vi.fn() }))
@@ -99,6 +98,31 @@ test('keeps stored trigger permissions and parser identity stable during display
         expect(createChatParserDependencyStamp(char)).toBe(before)
     }
     expect(session.activePinReasons).toEqual([])
+})
+
+test('records the chat variables a display trigger reads for its row', async () => {
+    const { chat, char, session } = fixture()
+    chat.scriptstate = { $hp: '9' }
+    char.triggerscript[0].type = 'display'
+    char.triggerscript[0].conditions = [
+        { type: 'var', var: 'hp', value: '5', operator: '>' },
+    ]
+    char.triggerscript[0].effect = []
+    runtime.session = session
+    DBState.db = { characters: [char], templateDefaultVariables: '' } as never
+    const reads = new DisplayReadRecord()
+    const stopRecording = recordAmbientChatVariableReads(reads)
+    try {
+        await runTrigger(char, 'display', {
+            chat,
+            displayMode: true,
+            displayData: 'unchanged',
+        })
+    } finally {
+        stopRecording()
+    }
+
+    expect([...reads.keys]).toEqual(['hp'])
 })
 
 test('CAS-applies ordered trigger mutations and preserves an empty string value', async () => {
@@ -198,6 +222,34 @@ test.each(['command', 'v2Command'] as const)(
     },
 )
 
+test.each(['command', 'v2Command'] as const)(
+    'commits earlier Trigger variables before %s effects so /setvar keeps the last write',
+    async (type) => {
+        const { chat, char, session } = fixture()
+        char.triggerscript[0].effect = [
+            { type: 'setvar', var: 'state', value: 'trigger', operator: '=' },
+            { type, value: '/setvar key=state command', valueType: 'value' },
+        ] as never
+        runtime.session = session
+        DBState.db = {
+            characters: [char],
+            templateDefaultVariables: '',
+        } as never
+        let seenByCommand: unknown
+        // `/getvar` reads the stored chat, and `/setvar` commits through the session that owns it.
+        vi.mocked(processMultiCommand).mockImplementationOnce(async () => {
+            seenByCommand = chat.scriptstate?.$state
+            session.updateChatVariables(new Map([['state', 'command']]))
+            return ''
+        })
+
+        await runTrigger(char, 'manual', { chat, manualName: 'ordered' })
+
+        expect(seenByCommand).toBe('trigger')
+        expect(chat.scriptstate).toEqual({ $state: 'command' })
+    },
+)
+
 test('CAS-applies Trigger chat variables and note metadata', async () => {
     const { chat, char, session } = fixture()
     char.triggerscript[0].effect = [
@@ -218,6 +270,36 @@ test('CAS-applies Trigger chat variables and note metadata', async () => {
     expect(chat.scriptstate).toEqual({ '$state': '' })
     expect(chat.note).toBe('operation note')
     expect(session.version).toBe(1)
+})
+
+test.each(['runtrigger', 'v2RunTrigger'] as const)('carries preparation cancellation through %s and nested commands', async (type) => {
+    const { chat, char, session } = fixture()
+    const controller = new AbortController()
+    const generation = { signal: controller.signal, reservation: { isCurrent: () => true, release: vi.fn() } }
+    char.triggerscript[0].effect = [
+        { type, value: 'inner', target: 'inner', indent: 0 },
+        { type: 'impersonate', role: 'char', value: 'after outer cancellation' },
+    ] as never
+    char.triggerscript.push({
+        comment: 'inner', type: 'manual', conditions: [], effect: [
+            { type: 'command', value: '/multisend first|||second' },
+            { type: 'impersonate', role: 'char', value: 'after inner cancellation' },
+        ],
+    })
+    runtime.session = session
+    DBState.db = { characters: [char], templateDefaultVariables: '' } as never
+    vi.mocked(processMultiCommand).mockImplementationOnce(async (_command, operation, inherited) => {
+        expect(operation).toBeDefined()
+        expect(inherited).toBe(generation)
+        controller.abort()
+        return ''
+    })
+
+    await runTrigger(char, 'manual', { chat, manualName: 'ordered', generation })
+
+    expect(controller.signal.aborted).toBe(true)
+    expect(chat.message.map(message => message.data)).toEqual(['zero', 'one'])
+    expect(session.activePinReasons).toEqual([])
 })
 
 test('keeps eager Trigger metadata on its original owner after a later error', async () => {
@@ -241,7 +323,8 @@ test('keeps eager Trigger metadata on its original owner after a later error', a
 
     expect(chat.scriptstate).toEqual({ '$state': '' })
     expect(chat.note).toBe('partial note')
-    expect(session.version).toBe(1)
+    // The variable commits before the command runs, and the note after it fails.
+    expect(session.version).toBe(2)
     expect(session.activePinReasons).toEqual([])
 })
 
@@ -285,6 +368,72 @@ test('rejects an awaited trigger batch after the active conversation advances', 
         vi.useRealTimers()
     }
 })
+
+test('runs a variable-only trigger without visiting messages', async () => {
+    const { chat, char, session } = fixture()
+    char.triggerscript[0].effect = [
+        { type: 'setvar', var: 'state', value: 'new', operator: '=' },
+    ] as never
+    runtime.session = session
+    DBState.db = { characters: [char], templateDefaultVariables: '' } as never
+    // The length is a constant-time read; any element read or iteration visits messages.
+    let messagesReadable = true
+    chat.message = new Proxy(chat.message, {
+        get(target, property, receiver) {
+            if (!messagesReadable && property !== 'length') {
+                throw new Error(`message read: ${String(property)}`)
+            }
+            return Reflect.get(target, property, receiver)
+        },
+    })
+
+    messagesReadable = false
+    try {
+        const result = await runTrigger(char, 'manual', { chat, manualName: 'ordered' })
+        expect(result?.chat).toBe(chat)
+    } finally {
+        messagesReadable = true
+    }
+    expect(chat.scriptstate).toEqual({ $state: 'new' })
+    expect(session.activePinReasons).toEqual([])
+})
+
+test.each(['variables', 'message edit'] as const)(
+    'keeps trigger variables when messages change while it waits (%s)',
+    async (kind) => {
+        const { chat, char, session } = fixture()
+        char.triggerscript[0].effect = [
+            { type: 'setvar', var: 'state', value: 'new', operator: '=' },
+            { type: 'v2Wait', value: '0.001', valueType: 'value' },
+            ...(kind === 'message edit' ? [{ type: 'modifychat', index: '1', value: 'edited' }] : []),
+        ] as never
+        runtime.session = session
+        DBState.db = { characters: [char], templateDefaultVariables: '' } as never
+        vi.useFakeTimers()
+
+        try {
+            const settled = runTrigger(char, 'manual', { chat, manualName: 'ordered' }).then(
+                () => null,
+                (error: unknown) => error,
+            )
+            await vi.advanceTimersByTimeAsync(0)
+            session.edit(session.locate(0), { role: 'user', data: 'concurrent', chatId: 'message-0' })
+            await vi.advanceTimersByTimeAsync(1)
+
+            // An edit computed before the change is not applied over it.
+            expect(await settled).toEqual(kind === 'variables'
+                ? null
+                : expect.objectContaining({ message: expect.stringMatching(/session version/i) }))
+            expect(chat.message.map((entry) => entry.data)).toEqual(['concurrent', 'one'])
+            expect(chat.scriptstate).toEqual({ $state: 'new' })
+            // The external edit and the trigger's variable commit.
+            expect(session.version).toBe(2)
+            expect(session.activePinReasons).toEqual([])
+        } finally {
+            vi.useRealTimers()
+        }
+    },
+)
 
 test('does not publish Trigger metadata to either conversation after navigation', async () => {
     const original = fixture()

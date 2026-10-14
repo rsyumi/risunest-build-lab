@@ -12,68 +12,24 @@ import * as polyfill from '../polyfill'
 import { alertConfirm } from '../alert'
 import { createStoreHistoryWindow, historyMessages } from './tests/historyWindowTestUtils'
 
-vi.mock('../storage/persistentDataRuntime.svelte', () => ({
-    peekActiveConversationSession: () => null,
-}))
-vi.mock('../parser/parser.svelte', () => ({
-    hasher: vi.fn(),
-    risuChatParser: vi.fn(),
-}))
-vi.mock('../alert', () => ({
-    alertConfirm: vi.fn(),
-    alertError: vi.fn(),
-    alertInput: vi.fn(),
-    alertNormal: vi.fn(),
-    alertSelect: vi.fn(),
-}))
+vi.mock('../storage/persistentDataRuntime.svelte', async () => (await import('./tests/scriptingsTestHarness')).persistentRuntimeModule())
+vi.mock('../parser/parser.svelte', async () => (await import('./tests/scriptingsTestHarness')).parserModule())
+vi.mock('../alert', async () => (await import('./tests/scriptingsTestHarness')).alertModule())
 vi.mock('../globalApi.svelte', () => ({ fetchNative: vi.fn(), readImage: vi.fn() }))
-vi.mock('../platform', () => ({ isTauriMobile: true }))
-vi.mock('../tokenizer', () => ({ tokenize: vi.fn() }))
-vi.mock('../util', () => ({
-    asBuffer: vi.fn(),
-    getPersonaPrompt: vi.fn(),
-    getUserIcon: vi.fn(),
-    getUserName: vi.fn(),
-    parseKeyValue: vi.fn(() => []),
-}))
-vi.mock('../storage/database.svelte', () => ({
-    getCurrentCharacter: vi.fn(() => ({})),
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule({ runtime: 'tauri', os: 'android' }))
+vi.mock('../tokenizer', async () => (await import('./tests/scriptingsTestHarness')).tokenizerModule())
+vi.mock('../util', async () => (await import('./tests/scriptingsTestHarness')).utilModule())
+vi.mock('../storage/database.svelte', async () => (await import('./tests/scriptingsTestHarness')).databaseModule({
     getCurrentChat: vi.fn(() => ({ id: 'conversation-1', message: [] })),
-    getDatabase: vi.fn(() => ({ characters: [] })),
-    setDatabase: vi.fn(),
 }))
-vi.mock('../stores.svelte', () => ({
-    DBState: { db: {} },
-    ReloadChatPointer: { update: vi.fn() },
-    ReloadGUIPointer: {
-        subscribe: (run: (value: number) => void) => {
-            run(0)
-            return () => {}
-        },
-        set: vi.fn(),
-        update: vi.fn(),
-    },
-    CurrentTriggerIdStore: {
-        subscribe: (run: (value: null) => void) => {
-            run(null)
-            return () => {}
-        },
-        set: vi.fn(),
-    },
-    selectedCharID: {
-        subscribe: (run: (value: number) => void) => (run(0), () => undefined),
-    },
-}))
-vi.mock('./modules', () => ({
-    getModuleLorebooks: vi.fn(() => []),
-    getModuleTriggers: vi.fn(() => []),
-}))
-vi.mock('./files/inlays', () => ({ getInlayAsset: vi.fn(), writeInlayImage: vi.fn() }))
-vi.mock('./lorebook.svelte', () => ({ loadLoreBookV3PromptFromCompatibilitySnapshot: vi.fn() }))
-vi.mock('./memory/hypamemory', () => ({ HypaProcesser: vi.fn() }))
-vi.mock('./request/request', () => ({ requestChatData: vi.fn() }))
-vi.mock('./stableDiff', () => ({ generateAIImage: vi.fn() }))
-vi.mock('./command', () => ({ processMultiCommand: vi.fn() }))
+vi.mock('../stores.svelte', async () => (await import('./tests/scriptingsTestHarness')).storesModule())
+vi.mock('./modules', async () => (await import('./tests/scriptingsTestHarness')).modulesModule())
+vi.mock('./files/inlays', async () => (await import('./tests/scriptingsTestHarness')).inlaysModule())
+vi.mock('./lorebook.svelte', async () => (await import('./tests/scriptingsTestHarness')).lorebookModule())
+vi.mock('./memory/hypamemory', async () => (await import('./tests/scriptingsTestHarness')).hypamemoryModule())
+vi.mock('./request/request', async () => (await import('./tests/scriptingsTestHarness')).requestModule())
+vi.mock('./stableDiff', async () => (await import('./tests/scriptingsTestHarness')).stableDiffModule())
+vi.mock('./command', async () => (await import('./tests/scriptingsTestHarness')).commandModule())
 
 let scriptings: typeof import('./scriptings')
 

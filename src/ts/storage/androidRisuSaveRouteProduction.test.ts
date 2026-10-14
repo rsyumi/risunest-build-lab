@@ -11,18 +11,12 @@ const backupMocks = vi.hoisted(() => ({
 vi.mock('../gui/nativeFileJobDialogModel', () => ({ failureReason: backupMocks.reason }))
 vi.mock('./fileOperationErrorPresentation', () => ({ fileOperationErrorWasPresented: backupMocks.presented }))
 vi.mock('./androidContentPicker', () => ({ importReplayedAndroidContentSpool: backupMocks.replay }))
-vi.mock('src/lang', () => ({
-    language: {
-        risuSaveCleanupWarning: 'cleanup warning',
-        risuSaveImportComplete: 'restore complete',
-    },
-}))
 vi.mock('../alert', () => ({
     alertConfirm: vi.fn(),
     alertError: vi.fn(),
     alertNormal: vi.fn(),
 }))
-vi.mock('../platform', () => ({ isTauriAndroid: false }))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule({ runtime: 'tauri', os: 'android' }))
 vi.mock('../plugins/plugins.svelte', () => ({
     loadPluginsAfterAuthoritativeRestore: vi.fn(),
 }))
@@ -36,6 +30,7 @@ vi.mock('./nativeFileJobManager', () => ({
     runExternalAndroidNativeFileOperation: backupMocks.externalManager,
 }))
 
+import { language } from 'src/lang'
 import { alertConfirm, alertNormal, alertError } from '../alert'
 
 import {
@@ -80,7 +75,7 @@ describe('Android opened spool production route', () => {
             expect(onSource).toHaveBeenCalledExactlyOnceWith({ name: displayName })
             expect(backupMocks.externalManager).not.toHaveBeenCalled()
             expect(alertConfirm).not.toHaveBeenCalled()
-            expect(alertNormal).toHaveBeenCalledExactlyOnceWith('restore complete')
+            expect(alertNormal).toHaveBeenCalledExactlyOnceWith(language.risuSaveImportComplete)
         },
     )
 
@@ -101,7 +96,7 @@ describe('Android opened spool production route', () => {
             source: { type: 'androidSpool', token: '11111111-1111-4111-8111-111111111111' },
             displayName: 'restored.risunest',
         })
-        expect(alertNormal).toHaveBeenCalledExactlyOnceWith('cleanup warning')
+        expect(alertNormal).toHaveBeenCalledExactlyOnceWith(language.risuSaveCleanupWarning)
     })
 
     it('keeps the inactive content capability fallback out of the restore discard path', async () => {

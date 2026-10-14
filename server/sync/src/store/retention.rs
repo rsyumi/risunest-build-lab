@@ -1,7 +1,7 @@
 //! Durable device custody for remotely resident payloads and local snapshots.
 //! Unlike transfer leases, custody does not expire when a device goes offline
 //! or is revoked. Only an explicit release with the current custody ID removes it.
-use super::{random_id, Device, Store};
+use super::{Device, Store};
 use crate::{Error, Result};
 use risunest_sync_wire::{validate_hash, Sequence};
 use rusqlite::{params, OptionalExtension};
@@ -85,7 +85,7 @@ impl Store {
                 return Err(Error::new("object-size-mismatch", 409));
             }
             self.check_object_body(&tx, &object.hash, size as u64)?;
-            let retention_id = random_id()?;
+            let retention_id = crate::identity::secret_token()?;
             tx.execute("INSERT INTO object_custody(device,hash,retention_id) VALUES(?1,?2,?3) ON CONFLICT(device,hash) DO UPDATE SET retention_id=excluded.retention_id",params![device.id,object.hash,retention_id])?;
             retained.push(RetainedObject {
                 hash: object.hash.clone(),

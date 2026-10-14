@@ -53,17 +53,12 @@ vi.mock('src/ts/globalApi.svelte', () => ({
     textifyReadableStream: vi.fn(),
 }))
 
-vi.mock('src/lang', () => ({
-    language: { errors: { httpError: 'HTTP ' } },
-}))
 
 vi.mock('src/ts/alert', () => ({
     alertError: vi.fn(),
 }))
 
-vi.mock('src/ts/platform', () => ({
-    isTauri: false,
-}))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 
 vi.mock('src/ts/network/localNetwork', () => ({
     isLocalNetworkUrl: () => false,

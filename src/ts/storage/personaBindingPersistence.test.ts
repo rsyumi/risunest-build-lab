@@ -1,7 +1,8 @@
 import { expect, it, vi } from 'vitest'
 import { captureRoot, deferred, makeDatabase, SaveCoordinator } from './saveCoordinator.testSupport'
 import { applyConversationBindingPatch, type ConversationBindingPatch } from './conversationBinding'
-import type { PersistentDataStore } from './persistentDataStore'
+import { createStoreStub } from './persistentDataStore.testSupport'
+import type { Chat } from './database.svelte'
 import { createConversationSummaryStub } from './conversationResidency'
 
 function setup() {
@@ -20,7 +21,7 @@ function setup() {
         throw new Error('Binding must not read message bodies')
     })
     let revision = 1
-    const conversation: Record<string, unknown> = { id: 'other', name: 'Synthetic', note: '', localLore: [] }
+    const conversation: Omit<Chat, 'message'> & Record<string, unknown> = { id: 'other', name: 'Synthetic', note: '', localLore: [] }
     const commit = vi.fn(async (input: import('./persistentDataStore').WorkingSetCommit) => {
         for (const mutation of input.unitMutations ?? []) {
             const [kind, , , field] = JSON.parse(mutation.key)
@@ -30,7 +31,7 @@ function setup() {
         }
         return { revision: ++revision }
     })
-    const store = {
+    const store = createStoreStub({
         readConversation,
         commit,
         readConversationMetadata: vi.fn(async () => ({
@@ -42,7 +43,7 @@ function setup() {
                 conversation: { ...conversation },
             },
         })),
-    } as unknown as PersistentDataStore
+    })
     const coordinator = new SaveCoordinator({
         store,
         captureRoot: () => captureRoot(database),

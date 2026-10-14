@@ -14,7 +14,7 @@ vi.mock("../process/modules", () => ({
 
 const parserCalls: { data: string, chatID: number }[] = [];
 
-vi.mock("../parser/parser.svelte", () => ({
+vi.mock("../parser/parser.svelte", async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule({
     applyMarkdownToNode: () => {},
     risuChatParser: (data: string, arg: { chatID?: number } = {}) => {
         parserCalls.push({ data, chatID: arg.chatID ?? -1 });

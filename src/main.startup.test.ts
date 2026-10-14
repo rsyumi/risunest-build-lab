@@ -15,11 +15,14 @@ vi.mock("./ts/bootstrap", async () => {
     await import("./ts/runtimePerformanceProfile");
   startup.cacheBudget =
     getRuntimePerformanceBudgets().browserAssetDataUrlCacheBytes;
-  return { loadData: vi.fn() };
+  return (await import("./ts/bootstrap.testSupport")).bootstrapModule();
 });
 vi.mock("./ts/hotkey", () => ({ initHotkey: vi.fn() }));
 vi.mock("./preload", () => ({ preLoadCheck: vi.fn() }));
-vi.mock("svelte", () => ({ mount: vi.fn(() => ({})) }));
+vi.mock("svelte", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("svelte")>()),
+  mount: vi.fn(() => ({})),
+}));
 vi.mock("./ts/storage/deviceBackup/jobRecovery", () => ({
   resumePortableExportsAfterBootstrap: vi.fn(async () => {}),
 }));

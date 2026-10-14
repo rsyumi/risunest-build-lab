@@ -39,6 +39,15 @@ const modalHistory = {
         parent!.action.destroy()
         parent!.node.remove()
     },
+    async replaceDuringCleanup() {
+        child!.action.destroy()
+        child!.node.remove()
+        await Promise.resolve()
+        parent!.action.destroy()
+        parent!.node.remove()
+        parent = createModal('parent')
+        child = createModal('child')
+    },
     pushForeign() { history.pushState(null, '', '#foreign') },
     showAlert() {
         alertStore.set({ type: 'normal', msg: 'Synthetic alert' })

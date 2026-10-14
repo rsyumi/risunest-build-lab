@@ -57,6 +57,8 @@ export class PreviousStorageFilesDownloadError extends Error {
     }
 }
 export interface SyncBindingTransport {
+    observeBinding?(operation: () => Promise<BindingOutcome>): Promise<BindingOutcome>
+    setConfirmationPending?(waiting: boolean): void
     receiveAvailableChanges?(context: BindingContext): Promise<void>
     inspectTarget(context: BindingContext): Promise<InspectedSyncTarget>
     pullAvailableState(target: InspectedSyncTarget, context: BindingContext): Promise<StagedSyncTarget>
@@ -99,7 +101,8 @@ export interface SyncBindingDependencies {
     gate: StorageMutationGate
     plugins: BindingPluginLifecycle
     withPausedWrites<T>(operation: () => Promise<T>): Promise<T>
-    hasNonDefaultData(): Promise<boolean>
+    // A device without characters is replaced without asking.
+    hasLocalCharacters(): Promise<boolean>
     hasNonDefaultSharedData(): Promise<boolean>
     confirmReplacement(reason?: ReplacementReason): Promise<boolean>
     refreshActivatedLibrary(): Promise<void>
@@ -230,6 +233,11 @@ export function createSyncBindingFlow(dependencies: SyncBindingDependencies) {
             const resumeAfterRefresh = async () => {
                 try { await resumeActivated!() } catch (error) { await stopActivated(error) }
             }
+            const confirm = async <T>(question: () => Promise<T>): Promise<T> => {
+                transport.setConfirmationPending?.(true)
+                try { return await question() }
+                finally { transport.setConfirmationPending?.(false) }
+            }
             try {
                 const state = await dependencies.native.state()
                 await adoptPersisted(state)
@@ -247,13 +255,13 @@ export function createSyncBindingFlow(dependencies: SyncBindingDependencies) {
                 const replace = newDevice || (!inspected.empty && !inspected.previouslyBoundLibrary)
                 const switchRequired = replace || !sameTarget(state.target, target) || state.libraryId !== inspected.libraryId
                 let acknowledged = false
-                if (newDevice || (replace && await dependencies.hasNonDefaultData())) {
-                    if (!await dependencies.confirmReplacement(reason)) return { kind: 'cancelled' }
+                if (replace && await dependencies.hasLocalCharacters()) {
+                    if (!await confirm(() => dependencies.confirmReplacement(reason))) return { kind: 'cancelled' }
                     acknowledged = true
                 }
                 let previousFiles: PreviousStorageFilesChoice = 'connect'
                 if (dependencies.confirmPreviousStorageFiles && inspected.empty && !replace && !inspected.previouslyBoundLibrary && switchRequired) {
-                    previousFiles = await dependencies.confirmPreviousStorageFiles({ ...context, target, libraryId: inspected.libraryId, targetId: inspected.targetId })
+                    previousFiles = await confirm(() => dependencies.confirmPreviousStorageFiles!({ ...context, target, libraryId: inspected.libraryId, targetId: inspected.targetId }))
                     if (previousFiles === 'cancel') return { kind: 'cancelled' }
                     if (previousFiles === 'download-then-connect' && !dependencies.downloadPreviousStorageFiles) throw new Error('Sync binding download is unavailable')
                     await check(context)
@@ -325,8 +333,8 @@ export function createSyncBindingFlow(dependencies: SyncBindingDependencies) {
                 }
                 const result: BindingOutcome = await dependencies.withPausedWrites(async () => {
                     await check(context)
-                    if (replace && !acknowledged && await dependencies.hasNonDefaultData()) {
-                        if (!await dependencies.confirmReplacement(reason)) {
+                    if (replace && !acknowledged && await dependencies.hasLocalCharacters()) {
+                        if (!await confirm(() => dependencies.confirmReplacement(reason))) {
                             pluginsFenced = false
                             await dependencies.plugins.restart()
                             return { kind: 'cancelled' }

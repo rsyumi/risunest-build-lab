@@ -2,18 +2,18 @@ use super::{
     objects::{check_path, publish, sync_directory},
     random_id, Device, Store,
 };
-#[cfg(test)]
+#[cfg(all(test, feature = "source-observer"))]
 use crate::source_observer::{shared_wire::stream_delta, small_object_store};
 use crate::{Error, Result};
-#[cfg(not(test))]
+#[cfg(not(all(test, feature = "source-observer")))]
 use risunest_small_object_store as small_object_store;
-#[cfg(not(test))]
+#[cfg(not(all(test, feature = "source-observer")))]
 use risunest_sync_wire::stream_delta;
 use risunest_sync_wire::{hash, validate_hash, validate_id, Sequence};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-#[cfg(not(test))]
+#[cfg(not(all(test, feature = "source-observer")))]
 use std::fs::File;
 use std::{
     fs,
@@ -161,11 +161,11 @@ impl Store {
         digest: &str,
         bytes: &[u8],
     ) -> Result<()> {
-        #[cfg(test)]
+        #[cfg(all(test, feature = "source-observer"))]
         let _observed = crate::source_observer::ingress(&self.root);
         validate_hash(digest)?;
         let (object_digest, size, state) = Self::upload_row(&*self.reader()?, device, id)?;
-        #[cfg(not(test))]
+        #[cfg(not(all(test, feature = "source-observer")))]
         let _ = object_digest;
         if state != "open" {
             return Err(Error::new("upload-not-open", 409));
@@ -176,7 +176,7 @@ impl Store {
             .ok_or(Error::new("invalid-chunk-offset", 400))?;
         if bytes.len() as u64 != (size - offset).min(UPLOAD_CHUNK_BYTES) || {
             let actual = hash(bytes);
-            #[cfg(test)]
+            #[cfg(all(test, feature = "source-observer"))]
             crate::source_observer::hashed(
                 &object_digest,
                 "upload-chunk-ingress-sha256",
@@ -221,7 +221,7 @@ impl Store {
         Ok(())
     }
     pub fn finish_upload(&self, device: &Device, id: &str) -> Result<String> {
-        #[cfg(test)]
+        #[cfg(all(test, feature = "source-observer"))]
         let _observed = crate::source_observer::ingress(&self.root);
         let (digest, size) = {
             let db = self.db()?;
@@ -279,7 +279,7 @@ impl Store {
                 })?;
             } else {
                 let mut full = Sha256::new();
-                #[cfg(test)]
+                #[cfg(all(test, feature = "source-observer"))]
                 let mut full_observed =
                     crate::source_observer::HashScope::new(&digest, "upload-full-sha256");
                 let mut buffer = vec![0u8; 1024 * 1024];
@@ -290,9 +290,9 @@ impl Store {
                         params![id, index as i64],
                         |r| Ok((r.get(0)?, r.get(1)?)),
                     )?;
-                    #[cfg(not(test))]
+                    #[cfg(not(all(test, feature = "source-observer")))]
                     let mut file = File::open(self.chunk_path(id, index)?)?;
-                    #[cfg(test)]
+                    #[cfg(all(test, feature = "source-observer"))]
                     let mut file = crate::source_observer::TrackedFile::open(
                         &self.root,
                         &digest,
@@ -300,7 +300,7 @@ impl Store {
                         "upload-chunk",
                     )?;
                     let mut chunk = Sha256::new();
-                    #[cfg(test)]
+                    #[cfg(all(test, feature = "source-observer"))]
                     let mut chunk_observed =
                         crate::source_observer::HashScope::new(&digest, "upload-chunk-sha256");
                     let mut length = 0u64;
@@ -315,7 +315,7 @@ impl Store {
                         }
                         chunk.update(&buffer[..n]);
                         full.update(&buffer[..n]);
-                        #[cfg(test)]
+                        #[cfg(all(test, feature = "source-observer"))]
                         {
                             chunk_observed.input(n);
                             full_observed.input(n);
@@ -324,25 +324,25 @@ impl Store {
                     }
                     if length != expected_size as u64 || {
                         let actual = hex::encode(chunk.finalize());
-                        #[cfg(test)]
+                        #[cfg(all(test, feature = "source-observer"))]
                         chunk_observed.finalized();
                         actual != expected
                     } {
                         return Err(Error::new("corrupt-chunk", 503));
                     }
-                    #[cfg(test)]
+                    #[cfg(all(test, feature = "source-observer"))]
                     chunk_observed.finish();
                     total += length;
                 }
                 if total != size || {
                     let actual = hex::encode(full.finalize());
-                    #[cfg(test)]
+                    #[cfg(all(test, feature = "source-observer"))]
                     full_observed.finalized();
                     actual != digest
                 } {
                     return Err(Error::new("hash-mismatch", 400));
                 }
-                #[cfg(test)]
+                #[cfg(all(test, feature = "source-observer"))]
                 full_observed.finish();
             }
             temp.as_file().sync_all()?;
@@ -369,9 +369,9 @@ impl Store {
             }
             let tx = db.transaction()?;
             if inline {
-                #[cfg(not(test))]
+                #[cfg(not(all(test, feature = "source-observer")))]
                 let bytes = fs::read(temp.path())?;
-                #[cfg(test)]
+                #[cfg(all(test, feature = "source-observer"))]
                 let bytes = {
                     let mut bytes = Vec::new();
                     crate::source_observer::TrackedFile::open(

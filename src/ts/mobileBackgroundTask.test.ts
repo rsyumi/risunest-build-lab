@@ -1,7 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-vi.mock('./platform', async original => ({
-    ...await original<typeof import('./platform')>(), isTauriAndroid: true, isTauriIOS: false,
-}))
+vi.mock('./platform', async () => (await import('./platform.testSupport')).platformModule({ runtime: 'tauri', os: 'android' }))
 vi.mock('./androidNativeControl', () => ({}))
 import { beginMobileBackgroundTask, hasMobileBackgroundTasks, measuredTaskPercent, runWithMobileBackgroundTask } from './mobileBackgroundTask'
 import { runSharedNativeFileOperation, cancelActiveNativeFileOperation } from './storage/nativeFileJobManager'

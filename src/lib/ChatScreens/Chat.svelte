@@ -12,6 +12,7 @@
     import { getModelInfo } from "src/ts/model/modellist"
     import { runLuaButtonTrigger } from 'src/ts/process/scriptings'
     import { risuChatParser } from "src/ts/process/scripts"
+    import { DisplayReadRecord, recordChatVariableReads, registerDisplayRow } from 'src/ts/process/scriptVariableReads'
     import { runTrigger } from 'src/ts/process/triggers'
     import { sayTTS } from "src/ts/process/tts"
     import { DBState, ReloadChatPointer, CurrentTriggerIdStore, popupStore } from 'src/ts/stores.svelte'
@@ -260,6 +261,8 @@
         } as unknown as Parameters<typeof risuChatParser>[1]
     }
 
+    // Script variable changes refresh this row only when its display read a changed variable.
+    const displayRow = untrack(() => captureContext) ? null : registerDisplayRow(() => idx)
     let msgDisplay = $state('')
     let translated = $state(false)
     let partialEditEnabled = $state(true)
@@ -795,14 +798,16 @@
     }
 
     function displaya(message:string){
-        msgDisplay = risuChatParser(message, {
+        const reads = new DisplayReadRecord()
+        msgDisplay = recordChatVariableReads(reads, () => risuChatParser(message, {
             chara: name,
             chatID: idx,
             rmVar: true,
             visualize: true,
             cbsConditions: getCbsCondition(),
             ...parserArgs(),
-        })
+        }))
+        displayRow?.track('message', reads)
     }
 
     const setStatusMessage = (message:string, timeout:number = 0)=>{
@@ -871,11 +876,21 @@
             unsubscribers.push(ReloadGUIPointer.subscribe(() => {
                 updateDisplayedMessage()
             }))
+            // Rows outside the chat list, such as the greeting, refresh their message text here.
+            let shownReloadPointer: number | undefined
+            unsubscribers.push(ReloadChatPointer.subscribe((pointers) => {
+                const pointer = pointers[idx] ?? 0
+                if (shownReloadPointer !== undefined && pointer !== shownReloadPointer) {
+                    updateDisplayedMessage()
+                }
+                shownReloadPointer = pointer
+            }))
         }
     })
 
     onDestroy(()=>{
         unsubscribers.forEach(u => u())
+        displayRow?.dispose()
     })
 
     const initialEditor = untrack(() => restoredEditor)
@@ -1177,6 +1192,7 @@
                     {captureParserIndex}
                     {parserAbortSignal}
                     {onDisplaySettled}
+                    displayRow={displayRow ?? undefined}
                     {parserProjection} />
         </span>
         {#if !captureContext && idx >= 0 && !editMode && !editTranslationMode && !isOptimizedStreamingMessage && partialEditEnabled && (DBState.db.enableBlockPartialEdit || DBState.db.enableDragPartialEdit)}

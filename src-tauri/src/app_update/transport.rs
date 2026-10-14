@@ -1,3 +1,4 @@
+use risunest_network_log::reqwest::RequestBuilderExt;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -33,7 +34,7 @@ impl MetadataTransport for GithubTransport {
             .client
             .get(url.clone())
             .timeout(timeout)
-            .send()
+            .send_logged("update-metadata")
             .await
             .map_err(|error| TransportError::new(error.to_string()))?;
         if !response.status().is_success() {

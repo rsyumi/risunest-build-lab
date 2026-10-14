@@ -9,15 +9,24 @@ use crate::{
 use axum::{
     body::Bytes,
     extract::{DefaultBodyLimit, Path, Query, Request, State},
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode, Version},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post, put},
     Extension, Json, Router,
 };
+use http_body::Body as _;
 use risunest_sync_wire::{body, canonical, transfer, Sequence, MAX_METADATA_BYTES};
 use serde::Deserialize;
-use std::{sync::Arc, time::Duration};
+use std::{
+    pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    task::{Context, Poll},
+    time::Duration,
+};
 use tokio::sync::Semaphore;
 
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(15 * 60);
@@ -282,6 +291,7 @@ pub fn router_with_shutdown(
         // Notification streams authenticate without entering request maintenance work.
         .route("/notify", get(lww::notify))
         .route("/media/{token}", get(media))
+        .layer(middleware::from_fn(close_after_unread_body))
         .with_state(app)
 }
 impl IntoResponse for Error {
@@ -308,9 +318,9 @@ impl IntoResponse for Error {
     }
 }
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "source-observer"))]
     let worker = crate::source_observer::worker();
-    #[cfg(test)]
+    #[cfg(all(test, feature = "source-observer"))]
     let f = move || {
         let _entered = worker.enter();
         let result = f();
@@ -453,6 +463,55 @@ fn retain_guard_until_body_eof<T: Send + 'static>(
         next
     });
     axum::body::Body::from_stream(stream)
+}
+/// Records when a request body has been read to its end.
+struct BodyEndTracker {
+    body: axum::body::Body,
+    read: Arc<AtomicBool>,
+}
+impl http_body::Body for BodyEndTracker {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Option<std::result::Result<http_body::Frame<Bytes>, axum::Error>>> {
+        let frame = Pin::new(&mut self.body).poll_frame(context);
+        if matches!(frame, Poll::Ready(None)) {
+            self.read.store(true, Ordering::Release);
+        }
+        frame
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.body.size_hint()
+    }
+}
+/// Closes the connection after a reply sent before its request body was read
+/// to the end. Hyper cannot drain the rest and would otherwise close a
+/// connection whose reply offered it for reuse.
+pub(crate) async fn close_after_unread_body(request: Request, next: Next) -> Response {
+    let read = Arc::new(AtomicBool::new(request.body().is_end_stream()));
+    let http1 = request.version() < Version::HTTP_2;
+    let tracked = read.clone();
+    let request = request.map(|body| {
+        axum::body::Body::new(BodyEndTracker {
+            body,
+            read: tracked,
+        })
+    });
+    let mut response = next.run(request).await;
+    if http1 && !read.load(Ordering::Acquire) {
+        response
+            .headers_mut()
+            .insert(header::CONNECTION, HeaderValue::from_static("close"));
+    }
+    response
 }
 async fn authorize(State(app): State<App>, request: Request, next: Next) -> Response {
     let result = async {
@@ -715,9 +774,9 @@ async fn object_response(
             };
             response = match body {
                 crate::store::Body::File(file) => {
-                    #[cfg(not(test))]
+                    #[cfg(not(all(test, feature = "source-observer")))]
                     let mut file = tokio::fs::File::from_std(file);
-                    #[cfg(test)]
+                    #[cfg(all(test, feature = "source-observer"))]
                     let mut file = {
                         let file = file.into_async();
                         file.selected(start, length);
@@ -734,7 +793,7 @@ async fn object_response(
                 // Already in memory and bounded by the inline threshold, so a
                 // range is a slice rather than a seek.
                 crate::store::Body::Bytes(bytes) => {
-                    #[cfg(test)]
+                    #[cfg(all(test, feature = "source-observer"))]
                     crate::source_observer::inline_selection(digest, start, length);
                     let bytes = bytes.into_inner();
                     let end = (start + length).min(bytes.len() as u64) as usize;

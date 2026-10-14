@@ -4,7 +4,8 @@ import {
     type SaveCoordinatorDependencies,
 } from './saveCoordinator'
 import type { Database } from './database.svelte'
-import type { PersistentDataStore, PersistentRoot } from './persistentDataStore'
+import type { PersistentDataStore, PersistentRoot, WorkingSetCommit } from './persistentDataStore'
+import { createStoreStub } from './persistentDataStore.testSupport'
 
 export function makeDatabase(): Database {
     return {
@@ -31,11 +32,28 @@ export function deferred<T>() {
     return { promise, resolve, reject }
 }
 
-export function makeStore(commit = vi.fn()) {
-    return {
-        commit,
-        replaceFromDatabase: vi.fn(),
-    } as unknown as PersistentDataStore
+export function makeStore(commit = vi.fn(), members: Partial<PersistentDataStore> = {}) {
+    return createStoreStub({ commit, replaceFromDatabase: vi.fn(), ...members })
+}
+
+/** Marks a root key that a commit removes. */
+export const deletedRootKey = Symbol('deleted root key')
+
+export type CommittedChanges = Omit<WorkingSetCommit, 'root' | 'rootMutations'> & {
+    /** Every root key the commit writes, mapped to its new value or `deletedRootKey`. */
+    rootChanges: Record<string, unknown>
+}
+
+/**
+ * One store commit with its root changes in a single shape, whether the commit replaces the
+ * whole root or lists root mutations.
+ */
+export function committedChanges(commit: WorkingSetCommit): CommittedChanges {
+    const { root, rootMutations, ...rest } = commit
+    const rootChanges: Record<string, unknown> = { ...root }
+    for (const mutation of rootMutations ?? [])
+        rootChanges[mutation.key] = mutation.type === 'set' ? mutation.value : deletedRootKey
+    return { ...rest, rootChanges }
 }
 
 export function captureRoot(database: Database): PersistentRoot {

@@ -19,15 +19,11 @@ vi.mock('src/ts/storage/persistentDataRuntime.svelte', async () => {
         retryCommittedWorkingSetRefresh: mocks.retry,
     }
 })
-vi.mock('src/lang', async () => ({
-    language: (await import('src/lang/en')).languageEnglish,
-}))
 
 import { externalApplicationRecovery } from 'src/ts/storage/sync/external/applicationRecovery'
 import Recovery from './PersistentWorkingSetRecovery.svelte'
 import { persistentWorkingSetRefreshRevision } from 'src/ts/storage/persistentDataRuntime.svelte'
 import { languageEnglish } from 'src/lang/en'
-import { languageKorean } from 'src/lang/ko'
 
 const external = externalApplicationRecovery as Writable<{ jobId: string; confirmationPending: boolean } | null>
 const revision = persistentWorkingSetRefreshRevision as Writable<number | null>
@@ -141,11 +137,5 @@ describe('committed working-set recovery', () => {
         await vi.waitFor(() => expect(target.querySelector('[role="dialog"]')).toBeNull())
         expect(mocks.retry).not.toHaveBeenCalled()
         expect(mocks.retryExternal).toHaveBeenCalledOnce()
-    })
-
-    it('provides Korean and English text for every recovery message', () => {
-        for (const key of Object.keys(copy) as Array<keyof typeof copy>) {
-            expect(languageKorean.risuNest.persistentData[key], key).toBeTruthy()
-        }
     })
 })

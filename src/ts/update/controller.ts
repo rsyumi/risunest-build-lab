@@ -173,6 +173,7 @@ function scheduleAutomaticCheck(): void {
     if (automaticTimer !== null) clearTimeout(automaticTimer)
     automaticTimer = null
     if (!started) return
+    if (['downloading', 'applying'].includes(get(appUpdateState).phase)) return
     let settings: AppUpdateSettings
     try {
         settings = getAppUpdateSettings()
@@ -216,6 +217,7 @@ export async function applyAppUpdate(dependencies: UpdateControllerDependencies 
         return
     }
     appUpdateState.update(state => ({ ...state, phase: 'downloading', progress: null, error: '' }))
+    scheduleAutomaticCheck()
     try {
         if (update.installStrategy === 'stage-deb') {
             const stagedDeb = await dependencies.stageDeb(update.handleId)
@@ -239,6 +241,8 @@ export async function applyAppUpdate(dependencies: UpdateControllerDependencies 
             error: message === 'cancelled' ? '' : message,
             progress: null,
         }))
+    } finally {
+        scheduleAutomaticCheck()
     }
 }
 

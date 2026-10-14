@@ -18,6 +18,7 @@ import { doingChat } from '../../process/index.svelte'
 import { additionalMessageButtons } from '../messageButtons.svelte'
 import { chatViewEvents } from '../chatViewHost.svelte'
 import { beginGenerationEndRun, noteGenerationStarted, type GenerationEndStatus } from '../../process/generationEnd'
+import { language } from 'src/lang'
 
 const mocks = vi.hoisted(() => ({
     database: null as any,
@@ -32,115 +33,39 @@ const mocks = vi.hoisted(() => ({
     locateGenerationEnd: vi.fn(async () => ({ characterIndex: 1, chatIndex: 0, messageIndex: 3, messageId: 'gen-1' })),
 }))
 
-const ownedStorageStub = {
-    getItem: vi.fn(), setItem: vi.fn(), removeItem: vi.fn(), clear: vi.fn(),
-    key: vi.fn(), keys: vi.fn(), length: vi.fn(), snapshot: vi.fn(async () => ({})),
-    mutate: vi.fn(),
-}
-
-vi.mock('../plugins.svelte', () => {
-    const oldApis = new Proxy({}, { get: () => vi.fn() })
-    return {
-        allowedDbKeys: [],
-        applyPreparedPluginDatabaseUpdate: vi.fn(),
-        chatOutputListenerProvenance: new WeakMap(),
-        customProviderStore: {
-            subscribe: (run: (value: unknown) => void) => { run([]); return () => undefined },
-            set: vi.fn(),
-            update: vi.fn(),
-        },
-        getV2PluginAPIs: () => oldApis,
-        handlePluginInstallViaPlugin: vi.fn(),
-        pluginCompatibility: { profile: 'scalable-v3' },
-        pluginStorageStore: {
-            forOwner: () => ownedStorageStub,
-            ownerOf: () => 'test-plugin',
-            invalidateOwner: vi.fn(),
-            synchronizeCommittedMutation: vi.fn(),
-            snapshot: vi.fn(), mutate: vi.fn(), invalidate: vi.fn(), getItem: vi.fn(),
-            setItem: vi.fn(), removeItem: vi.fn(), clear: vi.fn(), key: vi.fn(),
-            keys: vi.fn(), length: vi.fn(),
-        },
-        pluginV2: { providers: mocks.providers, providerOptions: new Map() },
-    }
-})
-vi.mock('src/ts/storage/database.svelte', () => ({ getDatabase: () => mocks.database }))
-vi.mock('../pluginSafeClass', () => ({
-    SafeLocalPluginStorage: class {},
-    SafeLocalStorage: class {},
-    tagWhitelist: ['button', 'span', 'div'],
+vi.mock('../plugins.svelte', async () => (await import('./v3Host.testSupport')).pluginsModule({
+    pluginV2: { providers: mocks.providers, providerOptions: new Map() },
 }))
-vi.mock('src/ts/stores.svelte', () => ({
-    DBState: {
-        get db() { return mocks.database },
-        set db(value) { mocks.database = value },
-    },
-    selectedCharID: {
-        subscribe(run: (value: number) => void) { run(mocks.selectedId); return () => undefined },
-    },
-    additionalChatMenu: [], additionalFloatingActionButtons: [], additionalHamburgerMenu: [],
-    additionalSettingsMenu: [], bodyIntercepterStore: [], chatPanelStore: [],
+vi.mock('src/ts/storage/database.svelte', async () => (await import('./v3Host.testSupport')).databaseModule({
+    read: () => mocks.database,
+    write: (database) => { mocks.database = database },
+    selectedIndex: () => mocks.selectedId,
 }))
-vi.mock('src/ts/alert', () => ({
-    alertConfirm: mocks.confirm,
-    alertError: vi.fn(),
-    alertNormal: vi.fn(),
+vi.mock('../pluginSafeClass', async () => (await import('./v3Host.testSupport')).pluginSafeClassModule({ tagWhitelist: ['button', 'span', 'div'] }))
+vi.mock('src/ts/stores.svelte', async () => (await import('./v3Host.testSupport')).storesModule({
+    read: () => mocks.database,
+    write: (database) => { mocks.database = database },
+    selectedIndex: () => mocks.selectedId,
 }))
-vi.mock('src/ts/util', () => ({ sleep: vi.fn(async () => undefined) }))
-vi.mock('src/lang', () => ({ language: {
-    fetchLogConsent: '{}', getFullDatabaseConsent: '{}', mainDomAccessConsent: '{}',
-    replacerPermissionConsent: '{}', providerPermissionConsent: '{}', sendChatConsent: '{}',
-    inlayPermissionConsent: '{}', pluginProviderPermissionDenied: 'permission denied',
-} }))
+vi.mock('src/ts/alert', async () => (await import('./v3Host.testSupport')).alertModule({ alertConfirm: mocks.confirm }))
+vi.mock('src/ts/util', async () => (await import('./v3Host.testSupport')).utilModule())
 vi.mock('src/ts/globalApi.svelte', () => ({
     checkCharOrder: vi.fn(), forageStorage: {}, getFetchLogs: vi.fn(),
 }))
-vi.mock('src/ts/gui/colorscheme', () => ({
-    changeColorScheme: vi.fn(), updateColorScheme: vi.fn(), updateTextThemeAndCSS: vi.fn(),
-}))
-vi.mock('src/ts/platform', () => ({ isTauri: false }))
-vi.mock('src/ts/process/mcp/pluginmcp', () => ({
-    registerMCPModule: vi.fn(), unregisterMCPModule: vi.fn(),
-}))
-vi.mock('src/ts/process/files/inlays', () => ({ getInlayAsset: vi.fn() }))
-vi.mock('src/ts/translator/translator', () => ({
-    getLLMCache: vi.fn(), searchLLMCache: vi.fn(),
-}))
-vi.mock('src/ts/parser/parser.svelte', () => ({ hasher: vi.fn(async () => 'fixture-hash') }))
-vi.mock('localforage', () => ({ default: { createInstance: () => ({
-    getItem: vi.fn((key: string) => mocks.permissionValues.get(key) ?? null),
-    setItem: vi.fn((key: string, value: unknown) => mocks.permissionValues.set(key, value)),
-}) } }))
-vi.mock('src/ts/process/index.svelte', async () => {
-    const { writable } = await import('svelte/store')
-    return { sendChat: vi.fn(), doingChat: writable(false) }
-})
-vi.mock('src/ts/model/modellist', () => ({ getModelInfo: () => ({ id: 'fixture-model' }) }))
-vi.mock('src/ts/process/request/request', () => ({ requestChatDataMain: vi.fn() }))
-vi.mock('src/ts/process/modules', () => ({ getModuleLorebooks: vi.fn() }))
-vi.mock('src/ts/process/ttsHooks', () => ({
-    registerTTSPreprocessor: vi.fn(), unregisterTTSPreprocessor: vi.fn(),
-    registerTTSPostprocessor: vi.fn(), unregisterTTSPostprocessor: vi.fn(),
-}))
-vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({
-    getPersistentRevision: () => 0,
-    commitPersistentUnitIntent: vi.fn(),
-    flushPendingDataLocally: vi.fn(), acquireCompleteConversation: vi.fn(),
-    assertPersistentMutationAllowed: vi.fn(),
-    getPersistentStorageAuthorityEpoch: () => 0,
-    captureSelectedConversationTarget: vi.fn(), getActiveConversationSession: vi.fn(),
-    getPersistentNavigationGeneration: vi.fn(() => 0),
-    invalidateActiveConversationSession: vi.fn(),
-    materializePersistentDatabaseSnapshotWithRevision: vi.fn(),
-    refreshSelectedConversationAfterReplacement: vi.fn(),
-    replacePersistentCompleteCharacter: vi.fn(),
-    replacePersistentConversation: vi.fn(), replacePersistentDatabase: vi.fn(),
-}))
-vi.mock('../pluginCompatibility', () => ({ runPluginFullObjectReplacement: vi.fn() }))
-vi.mock('../pluginDatabaseAccess', () => ({
-    createProductionPluginDatabaseAccess: vi.fn(() => ({})),
-    linkPluginQueryAbortSignals: vi.fn(),
-}))
+vi.mock('src/ts/gui/colorscheme', async () => (await import('./v3Host.testSupport')).colorschemeModule())
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
+vi.mock('src/ts/process/mcp/pluginmcp', async () => (await import('./v3Host.testSupport')).pluginMcpModule())
+vi.mock('src/ts/process/files/inlays', async () => (await import('./v3Host.testSupport')).inlaysModule())
+vi.mock('src/ts/translator/translator', async () => (await import('./v3Host.testSupport')).translatorModule())
+vi.mock('src/ts/parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
+vi.mock('localforage', async () => (await import('../localforage.testSupport')).localforageModule(mocks.permissionValues))
+vi.mock('src/ts/process/index.svelte', async () => (await import('./v3Host.testSupport')).processIndexModule())
+vi.mock('src/ts/model/modellist', async () => (await import('./v3Host.testSupport')).modellistModule())
+vi.mock('src/ts/process/request/request', async () => (await import('./v3Host.testSupport')).requestModule())
+vi.mock('src/ts/process/modules', async () => (await import('./v3Host.testSupport')).modulesModule())
+vi.mock('src/ts/process/ttsHooks', async () => (await import('./v3Host.testSupport')).ttsHooksModule())
+vi.mock('src/ts/storage/persistentDataRuntime.svelte', async () => (await import('./v3Host.testSupport')).persistentRuntimeModule())
+vi.mock('../pluginDatabaseAccess', async () => (await import('./v3Host.testSupport')).pluginDatabaseAccessModule())
 vi.mock('../pluginChatOutputListeners', () => ({
     registerChatOutputListener: vi.fn(), removeChatOutputListener: vi.fn(),
 }))
@@ -412,7 +337,7 @@ function __postToParent(message) {
             mode: 'chat',
         })
 
-        expect(result).toEqual({ success: false, content: 'permission denied' })
+        expect(result).toEqual({ success: false, content: language.pluginProviderPermissionDenied })
         expect(await guest(name, 'return globalThis.providerCalls')).toBe(0)
     })
 

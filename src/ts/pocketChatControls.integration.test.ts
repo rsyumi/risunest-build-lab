@@ -16,6 +16,9 @@ vi.mock('./globalApi.svelte', () => ({ forageStorage: {} }))
 import { decodeRisuSave } from './storage/risuSave'
 import { streamRisuSaveFromStore } from './storage/risuSaveStoreAdapter'
 
+// Reads stay below the conversation length, so no step loads the whole conversation.
+const TURNS = 1_000
+
 it('keeps candidates and recovery through real session commits, IndexedDB reopen and RisuSave export', async () => {
     let serial = 0
     let db = {
@@ -34,7 +37,7 @@ it('keeps candidates and recovery through real session commits, IndexedDB reopen
                         localLore: [],
                         savedToggleValues: {},
                         bindedPersona: 'persona',
-                        message: Array.from({ length: 10_000 }, (_, index) => ({
+                        message: Array.from({ length: TURNS }, (_, index) => ({
                             role: index % 2 ? 'char' : 'user',
                             data: `synthetic-${index}`,
                             chatId: `m-${index}`,
@@ -102,15 +105,15 @@ it('keeps candidates and recovery through real session commits, IndexedDB reopen
         },
     }
     expect(await generateResponseCandidate(options)).toBe(false)
-    expect((await store.readConversation('char', 'chat'))!.value.message.at(-1)?.data).toBe('synthetic-9999')
+    expect((await store.readConversation('char', 'chat'))!.value.message.at(-1)?.data).toBe(`synthetic-${TURNS - 1}`)
     recoverInterruptedReroll(interrupted!, null)
-    expect(interrupted!.message.at(-1)?.data).toBe('synthetic-9999')
+    expect(interrupted!.message.at(-1)?.data).toBe(`synthetic-${TURNS - 1}`)
     fail = false
     expect(await generateResponseCandidate(options)).toBe(true)
-    expect(chat.message.at(-1)?.chatId).toBe('m-9999')
+    expect(chat.message.at(-1)?.chatId).toBe(`m-${TURNS - 1}`)
     moveResponseCandidate(chat, lease.session, -1, options.createId)
     await runtime.flushPendingData('synthetic-select')
-    expect(read.mock.calls.every(([, limit]) => limit < 10_000)).toBe(true)
+    expect(read.mock.calls.every(([, limit]) => limit < TURNS)).toBe(true)
     lease.release()
     const reopened = (await store.readConversation('char', 'chat'))!.value
     expect(reopened.message.at(-1)?.responseVariants?.candidates).toHaveLength(2)

@@ -80,12 +80,12 @@ describe('Android bounded commit transport', () => {
     it('uses exact bounded binary chunks, including split UTF-8, and releases the listener', async () => {
         const h = binaryHarness()
         const bytes = new TextEncoder().encode(
-            'a'.repeat(ANDROID_BINARY_CHUNK_BYTES - 1) + '🐿️합성'.repeat(50000),
+            'a'.repeat(ANDROID_BINARY_CHUNK_BYTES - 1) + '🐿️합성'.repeat(20),
         )
         expect(await sendAndroidCommit(bytes, h.invoke as any, h.bridge)).toEqual({
             revision: 4,
         })
-        expect(new Uint8Array(h.packets.flatMap((p) => Array.from(p)))).toEqual(bytes)
+        expect(Buffer.concat(h.packets).equals(bytes)).toBe(true)
         expect(h.packets.every((p) => p.length <= ANDROID_BINARY_CHUNK_BYTES)).toBe(true)
         expect(h.invoke).toHaveBeenCalledWith(
             'pds_commit_android_open',

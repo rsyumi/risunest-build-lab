@@ -5,7 +5,7 @@ import { beforeEach, expect, test, vi } from 'vitest'
 import type { Database, Message, character, customscript } from '../../../storage/database.svelte'
 import type { ChatScreenshotRenderContext } from '../../../chatScreenshotRange'
 
-vi.mock('../../../platform', () => ({ isTauri: false, isNodeServer: false }))
+vi.mock('../../../platform', async () => (await import('../../../platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 
 const live = vi.hoisted(() => ({
     database: {} as Database,

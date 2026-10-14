@@ -424,8 +424,7 @@ async function prepareGenerationHistoryWindow(
             if (
                 !isTargetCurrent()
                 || getActiveConversationSession() !== session
-                || !session.isActive
-                || session.version !== version
+                || !session.isContentUnchangedSince(version)
             ) throw new PersistentMutationFencedError()
         }
         prepared = await select(

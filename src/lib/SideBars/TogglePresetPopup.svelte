@@ -25,13 +25,17 @@
         pickToggleValues,
         sanitizeToggleValues,
         snapshotToggleValues,
+        type ToggleValues,
     } from 'src/ts/toggleBindings'
     import SwitchInput from '../UI/GUI/SwitchInput.svelte'
 
     interface Props {
         close: () => void
+        values?: ToggleValues
+        onApply?: (values: ToggleValues, keys: readonly string[]) => void
     }
-    let { close }: Props = $props()
+    let { close, values, onApply }: Props = $props()
+    let displayedValues = $derived(values ?? DBState.db.globalChatVariables)
     type Preset = NonNullable<typeof DBState.db.togglePresets>[number]
 
     const titleId = $props.id()
@@ -52,7 +56,7 @@
         DBState.db.togglePresets ??= []
         return DBState.db.togglePresets
     }
-    const currentValues = () => pickToggleValues(DBState.db.globalChatVariables, currentToggleKeys())
+    const currentValues = () => pickToggleValues(displayedValues, currentToggleKeys())
     async function guarded(work: () => Promise<void>) {
         busy++
         try {
@@ -67,12 +71,14 @@
 
     const apply = (preset: Preset) =>
         guarded(async () => {
+            const originalValues = displayedValues
             const mismatch = preset.promptPresetName !== promptPresetName
             const message = mismatch
                 ? language.applyTogglePresetMismatchConfirm
                 : language.applyTogglePresetConfirm
-            if (!(await alertConfirm(message))) return
-            applyToggleValues(DBState.db.globalChatVariables, preset.values, currentToggleKeys())
+            if (!(await alertConfirm(message)) || displayedValues !== originalValues) return
+            if (onApply) onApply(preset.values, currentToggleKeys())
+            else applyToggleValues(DBState.db.globalChatVariables, preset.values, currentToggleKeys())
             alertToast(language.togglePresetApplied(preset.name))
             close()
         })
@@ -169,7 +175,7 @@
         guarded(async () => {
             if (DBState.db.defaultToggleValues === undefined) {
                 if (!(await alertConfirm(language.saveDefaultTogglesConfirm))) return
-                DBState.db.defaultToggleValues = snapshotToggleValues(DBState.db.globalChatVariables)
+                DBState.db.defaultToggleValues = snapshotToggleValues(displayedValues)
                 alertToast(language.defaultTogglesSaved)
                 return
             }
@@ -178,7 +184,7 @@
                 language.defaultTogglesManage,
             )
             if (choice === '0') {
-                DBState.db.defaultToggleValues = snapshotToggleValues(DBState.db.globalChatVariables)
+                DBState.db.defaultToggleValues = snapshotToggleValues(displayedValues)
                 alertToast(language.defaultTogglesSaved)
             } else if (choice === '1') {
                 DBState.db.defaultToggleValues = undefined

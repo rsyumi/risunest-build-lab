@@ -7,9 +7,9 @@ import { nativePersistentRevisionLease } from '../nativePersistentExport'
 import {
     RevisionConflictError,
     SnapshotReleasedError,
-    type PersistentDataStore,
-    type PersistentRevisionLease,
+    type PersistentRoot,
 } from '../persistentDataStore'
+import { createLeaseStub, createStoreStub } from '../persistentDataStore.testSupport'
 import { decodeRisuSave, encodeRisuSaveBlock, RisuSaveType } from '../risuSave'
 import {
     streamRisuSaveFromLease,
@@ -35,7 +35,7 @@ vi.mock('../database.svelte', () => ({
     presetTemplate: {},
 }))
 vi.mock('../../globalApi.svelte', () => ({ forageStorage: {} }))
-vi.mock('src/ts/platform', () => ({ isTauri: false }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 
 async function concatenate(chunks: AsyncIterable<Uint8Array>): Promise<Uint8Array> {
     const values: Uint8Array[] = []
@@ -261,9 +261,9 @@ describe('RisuSave persistent store adapter', () => {
             root: { ...root, username: 'Committed after external lease expiry' },
         })
 
-        const expiredLeaseStore = {
+        const expiredLeaseStore = createStoreStub({
             acquireRevision: async () => lease,
-        } as unknown as PersistentDataStore
+        })
         await withFlushedRisuSaveExport(
             {
                 store: expiredLeaseStore,
@@ -541,7 +541,7 @@ describe('RisuSave persistent store adapter', () => {
         const release = vi.fn()
             .mockRejectedValueOnce(releaseError)
             .mockResolvedValueOnce(undefined)
-        const lease = { release } as unknown as PersistentRevisionLease
+        const lease = createLeaseStub({ release })
         const store = { acquireRevision: vi.fn(async () => lease) }
 
         await expect(withFlushedRisuSaveExport({
@@ -562,12 +562,12 @@ describe('RisuSave persistent store adapter', () => {
         const release = vi.fn()
             .mockRejectedValueOnce(new Error('lease cleanup failed'))
             .mockResolvedValueOnce(undefined)
-        const lease = {
+        const lease = createLeaseStub({
             readRoot: vi.fn(async () => {
                 throw exportError
             }),
             release,
-        } as unknown as PersistentRevisionLease
+        })
         const store = { acquireRevision: vi.fn(async () => lease) }
 
         await expect(concatenate(streamRisuSaveFromStore(
@@ -578,10 +578,10 @@ describe('RisuSave persistent store adapter', () => {
     })
 
     it('rejects a reader whose root reports a different revision before yielding bytes', async () => {
-        const lease = {
+        const lease = createLeaseStub({
             revision: 4,
-            readRoot: vi.fn(async () => ({ revision: 5, value: {} })),
-        } as unknown as PersistentRevisionLease
+            readRoot: vi.fn(async () => ({ revision: 5, value: {} as PersistentRoot })),
+        })
         const iterator = streamRisuSaveFromLease(lease)[Symbol.asyncIterator]()
 
         await expect(iterator.next()).rejects.toThrow('Root returned revision 5, expected 4')
@@ -613,11 +613,10 @@ describe('RisuSave persistent store adapter', () => {
 
     it('exposes the native file boundary only for a native-capable pinned lease', async () => {
         const release = vi.fn(async () => undefined)
-        const lease = {
-            revision: 12,
-            [nativePersistentRevisionLease]: 'native-lease-12',
-            release,
-        } as unknown as PersistentRevisionLease
+        const lease = createLeaseStub(
+            { revision: 12, release },
+            { [nativePersistentRevisionLease]: 'native-lease-12' },
+        )
         const store = {
             acquireRevision: vi.fn(async () => lease),
         }

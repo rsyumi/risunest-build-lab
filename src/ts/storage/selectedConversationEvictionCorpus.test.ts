@@ -21,19 +21,20 @@ import { executeRegexPlanSync, getRegexExecutionPlan } from '../process/regexExe
 import type { ChatScreenshotRenderContext } from '../chatScreenshotRange'
 import type { Chat, Database, Message, character } from './database.svelte'
 import { IndexedDbPersistentDataStore } from './indexedDbPersistentDataStore'
-import { RevisionConflictError, type WorkingSetCommit } from './persistentDataStore'
+import { CONVERSATION_RANGE_MAX_LIMIT, RevisionConflictError, type WorkingSetCommit } from './persistentDataStore'
 import {
     createPersistentDataRuntime,
 } from './persistentDataRuntime'
 import { createPluginDatabaseAccess } from '../plugins/pluginDatabaseAccess'
-
-const INITIAL_MESSAGE_COUNT = 10_000
 import { createEvictionFixture, makeConversation, VIEWPORT_ROW_BUDGET } from './tests/selectedConversationEvictionFixture'
+
+const INITIAL_MESSAGE_COUNT = CONVERSATION_RANGE_MAX_LIMIT + 1
+const DUPLICATE_POSITIONS = [100, 3_000]
 
 const interfaceMockModules = [
     '../parser/parser.svelte', '../parser/chatML', '../alert', '../globalApi.svelte',
     '../platform', '../tokenizer', '../util', './database.svelte', '../stores.svelte',
-    './persistentDataRuntime.svelte', '../../lang', '../process/modules',
+    './persistentDataRuntime.svelte', '../process/modules',
     '../process/files/inlays', '../process/lorebook.svelte', '../process/memory/hypamemory',
     '../process/request/request', '../process/stableDiff', '../process/luaRuntime',
     '../process/scripts', '../process/triggers', '../process/command',
@@ -126,8 +127,8 @@ async function waitForWindowed(
 }
 
 describe('selected conversation eviction correctness corpus', () => {
-    it('matches a complete-owner oracle across forced 10,000-turn demotion cycles', async () => {
-        const initialConversation = makeConversation()
+    it('matches a complete-owner oracle across forced demotion cycles longer than one range page', async () => {
+        const initialConversation = makeConversation(INITIAL_MESSAGE_COUNT, DUPLICATE_POSITIONS)
         const oracle = structuredClone(initialConversation)
         const fixture = await createEvictionFixture(initialConversation)
         const { store, initial, state, runtime, selectedConversation, backgroundErrors } = fixture
@@ -283,12 +284,12 @@ describe('selected conversation eviction correctness corpus', () => {
         )
         await mutateComplete(
             'edit',
-            (session) => session.edit(session.locate(8_888), {
-                ...session.readMessage(session.locate(8_888)),
+            (session) => session.edit(session.locate(3_888), {
+                ...session.readMessage(session.locate(3_888)),
                 data: 'edited far turn',
                 saying: 'edit metadata',
             }),
-            () => { oracle.message[8_888] = { ...oracle.message[8_888], data: 'edited far turn', saying: 'edit metadata' } },
+            () => { oracle.message[3_888] = { ...oracle.message[3_888], data: 'edited far turn', saying: 'edit metadata' } },
         )
         await mutateComplete(
             'delete',
@@ -301,7 +302,7 @@ describe('selected conversation eviction correctness corpus', () => {
         const firstDuplicate = await queryChatMessageTargetById(context, 'duplicate-anchor', 'first')
         const lastDuplicate = await queryChatMessageTargetById(context, 'duplicate-anchor', 'last')
         expect(firstDuplicate).toMatchObject({ absoluteIndex: 99, message: oracle.message[99] })
-        expect(lastDuplicate).toMatchObject({ absoluteIndex: 8_999, message: oracle.message[8_999] })
+        expect(lastDuplicate).toMatchObject({ absoluteIndex: 2_999, message: oracle.message[2_999] })
         await assertWindowed('shifted anchored queries')
 
         const branchEnd = 257
@@ -381,7 +382,7 @@ describe('selected conversation eviction correctness corpus', () => {
             }),
         )
 
-        const bookmarkTarget = await queryChatMessageTargetById(context, 'message-9001')
+        const bookmarkTarget = await queryChatMessageTargetById(context, 'message-3901')
         expect(bookmarkTarget?.kind).toBe('persistent')
         const bookmarkLease = await runtime.acquireCompleteConversation(
             'bookmark',
@@ -393,15 +394,15 @@ describe('selected conversation eviction correctness corpus', () => {
             name: 'Far bookmark',
         })
         bookmarkLease.release()
-        oracle.bookmarks = ['message-9001']
-        oracle.bookmarkNames = { 'message-9001': 'Far bookmark' }
+        oracle.bookmarks = ['message-3901']
+        oracle.bookmarkNames = { 'message-3901': 'Far bookmark' }
         await runtime.flushPendingData('bookmark-persisted')
         expectedRevision += 1
         await assertWindowed('bookmark')
-        const renameTarget = await queryChatMessageTargetById(context, 'message-9001')
+        const renameTarget = await queryChatMessageTargetById(context, 'message-3901')
         await expect(renameCapturedBookmark(renameTarget!, context, async () => 'Renamed bookmark'))
             .resolves.toBe(true)
-        oracle.bookmarkNames['message-9001'] = 'Renamed bookmark'
+        oracle.bookmarkNames['message-3901'] = 'Renamed bookmark'
         await runtime.flushPendingData('bookmark-rename-persisted')
         expectedRevision += 1
         await assertWindowed('bookmark rename')
@@ -509,10 +510,7 @@ describe('selected conversation eviction correctness corpus', () => {
         )
         onTestFinished(() => luaOperation.release())
         expect(luaOperation.mode).toBe('compatibility')
-        vi.doMock('../parser/parser.svelte', () => ({
-            hasher: vi.fn(),
-            risuChatParser: (value: string) => value,
-        }))
+        vi.doMock('../parser/parser.svelte', async () => (await import('../parser/parser.testSupport')).parserStubModule({ hasher: vi.fn() }))
         vi.doMock('../alert', () => ({
             alertConfirm: vi.fn(),
             alertError: vi.fn(),
@@ -521,11 +519,7 @@ describe('selected conversation eviction correctness corpus', () => {
             alertSelect: vi.fn(),
         }))
         vi.doMock('../globalApi.svelte', () => ({ fetchNative: vi.fn(), readImage: vi.fn() }))
-        vi.doMock('../platform', () => ({
-            isTauriMobile: true,
-            isTauri: false,
-            isMobile: false,
-        }))
+        vi.doMock('../platform', async () => (await import('../platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
         vi.doMock('../tokenizer', () => ({ tokenize: vi.fn() }))
         vi.doMock('../util', () => ({
             asBuffer: vi.fn(),
@@ -660,10 +654,9 @@ describe('selected conversation eviction correctness corpus', () => {
             },
             tokenize: vi.fn(async () => 1), tokenizeNum: vi.fn(async () => []),
         }))
-        vi.doMock('../../lang', () => ({ language: { errors: {} } }))
         vi.doMock('../alert', () => ({ alertError: vi.fn(), alertToast: vi.fn() }))
         vi.doMock('../parser/chatML', () => ({ parseChatML: (value: string) => value }))
-        vi.doMock('../parser/parser.svelte', () => ({ risuChatParser: (value: string) => value }))
+        vi.doMock('../parser/parser.svelte', async () => (await import('../parser/parser.testSupport')).parserStubModule())
         vi.doMock('../util', () => ({
             checkNullish: (value: unknown) => value == null,
             findCharacterbyId: () => fixture.workingCopy.characters[0],
@@ -784,7 +777,7 @@ describe('selected conversation eviction correctness corpus', () => {
         }))
         vi.doMock('../process/modules', () => ({ getModuleTriggers: () => [] }))
         vi.doMock('../tokenizer', () => ({ tokenize: vi.fn(async () => 0) }))
-        vi.doMock('../parser/parser.svelte', () => ({ risuChatParser: (value: string) => value }))
+        vi.doMock('../parser/parser.svelte', async () => (await import('../parser/parser.testSupport')).parserStubModule())
         vi.doMock('../process/command', () => ({ processMultiCommand: vi.fn() }))
         vi.doMock('../process/request/request', () => ({ requestChatData: vi.fn() }))
         vi.doMock('../process/stableDiff', () => ({ generateAIImage: vi.fn() }))
@@ -838,20 +831,20 @@ describe('selected conversation eviction correctness corpus', () => {
             renderContext: screenshotRenderContext(fixture.workingCopy.characters[0] as character),
         }, runtime)
         onTestFinished(() => screenshot.close())
-        const screenshotJob = await screenshot.createJob(9_501, 9_502)
-        expect(screenshotJob.messages).toEqual(oracle.message.slice(9_500, 9_502))
+        const screenshotJob = await screenshot.createJob(3_501, 3_502)
+        expect(screenshotJob.messages).toEqual(oracle.message.slice(3_500, 3_502))
         await screenshot.close()
         await assertWindowed('screenshot source lease')
 
         const search = await queryChatMessageTargetsByIds(context, [
             // Keep a mix of near, far, and generated IDs.
             'message-3',
-            'message-9001',
+            'message-3901',
             'op-trigger',
         ])
         expect(search.map((target) => target.message)).toEqual([
             oracle.message.find((message) => message.chatId === 'message-3'),
-            oracle.message.find((message) => message.chatId === 'message-9001'),
+            oracle.message.find((message) => message.chatId === 'message-3901'),
             oracle.message.find((message) => message.chatId === 'op-trigger'),
         ])
         await assertWindowed('anchored search')
@@ -878,7 +871,6 @@ describe('selected conversation eviction correctness corpus', () => {
             risuChatParser: (value: string) => value,
         }))
         vi.doMock('../alert', () => ({ alertConfirm: vi.fn() }))
-        vi.doMock('../../lang', () => ({ language: { hypaV3Modal: { unclassified: '' } } }))
         const { captureCurrentHypaMessageById } = await import(
             '../../lib/Others/HypaV3Modal/utils'
         )
@@ -893,10 +885,10 @@ describe('selected conversation eviction correctness corpus', () => {
         )
         const hypaRevisionSpy = vi.spyOn(store, 'acquireRevision')
         const hypaCompleteSpy = vi.spyOn(runtime, 'acquireCompleteConversation')
-        const hypa = await captureCurrentHypaMessageById('message-8888')
+        const hypa = await captureCurrentHypaMessageById('message-3888')
         hypaOwner.chats[hypaChatIndex] = runtimeMetadataShell
         expect(hypa?.kind).toBe('persistent')
-        expect(hypa?.message).toEqual(oracle.message.find((message) => message.chatId === 'message-8888'))
+        expect(hypa?.message).toEqual(oracle.message.find((message) => message.chatId === 'message-3888'))
         expect(hypaRevisionSpy).toHaveBeenCalledWith(expectedRevision)
         expect(hypaCompleteSpy).not.toHaveBeenCalled()
         hypaRevisionSpy.mockRestore()
@@ -908,7 +900,6 @@ describe('selected conversation eviction correctness corpus', () => {
             './persistentDataRuntime.svelte',
             '../process/scripts',
             '../alert',
-            '../../lang',
         ]) vi.doUnmock(moduleId)
         vi.resetModules()
 
@@ -926,7 +917,7 @@ describe('selected conversation eviction correctness corpus', () => {
             .toEqual(oracle.message.map((message) => message.chatId))
         const finalSource = runtime.getActiveConversationViewportSource()!
         await finalSource.ensureRange({
-            startIndex: 9_000,
+            startIndex: 3_000,
             limit: 256,
             reason: 'viewport',
         })

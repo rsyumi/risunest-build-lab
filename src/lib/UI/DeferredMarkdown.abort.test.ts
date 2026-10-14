@@ -1,7 +1,7 @@
 import { expect, test, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 const state = vi.hoisted(() => ({ reject: null as ((error: unknown) => void) | null }))
-vi.mock('src/ts/parser/parser.svelte', () => ({
+vi.mock('src/ts/parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule({
     ParseMarkdown: vi.fn(
         () =>
             new Promise((_resolve, reject) => {

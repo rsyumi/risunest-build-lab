@@ -10,50 +10,32 @@ const fixture = vi.hoisted(() => ({
 }))
 
 // The synthetic database already supplies the generation fields; import migration is outside this fixture.
-vi.mock('src/ts/storage/databasePreparation', async (importOriginal) => ({
-    ...await importOriginal<typeof import('../storage/databasePreparation')>(),
-    prepareDatabaseForPersistence: async (input: unknown) => structuredClone(input),
-}))
-vi.mock('src/ts/storage/deviceSettings', async (importOriginal) => {
-    const original = await importOriginal<typeof import('../storage/deviceSettings')>()
-    return { ...original, getDeviceSettings: () => ({
-        ...original.getDeviceSettings(), generationHistoryLimitEnabled: fixture.historyLimit,
-        generationHistoryLimitMultiplier: 2,
-    }) }
-})
-vi.mock('src/ts/storage/persistentDataStoreFactory', () => ({ getPersistentDataStore: () => fixture.store }))
-vi.mock('src/ts/parser/parser.svelte', () => ({
-    assetRegex: /$^/,
-    hasher: vi.fn(async () => 'hash'),
-    parseMarkdownSafe: (value: string) => value,
-    ParseMarkdown: vi.fn(async (value: string) => value),
-    risuChatParser: (value: string) => value,
-}))
+vi.mock('src/ts/storage/databasePreparation', async (importOriginal) => (await import('../process/tests/sendChatTestHarness')).copyingDatabasePreparationModule(importOriginal))
+vi.mock('src/ts/storage/deviceSettings', async (importOriginal) => (await import('../process/tests/sendChatTestHarness')).historyWindowDeviceSettingsModule(importOriginal, () => fixture.historyLimit))
+vi.mock('src/ts/storage/persistentDataStoreFactory', async () => (await import('../process/tests/sendChatTestHarness')).persistentDataStoreFactoryModule(() => fixture.store))
+vi.mock('src/ts/parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
 vi.mock('src/ts/tokenizer', async () => (await import('../process/tests/sendChatTestHarness')).tokenizerModule({
     tokenize: vi.fn(async () => 10),
     encodeWithTokenizer: vi.fn(async () => new Array(10).fill(0)),
 }))
-vi.mock('src/lang', async () => (await import('../process/tests/sendChatTestHarness')).langModule())
 vi.mock('src/ts/alert', async () => (await import('../process/tests/sendChatTestHarness')).alertModule())
 vi.mock('src/ts/parser/chatML', async () => (await import('../process/tests/sendChatTestHarness')).chatMLModule())
 vi.mock('src/ts/process/lorebook.svelte', async () => (await import('../process/tests/sendChatTestHarness')).lorebookModule())
 // The provider request: `beforeRequest` replacers run where `requestChatData` runs them, then the reply.
-vi.mock('src/ts/process/request/request', () => ({
-    requestChatData: vi.fn(async (request: { formated: unknown[] }, purpose: string) => {
-        if (purpose === 'emotion') return '|igp'
-        fixture.modelRequests += 1
-        for (const replacer of fixture.replacers) request.formated = await replacer(request.formated, purpose)
-        return {
-            type: 'streaming',
-            result: new ReadableStream<Record<string, string>>({
-                start(controller) {
-                    controller.enqueue({ response: 'answer' })
-                    controller.close()
-                },
-            }),
-        }
-    }),
-}))
+vi.mock('src/ts/process/request/request', async () => (await import('../process/tests/sendChatTestHarness')).requestModule(vi.fn(async (request: { formated: unknown[] }, purpose: string) => {
+    if (purpose === 'emotion') return '|igp'
+    fixture.modelRequests += 1
+    for (const replacer of fixture.replacers) request.formated = await replacer(request.formated, purpose)
+    return {
+        type: 'streaming',
+        result: new ReadableStream<Record<string, string>>({
+            start(controller) {
+                controller.enqueue({ response: 'answer' })
+                controller.close()
+            },
+        }),
+    }
+})))
 vi.mock('src/ts/process/stableDiff', async () => (await import('../process/tests/sendChatTestHarness')).stableDiffModule())
 vi.mock('src/ts/process/scripts', async () => (await import('../process/tests/sendChatTestHarness')).scriptsModule())
 vi.mock('src/ts/process/templates/templates', async () => (await import('../process/tests/sendChatTestHarness')).templatesModule())
@@ -66,14 +48,10 @@ vi.mock('src/ts/process/memory/hypamemory', async () => (await import('../proces
 vi.mock('src/ts/process/embedding/addinfo', async () => (await import('../process/tests/sendChatTestHarness')).addinfoModule())
 vi.mock('src/ts/process/files/inlays', async () => (await import('../process/tests/sendChatTestHarness')).inlaysModule())
 vi.mock('src/ts/process/models/modelString', async () => (await import('../process/tests/sendChatTestHarness')).modelStringModule())
-vi.mock('src/ts/process/inlayScreen', () => ({ runInlayScreen: (_char: unknown, data: string) => ({ text: data }) }))
+vi.mock('src/ts/process/inlayScreen', async () => (await import('../process/tests/sendChatTestHarness')).inlayScreenModule())
 vi.mock('src/ts/process/transformers', async () => (await import('../process/tests/sendChatTestHarness')).transformersModule())
-vi.mock('src/ts/process/memory/hanuraiMemory', () => ({
-    hanuraiMemory: vi.fn(async (chats: unknown, { currentTokens }: { currentTokens: number }) => ({ chats, tokens: currentTokens })),
-}))
-vi.mock('src/ts/process/memory/hypav2', () => ({
-    hypaMemoryV2: vi.fn(async (chats: unknown, currentTokens: number) => ({ chats, currentTokens })),
-}))
+vi.mock('src/ts/process/memory/hanuraiMemory', async () => (await import('../process/tests/sendChatTestHarness')).hanuraiMemoryModule())
+vi.mock('src/ts/process/memory/hypav2', async () => (await import('../process/tests/sendChatTestHarness')).hypav2Module())
 vi.mock('src/ts/process/memory/hypav3', async () => (await import('../process/tests/sendChatTestHarness')).hypav3Module())
 vi.mock('src/ts/process/scriptings', async () => (await import('../process/tests/sendChatTestHarness')).scriptingsModule())
 vi.mock('src/ts/model/modellist', async (importOriginal) => ({
@@ -82,11 +60,9 @@ vi.mock('src/ts/model/modellist', async (importOriginal) => ({
 }))
 vi.mock('src/ts/process/modules', async () => (await import('../process/tests/sendChatTestHarness')).modulesModule())
 vi.mock('src/ts/globalApi.svelte', async () => (await import('../process/tests/sendChatTestHarness')).globalApiModule({ forageStorage: {} }))
-vi.mock('src/ts/plugins/plugins.svelte', () => ({
-    pluginV2: { chatOutput: fixture.outputs, editprocess: new Set(), replacerbeforeRequest: fixture.replacers, replacerafterRequest: new Set() },
-}))
+vi.mock('src/ts/plugins/plugins.svelte', async () => (await import('../process/tests/sendChatTestHarness')).pluginsModule({ chatOutput: fixture.outputs, replacerbeforeRequest: fixture.replacers }))
 vi.mock('src/ts/plugins/pluginDatabaseAccess', async (importOriginal) =>
-    (await import('../process/tests/sendChatTestHarness')).pluginDatabaseAccessModule(importOriginal as () => Promise<Record<string, unknown>>))
+    (await import('../process/tests/sendChatTestHarness')).pluginDatabaseAccessModule(importOriginal))
 vi.mock('src/ts/process/presetChain', async () => (await import('../process/tests/sendChatTestHarness')).presetChainModule())
 
 import type { Database, Message } from '../storage/database.svelte'

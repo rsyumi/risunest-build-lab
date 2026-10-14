@@ -172,16 +172,24 @@ impl SystemLeaseClock {
 }
 impl LeaseClock for SystemLeaseClock {
     fn reading(&self) -> ClockReading {
-        let wall = SystemTime::now().duration_since(UNIX_EPOCH)
-            .ok().and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok());
-        let monotonic = u64::try_from(self.origin.elapsed().as_millis()).ok();
-        let wall_ms = wall.unwrap_or(0);
-        let monotonic_ms = monotonic.unwrap_or(u64::MAX);
+        self.reading_with(|| {
+            let wall = SystemTime::now().duration_since(UNIX_EPOCH)
+                .ok().and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok());
+            let monotonic = u64::try_from(self.origin.elapsed().as_millis()).ok();
+            (wall, monotonic)
+        })
+    }
+}
+impl SystemLeaseClock {
+    fn reading_with(&self, sample: impl FnOnce() -> (Option<u64>, Option<u64>)) -> ClockReading {
         let mut state = self.state.lock().unwrap_or_else(|poison| {
             let mut state = poison.into_inner();
             state.invalidate();
             state
         });
+        let (wall, monotonic) = sample();
+        let wall_ms = wall.unwrap_or(0);
+        let monotonic_ms = monotonic.unwrap_or(u64::MAX);
         state.observe_reading(wall_ms, monotonic_ms);
         ClockReading {
             wall_ms,
@@ -976,6 +984,32 @@ mod tests {
         assert_eq!(state.verified_at, None);
         state.observe_reading(NOW, 3 * MINUTE_MS);
         assert_eq!(state.epoch, 2);
+    }
+
+    #[test]
+    fn c_clock_sampling_and_state_updates_share_the_same_lock() {
+        let clock = SystemLeaseClock::default();
+        for elapsed in [0, 1000, MINUTE_MS] {
+            let reading = clock.reading_with(|| {
+                assert!(matches!(clock.state.try_lock(), Err(std::sync::TryLockError::WouldBlock)),
+                    "another reader must not record a later sample before this sample is recorded");
+                (Some(NOW + elapsed), Some(elapsed))
+            });
+            assert_eq!(reading.wall_ms, NOW + elapsed);
+            assert_eq!(reading.monotonic_ms, elapsed);
+            assert_eq!(reading.epoch, 0);
+        }
+    }
+
+    #[test]
+    fn c_clock_discontinuity_boundary_is_one_second_in_both_directions() {
+        for (offset, trusted) in [(-1001_i64, false), (-1000, true), (1000, true), (1001, false)] {
+            let mut state = ClockState { previous: None, verified_at: Some(0), foreground: true, epoch: 0 };
+            state.observe_reading(NOW, 0);
+            state.observe_reading((NOW as i64 + MINUTE_MS as i64 + offset) as u64, MINUTE_MS);
+            assert_eq!(state.verified_at.is_some(), trusted, "{offset}");
+            assert_eq!(state.epoch, u64::from(!trusted), "{offset}");
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import type { Chat, Message } from './database.svelte'
 import { CONVERSATION_RANGE_MAX_LIMIT, type DataRevision } from './persistentDataStore'
-import { safeStructuredClone } from '../polyfill'
+import { safeStructuredClone } from '../safeStructuredClone'
 import { replaceArrayRange } from '../arrayRange'
 import {
     SegmentedConversationResidency,
@@ -96,9 +96,17 @@ export interface ActiveConversationBackwardScan {
     sessionVersion: number
 }
 
+export interface ActiveConversationVariableUpdate {
+    /** Changed chat variable names, without the `$` storage prefix. */
+    keys: readonly string[]
+    origin?: 'display'
+}
+
 export interface ActiveConversationMutationEvent {
     /** Display-listener variable writes persist without recursively invalidating that display. */
     displayVariableUpdate?: boolean
+    /** Set only for chat-variable commits, which leave every message unchanged. */
+    variableUpdate?: ActiveConversationVariableUpdate
     characterId: string
     conversationId: string
     sessionToken: ConversationSessionToken
@@ -211,7 +219,6 @@ export class ActiveConversationCompatibilitySnapshot {
 interface MessageLocatorIdentity {
     type: 'message'
     absoluteIndex: number
-    sessionVersion: number
     messages: readonly Message[]
     message: Message
 }
@@ -219,7 +226,6 @@ interface MessageLocatorIdentity {
 interface ConversationPositionIdentity {
     type: 'position'
     absoluteIndex: number
-    sessionVersion: number
     messages: readonly Message[]
     before?: Message
     after?: Message
@@ -230,6 +236,10 @@ type ConversationTokenIdentity = MessageLocatorIdentity | ConversationPositionId
 let nextConversationSessionToken = 0
 let nextConversationLocatorToken = 0
 
+/**
+ * Tokens for one content version: a content commit replaces or clears the registry,
+ * a variable-only commit keeps it, so a token stays valid until the content changes.
+ */
 class ConversationLocatorRegistry {
     readonly sessionToken: ConversationSessionToken
     private readonly identities = new Map<string, ConversationTokenIdentity>()
@@ -247,7 +257,6 @@ class ConversationLocatorRegistry {
     registerMessage(
         messages: readonly Message[],
         absoluteIndex: number,
-        sessionVersion: number,
         message: Message,
     ): MessageLocatorToken {
         const currentToken = this.messageTokens.get(absoluteIndex)
@@ -258,7 +267,6 @@ class ConversationLocatorRegistry {
             currentToken !== undefined &&
             currentIdentity?.type === 'message' &&
             currentIdentity.absoluteIndex === absoluteIndex &&
-            currentIdentity.sessionVersion === sessionVersion &&
             currentIdentity.messages === messages &&
             currentIdentity.message === message
         ) return currentToken
@@ -269,7 +277,6 @@ class ConversationLocatorRegistry {
         this.identities.set(token, {
             type: 'message',
             absoluteIndex,
-            sessionVersion,
             messages,
             message,
         })
@@ -279,7 +286,6 @@ class ConversationLocatorRegistry {
     registerPosition(
         messages: readonly Message[],
         absoluteIndex: number,
-        sessionVersion: number,
     ): ConversationPositionToken {
         const currentToken = this.positionTokens.get(absoluteIndex)
         const currentIdentity = currentToken === undefined
@@ -289,7 +295,6 @@ class ConversationLocatorRegistry {
             currentToken !== undefined &&
             currentIdentity?.type === 'position' &&
             currentIdentity.absoluteIndex === absoluteIndex &&
-            currentIdentity.sessionVersion === sessionVersion &&
             currentIdentity.messages === messages &&
             currentIdentity.before === messages[absoluteIndex - 1] &&
             currentIdentity.after === messages[absoluteIndex]
@@ -301,7 +306,6 @@ class ConversationLocatorRegistry {
         this.identities.set(token, {
             type: 'position',
             absoluteIndex,
-            sessionVersion,
             messages,
             before: messages[absoluteIndex - 1],
             after: messages[absoluteIndex],
@@ -314,7 +318,6 @@ class ConversationLocatorRegistry {
         const identity = this.identities.get(locator.locatorToken)
         return identity?.type === 'message' &&
             identity.absoluteIndex === locator.absoluteIndex &&
-            identity.sessionVersion === locator.sessionVersion &&
             identity.messages === messages &&
             identity.message === messages[locator.absoluteIndex]
     }
@@ -327,7 +330,6 @@ class ConversationLocatorRegistry {
         const identity = this.identities.get(position.positionToken)
         return identity?.type === 'position' &&
             identity.absoluteIndex === position.absoluteIndex &&
-            identity.sessionVersion === position.sessionVersion &&
             identity.messages === messages &&
             identity.before === messages[position.absoluteIndex - 1] &&
             identity.after === messages[position.absoluteIndex]
@@ -499,6 +501,14 @@ export function conversationMetadataEqual(
     return valuesEqual(left, right)
 }
 
+/** Compares metadata without the chat and global variable maps, which may change underneath a holder. */
+export function conversationContentMetadataEqual(
+    left: ConversationMetadata,
+    right: ConversationMetadata,
+): boolean {
+    return valuesEqual(withoutVariableMaps(left), withoutVariableMaps(right))
+}
+
 export function replaceConversationMetadata(
     chat: Chat,
     metadata: ConversationMetadata,
@@ -510,6 +520,57 @@ export function replaceConversationMetadata(
         }
     }
     Object.assign(chatRecord, safeStructuredClone(metadata))
+}
+
+const VARIABLE_METADATA_KEYS = ['scriptstate', 'GLGlobalVariables'] as const
+
+interface VariableOnlyCommit {
+    display: boolean
+    update?: ActiveConversationVariableUpdate
+}
+
+function withoutVariableMaps(metadata: ConversationMetadata): ConversationMetadata {
+    return { ...metadata, scriptstate: undefined, GLGlobalVariables: undefined }
+}
+
+function asVariableRecord(value: unknown): Record<string, unknown> {
+    return value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : {}
+}
+
+/** Applies the keys a caller changed from `expected` to `next` onto the live map. */
+function mergeVariableMap(live: unknown, expected: unknown, next: unknown): unknown {
+    if (valuesEqual(expected, next)) return live
+    if (next !== undefined && asVariableRecord(next) !== next) return next
+    const expectedRecord = asVariableRecord(expected)
+    const nextRecord = asVariableRecord(next)
+    const merged: Record<string, unknown> = { ...asVariableRecord(live) }
+    for (const [key, value] of Object.entries(nextRecord)) {
+        if (
+            !Object.prototype.hasOwnProperty.call(expectedRecord, key) ||
+            !valuesEqual(expectedRecord[key], value)
+        ) merged[key] = value
+    }
+    for (const key of Object.keys(expectedRecord)) {
+        if (!Object.prototype.hasOwnProperty.call(nextRecord, key)) delete merged[key]
+    }
+    if (next === undefined && Object.keys(merged).length === 0) return undefined
+    return merged
+}
+
+function mergeOperationVariables(
+    live: ConversationMetadata,
+    expected: ConversationMetadata,
+    next: ConversationMetadata,
+): ConversationMetadata {
+    const merged: ConversationMetadata = { ...next }
+    for (const key of VARIABLE_METADATA_KEYS) {
+        const value = mergeVariableMap(live[key], expected[key], next[key])
+        if (value === undefined) delete merged[key]
+        else merged[key] = value
+    }
+    return merged
 }
 
 function createLocator(
@@ -531,7 +592,6 @@ function createLocator(
         locatorToken: locatorRegistry.registerMessage(
             messages,
             absoluteIndex,
-            sessionVersion,
             message,
         ),
     }
@@ -557,16 +617,21 @@ function createPosition(
         positionToken: locatorRegistry.registerPosition(
             messages,
             absoluteIndex,
-            sessionVersion,
         ),
     }
     return position
 }
 
+/** Locators from any version since the last content change still address the same messages. */
+interface AcceptedLocatorVersions {
+    oldest: number
+    current: number
+}
+
 function validateLocator(
     conversationId: string,
     messages: readonly Message[],
-    sessionVersion: number,
+    versions: AcceptedLocatorVersions,
     locator: MessageLocator,
     locatorRegistry: ConversationLocatorRegistry,
     sourceMessages?: readonly Message[],
@@ -577,8 +642,11 @@ function validateLocator(
             `Message locator belongs to ${locator.conversationId}, not ${conversationId}`,
         )
     }
-    if (locator.sessionVersion !== sessionVersion) {
-        throw new ConversationSessionStaleError(locator.sessionVersion, sessionVersion)
+    if (
+        locator.sessionVersion < versions.oldest ||
+        locator.sessionVersion > versions.current
+    ) {
+        throw new ConversationSessionStaleError(locator.sessionVersion, versions.current)
     }
     validateIndex(locator.absoluteIndex, 'Message locator index')
     const message = messages[locator.absoluteIndex]
@@ -606,7 +674,7 @@ function validateLocator(
 function validatePosition(
     conversationId: string,
     messages: readonly Message[],
-    sessionVersion: number,
+    versions: AcceptedLocatorVersions,
     position: ConversationPosition,
     locatorRegistry: ConversationLocatorRegistry,
     sourceMessages?: readonly Message[],
@@ -617,8 +685,11 @@ function validatePosition(
             `Conversation position belongs to ${position.conversationId}, not ${conversationId}`,
         )
     }
-    if (position.sessionVersion !== sessionVersion) {
-        throw new ConversationSessionStaleError(position.sessionVersion, sessionVersion)
+    if (
+        position.sessionVersion < versions.oldest ||
+        position.sessionVersion > versions.current
+    ) {
+        throw new ConversationSessionStaleError(position.sessionVersion, versions.current)
     }
     validateIndex(position.absoluteIndex, 'Conversation position index')
     if (position.absoluteIndex > messages.length) {
@@ -677,6 +748,7 @@ export class ActiveConversationTransaction {
     private currentBookmarkNames?: Record<string, string>
     private bookmarkMetadataChanged = false
     private currentVersion: number
+    private oldestAcceptedVersion: number
     private readonly locatorRegistry: ConversationLocatorRegistry
     private readonly commandNames: ActiveConversationCommandName[] = []
     private readonly mutationRanges: ActiveConversationMutationRange[] = []
@@ -690,6 +762,7 @@ export class ActiveConversationTransaction {
         private readonly storeRevision: DataRevision,
         private readonly sourceLocatorRegistry: ConversationLocatorRegistry,
         sessionVersion: number,
+        contentVersion: number,
     ) {
         this.currentMessages = [...sourceMessages]
         this.currentBookmarks = sourceConversation.bookmarks === undefined
@@ -699,7 +772,12 @@ export class ActiveConversationTransaction {
             ? undefined
             : { ...sourceConversation.bookmarkNames }
         this.currentVersion = sessionVersion
+        this.oldestAcceptedVersion = contentVersion
         this.locatorRegistry = sourceLocatorRegistry.fork()
+    }
+
+    private get acceptedVersions(): AcceptedLocatorVersions {
+        return { oldest: this.oldestAcceptedVersion, current: this.currentVersion }
     }
 
     get version(): number {
@@ -795,7 +873,7 @@ export class ActiveConversationTransaction {
         validateLocator(
             this.conversationId,
             this.currentMessages,
-            this.currentVersion,
+            this.acceptedVersions,
             locator,
             this.locatorRegistry,
             this.sourceMessages,
@@ -817,7 +895,7 @@ export class ActiveConversationTransaction {
         const message = validateLocator(
             this.conversationId,
             this.currentMessages,
-            this.currentVersion,
+            this.acceptedVersions,
             locator,
             this.locatorRegistry,
             this.sourceMessages,
@@ -871,7 +949,7 @@ export class ActiveConversationTransaction {
         const message = validateLocator(
             this.conversationId,
             this.currentMessages,
-            this.currentVersion,
+            this.acceptedVersions,
             locator,
             this.locatorRegistry,
             this.sourceMessages,
@@ -892,7 +970,7 @@ export class ActiveConversationTransaction {
         validateLocator(
             this.conversationId,
             this.currentMessages,
-            this.currentVersion,
+            this.acceptedVersions,
             locator,
             this.locatorRegistry,
             this.sourceMessages,
@@ -910,7 +988,7 @@ export class ActiveConversationTransaction {
         validateLocator(
             this.conversationId,
             this.currentMessages,
-            this.currentVersion,
+            this.acceptedVersions,
             locator,
             this.locatorRegistry,
             this.sourceMessages,
@@ -930,7 +1008,7 @@ export class ActiveConversationTransaction {
         validatePosition(
             this.conversationId,
             this.currentMessages,
-            this.currentVersion,
+            this.acceptedVersions,
             position,
             this.locatorRegistry,
             this.sourceMessages,
@@ -964,7 +1042,7 @@ export class ActiveConversationTransaction {
         validateLocator(
             this.conversationId,
             this.currentMessages,
-            this.currentVersion,
+            this.acceptedVersions,
             locator,
             this.locatorRegistry,
             this.sourceMessages,
@@ -1025,7 +1103,7 @@ export class ActiveConversationTransaction {
         validatePosition(
             this.conversationId,
             this.currentMessages,
-            this.currentVersion,
+            this.acceptedVersions,
             position,
             this.locatorRegistry,
             this.sourceMessages,
@@ -1047,6 +1125,7 @@ export class ActiveConversationTransaction {
         messages?: readonly Message[],
     ): void {
         this.currentVersion += 1
+        this.oldestAcceptedVersion = this.currentVersion
         this.locatorRegistry.clear()
         this.commandNames.push(command)
         this.mutationRanges.push({
@@ -1077,6 +1156,8 @@ export class ActiveConversationSession {
     ) => void>()
     private locatorRegistry = new ConversationLocatorRegistry()
     private sessionVersion = 0
+    private lastMessageChangeVersion = 0
+    private lastContentChangeVersion = 0
     private generationContinuationStart = 0
     private persistedSessionVersion = 0
     private currentStoreRevision: DataRevision
@@ -1119,6 +1200,24 @@ export class ActiveConversationSession {
 
     get generationInvalidationVersion(): number {
         return this.generationContinuationStart
+    }
+
+    /** Advances with every commit except one that changes only chat or global variables. */
+    get contentVersion(): number {
+        return this.lastContentChangeVersion
+    }
+
+    /** Whether messages and non-variable metadata are as they were at `version`. */
+    isContentUnchangedSince(version: number): boolean {
+        return (
+            this.active &&
+            version >= this.lastContentChangeVersion &&
+            version <= this.sessionVersion
+        )
+    }
+
+    private get acceptedLocatorVersions(): AcceptedLocatorVersions {
+        return { oldest: this.lastContentChangeVersion, current: this.sessionVersion }
     }
 
     /** Whether a commit of metadata and unknown message fields would be adopted now; it changes nothing. */
@@ -1172,6 +1271,9 @@ export class ActiveConversationSession {
         this.conversation.message = messages
         this.locatorRegistry.clear()
         this.sessionVersion = version
+        this.lastContentChangeVersion = version
+        // Message metadata was replaced too; pending edits must not restore older fields.
+        this.lastMessageChangeVersion = version
         this.persistedSessionVersion = version
         this.currentStoreRevision = revision
         this.notifySubscribers({
@@ -1201,6 +1303,17 @@ export class ActiveConversationSession {
 
     get version(): number {
         return this.sessionVersion
+    }
+
+    /** Advances with message replacements, including metadata; chat-only metadata commits keep it. */
+    get messageVersion(): number {
+        return this.lastMessageChangeVersion
+    }
+
+    /** Reads one chat variable of the live conversation without copying it. */
+    readChatVariable(key: string): unknown {
+        this.assertActive()
+        return this.conversation.scriptstate?.['$' + key]
     }
 
     get persistedVersion(): number {
@@ -1275,7 +1388,7 @@ export class ActiveConversationSession {
         return validateLocator(
             this.conversationId,
             this.conversation.message,
-            this.sessionVersion,
+            this.acceptedLocatorVersions,
             locator,
             this.locatorRegistry,
         )
@@ -1314,7 +1427,7 @@ export class ActiveConversationSession {
         validateLocator(
             this.conversationId,
             this.conversation.message,
-            this.sessionVersion,
+            this.acceptedLocatorVersions,
             locator,
             this.locatorRegistry,
         )
@@ -1368,7 +1481,7 @@ export class ActiveConversationSession {
         const message = validateLocator(
             this.conversationId,
             this.conversation.message,
-            this.sessionVersion,
+            this.acceptedLocatorVersions,
             locator,
             this.locatorRegistry,
         )
@@ -1381,7 +1494,7 @@ export class ActiveConversationSession {
             validateLocator(
                 this.conversationId,
                 this.conversation.message,
-                this.sessionVersion,
+                this.acceptedLocatorVersions,
                 locator,
                 this.locatorRegistry,
             )
@@ -1493,7 +1606,7 @@ export class ActiveConversationSession {
             validateLocator(
                 this.conversationId,
                 this.conversation.message,
-                this.sessionVersion,
+                this.acceptedLocatorVersions,
                 locator,
                 this.locatorRegistry,
             )
@@ -1566,7 +1679,7 @@ export class ActiveConversationSession {
         if (this.transactionActive) {
             throw new Error('Nested conversation session transactions are not supported')
         }
-        if (commit.expectedVersion !== this.sessionVersion) {
+        if (!this.isContentUnchangedSince(commit.expectedVersion)) {
             throw new ConversationSessionStaleError(
                 commit.expectedVersion,
                 this.sessionVersion,
@@ -1580,7 +1693,12 @@ export class ActiveConversationSession {
             for (const [key, value] of Object.entries(this.conversation)) {
                 if (key !== 'message') currentMetadata[key] = value
             }
-            if (!conversationMetadataEqual(commit.expectedMetadata, currentMetadata)) {
+            // Variables written since the caller read them are kept; the caller's own
+            // variable changes are merged per key.
+            if (!conversationMetadataEqual(
+                withoutVariableMaps(commit.expectedMetadata),
+                withoutVariableMaps(currentMetadata),
+            )) {
                 throw new MessageLocatorMismatchError(
                     'Conversation operation metadata baseline changed',
                 )
@@ -1590,11 +1708,17 @@ export class ActiveConversationSession {
                 throw new TypeError('Conversation operation cannot include both range and ranges')
             }
             const ranges = commit.ranges ?? (commit.range === undefined ? [] : [commit.range])
-            const metadataChanged = !conversationMetadataEqual(
+            const nextMetadata = mergeOperationVariables(
+                currentMetadata,
                 commit.expectedMetadata,
                 commit.metadata,
             )
+            const metadataChanged = !conversationMetadataEqual(currentMetadata, nextMetadata)
             if (ranges.length === 0 && !metadataChanged) return
+            const variableOnly = ranges.length === 0 && conversationMetadataEqual(
+                withoutVariableMaps(currentMetadata),
+                withoutVariableMaps(nextMetadata),
+            )
 
             const previousVersion = this.sessionVersion
             const previousMessages = this.conversation.message
@@ -1609,7 +1733,7 @@ export class ActiveConversationSession {
                 validatePosition(
                     this.conversationId,
                     previousMessages,
-                    previousVersion,
+                    this.acceptedLocatorVersions,
                     range.position,
                     previousLocatorRegistry,
                 )
@@ -1677,11 +1801,13 @@ export class ActiveConversationSession {
             }
             if (metadataChanged) commands.push('update-metadata')
 
-            const nextLocatorRegistry = previousLocatorRegistry.fork()
-            nextLocatorRegistry.clear()
+            // A variable-only commit leaves every message in place, so its locators stay valid.
+            const nextLocatorRegistry = variableOnly
+                ? previousLocatorRegistry
+                : previousLocatorRegistry.fork()
             this.conversation.message = nextMessages
             if (metadataChanged) {
-                replaceConversationMetadata(this.conversation, commit.metadata)
+                replaceConversationMetadata(this.conversation, nextMetadata)
             }
             this.sessionVersion = previousVersion + Math.max(1, ranges.length)
             this.locatorRegistry = nextLocatorRegistry
@@ -1699,33 +1825,88 @@ export class ActiveConversationSession {
                                   sessionVersion: this.sessionVersion,
                               },
                           ],
-                    commit.origin === 'display' &&
-                        ranges.length === 0 &&
-                        conversationMetadataEqual(
-                            {
-                                ...previousMetadata,
-                                scriptstate: undefined,
-                                GLGlobalVariables: undefined,
-                            },
-                            {
-                                ...commit.metadata,
-                                scriptstate: undefined,
-                                GLGlobalVariables: undefined,
-                            },
-                        ),
+                    variableOnly ? { display: commit.origin === 'display' } : undefined,
                 )
 
-                previousLocatorRegistry.clear()
+                if (!variableOnly) previousLocatorRegistry.clear()
             } catch (error) {
                 this.conversation.message = previousMessages
                 if (metadataChanged) {
                     replaceConversationMetadata(this.conversation, previousMetadata)
                 }
                 this.sessionVersion = previousVersion
-                nextLocatorRegistry.clear()
+                if (!variableOnly) nextLocatorRegistry.clear()
                 this.locatorRegistry = previousLocatorRegistry
                 throw error
             }
+        } finally {
+            this.transactionActive = false
+        }
+    }
+
+    /**
+     * Writes chat variables, last writer wins per key, regardless of what changed since
+     * the caller read them. Returns the keys whose value changed.
+     */
+    updateChatVariables(
+        changes: ReadonlyMap<string, string>,
+        options: { origin?: 'display' } = {},
+    ): readonly string[] {
+        this.assertActive()
+        if (this.transactionActive) {
+            throw new Error('Nested conversation session transactions are not supported')
+        }
+        const previousScriptstate = this.conversation.scriptstate
+        const changed = [...changes].filter(
+            ([key, value]) => previousScriptstate?.['$' + key] !== value,
+        )
+        if (changed.length === 0) return []
+
+        this.transactionActive = true
+        try {
+            const previousVersion = this.sessionVersion
+            const previousValues = changed.map(([key]) => {
+                const stateKey = '$' + key
+                return [
+                    stateKey,
+                    previousScriptstate !== undefined &&
+                        Object.prototype.hasOwnProperty.call(previousScriptstate, stateKey),
+                    previousScriptstate?.[stateKey],
+                ] as const
+            })
+            const scriptstate = (this.conversation.scriptstate ??= {})
+            for (const [key, value] of changed) scriptstate['$' + key] = value
+            this.sessionVersion = previousVersion + 1
+            try {
+                this.notifyMutation(
+                    previousVersion,
+                    ['update-metadata'],
+                    [{
+                        start: this.conversation.message.length,
+                        deleteCount: 0,
+                        messages: [],
+                        sessionVersion: this.sessionVersion,
+                    }],
+                    {
+                        display: options.origin === 'display',
+                        update: {
+                            keys: changed.map(([key]) => key),
+                            ...(options.origin ? { origin: options.origin } : {}),
+                        },
+                    },
+                )
+            } catch (error) {
+                if (previousScriptstate === undefined) delete this.conversation.scriptstate
+                else {
+                    for (const [stateKey, existed, value] of previousValues) {
+                        if (existed) scriptstate[stateKey] = value
+                        else delete scriptstate[stateKey]
+                    }
+                }
+                this.sessionVersion = previousVersion
+                throw error
+            }
+            return changed.map(([key]) => key)
         } finally {
             this.transactionActive = false
         }
@@ -1746,7 +1927,7 @@ export class ActiveConversationSession {
         validateLocator(
             this.conversationId,
             this.conversation.message,
-            this.sessionVersion,
+            this.acceptedLocatorVersions,
             locator,
             this.locatorRegistry,
         )
@@ -1834,6 +2015,7 @@ export class ActiveConversationSession {
             this.storeRevision,
             this.locatorRegistry,
             previousVersion,
+            this.lastContentChangeVersion,
         )
         try {
             const result = run(transaction)
@@ -2116,7 +2298,7 @@ export class ActiveConversationSession {
         previousVersion: number,
         commands: readonly ActiveConversationCommandName[],
         mutations: readonly ActiveConversationMutationRange[] = [],
-        displayVariableUpdate = false,
+        variableCommit?: VariableOnlyCommit,
     ): void {
         let detachedMutations = safeStructuredClone(mutations)
         if (!this.compatibilityFallback && !this.canApplyResidentMutations(detachedMutations)) {
@@ -2126,7 +2308,8 @@ export class ActiveConversationSession {
             detachedMutations = this.createCompatibilityFallbackMutations(previousVersion)
         }
         const event: ActiveConversationMutationEvent = {
-            ...(displayVariableUpdate ? { displayVariableUpdate: true } : {}),
+            ...(variableCommit?.display ? { displayVariableUpdate: true } : {}),
+            ...(variableCommit?.update ? { variableUpdate: variableCommit.update } : {}),
             characterId: this.characterId,
             conversationId: this.conversationId,
             sessionToken: this.locatorRegistry.sessionToken,
@@ -2137,7 +2320,14 @@ export class ActiveConversationSession {
             conversation: cloneConversationMetadata(this.conversation),
         }
         this.onMutation?.(event)
-        this.generationContinuationStart = this.sessionVersion
+        if (commands.some((command) => command !== 'update-metadata')) {
+            this.lastMessageChangeVersion = this.sessionVersion
+        }
+        // Requests, prompts and locators read messages and non-variable metadata only.
+        if (!variableCommit) {
+            this.lastContentChangeVersion = this.sessionVersion
+            this.generationContinuationStart = this.sessionVersion
+        }
         if (this.compatibilityFallback) {
             this.compatibilityBaselineMessageCount = this.conversation.message.length
         } else {

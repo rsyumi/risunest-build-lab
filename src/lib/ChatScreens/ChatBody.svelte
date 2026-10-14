@@ -20,6 +20,7 @@
     import type { StreamingThoughtPreview } from '../../ts/parser/streamingThoughtPreview'
     import type { StreamingThoughtMode } from '../../ts/storage/database.svelte'
     import { mountBoundedThoughtExpansion, type BoundedThoughtExpansion } from './boundedThoughtExpansion'
+    import { DisplayReadRecord, recordChatVariableReads, type DisplayRowReads } from 'src/ts/process/scriptVariableReads'
 
     interface Props {
         character?: simpleCharacterArgument|string|null
@@ -47,6 +48,7 @@
         parserProjection?: BoundedLiveChatParserProjection
         parserAbortSignal?: AbortSignal
         onDisplaySettled?: () => void
+        displayRow?: DisplayRowReads
     }
 
     let {
@@ -75,6 +77,7 @@
         parserProjection,
         parserAbortSignal,
         onDisplaySettled,
+        displayRow,
     }: Props =  $props()
 
     // svelte-ignore non_reactive_update
@@ -103,6 +106,7 @@
         onDisplaySettled?: () => void
         releaseObjectUrls: () => void
         thoughtExpansion: BoundedThoughtExpansion | null
+        reads?: DisplayReadRecord
     }
 
     let activeParseJob: ChatBodyParseJob|null = null
@@ -176,7 +180,7 @@
         }
     }
 
-    function createMarkupFinalizer() {
+    function createMarkupFinalizer(reads?: DisplayReadRecord) {
         const settings = captureContext?.settings ?? DBState.db
         const scriptContext = parserScriptContext()
         const projectedChatID = captureContext
@@ -198,7 +202,7 @@
         // Re-evaluating it in the template restyles the old DOM during a refresh.
         return (value: string, deferredInlays?: DeferredInlayMarkerRegistry) =>
             addMetadataToElement(
-                trimMarkdown(value, { ...renderContext, deferredInlays }),
+                recordChatVariableReads(reads, () => trimMarkdown(value, { ...renderContext, deferredInlays })),
                 model,
                 frozenLawApplies,
             )
@@ -319,6 +323,7 @@
                 projectedChatID: captureContext
                     ? captureParserIndex
                     : parserProjection?.projectedChatID,
+                variableReads: job.reads,
             })
         )
         // track 'translated' and 'retranslate' state
@@ -351,14 +356,14 @@
 
                     const lastTranslated = translated
 
-                    setTimeout(() => {
-                            translated = translateText
-                    }, 10)
-
                     // State change of `translated` triggers markParsing again,
                     // causing redundant translation attempts
                     if (lastTranslated !== translateText) {
                         job.transitional = true
+                        setTimeout(() => {
+                            if (destroyed || job.disposed || activeParseJob !== job) return
+                            translated = translateText
+                        }, 10)
                         return ''
                     }
                 } catch (error) {
@@ -366,6 +371,8 @@
                 }
             }
             if(retranslate || translated){
+                // Translation runs its own script pass, which this record does not follow.
+                job.reads?.markUntracked()
                 const settings = captureContext?.settings ?? DBState.db
                 if (settings.showTranslationLoading && !job.preservePendingContent) {
                     lastParsed = `<div style="display:flex;justify-content:center;align-items:center;height:48px;"><div style="animation: spin 1s linear infinite; border-radius: 50%; height: 32px; width: 32px; border: 2px solid #3b82f6; border-top: 2px solid transparent;"></div></div><style>@keyframes spin { to { transform: rotate(360deg); } }</style>`
@@ -561,11 +568,14 @@
         const abort = () => controller.abort(externalSignal?.reason)
         if (externalSignal?.aborted) abort()
         else externalSignal?.addEventListener('abort', abort, { once: true })
+        const reads = displayRow ? new DisplayReadRecord() : undefined
+        // The pending parse counts until it is shown, so a change it already read refreshes it.
+        if (reads) displayRow.track('body-pending', reads)
         const job:ChatBodyParseJob = {
             controller,
             removeExternalAbortListener: () => externalSignal?.removeEventListener('abort', abort),
             promise: Promise.resolve(''),
-            finalizeMarkup: createMarkupFinalizer(),
+            finalizeMarkup: createMarkupFinalizer(reads),
             deferredInlays: new DeferredInlayMarkerRegistry(),
             disposed: false,
             generation: ++parseGeneration,
@@ -577,6 +587,7 @@
             onDisplaySettled,
             releaseObjectUrls: () => {},
             thoughtExpansion: null,
+            reads,
         }
         job.promise = markParsing(msgDisplay, character, idx, job)
         return job
@@ -647,6 +658,7 @@
             }
             displayedParseJob = job
             displayedHtml = html
+            if (job.reads) displayRow?.track('body', job.reads)
             pendingPreview = null
             await tick()
             if (previousDisplay !== job) disposeParseJob(previousDisplay)

@@ -581,7 +581,7 @@ export function createNestReimportHarness() {
       .join("\n");
   };
   const source = [
-    select("../src/ts/polyfill.ts", ["rfdcClone", "safeStructuredClone"]),
+    select("../src/ts/safeStructuredClone.ts", ["rfdcClone", "safeStructuredClone"]),
     select("../src/ts/responseVariants.ts", ["snapshotResponse"]),
     select("../src/ts/drive/pocketRisuFeatures.ts"),
   ].join("\n");

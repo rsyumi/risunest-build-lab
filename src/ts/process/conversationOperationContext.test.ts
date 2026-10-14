@@ -358,6 +358,44 @@ test('adopts only the generated ID of a future prompt message into its pinned ba
     expect(session.activePinReasons).toEqual([])
 })
 
+test('commits across a variable commit made meanwhile without overwriting its variables', () => {
+    const conversation = chat([
+        message('zero', 'message-0'),
+        message('one', ''),
+    ])
+    conversation.scriptstate = { $kept: 'before', $own: 'before', $written: 'before' }
+    const session = createSession(conversation)
+    let receipt: import('./conversationOperationContext').ConversationOperationCommit | undefined
+    const operation = createConversationOperationContext(session, conversation, (committed) => {
+        receipt = committed
+    })
+    const locator = session.locate(1)
+
+    session.updateChatVariables(
+        new Map([['kept', 'display'], ['written', 'display']]),
+        { origin: 'display' },
+    )
+    session.ensureMessageId(locator, () => 'generated-message-1')
+    operation.adoptMessageId(locator, 'generated-message-1')
+    operation.chat.message[0].data = 'operation edit'
+    operation.chat.scriptstate!.$own = 'operation'
+    operation.commit(session, { variables: new Map([['written', 'before']]) })
+
+    expect(conversation.message).toEqual([
+        message('operation edit', 'message-0'),
+        message('one', 'generated-message-1'),
+    ])
+    expect(conversation.scriptstate).toEqual({
+        $kept: 'display',
+        $own: 'operation',
+        $written: 'before',
+    })
+    expect(session.version).toBe(2)
+    expect(receipt!.follows(session, 0, conversation)).toBe(true)
+    expect(receipt!.follows(session, 1, conversation)).toBe(true)
+    expect(session.activePinReasons).toEqual([])
+})
+
 test('refuses ID adoption when another unversioned message field changed', () => {
     const conversation = chat([
         message('zero', 'message-0'),

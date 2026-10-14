@@ -10,7 +10,7 @@ use std::{path::PathBuf, sync::Arc};
 
 mod update;
 
-const USAGE: &str = "risunest-sync-server <init|status|serve|maintain|backup|restore|restore-epoch|device add [--qr]|device revoke ID|connection configure|connection status|connection repost> --data-dir ABSOLUTE_PATH [--backup-dir ABSOLUTE_PATH] [--listen 127.0.0.1:14319] [--https-proxy]\nrisunest-sync-server update check\nconnection configure: choose --endpoint HTTP_OR_HTTPS_URL or --cloudflared ABSOLUTE_EXECUTABLE, optionally --registry REGISTRY_URL.\nUpdate check verifies the signed product catalog and reports the raw package for this OS and architecture without downloading or installing it.\nAdministration commands require the daemon to be stopped. Configured device add emits a private registration URI; --qr also displays its QR. Without connection configuration, manual credential JSON remains available. Backup and restore require a new destination directory. network configure --listen IP:PORT saves the listener for the next start; network status shows saved settings. The default listener is 127.0.0.1:14319. Listeners serve HTTP; an HTTPS proxy is optional.";
+const USAGE: &str = "risunest-sync-server <init|status|serve|maintain|backup|restore|restore-epoch|device add [--qr]|device revoke ID|connection configure|connection status|connection repost> --data-dir ABSOLUTE_PATH [--backup-dir ABSOLUTE_PATH] [--listen 127.0.0.1:14319] [--https-proxy]\nrisunest-sync-server --version\nrisunest-sync-server update check\nconnection configure: choose --endpoint HTTP_OR_HTTPS_URL or --cloudflared ABSOLUTE_EXECUTABLE, optionally --registry REGISTRY_URL.\nUpdate check verifies the signed product catalog and reports the raw package for this OS and architecture without downloading or installing it.\nAdministration commands require the daemon to be stopped. Configured device add emits a private registration URI; --qr also displays its QR. Without connection configuration, manual credential JSON remains available. Backup and restore require a new destination directory. network configure --listen IP:PORT saves the listener for the next start; network status shows saved settings. The default listener is 127.0.0.1:14319. Listeners serve HTTP; an HTTPS proxy is optional.";
 
 #[tokio::main]
 async fn main() {
@@ -52,6 +52,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let command = args.next().unwrap();
+    if command == "--version" {
+        if args.next().is_some() {
+            return Err(USAGE.into());
+        }
+        println!("risunest-sync-server {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let subcommand = if command == "device"
         || command == "connection"
         || command == "update"

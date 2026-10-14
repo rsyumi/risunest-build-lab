@@ -94,10 +94,8 @@ vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({
 }))
 vi.mock('src/ts/globalApi.svelte', () => ({ downloadFile: vi.fn() }))
 vi.mock('src/ts/alert', () => ({ alertError: vi.fn(), alertNormal: vi.fn() }))
-vi.mock('src/lang', () => ({ language: {} }))
 vi.mock('src/ts/util', () => ({ selectSingleFile: vi.fn() }))
-vi.mock('src/ts/parser/parser.svelte', () => ({
-    assetRegex: /$^/g,
+vi.mock('src/ts/parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule({
     risuChatParser: (data: string, options?: { setChatVar?: (key: string, value: string) => void }) => {
         if (data === '{{setvar::scratch::regex}}') {
             options?.setChatVar?.('scratch', 'regex')
@@ -553,6 +551,81 @@ describe('history-sensitive regex conversation operations', () => {
         expect(chat.scriptstate).toEqual({ $plugin: 'saved' })
         expect(session.activePinReasons).toEqual([])
     })
+
+    it.each([
+        ['display Lua variable', { origin: 'display' as const }],
+        ['trigger variable', {}],
+    ])('runs an editinput regex after a %s commits during an input plugin hook', async (_name, origin) => {
+        const chat = {
+            id: 'regex-chat',
+            message: [{ role: 'user', data: 'before', chatId: 'message' }],
+        } as Chat
+        const char = makeCharacter([{ ...makeScript('x', '@@inject'), type: 'editinput' }])
+        char.chaId = 'regex-character'
+        char.chats = [chat]
+        char.chatPage = 0
+        const session = new ActiveConversationSession({
+            characterId: char.chaId,
+            conversationId: chat.id,
+            conversation: chat,
+            storeRevision: 21,
+        })
+        mocks.database.characters = [char] as never
+        mocks.state.currentChat = chat
+        mocks.state.session = session
+        mocks.pluginV2.editinput.add(async (data) => {
+            session.updateChatVariables(new Map([['scratch', 'written']]), origin)
+            return data
+        })
+        const result = await processScriptFull(
+            char,
+            'x',
+            'editinput',
+            0,
+            {},
+            { cache: 'bypass', regexWorker: false },
+        )
+        expect(result.data).toBe('')
+        expect(chat.message[0].data).toBe('x')
+        expect(chat.scriptstate).toEqual({ $scratch: 'written' })
+        expect(session.activePinReasons).toEqual([])
+    })
+
+    // Script parses run without runVar, so the tag is left unexecuted.
+    it.each(['editinput', 'editoutput', 'editprocess', 'editdisplay'] as const)(
+        'runs a %s setvar regex without copying or committing the conversation',
+        async (mode) => {
+            const chat = { id: 'regex-chat', message: historyMessages(1000) } as Chat
+            const char = makeCharacter([
+                { ...makeScript('^input$', '{{setvar::scratch::regex}}'), type: mode },
+            ])
+            char.chaId = 'regex-character'
+            char.chats = [chat]
+            char.chatPage = 0
+            const session = new ActiveConversationSession({
+                characterId: char.chaId,
+                conversationId: chat.id,
+                conversation: chat,
+                storeRevision: 21,
+            })
+            mocks.database.characters = [char] as never
+            mocks.state.currentChat = chat
+            mocks.state.session = session
+            const clone = vi.spyOn(polyfill, 'safeStructuredClone')
+            try {
+                const result = await processScriptFull(char, 'input', mode, 950, {}, {
+                    cache: 'bypass',
+                    regexWorker: false,
+                })
+                expect(result.data).toBe('written')
+                expect(clone.mock.calls.some(([value]) => Array.isArray(value) && value.length === 1000)).toBe(false)
+                expect(session.version).toBe(0)
+                expect(chat.scriptstate).toBeUndefined()
+            } finally {
+                clone.mockRestore()
+            }
+        },
+    )
 
     it('applies @@inject through the active session batch instead of direct DB mutation', async () => {
         const chat = {
@@ -1229,6 +1302,32 @@ describe('live display script ordering', () => {
             f.cleanup()
         }
     })
+    it('runs waiting work after a chat variable commit from outside the display', async () => {
+        const f = fixture()
+        try {
+            const first = f.run('first')
+            await vi.waitFor(() => expect(f.plugin).toHaveBeenCalledOnce())
+            const second = f.run('second')
+            const results = Promise.allSettled([first, second])
+            f.session.updateChatVariables(new Map([['button', 'pressed']]))
+            f.release()
+            expect(await results).toEqual([
+                {
+                    status: 'fulfilled',
+                    value: { data: 'first', emoChanged: false },
+                },
+                {
+                    status: 'fulfilled',
+                    value: { data: 'second', emoChanged: false },
+                },
+            ])
+            expect(f.chat.scriptstate?.$scratch).toBe('second')
+            expect(f.session.activePinReasons).toEqual([])
+        } finally {
+            f.cleanup()
+        }
+    })
+
     it('rejects waiting work after an external edit and releases the queue for a fresh render', async () => {
         const f = fixture()
         try {
@@ -1323,31 +1422,7 @@ describe('live display script ordering', () => {
         } finally {
             f.cleanup()
         }
-    })
-    it('persists regex display variables without invalidating the same display again', async () => {
-        const f = fixture()
-        try {
-            f.char.customscript = [
-                {
-                    ...makeScript('^input$', '{{setvar::scratch::regex}}'),
-                    type: 'editdisplay',
-                },
-            ]
-            const events = vi.fn()
-            f.session.subscribe(events)
-            expect((await f.run('input')).data).toBe('written')
-            expect(f.chat.scriptstate).toEqual({ $scratch: 'regex' })
-            expect(events).toHaveBeenCalledTimes(2)
-            expect(
-                events.mock.calls.every(
-                    ([event]) => event.displayVariableUpdate === true,
-                ),
-            ).toBe(true)
-        } finally {
-            f.cleanup()
-        }
-    })
-})
+    })})
 
 
 it('retries a collateral worker reset once on the worker and never synchronously after a second reset', async () => {
@@ -1457,7 +1532,7 @@ describe('regex history actions over a history window', () => {
 
     it.each(['editinput', 'editoutput'] as const)('keeps %s mutations window-owned when the full conversation is resident', async (mode) => {
         const { store, char, controller: initial } = windowedCharacter([
-            { ...makeScript('^input$', '{{setvar::scratch::regex}}'), type: mode },
+            { ...makeScript('^input$', '@@inject'), type: mode },
         ])
         const complete = { ...initial.chat, message: structuredClone(store) }
         char.chats[0] = complete
@@ -1478,9 +1553,9 @@ describe('regex history actions over a history window', () => {
         const clone = vi.spyOn(polyfill, 'safeStructuredClone')
         try {
             const result = await processScriptFull(char, 'input', mode, 950, {}, { cache: 'bypass', regexWorker: false })
-            expect(result.data).toBe('written')
-            expect(complete.scriptstate).toEqual({ $scratch: 'regex' })
-            expect(complete.message).toEqual(store)
+            expect(result.data).toBe('')
+            expect(complete.message[950].data).toBe('input')
+            expect(complete.message.slice(0, 950)).toEqual(store.slice(0, 950))
             expect(clone.mock.calls.some(([value]) => Array.isArray(value) && value.length === 1000)).toBe(false)
         } finally {
             clone.mockRestore()
@@ -1530,23 +1605,4 @@ describe('regex history actions over a history window', () => {
         scope.release()
     })
 
-    it('keeps chat variables an editinput regex sets on the window chat', async () => {
-        const { char, controller } = windowedCharacter([
-            { ...makeScript('^input$', '{{setvar::scratch::regex}}'), type: 'editinput' },
-        ])
-        const scope = createPromptScriptOperationScope(char, {
-            historyWindow: { chat: controller.chat, conversationId: 'conversation-1' },
-        })
-
-        const result = await processScriptFull(char, 'input', 'editinput', -1, {}, {
-            promptOperationScope: scope,
-            cache: 'bypass',
-            regexWorker: false,
-        })
-        scope.finish()
-
-        expect(result.data).toBe('written')
-        expect(controller.chat.scriptstate).toEqual({ $scratch: 'regex' })
-        expect(Object.hasOwn(char.chats[0], 'scriptstate')).toBe(false)
-    })
 })

@@ -1,16 +1,16 @@
 use super::Store;
-#[cfg(test)]
+#[cfg(all(test, feature = "source-observer"))]
 use crate::source_observer::small_object_store;
-#[cfg(test)]
+#[cfg(all(test, feature = "source-observer"))]
 pub use crate::source_observer::Body;
 use crate::{Error, Result};
-#[cfg(not(test))]
+#[cfg(not(all(test, feature = "source-observer")))]
 use risunest_small_object_store as small_object_store;
-#[cfg(not(test))]
+#[cfg(not(all(test, feature = "source-observer")))]
 pub use risunest_small_object_store::Body;
 use risunest_sync_wire::{delta::MAX_TARGET_BYTES, hash, validate_hash};
 use rusqlite::{params, Connection, OptionalExtension};
-#[cfg(any(not(test), unix))]
+#[cfg(any(not(all(test, feature = "source-observer")), unix))]
 use std::fs::File;
 use std::{fs, io::Write, path::Path};
 
@@ -20,8 +20,88 @@ use std::{fs, io::Write, path::Path};
 pub(super) const SMALL_OBJECT_BYTES: usize = 64 * 1024;
 pub(super) use small_object_store::delete_batch as delete_inline;
 
-pub(super) fn body_error(error: small_object_store::StoreError) -> Error {
+// Four workers improved file-backed persistence in release measurements with
+// depths 1, 2 and 4. Keep this bounded independently of the request's body count.
+const FILE_IO_WORKERS: usize = 4;
+
+fn spawn_file_worker<'scope, 'env, F, T>(
+    scope: &'scope std::thread::Scope<'scope, 'env>,
+    worker: F,
+) -> std::io::Result<std::thread::ScopedJoinHandle<'scope, T>>
+where
+    F: FnOnce() -> T + Send + 'scope,
+    T: Send + 'scope,
+{
     #[cfg(test)]
+    if frame_metrics::SPAWN_FAILURE_MASK.with(|mask| {
+        let current = mask.get();
+        mask.set(current >> 1);
+        current & 1 != 0
+    }) {
+        return Err(std::io::ErrorKind::WouldBlock.into());
+    }
+    std::thread::Builder::new().spawn_scoped(scope, worker)
+}
+
+enum FileWork<'scope, T> {
+    Worker(std::thread::ScopedJoinHandle<'scope, Result<Vec<T>>>),
+    Current(Result<Vec<T>>),
+}
+
+fn file_batch<T: Sync, U: Send>(
+    items: &[T],
+    operation: impl Fn(&T) -> Result<U> + Sync,
+) -> Result<Vec<U>> {
+    #[cfg(not(test))]
+    let depth = FILE_IO_WORKERS;
+    #[cfg(test)]
+    let depth = frame_metrics::FILE_WORKERS.with(std::cell::Cell::get);
+    if items.len() <= 1 || depth == 1 {
+        return items.iter().map(operation).collect();
+    }
+    std::thread::scope(|scope| {
+        let workers = items
+            .chunks(items.len().div_ceil(depth))
+            .map(|group| {
+                let operation = &operation;
+                #[cfg(all(test, feature = "source-observer"))]
+                let observed = crate::source_observer::worker();
+                #[cfg(test)]
+                let samples = frame_metrics::SAMPLES.with(|samples| samples.borrow().clone());
+                let worker = spawn_file_worker(scope, move || {
+                    #[cfg(all(test, feature = "source-observer"))]
+                    let _observed = observed.enter();
+                    #[cfg(test)]
+                    frame_metrics::SAMPLES.with(|current| *current.borrow_mut() = samples);
+                    group.iter().map(operation).collect::<Result<Vec<_>>>()
+                });
+                match worker {
+                    Ok(worker) => FileWork::Worker(worker),
+                    // Thread exhaustion must not unwind while holding objects_gate.
+                    Err(_) => FileWork::Current(group.iter().map(operation).collect()),
+                }
+            })
+            .collect::<Vec<_>>();
+        // Every worker must end before a failure releases staging files or the publication gate.
+        let results = workers
+            .into_iter()
+            .map(|work| match work {
+                FileWork::Worker(worker) => worker
+                    .join()
+                    .unwrap_or_else(|_| Err(Error::new("storage-unavailable", 503))),
+                FileWork::Current(result) => result,
+            })
+            .collect::<Vec<_>>();
+        let mut completed = Vec::with_capacity(items.len());
+        for result in results {
+            completed.extend(result?);
+        }
+        Ok(completed)
+    })
+}
+
+pub(super) fn body_error(error: small_object_store::StoreError) -> Error {
+    #[cfg(all(test, feature = "source-observer"))]
     crate::source_observer::note_current_violation("inline-body-error");
     match error {
         small_object_store::StoreError::TooLarge => Error::new("object-too-large", 413),
@@ -113,7 +193,7 @@ pub(super) fn publish(from: &Path, to: &Path) -> Result<()> {
 }
 impl Store {
     pub fn open_object(&self, digest: &str) -> Result<(Body, u64)> {
-        #[cfg(test)]
+        #[cfg(all(test, feature = "source-observer"))]
         let _observed = crate::source_observer::operation(&self.root);
         let (size, inline) = {
             let db = self.reader()?;
@@ -129,9 +209,9 @@ impl Store {
             .objects_gate
             .lock()
             .map_err(|_| Error::new("storage-unavailable", 503))?;
-        #[cfg(not(test))]
+        #[cfg(not(all(test, feature = "source-observer")))]
         let file = File::open(self.object_path(digest)?)?;
-        #[cfg(test)]
+        #[cfg(all(test, feature = "source-observer"))]
         let file = crate::source_observer::TrackedFile::open(
             &self.root,
             digest,
@@ -139,7 +219,7 @@ impl Store {
             "file",
         )?;
         if file.metadata()?.len() != size {
-            #[cfg(test)]
+            #[cfg(all(test, feature = "source-observer"))]
             crate::source_observer::note_current_violation("corrupt-object");
             return Err(Error::new("corrupt-object", 503));
         }
@@ -196,9 +276,9 @@ impl Store {
     /// keeps the object where the row puts it; a damaged one is replaced there,
     /// so an upload never acknowledges a body nothing can read.
     fn filed_body_differs(&self, digest: &str, bytes: &[u8]) -> Result<bool> {
-        #[cfg(not(test))]
+        #[cfg(not(all(test, feature = "source-observer")))]
         let opened = File::open(self.object_path(digest)?);
-        #[cfg(test)]
+        #[cfg(all(test, feature = "source-observer"))]
         let opened = crate::source_observer::TrackedFile::open(
             &self.root,
             digest,
@@ -251,15 +331,42 @@ impl Store {
         device: &super::Device,
         objects: &[(String, Vec<u8>)],
     ) -> Result<()> {
-        #[cfg(test)]
+        #[cfg(all(test, feature = "source-observer"))]
         let _observed = crate::source_observer::ingress(&self.root);
+        Self::require_device(&*self.db()?, device)?;
+        for (digest, bytes) in objects {
+            #[cfg(test)]
+            let measured = std::time::Instant::now();
+            validate_hash(digest)?;
+            if bytes.len() > MAX_TARGET_BYTES || {
+                let actual = hash(bytes);
+                #[cfg(test)]
+                frame_metrics::hashed("object", bytes.len());
+                #[cfg(all(test, feature = "source-observer"))]
+                crate::source_observer::hashed(digest, "object-ingress-sha256", bytes.len());
+                actual != *digest
+            } {
+                return Err(Error::new("hash-mismatch", 400));
+            }
+            #[cfg(test)]
+            frame_metrics::record(1, measured);
+        }
+        self.put_hashed_objects(device, objects)
+    }
+
+    // Only immediate callers that computed identities from these unchanged bodies
+    // may enter here. Authorization and durable publication remain shared.
+    pub(super) fn put_hashed_objects(
+        &self,
+        device: &super::Device,
+        objects: &[(String, Vec<u8>)],
+    ) -> Result<()> {
         Self::require_device(&*self.db()?, device)?;
         let staging = self.root.join("staging");
         check_path(&staging)?;
-        let mut prepared = Vec::new();
-        let mut directories = std::collections::BTreeSet::new();
         let mut inline: Vec<(&str, &[u8])> = Vec::new();
-        let mut filed: Vec<(&str, u64)> = Vec::new();
+        let mut filed: Vec<(&str, &[u8])> = Vec::new();
+        let mut file_hashes = std::collections::BTreeSet::new();
         // Small bodies an earlier upload published as files. Normally none.
         let small_files = {
             let reader = self.reader()?;
@@ -274,19 +381,10 @@ impl Store {
             found
         };
         for (digest, bytes) in objects {
-            #[cfg(test)]
-            let measured = std::time::Instant::now();
             validate_hash(digest)?;
-            if bytes.len() > MAX_TARGET_BYTES || {
-                let actual = hash(bytes);
-                #[cfg(test)]
-                crate::source_observer::hashed(digest, "object-ingress-sha256", bytes.len());
-                actual != *digest
-            } {
+            if bytes.len() > MAX_TARGET_BYTES {
                 return Err(Error::new("hash-mismatch", 400));
             }
-            #[cfg(test)]
-            frame_metrics::record(1, measured);
             if bytes.len() <= SMALL_OBJECT_BYTES
                 && !(small_files.contains(digest.as_str())
                     && self.filed_body_differs(digest, bytes)?)
@@ -294,12 +392,15 @@ impl Store {
                 inline.push((digest.as_str(), bytes.as_slice()));
                 continue;
             }
-            filed.push((digest.as_str(), bytes.len() as u64));
+            if file_hashes.insert(digest.as_str()) {
+                filed.push((digest.as_str(), bytes.as_slice()));
+            }
+        }
+        let prepared = file_batch(&filed, |(digest, bytes)| {
             #[cfg(test)]
             let measured = std::time::Instant::now();
             let destination = self.object_path(digest)?;
             fs::create_dir_all(destination.parent().unwrap())?;
-            directories.insert(destination.parent().unwrap().to_path_buf());
             let mut temp = self.staging_temp()?;
             temp.write_all(bytes)?;
             #[cfg(test)]
@@ -309,8 +410,8 @@ impl Store {
             temp.as_file().sync_all()?;
             #[cfg(test)]
             frame_metrics::record(3, measured);
-            prepared.push((temp, destination));
-        }
+            Ok((temp, destination))
+        })?;
         // The gate serializes a file publication against the metadata that
         // names it. An inline body is published by the same transaction as its
         // metadata, so a group without files never takes it.
@@ -330,7 +431,7 @@ impl Store {
             sync_directory(&self.root.join("objects"))?;
             #[cfg(test)]
             frame_metrics::record(6, measured);
-            for (temp, destination) in &prepared {
+            file_batch(&prepared, |(temp, destination)| {
                 #[cfg(test)]
                 let measured = std::time::Instant::now();
                 #[cfg(windows)]
@@ -339,11 +440,16 @@ impl Store {
                 fs::rename(temp.path(), destination)?;
                 #[cfg(test)]
                 frame_metrics::record(5, measured);
-            }
+                Ok(())
+            })?;
+            let directories = prepared
+                .iter()
+                .map(|(_, destination)| destination.parent().unwrap())
+                .collect::<std::collections::BTreeSet<_>>();
             for directory in directories {
                 #[cfg(test)]
                 let measured = std::time::Instant::now();
-                sync_directory(&directory)?;
+                sync_directory(directory)?;
                 #[cfg(test)]
                 frame_metrics::record(6, measured);
             }
@@ -358,10 +464,10 @@ impl Store {
         let measured = std::time::Instant::now();
         Self::require_device(&db, device)?;
         let tx = db.transaction()?;
-        for (digest, size) in &filed {
+        for (digest, bytes) in &filed {
             tx.execute(
                 "INSERT INTO objects(hash,size,storage) VALUES(?1,?2,'file') ON CONFLICT(hash) DO NOTHING",
-                params![digest, *size as i64],
+                params![digest, bytes.len() as i64],
             )?;
             Self::lease_object(&tx, device, digest)?;
         }
@@ -398,7 +504,7 @@ impl Store {
         }
     }
     pub fn get_object(&self, digest: &str) -> Result<Vec<u8>> {
-        #[cfg(test)]
+        #[cfg(all(test, feature = "source-observer"))]
         let _observed = crate::source_observer::operation(&self.root);
         let (size, inline) = {
             let db = self.reader()?;
@@ -414,9 +520,9 @@ impl Store {
             return Ok(bytes);
         }
         let path = self.object_path(digest)?;
-        #[cfg(not(test))]
+        #[cfg(not(all(test, feature = "source-observer")))]
         let file = File::open(path)?;
-        #[cfg(test)]
+        #[cfg(all(test, feature = "source-observer"))]
         let file = crate::source_observer::TrackedFile::open(&self.root, digest, &path, "file")?;
         #[cfg(test)]
         frame_metrics::opened();
@@ -425,11 +531,11 @@ impl Store {
         file.take(size + 1).read_to_end(&mut bytes)?;
         if bytes.len() as u64 != size || {
             let actual = hash(&bytes);
-            #[cfg(test)]
+            #[cfg(all(test, feature = "source-observer"))]
             crate::source_observer::hashed(digest, "object-source-sha256", bytes.len());
             actual != digest
         } {
-            #[cfg(test)]
+            #[cfg(all(test, feature = "source-observer"))]
             crate::source_observer::note_violation("corrupt-object");
             return Err(Error::new("corrupt-object", 503));
         }
@@ -439,17 +545,24 @@ impl Store {
 
 #[cfg(test)]
 pub(super) mod frame_metrics {
+    type Samples = std::sync::Arc<std::sync::Mutex<[Vec<u128>; 8]>>;
+
     std::thread_local! {
-        pub static SAMPLES: std::cell::RefCell<Option<[Vec<u128>; 8]>> = const { std::cell::RefCell::new(None) };
+        pub static SAMPLES: std::cell::RefCell<Option<Samples>> = const { std::cell::RefCell::new(None) };
+        pub static FILE_WORKERS: std::cell::Cell<usize> = const { std::cell::Cell::new(super::FILE_IO_WORKERS) };
+        pub static SPAWN_FAILURE_MASK: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
         /// Counts the bodies a reply actually opened. A transfer reply is
         /// planned from object metadata, so this must stay at the number of
         /// bodies the reply carries.
         pub static BODY_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        /// The identities ingress computed, by step and body length. A
+        /// materialized frame is hashed once and published under that hash.
+        pub static HASHES: std::cell::RefCell<Vec<(&'static str, usize)>> = const { std::cell::RefCell::new(Vec::new()) };
     }
     pub fn record(stage: usize, started: std::time::Instant) {
         SAMPLES.with(|samples| {
             if let Some(samples) = &mut *samples.borrow_mut() {
-                samples[stage].push(started.elapsed().as_micros());
+                samples.lock().unwrap()[stage].push(started.elapsed().as_micros());
             }
         });
     }
@@ -459,11 +572,109 @@ pub(super) mod frame_metrics {
     pub fn take_opens() -> usize {
         BODY_OPENS.with(|count| count.replace(0))
     }
+    pub fn hashed(step: &'static str, bytes: usize) {
+        HASHES.with(|hashes| hashes.borrow_mut().push((step, bytes)));
+    }
+    pub fn take_hashes() -> Vec<(&'static str, usize)> {
+        HASHES.with(|hashes| hashes.take())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validated_batch_rejects_mismatch_and_oversize_before_publication() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::init(directory.path()).unwrap();
+        let registration = store.add_device().unwrap();
+        let device = super::super::Device {
+            id: registration.device_id,
+        };
+        let good = b"synthetic good".to_vec();
+        let digest = hash(&good);
+        for (bad_hash, bad_body) in [
+            (hash(b"other"), b"wrong bytes".to_vec()),
+            ("invalid".into(), vec![]),
+            (hash(b"oversized"), vec![0; MAX_TARGET_BYTES + 1]),
+        ] {
+            assert!(store
+                .put_objects(
+                    &device,
+                    &[(digest.clone(), good.clone()), (bad_hash, bad_body)]
+                )
+                .is_err());
+            assert!(store.object_size(&digest).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn frame_handoff_preserves_validation_retry_and_durable_mixed_storage() {
+        use risunest_sync_wire::{
+            delta,
+            transfer::{self, Frame},
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::init(directory.path()).unwrap();
+        let registration = store.add_device().unwrap();
+        let device = super::super::Device {
+            id: registration.device_id,
+        };
+        let small = b"synthetic base".to_vec();
+        let large = vec![b'z'; SMALL_OBJECT_BYTES + 1];
+        let target = b"synthetic base changed".to_vec();
+        let recipe = delta::create(&[&small], &target).unwrap();
+        let mut bad_recipe = recipe.clone();
+        bad_recipe.target_hash = hash(b"wrong target");
+        let bad =
+            transfer::encode(&[Frame::Full(small.clone()), Frame::Delta(bad_recipe)]).unwrap();
+        assert!(store.receive_frames(&device, &bad).is_err());
+        assert!(store.object_size(&hash(&small)).unwrap().is_none());
+        let frames = [
+            Frame::Full(small.clone()),
+            Frame::Delta(recipe),
+            Frame::Full(large.clone()),
+        ];
+        let encoded = transfer::encode(&frames).unwrap();
+        let mut corrupt = encoded.clone();
+        *corrupt.last_mut().unwrap() ^= 1;
+        assert!(store.receive_frames(&device, &corrupt).is_err());
+        assert!(store.object_size(&hash(&small)).unwrap().is_none());
+        let unknown = super::super::Device {
+            id: "missing-device".into(),
+        };
+        assert!(store.receive_frames(&unknown, &encoded).is_err());
+        assert!(store.object_size(&hash(&small)).unwrap().is_none());
+        store.db().unwrap().execute_batch("CREATE TRIGGER synthetic_frame_failure BEFORE INSERT ON small_objects BEGIN SELECT RAISE(ABORT,'synthetic body failure'); END").unwrap();
+        assert!(store.receive_frames(&device, &encoded).is_err());
+        for body in [&small, &target, &large] {
+            assert!(store.object_size(&hash(body)).unwrap().is_none());
+        }
+        assert_eq!(
+            store
+                .db()
+                .unwrap()
+                .query_row("SELECT count(*) FROM object_leases", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        store
+            .db()
+            .unwrap()
+            .execute_batch("DROP TRIGGER synthetic_frame_failure")
+            .unwrap();
+        let hashes = [&small, &target, &large].map(|body| hash(body));
+        for _ in 0..2 {
+            assert_eq!(store.receive_frames(&device, &encoded).unwrap(), hashes);
+        }
+        drop(store);
+        let store = Store::open(directory.path()).unwrap();
+        for (body, digest) in [&small, &target, &large].into_iter().zip(hashes) {
+            assert_eq!(&store.get_object(&digest).unwrap(), body);
+        }
+    }
 
     #[test]
     fn frame_body_write_failure_leaves_no_metadata_or_lease() {
@@ -480,6 +691,12 @@ mod tests {
         // directory has to carry.
         let bytes = vec![b's'; SMALL_OBJECT_BYTES + 1];
         let digest = hash(&bytes);
+        let encoded =
+            risunest_sync_wire::transfer::encode(&[risunest_sync_wire::transfer::Frame::Full(
+                bytes.clone(),
+            )])
+            .unwrap();
+        assert!(store.receive_frames(&device, &encoded).is_err());
         assert!(store
             .put_objects(&device, &[(digest.clone(), bytes)])
             .is_err());
@@ -590,6 +807,185 @@ mod tests {
             503,
             "an absent inline body must report corruption"
         );
+    }
+
+    #[test]
+    fn parallel_file_frames_preserve_mixed_placement_duplicates_and_reopening() {
+        use risunest_sync_wire::transfer::{self, Frame};
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::init(directory.path()).unwrap();
+        let registration = store.add_device().unwrap();
+        let device = super::super::Device {
+            id: registration.device_id,
+        };
+        let sizes = [64 * 1024, 64 * 1024 + 1, 256 * 1024, 256 * 1024 + 1];
+        let bodies = sizes.map(|size| vec![0x5a; size]);
+        let frames = bodies
+            .iter()
+            .cycle()
+            .take(16)
+            .cloned()
+            .map(Frame::Full)
+            .collect::<Vec<_>>();
+        let encoded = transfer::encode(&frames).unwrap();
+        for _ in 0..2 {
+            store.receive_frames(&device, &encoded).unwrap();
+        }
+        for (body, expected) in bodies.iter().zip([true, false, false, false]) {
+            let digest = hash(body);
+            assert_eq!(
+                placement(&store.reader().unwrap(), &digest).unwrap(),
+                Some((body.len() as u64, expected))
+            );
+            assert_eq!(store.object_path(&digest).unwrap().exists(), !expected);
+        }
+        drop(store);
+        let store = Store::open(directory.path()).unwrap();
+        for body in &bodies {
+            assert_eq!(&store.get_object(&hash(body)).unwrap(), body);
+        }
+        let copy = tempfile::tempdir().unwrap();
+        let backup = copy.path().join("backup");
+        store.backup(&backup).unwrap();
+        let restored = Store::restore_backup(&backup, &copy.path().join("restored")).unwrap();
+        for body in bodies {
+            assert_eq!(restored.get_object(&hash(&body)).unwrap(), body);
+        }
+    }
+
+    #[test]
+    fn file_batch_joins_successful_workers_before_returning_an_error() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Barrier,
+        };
+        for depth in [2, 4, 8] {
+            frame_metrics::FILE_WORKERS.with(|workers| workers.set(depth));
+            let items = (0..depth).collect::<Vec<_>>();
+            let entered = Barrier::new(depth);
+            let completed = AtomicUsize::new(0);
+            let result = file_batch(&items, |index| {
+                entered.wait();
+                if *index == 0 {
+                    return Err(Error::new("storage-io", 503));
+                }
+                completed.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            });
+            assert_eq!(result.unwrap_err().code, "storage-io");
+            assert_eq!(completed.load(Ordering::SeqCst), depth - 1);
+        }
+        frame_metrics::FILE_WORKERS.with(|workers| workers.set(FILE_IO_WORKERS));
+    }
+
+    #[test]
+    fn thread_creation_failure_falls_back_without_poisoning_publication() {
+        use risunest_sync_wire::transfer::{self, Frame};
+        frame_metrics::FILE_WORKERS.with(|workers| workers.set(4));
+        // Four preparation attempts, followed by four publication attempts.
+        for failures in [0x0f, 0xf0, 0xaa, 0xff] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = Store::init(directory.path()).unwrap();
+            let registration = store.add_device().unwrap();
+            let device = super::super::Device {
+                id: registration.device_id,
+            };
+            let bodies = (0..8)
+                .map(|index| vec![index; SMALL_OBJECT_BYTES + 1])
+                .collect::<Vec<_>>();
+            let frames = bodies.iter().cloned().map(Frame::Full).collect::<Vec<_>>();
+            let encoded = transfer::encode(&frames).unwrap();
+            frame_metrics::SPAWN_FAILURE_MASK.with(|mask| mask.set(failures));
+            let received = store.receive_frames(&device, &encoded).unwrap();
+            assert_eq!(
+                received,
+                bodies.iter().map(|body| hash(body)).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                frame_metrics::SPAWN_FAILURE_MASK.with(std::cell::Cell::get),
+                0
+            );
+            assert!(!store.objects_gate.is_poisoned());
+            assert!(store.temporary_paths.lock().unwrap().is_empty());
+            assert_eq!(
+                std::fs::read_dir(directory.path().join("staging"))
+                    .unwrap()
+                    .count(),
+                0
+            );
+            store.maintain().unwrap();
+            assert_eq!(store.receive_frames(&device, &encoded).unwrap(), received);
+            for body in &bodies {
+                assert_eq!(&store.get_object(&hash(body)).unwrap(), body);
+            }
+        }
+        frame_metrics::FILE_WORKERS.with(|workers| workers.set(FILE_IO_WORKERS));
+    }
+
+    #[test]
+    fn mixed_inline_and_spawned_file_work_finishes_before_an_error_returns() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        frame_metrics::FILE_WORKERS.with(|workers| workers.set(4));
+        frame_metrics::SPAWN_FAILURE_MASK.with(|mask| mask.set(0b1010));
+        let completed = AtomicUsize::new(0);
+        let result = file_batch(&(0..8).collect::<Vec<_>>(), |index| {
+            if *index == 3 {
+                return Err(Error::new("storage-io", 503));
+            }
+            completed.fetch_add(1, Ordering::SeqCst);
+            Ok(*index)
+        });
+        assert_eq!(result.unwrap_err().code, "storage-io");
+        assert_eq!(completed.load(Ordering::SeqCst), 7);
+        assert_eq!(
+            frame_metrics::SPAWN_FAILURE_MASK.with(std::cell::Cell::get),
+            0
+        );
+        frame_metrics::FILE_WORKERS.with(|workers| workers.set(FILE_IO_WORKERS));
+    }
+
+    #[test]
+    fn a_parallel_publication_failure_keeps_metadata_unpublished_and_retries_cleanly() {
+        use risunest_sync_wire::transfer::{self, Frame};
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::init(directory.path()).unwrap();
+        let registration = store.add_device().unwrap();
+        let device = super::super::Device {
+            id: registration.device_id,
+        };
+        let bodies = (0..8)
+            .map(|index| vec![index; SMALL_OBJECT_BYTES + 1])
+            .collect::<Vec<_>>();
+        let hashes = bodies.iter().map(|body| hash(body)).collect::<Vec<_>>();
+        let frames = bodies.iter().cloned().map(Frame::Full).collect::<Vec<_>>();
+        let encoded = transfer::encode(&frames).unwrap();
+        let blocked = store.object_path(&hashes[0]).unwrap();
+        std::fs::create_dir_all(&blocked).unwrap();
+        assert!(store.receive_frames(&device, &encoded).is_err());
+        for digest in &hashes {
+            assert!(store.object_size(digest).unwrap().is_none());
+        }
+        assert_eq!(
+            store
+                .db()
+                .unwrap()
+                .query_row("SELECT count(*) FROM object_leases", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(store.temporary_paths.lock().unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_dir(directory.path().join("staging"))
+                .unwrap()
+                .count(),
+            0
+        );
+        std::fs::remove_dir(&blocked).unwrap();
+        assert_eq!(store.receive_frames(&device, &encoded).unwrap(), hashes);
+        for (body, digest) in bodies.iter().zip(&hashes) {
+            assert_eq!(&store.get_object(digest).unwrap(), body);
+        }
     }
 
     #[derive(Clone, Copy, Debug, PartialEq)]
@@ -900,45 +1296,57 @@ mod tests {
     #[test]
     #[ignore = "Explicit synthetic receive_frames persistence measurement"]
     fn frame_persistence_measurement() {
-        let root = tempfile::tempdir().unwrap();
-        let store = Store::init(root.path()).unwrap();
-        let registration = store.add_device().unwrap();
-        let device = super::super::Device {
-            id: registration.device_id,
-        };
-        for count in [1, 200] {
-            frame_metrics::SAMPLES.with(|samples| *samples.borrow_mut() = Some(Default::default()));
-            let frames = (0..count)
-                .map(|index| {
-                    risunest_sync_wire::transfer::Frame::Full(
-                        format!("synthetic {count} {index}").repeat(16).into_bytes(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let bytes = risunest_sync_wire::transfer::encode(&frames).unwrap();
-            let started = std::time::Instant::now();
-            store.receive_frames(&device, &bytes).unwrap();
-            eprintln!(
-                "frame_count={count} wall_us={}",
-                started.elapsed().as_micros()
-            );
-            frame_metrics::SAMPLES.with(|samples| {
-                for (stage, mut values) in
-                    samples.borrow_mut().take().unwrap().into_iter().enumerate()
-                {
-                    if values.is_empty() {
-                        continue;
-                    }
-                    values.sort_unstable();
-                    eprintln!(
-                        "stage={stage} calls={} sum_us={} p50_us={} p95_us={}",
-                        values.len(),
-                        values.iter().sum::<u128>(),
-                        values[values.len() / 2],
-                        values[values.len() * 95 / 100]
-                    );
+        for depth in [1, 2, 4, 4, 2, 1] {
+            frame_metrics::FILE_WORKERS.with(|workers| workers.set(depth));
+            for size in [64 * 1024, 64 * 1024 + 1, 256 * 1024, 1024 * 1024] {
+                let root = tempfile::tempdir().unwrap();
+                let store = Store::init(root.path()).unwrap();
+                let registration = store.add_device().unwrap();
+                let device = super::super::Device {
+                    id: registration.device_id,
+                };
+                let count = 64usize;
+                frame_metrics::SAMPLES
+                    .with(|samples| *samples.borrow_mut() = Some(Default::default()));
+                let frames = (0..count)
+                    .map(|index| {
+                        let mut body = vec![0x5a; size];
+                        body[..8].copy_from_slice(&(index as u64).to_le_bytes());
+                        body[8..16].copy_from_slice(&(depth as u64).to_le_bytes());
+                        risunest_sync_wire::transfer::Frame::Full(body)
+                    })
+                    .collect::<Vec<_>>();
+                let mut elapsed = std::time::Duration::ZERO;
+                for group in frames.chunks((4 * 1024 * 1024 - 8) / (size + 45)) {
+                    let bytes = risunest_sync_wire::transfer::encode(group).unwrap();
+                    let started = std::time::Instant::now();
+                    store.receive_frames(&device, &bytes).unwrap();
+                    elapsed += started.elapsed();
                 }
-            });
+                eprintln!(
+                    "file_workers={depth} object_bytes={size} frame_count={count} wall_us={}",
+                    elapsed.as_micros()
+                );
+                frame_metrics::SAMPLES.with(|samples| {
+                    let samples = samples.borrow_mut().take().unwrap();
+                    for (stage, mut values) in
+                        samples.lock().unwrap().clone().into_iter().enumerate()
+                    {
+                        if values.is_empty() {
+                            continue;
+                        }
+                        values.sort_unstable();
+                        eprintln!(
+                            "stage={stage} calls={} sum_us={} p50_us={} p95_us={}",
+                            values.len(),
+                            values.iter().sum::<u128>(),
+                            values[values.len() / 2],
+                            values[values.len() * 95 / 100]
+                        );
+                    }
+                });
+            }
         }
+        frame_metrics::FILE_WORKERS.with(|workers| workers.set(FILE_IO_WORKERS));
     }
 }

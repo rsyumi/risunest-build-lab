@@ -1,9 +1,9 @@
 //! PocketRisu v1.10.0 and v1.12.0 export raw `inlay/<id>.<ext>` files before their
 //! `inlay_sidecar/<id>` JSON. Pair staged paths, never retain media in memory.
 use super::{
-    cancellation_io, check_cancelled, invalid, open_staged, to_alias_size, AssetAlias,
-    CancellationProbe, CancellationReader, CasObjectRole, DurableCasJob, HashMap,
-    LegacyPrepareObserver, LocalBackupError, LocalBackupErrorCode, Map, PayloadCas,
+    check_cancelled, invalid, open_staged, to_alias_size, AssetAlias,
+    CancellationProbe, CancellationReader, HashMap,
+    LocalBackupError, LocalBackupErrorCode, Map,
     StagedLocalBackupEntry, Value, MAX_METADATA_BYTES,
 };
 use serde::Deserialize;
@@ -95,10 +95,7 @@ pub(super) fn prepare(
     id: &str,
     ext: &str,
     metadata: &MetadataIndex<'_>,
-    cas: &PayloadCas,
-    durable: &mut DurableCasJob,
     cancellation: &dyn CancellationProbe,
-    observer: &dyn LegacyPrepareObserver,
 ) -> Result<AssetAlias, LocalBackupError> {
     check_cancelled(cancellation)?;
     let mut retained_metadata = Map::new();
@@ -138,21 +135,11 @@ pub(super) fn prepare(
             .map(|(_, mime)| mime)
             .unwrap_or("application/octet-stream")
     };
-    let mut reader = CancellationReader::observed(open_staged(entry)?, cancellation, observer);
-    let payload = durable
-        .prepare_reader_expected(
-            cas,
-            &mut reader,
-            &entry.sha256,
-            entry.byte_length,
-            CasObjectRole::DirectObject,
-        )
-        .map_err(|error| cancellation_io(error, cancellation))?;
     Ok(AssetAlias {
         key: id.to_owned(),
-        object_hash: Some(payload.content_hash),
+        object_hash: Some(entry.sha256.clone()),
         kind: "inlay".to_owned(),
-        size: to_alias_size(payload.byte_size)?,
+        size: to_alias_size(entry.byte_length)?,
         mime: mime.to_owned(),
         name: metadata.name,
         ext: metadata.ext,

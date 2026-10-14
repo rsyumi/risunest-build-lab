@@ -16,11 +16,7 @@ vi.mock('../modules', () => ({ getModuleMcps: () => [] }))
 vi.mock('src/ts/alert', () => ({
     alertError: vi.fn(), alertInput: vi.fn(), alertNormal: vi.fn(),
 }))
-vi.mock('src/ts/platform', () => ({
-    isTauri: false, isWeb: false, isAndroid: false, isMobile: false,
-    isTauriIOS: false, isTauriAndroid: false, isTauriMobile: false, isTauriDesktop: false,
-    isFirefox: false, isInStandaloneMode: false, isIOS: () => false,
-}))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 vi.mock('./pluginmcp', () => ({ registeredCustomPluginMCPs: new Map() }))
 vi.mock('./mcplib', () => ({ MCPClient: class {} }))
 

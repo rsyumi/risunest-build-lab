@@ -6,7 +6,6 @@ import ModuleSettings from './ModuleSettings.svelte'
 import { importRegex } from 'src/ts/process/scripts'
 import { alertConfirm } from 'src/ts/alert'
 
-vi.mock('src/lang', () => ({ language: languageEnglish }))
 vi.mock('src/ts/stores.svelte', () => {
     const DBState = $state({ db: { modules: [], enabledModules: [] } })
     return { DBState }

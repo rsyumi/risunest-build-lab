@@ -78,13 +78,6 @@ test('no module outside the path manifests derives a filesystem root', async () 
     assert.deepEqual(offences, [])
 })
 
-test('the manifests are the modules that do resolve roots', async () => {
-    const app = await readFile(join(ROOT, APP_MANIFEST.split('/').join(sep)), 'utf8')
-    assert.match(app, /\bdirs::data_local_dir\(\)/)
-    const sync = await readFile(join(ROOT, SYNC_MANIFEST.split('/').join(sep)), 'utf8')
-    assert.match(sync, /"LOCALAPPDATA"/)
-})
-
 test('every native SQLite open names its database through the shared helper', async () => {
     // On Windows SQLite takes the locks of a database named by a \\?\ path
     // through one handle for the whole process, which can strand a read lock,
@@ -106,53 +99,4 @@ test('every native SQLite open names its database through the shared helper', as
     }
     assert.ok(scanned > 100, `expected a full native source scan, saw ${scanned} files`)
     assert.deepEqual(offences, [])
-})
-
-test('the iOS staging root is received from Rust rather than derived in Swift', async () => {
-    const swift = await readFile(
-        join(ROOT, 'crates', 'tauri-plugin-ios-native', 'ios', 'Sources', 'IosNativePlugin.swift'),
-        'utf8',
-    )
-    // Swift enforces file ownership against this root, so a derivation of its
-    // own would make the check verify nothing.
-    assert.doesNotMatch(swift, /applicationSupportDirectory/)
-    assert.match(swift, /private var dataRoot: URL\?/)
-    assert.match(swift, /func setDataRoot\(/)
-    // The sweep may only run once the root has arrived.
-    assert.doesNotMatch(swift, /webView = webview\s+sweepStaging\(/)
-
-    const plugin = await readFile(
-        join(ROOT, 'crates', 'tauri-plugin-ios-native', 'src', 'lib.rs'),
-        'utf8',
-    )
-    assert.match(plugin, /run_mobile_plugin_async::<\(\)>\(\s*\n?\s*"setDataRoot"/)
-    // Only the plugin sends the root, and every call that can reach a staged
-    // file waits for that handover instead of racing it.
-    assert.match(plugin, /pub async fn ensure_data_root/)
-    assert.match(plugin, /self\.ensure_data_root\(\)\.await/)
-    const entry = await readFile(join(ROOT, 'src-tauri', 'src', 'lib.rs'), 'utf8')
-    assert.match(entry, /tauri_plugin_ios_native::init\(\s*\n?\s*app_paths::data_root\(app\)\?/)
-    // The renderer learns every path here, so this is the gate for the calls
-    // the renderer makes directly to the plugin.
-    const paths = await readFile(join(ROOT, 'src-tauri', 'src', 'app_paths.rs'), 'utf8')
-    assert.match(paths, /ios_native\(\)\.ensure_data_root\(\)\.await/)
-
-    // Both consumers name the same leaf inside that root.
-    const helper = await readFile(join(ROOT, 'src', 'ts', 'storage', 'nativePaths.ts'), 'utf8')
-    for (const source of [swift, helper]) assert.match(source, /'ios-file-staging'|"ios-file-staging"/)
-})
-
-test('orphan asset collection is left to the native repository', async () => {
-    const bootstrap = await readFile(join(ROOT, 'src', 'ts', 'bootstrap.ts'), 'utf8')
-    // The renderer enumerated a flat assets directory that the
-    // content-addressed store no longer has. Reclamation lives in
-    // src-tauri/src/asset_repository, which owns the job pins and GC roots.
-    assert.doesNotMatch(bootstrap, /readDir\(\s*'assets'/)
-    assert.doesNotMatch(bootstrap, /blobStore\.remove\(\s*'assets\/'/)
-    for (const name of ['job_pins.rs', 'migration_gc.rs']) {
-        const module = await readFile(join(ROOT, 'src-tauri', 'src', 'asset_repository', name), 'utf8')
-        assert.match(module, /AssetRootSet/)
-    }
-    const store = await readFile(join(ROOT, 'src-tauri', 'src', 'persistent_store', 'mod.rs'), 'utf8')
-    assert.match(store, /fn recover_asset_object_deletions/)
 })

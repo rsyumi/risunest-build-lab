@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import { CATALOG_LIMIT, PRODUCT_LIMIT, compareVersions, releaseUrl,
   validateCatalog, validateProductRelease } from "./contracts.mjs";
 import { mergeCatalog } from "./catalog.mjs";
+import { renderDownloadTable } from "./download-table.mjs";
 import { verifySignature } from "./signatures.mjs";
 
 export function verifiedJson(bytes, signature, publicKey, limit) {
@@ -116,7 +117,8 @@ export async function publishRelease({ github, productBytes, productSignature, p
   await github.assertTagCommit(product.tag, product.sourceCommit);
   const published = await github.getByTag(product.tag);
   if (published && published.id !== releaseId) throw new Error("publication-release-mismatch");
-  try { await github.publish(prepared.id); }
+  const body = `${product.notes}\n\n## Downloads / 다운로드\n\n${renderDownloadTable(product)}`;
+  try { await github.publish(prepared.id, body); }
   catch (error) {
     const observed = await github.getById(releaseId);
     if (!matchesIdentity(observed) || observed.draft) throw error;

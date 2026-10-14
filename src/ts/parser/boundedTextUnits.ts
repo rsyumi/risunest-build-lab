@@ -7,6 +7,9 @@
  */
 export const maxTextUnitLength = 2048
 export const textUnitFrameBudget = maxTextUnitLength
+// A slow paint has a fixed cost even for one unit. Keep several bounded units
+// per later frame so that shrinking the batch does not multiply that cost.
+const minFrameBudget = 4 * maxTextUnitLength
 const maxFrameBudget = 65_536
 // Frame intervals that shrink or grow the next batch.
 const slowFrameMs = 50
@@ -261,7 +264,7 @@ export class IncrementalTextUnits {
                 // The interval includes the style and layout of the previous batch.
                 const interval = this.#now() - scheduled
                 if (interval > slowFrameMs)
-                    this.#budget = Math.max(1, Math.floor(this.#budget / 2))
+                    this.#budget = Math.max(minFrameBudget, Math.floor(this.#budget / 2))
                 else if (interval < fastFrameMs)
                     this.#budget = Math.min(maxFrameBudget, this.#budget * 2)
                 this.#pump()

@@ -650,8 +650,9 @@ impl HydrationSession {
                 // leaves without a file, so custody is read under it too.
                 let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
                 let mut rows = Vec::with_capacity(hashes.len());
-                for hash in hashes {
-                    if let Some(size) = cas.stat_object(hash)? {
+                let sizes = cas.stat_objects(hashes.iter().map(|hash| hash.as_str()))?;
+                for (hash, size) in hashes.into_iter().zip(sizes) {
+                    if let Some(size) = size {
                         rows.push(AssetObjectRegistration { object_hash: hash.clone(), byte_size: size });
                         local.push(hash);
                         continue;
@@ -732,20 +733,31 @@ impl HydrationSession {
                     let client = self.clients.get(&key).unwrap();
                     super::transfer::Transfer::new(client, cache)?.with_check(check)
                         .download(&objects.iter().map(|object| object.hash.clone()).collect::<Vec<_>>(), &[])?;
-                    for object in objects {
-                        let mut body = cache.open_derived(&object.hash)?.ok_or_else(|| SyncError::new("hydration-incomplete", 502))?;
-                        let staged = super::transfer::stage_checked(&cas, &mut body, &object.hash, object.size, check)?;
+                    let mut remaining = objects.as_slice();
+                    while !remaining.is_empty() {
+                        let count = crate::asset_repository::parallel_stage::batch_len(remaining.iter().map(|object| object.size));
+                        let (batch, rest) = remaining.split_at(count);
+                        remaining = rest;
+                        let staged = crate::asset_repository::parallel_stage::stage_batch(batch, check, &|object, stopped| {
+                            let mut body = cache.open_derived(&object.hash)?.ok_or_else(|| SyncError::new("hydration-incomplete", 502))?;
+                            super::transfer::stage_checked(&cas, &mut body, &object.hash, object.size, &|| {
+                                if stopped.load(std::sync::atomic::Ordering::Acquire) { Err(SyncError::new("cancelled", 409)) }
+                                else { Ok(()) }
+                            })
+                        });
                         check()?;
-                        {
-                            let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
+                        for (object, staged) in batch.iter().zip(staged?) {
                             check()?;
-                            let outcome = publish_registered(&cas, &mut self.catalog, &self.root, staged);
-                            check()?;
-                            outcome?;
-                            opened(&object.hash, HydrationOutcome::Downloaded);
+                            {
+                                let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
+                                check()?;
+                                let outcome = publish_registered(&cas, &mut self.catalog, &self.root, staged);
+                                check()?;
+                                outcome?;
+                                opened(&object.hash, HydrationOutcome::Downloaded);
+                            }
+                            cache.remove_derived(&object.hash)?;
                         }
-                        drop(body);
-                        cache.remove_derived(&object.hash)?;
                     }
                 }
                 drop(guards);

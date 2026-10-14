@@ -33,6 +33,14 @@ function run(target, args, { allowFailure = false } = {}) {
   return result;
 }
 
+function isAppOrigin(url) {
+  try {
+    return new URL(url).origin === "http://tauri.localhost";
+  } catch {
+    return false;
+  }
+}
+
 async function connect(onProgress) {
   const deadline = Date.now() + 30000;
   let target;
@@ -43,8 +51,7 @@ async function connect(onProgress) {
       .then((res) => res.json())
       .catch(() => []);
     target = targets.find(
-      (entry) =>
-        entry.type === "page" && entry.url.startsWith("http://tauri.localhost"),
+      (entry) => entry.type === "page" && isAppOrigin(entry.url),
     );
     if (target) break;
     await delay(250);

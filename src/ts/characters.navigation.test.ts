@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { get } from 'svelte/store'
 
@@ -73,11 +75,6 @@ vi.mock('./alert', async () => {
         alertWait: vi.fn(),
     }
 })
-vi.mock('../lang', () => ({ language: { errors: {}, navigationBlockedWhileEditingPaused: 'Synthetic paused copy', checkboxConfirmation: {
-    characterDeletion: "Delete character",
-    characterTrashDescription: "Moves to the trash.",
-    characterDeletionDescription: "Deleted permanently.",
-} } }))
 vi.mock('./util', () => ({
     checkNullish: (value: unknown) => value === null || value === undefined,
     findCharacterbyId: mocks.findCharacterbyId,
@@ -105,7 +102,7 @@ vi.mock('./globalApi.svelte', () => ({
     getFileSrc: vi.fn(),
 }))
 vi.mock('./process/inlayScreen', () => ({ updateInlayScreen: (value: unknown) => value }))
-vi.mock('./parser/parser.svelte', () => ({ parseMarkdownSafe: (value: string) => value }))
+vi.mock('./parser/parser.svelte', async () => (await import('./parser/parser.testSupport')).parserStubModule())
 vi.mock('./translator/translator', () => ({ translateHTML: vi.fn() }))
 vi.mock('./process/index.svelte', async () => {
     const { writable } = await import('svelte/store')
@@ -162,10 +159,12 @@ import {
     addingEmotion,
 } from './characters'
 import { createMetadataOnlySelectedConversation } from './storage/selectedConversationLifecycle'
+import { language } from 'src/lang'
 import { SelectedConversationPromotionStaleError } from './storage/activeWorkingSet.svelte'
 import { PersistentMutationFencedError } from './storage/saveCoordinator'
 import { MobileGUIStack, OpenRealmStore, selectedCharID } from './stores.svelte'
 import { doingChat } from './process/index.svelte'
+import { translateHTML } from './translator/translator'
 import { createConversationSummaryStub } from './storage/conversationResidency'
 import {
     beginNavigationActivity,
@@ -358,7 +357,7 @@ describe('runtime chat identity', () => {
 
         await expect(changeChar(0)).resolves.toBe(false)
 
-        expect(mocks.alertToast).toHaveBeenCalledWith('Synthetic paused copy')
+        expect(mocks.alertToast).toHaveBeenCalledWith(language.navigationBlockedWhileEditingPaused)
         expect(mocks.alertError).not.toHaveBeenCalled()
         expect(get(navigationActivity)).toBeNull()
     })
@@ -429,16 +428,16 @@ describe('runtime chat identity', () => {
     })
 
     it.each([
-        ['normal', 'Moves to the trash.'],
-        ['permanent', 'Deleted permanently.'],
-    ] as const)('describes a %s removal by what it does', async (type, description) => {
+        ['normal', 'characterTrashDescription'],
+        ['permanent', 'characterDeletionDescription'],
+    ] as const)('describes a %s removal by what it does', async (type, key) => {
         const character = createBlankChar()
         mocks.database.characters.push(character)
         mocks.alertConfirm.mockResolvedValueOnce(false)
 
         await removeChar(character.chaId, character.name, type)
 
-        expect(mocks.alertConfirm).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ description }))
+        expect(mocks.alertConfirm).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ description: language.checkboxConfirmation[key] }))
     })
 
     it('removes the character ID captured before confirmation', async () => {
@@ -1024,7 +1023,10 @@ describe('chat list operations', () => {
         const { SaveCoordinator } = await import('./storage/saveCoordinator')
         const { createPersistenceCanonicalCapture } = await import('./storage/reactivePersistenceCapture.svelte')
         const { createPersistentSaveObserverHarness } = await import('./storage/tests/persistentSaveObserverHarness.svelte')
-        const { cloneConversationByMessage, CONVERSATION_INSERT_PAGE_BYTES } = await import('./storage/conversationInsertPages')
+        const { cloneConversationByMessage } = await import('./storage/conversationInsertPages')
+        // Two of the three messages fit in one page, as with the product page and full-size messages.
+        const pageBytes = 64 * 1024
+        const pageSlack = 8 * 1024
         const { utf8ByteLength } = await import('./storage/nativePersistenceValue')
         const { encodeNativeCommit } = await import('./storage/nativeCommitTransport')
         let encodedRequests = 0
@@ -1034,7 +1036,7 @@ describe('chat list operations', () => {
             terminate() {}
             postMessage(data: { pages: Uint8Array[]; byteLength: number }, transfer: ArrayBuffer[]) {
                 expect(Object.keys(data)).toEqual(['pages', 'byteLength'])
-                expect(data.byteLength).toBeLessThan(CONVERSATION_INSERT_PAGE_BYTES + 64 * 1024)
+                expect(data.byteLength).toBeLessThan(pageBytes + pageSlack)
                 expect(data.pages.every((page) => page.byteLength <= 1024 * 1024)).toBe(true)
                 const received = structuredClone(data, { transfer })
                 expect(data.pages.every((page) => page.byteLength === 0)).toBe(true)
@@ -1082,6 +1084,7 @@ describe('chat list operations', () => {
             captureRoot: () => ({}) as any, capturePresets: () => [], capturePluginStorage: () => null,
             captureCharacters: () => mocks.database.characters, captureSelectedCharacter: current,
             captureCharacter: (id) => mocks.database.characters.find((value: any) => value.chaId === id) ?? null, replaceDatabase: () => {},
+            conversationInsertPageBytes: pageBytes,
         })
         coordinator.initialize(revision)
         mocks.getSelectedConversationMode.mockReturnValue('complete')
@@ -1097,7 +1100,7 @@ describe('chat list operations', () => {
             await coordinator.flushPendingData('after-duplicate-selection')
             return result
         })
-        const data = '한글🐿️é'.repeat(550_000)
+        const data = '한글🐿️é'.repeat(2_000)
         const messages = [0, 1, 2].map((index) => ({ role: 'user', data: `${index}:${data}`, chatId: `import-message-${index}` }))
         mocks.selectSingleFile.mockResolvedValueOnce({ name: 'large-synthetic.json', data: new TextEncoder().encode(JSON.stringify({
             type: 'risuChat', ver: 2, data: { id: 'input', name: 'Large import', note: '', localLore: [], message: messages }, folders: [],
@@ -1124,7 +1127,7 @@ describe('chat list operations', () => {
                 chats: [{ id: 'new-character-chat', name: 'New chat', note: '', localLore: [], message: messages }] } as any, 'large-character-import')
             expect((stored.get('new-character-chat') as any).message.map((message: any) => message.data)).toEqual(messages.map((message) => message.data))
             expect(requests.find((request) => request.addCharacter)?.addCharacter.chats).toEqual([])
-            expect(largestEncoding).toBeLessThan(CONVERSATION_INSERT_PAGE_BYTES + 64 * 1024)
+            expect(largestEncoding).toBeLessThan(pageBytes + pageSlack)
             expect(requests.filter((request) => request.conversations?.some((mutation: any) => mutation.start > 0))).toHaveLength(4)
             expect(encodedRequests).toBe(requests.length)
             expect(coordinator.hasPendingPersistenceWork).toBe(false)
@@ -1133,7 +1136,7 @@ describe('chat list operations', () => {
             vi.unstubAllGlobals()
             mocks.commitCharacterAddition.mockImplementation(async (request: any) => request.install())
         }
-    }, 30_000)
+    })
 
     it('keeps the selected chat when another chat is removed', async () => {
         const character = buildSelectedCharacter()
@@ -1459,6 +1462,25 @@ describe('chat list operations', () => {
         expect(exported.data.message).toEqual([
             { role: 'user', data: 'authoritative body' },
         ])
+    })
+
+    it('filters markup added by translation from an HTML export and shows names as text', async () => {
+        const character = buildCharacter()
+        character.name = '<b>A&B</b>'
+        mocks.database.characters.push(character)
+        selectedCharID.set(0)
+        mocks.readPersistentConversation.mockResolvedValue({ ...character.chats[0], fmIndex: -1 })
+        // HTML file, then the default '0' answers translate the content and keep names.
+        mocks.alertSelect.mockResolvedValueOnce('2')
+        vi.mocked(translateHTML).mockResolvedValue('<p>translated <img src="x" onerror="alert(1)"></p>')
+
+        await exportChat(0)
+
+        const exported = Buffer.from(mocks.downloadFile.mock.calls[0][1]).toString()
+        expect(exported).toContain('<p>translated <img src="x"></p>')
+        expect(exported).not.toContain('onerror')
+        expect(exported).toContain('<h2>&lt;b&gt;A&amp;B&lt;/b&gt;</h2>')
+        expect(exported).not.toContain('<b>A')
     })
 
     it('reads the complete character authoritatively before exporting all chats', async () => {

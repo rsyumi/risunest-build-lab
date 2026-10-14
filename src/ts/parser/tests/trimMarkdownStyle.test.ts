@@ -4,7 +4,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { writable } from 'svelte/store'
 import { ParseMarkdown, trimMarkdown } from '../parser.svelte'
 
-vi.mock('../../platform', () => ({ isTauri: false, isNodeServer: false }))
+vi.mock('../../platform', async () => (await import('../../platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 
 //#region module mocks
 

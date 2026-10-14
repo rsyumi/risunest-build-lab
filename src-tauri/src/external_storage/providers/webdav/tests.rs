@@ -1242,9 +1242,10 @@ fn documented_statuses_map_to_provider_errors_with_their_retry_hints() {
             reply(401, &[("WWW-Authenticate", "Basic realm=\"dav\"")], b""),
             reply(507, &[], b""),
             reply(423, &[], b""),
-            reply(429, &[("Retry-After", "60")], b""),
             reply(404, &[], b""),
             reply(302, &[], b""),
+            // Last, because a later request on this account waits out its Retry-After.
+            reply(429, &[("Retry-After", "60")], b""),
         ]);
         let repository = harness.opened().await;
         let directory = tempfile::tempdir().unwrap();
@@ -1254,10 +1255,10 @@ fn documented_statuses_map_to_provider_errors_with_their_retry_hints() {
             (ErrorKind::StorageFull, 507, None),
             // A write lock another client holds clears on its own timeout.
             (ErrorKind::Transient, 423, None),
-            (ErrorKind::RateLimited, 429, Some(NOW_MS + 60_000)),
             (ErrorKind::NotFound, 404, None),
             // A redirect without a destination cannot be followed.
             (ErrorKind::EndpointRejected, 302, None),
+            (ErrorKind::RateLimited, 429, Some(NOW_MS + 60_000)),
         ];
         for (index, (kind, status, retry_at_ms)) in expected.into_iter().enumerate() {
             let mut staging = sink(&directory, &format!("read-{index}"));
@@ -1282,31 +1283,14 @@ fn documented_statuses_map_to_provider_errors_with_their_retry_hints() {
 
 #[test]
 fn cancellation_during_a_body_stops_the_read() {
+    use crate::external_storage::provider_contract::{a_read_cancelled_during_its_body_stops, held_body};
     runtime().block_on(async {
-        let harness = Harness::start(vec![established_root(), Reply::DelayedBody]);
+        let (held, _release) = held_body();
+        let harness = Harness::start(vec![established_root(), held]);
         let repository = harness.opened().await;
-        let directory = tempfile::tempdir().unwrap();
-        let mut staging = sink(&directory, "cancelled");
-        let cancel = Cancellation::default();
         let target = locator(&repository, None, HEAD_OBJECT);
-        let read = harness
-            .provider
-            .read_object(&repository, &target, None, &mut staging, &cancel);
-        let trigger = async {
-            while harness.count() < 2 {
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            cancel.cancel();
-        };
-        let (outcome, ()) = tokio::time::timeout(
-            std::time::Duration::from_millis(2_000),
-            futures::future::join(read, trigger),
-        )
-        .await
-        .unwrap();
-        assert_eq!(outcome.unwrap_err().kind, ErrorKind::Cancelled);
-        assert!(!staging.is_verified());
+        a_read_cancelled_during_its_body_stops(harness.provider.as_ref(), &repository, &target, &Cancellation::default())
+            .await;
     });
 }
 

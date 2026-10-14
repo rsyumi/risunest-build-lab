@@ -1,3 +1,4 @@
+import { withLibraryFileSelection } from './libraryFileOperation'
 import '../androidNativeControl'
 import type { NativeFileJobSource } from './nativeFileJobs'
 
@@ -123,6 +124,8 @@ export interface AndroidSafProgress {
     token: string | null
 }
 
+export type AndroidBackupCopyProgress = Pick<AndroidSafProgress, 'copiedBytes' | 'totalBytes'>
+
 export interface AndroidSafDestinationResult {
     requestId?: string
     bytes: number
@@ -154,7 +157,7 @@ export interface AndroidSafJavascriptBridge {
     pickBackupSource?(requestId: string): NativeReply<void>
     pickPortableBackupSource?(requestId: string): NativeReply<void>
     discardPortableSource?(token: string): NativeReply<boolean>
-    materializeBackupSource?(token: string): NativeReply<string>
+    materializeBackupSource?(token: string, onProgress?: (progress: AndroidBackupCopyProgress) => void): NativeReply<string>
     pickContentSource?(
         requestId: string,
         destination: 'character' | 'module',
@@ -263,7 +266,7 @@ function pickAndroidSpoolSource(
         )
     }
     const requestId = dependencies.createRequestId()
-    return new Promise((resolve, reject) => {
+    return withLibraryFileSelection(() => new Promise((resolve, reject) => {
         let settled = false
         let receiving = false
         let aborted = false
@@ -398,7 +401,7 @@ function pickAndroidSpoolSource(
         } catch (error) {
             finish(() => reject(error))
         }
-    })
+    }))
 }
 
 
@@ -433,14 +436,38 @@ export function pickAndroidPortableBackupSource(
     }, options, dependencies)
 }
 
-export async function materializeAndroidBackupSource(token: string): Promise<NativeFileJobSource> {
-    const response = await productionBridge().materializeBackupSource?.(token)
-    if (!response) throw new AndroidSafSourceError('source-reselect-required', 'Backup source custody is unavailable')
-    const batch = JSON.parse(response) as AndroidSpoolBatch
-    const failure = batch.failures[0]
-    if (failure) throw new AndroidSafSourceError(failure.code, failure.code)
-    if (batch.ready.length !== 1) throw new AndroidSafSourceError('source-reselect-required', 'Backup source copy is unavailable')
-    return {type: 'androidSpool', token: batch.ready[0].token}
+export async function materializeAndroidBackupSource(
+    token: string,
+    options: Pick<AndroidSafSourcePickerOptions, 'signal' | 'onProgress'> = {},
+    bridge: AndroidSafJavascriptBridge = productionBridge(),
+): Promise<NativeFileJobSource> {
+    const cancelled = () => new DOMException('Android backup copy was cancelled', 'AbortError')
+    if (options.signal?.aborted) throw cancelled()
+    const onAbort = () => {
+        // Releasing custody cancels the native copy before waiting for its cleanup.
+        void Promise.resolve().then(() => bridge.discardPortableSource?.(token)).catch(() => {})
+    }
+    options.signal?.addEventListener('abort', onAbort, { once: true })
+    try {
+        const response = await bridge.materializeBackupSource?.(token, progress => {
+            if (!options.signal?.aborted) options.onProgress?.({ ...progress, requestId: token, token, operation: 'source-copy' })
+        })
+        if (!response) throw new AndroidSafSourceError('source-reselect-required', 'Backup source custody is unavailable')
+        const batch = JSON.parse(response) as AndroidSpoolBatch
+        if (options.signal?.aborted) {
+            await Promise.all(batch.ready.map(source => bridge.discardSource?.(source.token)))
+            throw cancelled()
+        }
+        const failure = batch.failures[0]
+        if (failure) throw new AndroidSafSourceError(failure.code, failure.code)
+        if (batch.ready.length !== 1) throw new AndroidSafSourceError('source-reselect-required', 'Backup source copy is unavailable')
+        return {type: 'androidSpool', token: batch.ready[0].token}
+    } catch (error) {
+        if (options.signal?.aborted) throw cancelled()
+        throw error
+    } finally {
+        options.signal?.removeEventListener('abort', onAbort)
+    }
 }
 
 export function pickAndroidLegacyBackupSource(
@@ -546,7 +573,7 @@ export function copyNativeExportToAndroidSaf(
     }
     const requestId = dependencies.createRequestId()
     activeDestinationRequestIds.add(requestId)
-    return new Promise((resolve, reject) => {
+    return withLibraryFileSelection(() => new Promise((resolve, reject) => {
         let settled = false
         let receiving = false
         const cleanup = () => {
@@ -629,7 +656,7 @@ export function copyNativeExportToAndroidSaf(
         catch (error) {
             finish(() => reject(error))
         }
-    })
+    }))
 }
 
 export function pickAndroidContentSource(

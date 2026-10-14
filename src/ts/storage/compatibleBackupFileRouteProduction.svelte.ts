@@ -1,4 +1,4 @@
-import { save } from '@tauri-apps/plugin-dialog'
+import { save } from './fileSelection'
 
 import { isTauri, isTauriAndroid, isTauriIOS } from '../platform'
 import { runSharedNativeFileOperation } from './nativeFileJobManager'

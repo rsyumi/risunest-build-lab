@@ -21,7 +21,7 @@ vi.mock('src/ts/stores.svelte', async () => {
         disableHighlight: writable(false),
     }
 })
-vi.mock('src/ts/platform', () => ({ isMobile: false }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 vi.mock('src/ts/util', () => ({ sleep: async () => {} }))
 
 import TextAreaInput from './TextAreaInput.svelte'

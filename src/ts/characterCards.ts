@@ -20,7 +20,7 @@ import type { OnnxModelFiles } from "./process/transformers"
 import { CharXImporter, CharXWriter } from "./process/processzip"
 import { exportModuleLegacy, readModule, type RisuModule } from "./process/modules"
 import { readFile } from "@tauri-apps/plugin-fs"
-import { open } from "@tauri-apps/plugin-dialog"
+import { open } from "./storage/fileSelection"
 import { REALM_HUB_URL, REALM_NIGHTLY_HUB_URL, REALM_SITE_URL } from "./realmEndpoints"
 import { registerOpenedFileListeners } from "./openedFiles"
 import { type DeviceMarkerStorage } from './storage/deviceMarkers'

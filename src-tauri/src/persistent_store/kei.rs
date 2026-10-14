@@ -1,3 +1,4 @@
+use risunest_network_log::reqwest::RequestBuilderExt;
 use super::{
     checkpoint_after_detached_release, RevisionReadLease, StoreError,
     StoreResult,
@@ -539,7 +540,7 @@ async fn upload_payload_for_job(
         .header(CONTENT_TYPE, "application/json")
         .header(CONTENT_LENGTH, payload.bytes)
         .body(body)
-        .send();
+        .send_logged("kei-upload");
     let response = match await_upload_with_job_control(request, &job, idle_timeout).await {
         Ok(response) => response,
         Err(ControlledUploadError::Request(error)) => {
@@ -768,7 +769,7 @@ async fn upload_payload(url: &Url, payload: &KeiPayloadFile) -> StoreResult<u16>
         .header(CONTENT_TYPE, "application/json")
         .header(CONTENT_LENGTH, payload.bytes)
         .body(body)
-        .send()
+        .send_logged("kei-upload")
         .await
         .map_err(|error| {
             let summary = if error.is_timeout() {

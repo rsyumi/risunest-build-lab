@@ -9,6 +9,7 @@ import { fetchProtectedResource } from "../sionyw"
 import { replacePersistentDatabase } from "../storage/persistentDataRuntime.svelte"
 import { installAccountBackup } from "../storage/databaseRestore"
 import { isTauri } from "../platform"
+import { hasLibraryCharacters } from "../storage/libraryCharacters"
 
 export function risuLogin() {
     const win = window.open(hubURL + '/hub/login')
@@ -100,7 +101,7 @@ export async function loadRisuAccountBackup() {
         alertError("Invalid backup id")
         return
     }
-    if (!isTauri && !(await alertCheckboxConfirm({
+    if (!isTauri && await hasLibraryCharacters() && !(await alertCheckboxConfirm({
         title: language.backupLoadConfirm,
         description: language.checkboxConfirmation.dataReplacementDescription,
         checkboxLabel: language.checkboxConfirmation.dataReplacement,

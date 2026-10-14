@@ -4,6 +4,73 @@ use risunest_sync_server::{config::Config, store::Store};
 use risunest_sync_wire::hash;
 
 #[test]
+fn generated_identifiers_are_uuids_and_credentials_remain_full_length() {
+    use risunest_sync_server::store::{ObjectIdentity, UploadManifest};
+
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::init(root.path()).unwrap();
+    let credential = store.add_device().unwrap();
+    let device = store
+        .authenticate(&credential.library_id, &credential.token)
+        .unwrap();
+    let head = store.head().unwrap();
+    let pin = store.create_state_pin(&device).unwrap();
+    let body = b"synthetic retained content";
+    let digest = hash(body);
+    let upload = store
+        .begin_upload(
+            &device,
+            &UploadManifest {
+                hash: digest.clone(),
+                size: (body.len() as u64).into(),
+            },
+        )
+        .unwrap();
+    let ids = [
+        &head.library_id,
+        &head.epoch,
+        &credential.device_id,
+        &pin.pin_id,
+        &upload,
+    ];
+    for value in ids {
+        let id = uuid::Uuid::parse_str(value).unwrap();
+        assert_eq!(id.get_version(), Some(uuid::Version::Random));
+        assert_eq!(id.get_variant(), uuid::Variant::RFC4122);
+        assert_eq!(id.to_string(), *value);
+    }
+    assert_eq!(
+        ids.into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        ids.len()
+    );
+    store.put_object(&device, &digest, body).unwrap();
+    let retained = store
+        .retain_objects(
+            &device,
+            &head.epoch,
+            &[ObjectIdentity {
+                hash: digest,
+                size: Some((body.len() as u64).into()),
+            }],
+        )
+        .unwrap();
+    risunest_sync_wire::validate_hash(&credential.token).unwrap();
+    risunest_sync_wire::validate_hash(&retained[0].retention_id).unwrap();
+    store.rotate_restored_epoch().unwrap();
+    let restored = store.head().unwrap();
+    assert_eq!(restored.library_id, head.library_id);
+    assert_ne!(restored.epoch, head.epoch);
+    assert_eq!(
+        uuid::Uuid::parse_str(&restored.epoch)
+            .unwrap()
+            .get_version(),
+        Some(uuid::Version::Random)
+    );
+}
+
+#[test]
 fn owner_lock_and_reinitialization_protect_the_store() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::init(dir.path()).unwrap();

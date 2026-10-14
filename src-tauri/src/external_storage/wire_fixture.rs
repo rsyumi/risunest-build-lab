@@ -21,7 +21,6 @@ pub(crate) enum Reply {
         body: Vec<u8>,
     },
     Lost,
-    DelayedHeaders,
     DelayedBody,
     Gated {
         send_headers: bool,
@@ -74,7 +73,6 @@ impl WireServer {
                 records.lock().unwrap().push(request);
                 match reply {
                     Reply::Lost => {}
-                    Reply::DelayedHeaders => thread::sleep(Duration::from_millis(250)),
                     Reply::DelayedBody => {
                         let _ = stream.write_all(
                             b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n",

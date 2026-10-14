@@ -1,8 +1,58 @@
 import { test, expect } from './fixture'
+import { languageKorean as language } from '../../src/lang/ko'
 
-declare global { interface Window { lazyApp: { open(route: string): void; showDialog(): void; read(): { sidebarClosing: boolean; dialog: string; entries: number } }; lazyImportBoundary: { arm(route: string): void; hold(route: string): void; rejectHeld(): void; attempts(): number } } }
+declare global { interface Window { lazyApp: { open(route: string): void; layout(mobile: boolean): void; read(): { sidebarClosing: boolean; entries: number } }; lazyImportBoundary: { arm(route: string): void; hold(route: string): void; rejectHeld(): void; attempts(): number } } }
 
 const hosts = ['settings', 'custom', 'grid', 'presets', 'personas', 'mobile'] as const
+for (const back of ['header', 'Escape', 'history'] as const) {
+    test(`actual mobile chat menu opens Settings and returns through ${back}`, async ({ page }) => {
+        const errors: string[] = []
+        page.on('pageerror', error => errors.push(error.message))
+        await page.setViewportSize({ width: 390, height: 844 })
+        await page.goto('/lazyApp.html')
+        await page.evaluate(() => window.lazyApp.open('mobile-chat'))
+        await page.getByRole('button', { name: language.menu, exact: true }).click()
+        await page.getByRole('button', { name: language.settings, exact: true }).click()
+        const display = page.getByRole('button', { name: language.display, exact: true })
+        await display.click()
+        await expect(display).toHaveCount(0)
+        const goBack = async () => {
+            if (back === 'header') await page.getByRole('button', { name: language.goback, exact: true }).click()
+            else if (back === 'Escape') await page.keyboard.press('Escape')
+            else await page.evaluate(() => history.back())
+        }
+        await goBack()
+        await expect(display).toBeVisible()
+        await goBack()
+        await expect(display).toHaveCount(0)
+        await expect(page.getByRole('button', { name: language.settings, exact: true })).toBeVisible()
+        await page.getByRole('button', { name: language.goback, exact: true }).click()
+        await expect(page.getByRole('button', { name: language.menu, exact: true })).toBeVisible()
+        expect(errors).toEqual([])
+    })
+}
+test('actual Settings returns to the selected mobile menu after layout changes', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/lazyApp.html')
+    await page.evaluate(() => window.lazyApp.open('mobile-chat'))
+    await page.getByRole('button', { name: language.menu, exact: true }).click()
+    await page.getByRole('button', { name: language.settings, exact: true }).click()
+    const display = page.getByRole('button', { name: language.display, exact: true })
+    await expect(display).toBeVisible()
+    await page.setViewportSize({ width: 1200, height: 800 })
+    await page.evaluate(() => window.lazyApp.layout(false))
+    await expect(display).toBeVisible()
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.evaluate(() => window.lazyApp.layout(true))
+    // The page the desktop layout opened stays open, so the menu list is hidden until Back.
+    await expect(display).toHaveCount(0)
+    await page.getByRole('button', { name: language.goback, exact: true }).click()
+    await expect(display).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(display).toHaveCount(0)
+    await expect(page.getByRole('button', { name: language.settings, exact: true })).toBeVisible()
+})
+
 for (const host of hosts) {
     for (const action of ['retry', 'leave'] as const) {
         test(`actual App ${host} rejected import supports ${action}`, async ({ page }) => {
@@ -15,13 +65,12 @@ for (const host of hosts) {
                 : page.evaluate(route => window.lazyApp.open(route), host)
             await open()
             const failure = page.getByRole('alert')
-            await expect(failure.locator('span')).toHaveText(host === 'settings' || host === 'mobile' ? '설정 화면을 불러오지 못했습니다.' : '화면을 불러오지 못했습니다.')
-            await expect(failure.getByRole('button')).toHaveText(['다시 시도', host === 'mobile' ? '뒤로' : '닫기'])
-            await expect(failure.locator('p')).toHaveText('계속 실패할 경우 앱을 다시 실행해주세요.')
-            await expect(failure.getByRole('button', { name: '취소', exact: true })).toHaveCount(0)
-            if (action === 'retry') await failure.getByRole('button', { name: '다시 시도', exact: true }).click()
+            await expect(failure.getByText(host === 'settings' || host === 'mobile' ? language.risuNest.lazy.settings : language.risuNest.lazy.screen, { exact: true })).toBeVisible()
+            const backLabel = host === 'mobile' ? language.goback : language.close
+            await expect(failure.getByRole('button')).toHaveText([language.retry, backLabel])
+            if (action === 'retry') await failure.getByRole('button', { name: language.retry, exact: true }).click()
             else {
-                await failure.getByRole('button', { name: host === 'mobile' ? '뒤로' : '닫기', exact: true }).click()
+                await failure.getByRole('button', { name: backLabel, exact: true }).click()
                 await expect(failure).toHaveCount(0)
                 await open()
             }
@@ -38,9 +87,9 @@ test('actual MobileFooter leaving a failed Settings import allows re-entry', asy
     await page.evaluate(() => window.lazyImportBoundary.arm('mobile'))
     await page.evaluate(() => window.lazyApp.open('mobile'))
     await expect(page.getByRole('alert')).toBeVisible()
-    await page.getByRole('button', { name: '캐릭터', exact: true }).click()
+    await page.getByRole('button', { name: language.character, exact: true }).click()
     await expect(page.getByRole('alert')).toHaveCount(0)
-    await page.getByRole('button', { name: '설정', exact: true }).click()
+    await page.getByRole('button', { name: language.settings, exact: true }).click()
     await expect(page.locator('[data-lazy-loaded]')).toHaveCount(1)
     expect(await page.evaluate(() => window.lazyImportBoundary.attempts())).toBe(2)
 })
@@ -50,10 +99,10 @@ test('actual MobileBody ignores a prior import rejection after footer leave and 
     page.on('pageerror', error => errors.push(error.message))
     await page.goto('/lazyApp.html')
     await page.evaluate(() => { window.lazyImportBoundary.hold('mobile'); window.lazyApp.open('mobile') })
-    await expect(page.getByRole('status')).toHaveText('로딩중')
-    await page.getByRole('button', { name: '캐릭터', exact: true }).click()
+    await expect(page.getByRole('status')).toBeVisible()
+    await page.getByRole('button', { name: language.character, exact: true }).click()
     await expect(page.getByRole('status')).toHaveCount(0)
-    await page.getByRole('button', { name: '설정', exact: true }).click()
+    await page.getByRole('button', { name: language.settings, exact: true }).click()
     await expect(page.locator('[data-lazy-loaded]')).toHaveCount(1)
     expect(await page.evaluate(() => window.lazyImportBoundary.attempts())).toBe(2)
     await page.evaluate(() => window.lazyImportBoundary.rejectHeld())
@@ -68,22 +117,8 @@ test('actual App closes the open sidebar on Back and leaves Escape to its conten
     await expect(page.getByRole('button', { name: 'Synthetic grid opener', exact: true })).toBeVisible()
     await expect.poll(() => page.evaluate(() => window.lazyApp.read().entries)).toBe(1)
     await page.keyboard.press('Escape')
-    expect(await page.evaluate(() => window.lazyApp.read())).toEqual({ sidebarClosing: false, dialog: 'none', entries: 1 })
+    expect(await page.evaluate(() => window.lazyApp.read())).toEqual({ sidebarClosing: false, entries: 1 })
     await page.evaluate(() => history.back())
     await expect.poll(() => page.evaluate(() => window.lazyApp.read().sidebarClosing)).toBe(true)
     expect(page.url()).toMatch(/\/lazyApp\.html$/)
-})
-
-test('actual App cancels a dialog shown outside every layer on the Android root Back', async ({ page }) => {
-    await page.goto('/lazyApp.html')
-    const rootBack = () => page.evaluate(() => {
-        const event = new Event('risunest-root-back', { cancelable: true })
-        window.dispatchEvent(event)
-        return event.defaultPrevented
-    })
-    expect(await rootBack()).toBe(false)
-    await page.evaluate(() => window.lazyApp.showDialog())
-    expect(await rootBack()).toBe(true)
-    expect(await page.evaluate(() => window.lazyApp.read().dialog)).toBe('none')
-    expect(await rootBack()).toBe(false)
 })

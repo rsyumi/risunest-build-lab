@@ -166,6 +166,17 @@ fn failure(error: impl std::fmt::Display) -> ProviderError {
 pub(crate) struct JobStore(Connection);
 const STATE_TERMINAL_LIMIT: i64 = 32;
 const MAINTENANCE_PAGE: i64 = 128;
+const RESTORE_BODY_PAGE: i64 = 128;
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_RESTORE_BODY_PAGE: std::cell::Cell<i64> = const { std::cell::Cell::new(RESTORE_BODY_PAGE) };
+}
+fn restore_body_page_size() -> i64 {
+    #[cfg(test)]
+    return TEST_RESTORE_BODY_PAGE.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    RESTORE_BODY_PAGE
+}
 const RELEASED_PAGE_SQL: &str =
     "SELECT rowid,connection_id FROM external_requests
      WHERE json_extract(value,'$.spoolReleased')=1
@@ -262,8 +273,8 @@ impl JobStore {
     /// interner share their catalog and pack objects across pages.
     pub(crate) fn restore_body_page(&self,job:&str,after:&str,interner:&mut super::lww_residency::ObjectInterner)->Result<Vec<super::lww_residency::SharedPackedSource>> {
         if self.read(job)?.summary["restoreBodiesReady"]!=true {return Err(ProviderError::new(ErrorKind::Corrupt));}
-        let mut statement=self.0.prepare("SELECT source FROM external_restore_bodies WHERE job_id=?1 AND hash>?2 AND settled=0 ORDER BY hash LIMIT 128").map_err(failure)?;
-        let rows=statement.query_map(rusqlite::params![job,after],|row|row.get::<_,String>(0)).map_err(failure)?;
+        let mut statement=self.0.prepare("SELECT source FROM external_restore_bodies WHERE job_id=?1 AND hash>?2 AND settled=0 ORDER BY hash LIMIT ?3").map_err(failure)?;
+        let rows=statement.query_map(rusqlite::params![job,after,restore_body_page_size()],|row|row.get::<_,String>(0)).map_err(failure)?;
         rows.map(|row|{
             let source:super::lww_residency::PackedSource=serde_json::from_str(&row.map_err(failure)?).map_err(failure)?;
             Ok(source.interned(interner))

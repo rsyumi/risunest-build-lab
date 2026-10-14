@@ -193,7 +193,11 @@ mod recovery_ciphertext {
     }
 }
 const RECOVERY_SCHEMA: &str = "risunest.repository-bootstrap/v1";
-const CONNECTION_SETTINGS_SCHEMA: &str = "risunest.connection-settings/v1";
+const CONNECTION_SETTINGS_MAGIC: &[u8; 4] = b"RNC1";
+// Magic, compression flag, repository ID length, then a 16-byte salt.
+const CONNECTION_SETTINGS_HEADER_BYTES: usize = 22;
+const MAX_CONNECTION_SETTINGS_PLAINTEXT: usize = 32 * 1024;
+const CONNECTION_SETTINGS_WINDOW_LOG: u32 = 15;
 pub const MAX_REPOSITORY_BOOTSTRAP_BYTES: usize = 64 * 1024;
 pub const MAX_CONNECTION_SETTINGS_BYTES: usize = 64 * 1024;
 
@@ -247,26 +251,28 @@ impl RecoveryKey {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Clone)]
 pub struct ConnectionSettingsEnvelope {
-    pub schema: String,
     pub repository_id: String,
     pub salt: [u8; 16],
-    #[serde(with = "recovery_ciphertext")]
     pub ciphertext: Vec<u8>,
+    compressed: bool,
 }
 
 impl ConnectionSettingsEnvelope {
     fn binding(&self) -> Result<Vec<u8>> {
-        if self.schema != CONNECTION_SETTINGS_SCHEMA
-            || self.repository_id.is_empty()
+        if self.repository_id.is_empty()
             || self.repository_id.len() > 128
         {
             return Err(FormatError("invalid-connection-settings"));
         }
-        serde_json::to_vec(&(&self.schema, &self.repository_id, self.salt))
-            .map_err(|_| FormatError("invalid-connection-settings"))
+        let mut header = Vec::with_capacity(CONNECTION_SETTINGS_HEADER_BYTES + self.repository_id.len());
+        header.extend_from_slice(CONNECTION_SETTINGS_MAGIC);
+        header.push(u8::from(self.compressed));
+        header.push(self.repository_id.len() as u8);
+        header.extend_from_slice(&self.salt);
+        header.extend_from_slice(self.repository_id.as_bytes());
+        Ok(header)
     }
 
     fn wrapping_key(&self, code: &RecoveryKey) -> Result<Zeroizing<[u8; 32]>> {
@@ -278,14 +284,19 @@ impl ConnectionSettingsEnvelope {
     }
 
     pub fn protect(repository_id: String, plaintext: &[u8], code: &RecoveryKey) -> Result<Self> {
-        if plaintext.is_empty() || plaintext.len() > 32 * 1024 {
+        if plaintext.is_empty() || plaintext.len() > MAX_CONNECTION_SETTINGS_PLAINTEXT {
             return Err(FormatError("invalid-connection-settings"));
         }
+        let mut compressor = zstd::bulk::Compressor::new(1)?;
+        compressor.set_parameter(zstd::zstd_safe::CParameter::WindowLog(CONNECTION_SETTINGS_WINDOW_LOG))?;
+        let compressed = Zeroizing::new(compressor.compress(plaintext)?);
+        let use_compression = compressed.len() < plaintext.len();
+        let plaintext = if use_compression { compressed.as_slice() } else { plaintext };
         let mut result = Self {
-            schema: CONNECTION_SETTINGS_SCHEMA.into(),
             repository_id,
             salt: [0; 16],
             ciphertext: Vec::new(),
+            compressed: use_compression,
         };
         getrandom::getrandom(&mut result.salt)
             .map_err(|_| FormatError("randomness-unavailable"))?;
@@ -302,9 +313,8 @@ impl ConnectionSettingsEnvelope {
     }
 
     pub fn encode(&self) -> Result<Vec<u8>> {
-        self.binding()?;
-        let bytes = serde_json::to_vec(self)
-            .map_err(|_| FormatError("invalid-connection-settings"))?;
+        let mut bytes = self.binding()?;
+        bytes.extend_from_slice(&self.ciphertext);
         if bytes.len() > MAX_CONNECTION_SETTINGS_BYTES {
             return Err(FormatError("invalid-connection-settings"));
         }
@@ -312,13 +322,29 @@ impl ConnectionSettingsEnvelope {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
-        if bytes.is_empty() || bytes.len() > MAX_CONNECTION_SETTINGS_BYTES {
+        if bytes.len() < CONNECTION_SETTINGS_HEADER_BYTES
+            || bytes.len() > MAX_CONNECTION_SETTINGS_BYTES
+            || &bytes[..4] != CONNECTION_SETTINGS_MAGIC
+            || bytes[4] > 1
+        {
             return Err(FormatError("invalid-connection-settings"));
         }
-        let value: Self = serde_json::from_slice(bytes)
-            .map_err(|_| FormatError("invalid-connection-settings"))?;
+        let repository_end = CONNECTION_SETTINGS_HEADER_BYTES + bytes[5] as usize;
+        let repository_id = bytes.get(CONNECTION_SETTINGS_HEADER_BYTES..repository_end)
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .ok_or(FormatError("invalid-connection-settings"))?;
+        let mut salt = [0; 16];
+        salt.copy_from_slice(&bytes[6..CONNECTION_SETTINGS_HEADER_BYTES]);
+        let value = Self {
+            repository_id: repository_id.into(),
+            salt,
+            ciphertext: bytes[repository_end..].to_vec(),
+            compressed: bytes[4] == 1,
+        };
         value.binding()?;
-        if value.ciphertext.len() > 48 * 1024 {
+        if value.ciphertext.is_empty()
+            || value.ciphertext.len() as u64 > ciphertext_length(MAX_CONNECTION_SETTINGS_PLAINTEXT as u64)?
+        {
             return Err(FormatError("invalid-connection-settings"));
         }
         Ok(value)
@@ -336,8 +362,22 @@ impl ConnectionSettingsEnvelope {
             &mut *plaintext,
             &key,
             &binding,
-            32 * 1024,
+            MAX_CONNECTION_SETTINGS_PLAINTEXT as u64,
         )?;
+        if self.compressed {
+            // Authenticate the complete ciphertext before allocating a bounded decoder.
+            if !plaintext.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
+                return Err(FormatError("invalid-zstd-frame"));
+            }
+            let mut decoder = zstd::stream::read::Decoder::with_buffer(plaintext.as_slice())?.single_frame();
+            decoder.window_log_max(CONNECTION_SETTINGS_WINDOW_LOG)?;
+            let mut decoded = Zeroizing::new(Vec::new());
+            decoder.by_ref().take(MAX_CONNECTION_SETTINGS_PLAINTEXT as u64 + 1).read_to_end(&mut decoded)?;
+            if decoded.len() > MAX_CONNECTION_SETTINGS_PLAINTEXT || !decoder.finish().is_empty() {
+                return Err(FormatError("invalid-connection-settings"));
+            }
+            plaintext = decoded;
+        }
         if plaintext.is_empty() {
             return Err(FormatError("invalid-connection-settings"));
         }
@@ -595,11 +635,83 @@ mod tests {
         let plaintext = vec![b'x'; 32 * 1024];
         let encoded = ConnectionSettingsEnvelope::protect("repository".into(), &plaintext, &key)
             .unwrap().encode().unwrap();
-        assert!(encoded.len() > 24 * 1024);
+        assert!(encoded.len() < 256);
         let decoded = ConnectionSettingsEnvelope::decode(&encoded).unwrap();
         assert_eq!(decoded.open("repository", &key).unwrap().as_slice(), plaintext);
         assert!(ConnectionSettingsEnvelope::protect("repository".into(), &vec![b'x'; 32 * 1024 + 1], &key).is_err());
         assert!(ConnectionSettingsEnvelope::decode(&vec![b' '; MAX_CONNECTION_SETTINGS_BYTES + 1]).is_err());
+    }
+
+    #[test]
+    fn connection_settings_keep_small_and_incompressible_payloads_raw() {
+        let key = RecoveryKey::generate().unwrap();
+        let mut noise = Vec::new();
+        for index in 0..1024u32 {
+            noise.extend_from_slice(&super::super::content_identity::hash(&index.to_le_bytes()));
+        }
+        for plaintext in [b"small".as_slice(), noise.as_slice()] {
+            let envelope = ConnectionSettingsEnvelope::protect("repository".into(), plaintext, &key).unwrap();
+            assert!(!envelope.compressed);
+            let bytes = envelope.encode().unwrap();
+            let decoded = ConnectionSettingsEnvelope::decode(&bytes).unwrap();
+            assert_eq!(decoded.open("repository", &key).unwrap().as_slice(), plaintext);
+        }
+    }
+
+    #[test]
+    fn connection_settings_authenticate_header_and_reject_truncation_and_trailing_bytes() {
+        let key = RecoveryKey::generate().unwrap();
+        let bytes = ConnectionSettingsEnvelope::protect("repository".into(), &vec![b'x'; 1024], &key)
+            .unwrap().encode().unwrap();
+        let refuses = |bytes: &[u8]| {
+            ConnectionSettingsEnvelope::decode(bytes)
+                .and_then(|value| value.open(&value.repository_id, &key)).is_err()
+        };
+        for index in 0..bytes.len() {
+            let mut changed = bytes.clone();
+            changed[index] ^= 1;
+            assert!(refuses(&changed), "changed byte {index}");
+            assert!(refuses(&bytes[..index]), "truncated at {index}");
+        }
+        let mut extra = bytes.clone();
+        extra.push(0);
+        assert!(refuses(&extra));
+        extra[4] = 2;
+        assert!(refuses(&extra));
+    }
+
+    #[test]
+    fn connection_settings_bound_authenticated_compressed_data() {
+        let key = RecoveryKey::generate().unwrap();
+        let frame = |bytes: &[u8], window: u32| {
+            let mut compressor = zstd::bulk::Compressor::new(1).unwrap();
+            compressor.set_parameter(zstd::zstd_safe::CParameter::WindowLog(window)).unwrap();
+            compressor.compress(bytes).unwrap()
+        };
+        let valid = frame(b"synthetic", CONNECTION_SETTINGS_WINDOW_LOG);
+        let mut trailing = valid.clone();
+        trailing.push(0);
+        let mut concatenated = valid.clone();
+        concatenated.extend_from_slice(&valid);
+        let invalid = [
+            frame(&vec![b'x'; MAX_CONNECTION_SETTINGS_PLAINTEXT + 1], CONNECTION_SETTINGS_WINDOW_LOG),
+            frame(&vec![b'x'; 128 * 1024], 17),
+            frame(b"", CONNECTION_SETTINGS_WINDOW_LOG),
+            trailing,
+            concatenated,
+            valid[..valid.len() - 1].to_vec(),
+            vec![0x50, 0x2a, 0x4d, 0x18, 0, 0, 0, 0],
+        ];
+        for plaintext in invalid {
+            let mut envelope = ConnectionSettingsEnvelope {
+                repository_id: "repository".into(), salt: [0; 16], compressed: true, ciphertext: Vec::new(),
+            };
+            let wrapping_key = envelope.wrapping_key(&key).unwrap();
+            let binding = envelope.binding().unwrap();
+            encrypt(&mut plaintext.as_slice(), &mut envelope.ciphertext,
+                &wrapping_key, &binding, plaintext.len() as u64).unwrap();
+            assert!(envelope.open("repository", &key).is_err());
+        }
     }
 
     #[test]

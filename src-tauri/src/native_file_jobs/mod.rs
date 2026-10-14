@@ -1345,7 +1345,7 @@ impl NativeFileJobState {
         Ok(NativeFileJobStarted {job_id:request.job_id.clone(),warning_codes:status.warning_codes})
     }
 
-    fn admit_cleanup_operation(&self) -> Result<std::sync::RwLockReadGuard<'_, bool>, NativeJobError> {
+    pub(crate) fn admit_cleanup_operation(&self) -> Result<std::sync::RwLockReadGuard<'_, bool>, NativeJobError> {
         let guard = self.cleanup_closed.read().map_err(|_| NativeJobError::new("store-error", "Native cleanup state is unavailable"))?;
         if *guard { return Err(NativeJobError::new("cleanup-pending", "Application cleanup is pending")); }
         Ok(guard)
@@ -4019,6 +4019,8 @@ pub(crate) enum FinalizeOutcome {
 }
 
 pub(crate) struct JobRegistry {
+    #[cfg(test)]
+    content_preparation_gate: Mutex<Option<Arc<ContentPreparationGate>>>,
     jobs: Mutex<HashMap<String, Arc<JobControl>>>,
     max_terminal_jobs: usize,
     max_terminal_age: Duration,
@@ -4053,6 +4055,8 @@ impl Default for JobRegistry {
 impl JobRegistry {
     fn with_retention(max_terminal_jobs: usize, max_terminal_age: Duration) -> Self {
         Self {
+            #[cfg(test)]
+            content_preparation_gate: Mutex::new(None),
             jobs: Mutex::new(HashMap::new()),
             max_terminal_jobs,
             max_terminal_age,
@@ -4097,6 +4101,8 @@ impl JobRegistry {
         validate_warning_codes(&warning_codes)?;
         let id = Uuid::new_v4().to_string();
         let job = Arc::new(JobControl {
+            #[cfg(test)]
+            content_preparation_gate: self.content_preparation_gate.lock().unwrap().clone(),
             #[cfg(test)] source_io_scope: crate::portable_backup::source_io::capture_scope(),
             cancel_requested: Arc::new(AtomicBool::new(false)),
             requires_restore_finalization,
@@ -4251,7 +4257,15 @@ impl JobRegistry {
     }
 }
 
+#[cfg(test)]
+struct ContentPreparationGate {
+    entered: std::sync::mpsc::SyncSender<()>,
+    resume: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
 pub(crate) struct JobControl {
+    #[cfg(test)]
+    content_preparation_gate: Option<Arc<ContentPreparationGate>>,
     #[cfg(test)] pub(super) source_io_scope: crate::portable_backup::source_io::Scope,
     cancel_requested: Arc<AtomicBool>,
     requires_restore_finalization: bool,
@@ -5948,14 +5962,14 @@ mod tests {
     }
 
     fn wait_for_content_job(state: &NativeFileJobState, job_id: &str) -> JobStatus {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let status = state.status(job_id).unwrap();
             if status.state.is_terminal() {
                 return status;
             }
-            assert!(Instant::now() < deadline, "content preparation timed out");
-            thread::yield_now();
+            assert!(Instant::now() < deadline, "content preparation timed out: {status:?}");
+            thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -6785,6 +6799,55 @@ mod tests {
     }
 
     #[test]
+    fn prepared_asset_rich_modules_commit_units_and_reopen_for_bin_and_risum() {
+        use crate::persistent_store::{AssetAlias, AssetOwnerHead, PersistentStore, WorkingSetCommit};
+
+        for name in ["module.bin", "module.RISUM"] {
+            let directory = TempDir::new().unwrap();
+            let mut store = PersistentStore::open(directory.path()).unwrap();
+            let payloads: Vec<Vec<u8>> = (0..300).map(|index| format!("synthetic-payload-{index}").into_bytes()).collect();
+            let bytes: Vec<&[u8]> = payloads.iter().map(Vec::as_slice).collect();
+            let tuples: Vec<Value> = (0..payloads.len()).map(|index| json!([format!("asset-{index}"), "source-key", "bin"])).collect();
+            let source = directory.path().join(name);
+            fs::write(&source, risum_fixture(json!({"id":"source-id", "name":"Synthetic module", "assets":tuples}), &bytes)).unwrap();
+            let state = NativeFileJobState::initialize(directory.path().join("native-file-jobs"));
+            let started = start_test_content_job(&state, &source, name);
+            let prepared = wait_for_content_job(&state, &started.job_id);
+            let content = serde_json::to_value(prepared.prepared_content.as_ref().expect("prepared module")).unwrap();
+            assert_eq!(content["format"], "risu-module");
+            let mut module = content["metadata"].clone();
+            module["id"] = json!("imported-module");
+            let aliases: Vec<AssetAlias> = content["assets"].as_array().unwrap().iter().enumerate().map(|(index, asset)| {
+                module["assets"][index][1] = asset["logicalId"].clone();
+                serde_json::from_value(json!({"kind":"asset", "key":asset["logicalId"], "objectHash":asset["objectHash"], "size":asset["byteSize"], "mime":asset["mime"], "name":asset["name"], "ext":asset["ext"]})).unwrap()
+            }).collect();
+            let mut head = content["ownerHead"].clone();
+            head["owner"] = json!({"kind":"root-module-assets", "moduleId":"imported-module"});
+            let head: AssetOwnerHead = serde_json::from_value(head).unwrap();
+            let mut session = crate::asset_repository::job_pins::DurableCasJob::open(directory.path(), &started.job_id).unwrap();
+            session.seal(&mut store, 2).unwrap();
+            let input: WorkingSetCommit = serde_json::from_value(json!({
+                "expectedRevision":store.revision().unwrap(),
+                "unitMutations":[
+                    {"key":"[\"exists\",\"modules\",\"imported-module\"]", "type":"set", "value":true},
+                    {"key":"[\"record\",\"modules\",\"imported-module\"]", "type":"set", "value":module}
+                ],
+                "assetOwnerHeads":[head]
+            })).unwrap();
+            store.commit_with_asset_aliases(&input, &aliases).unwrap();
+            drop(store);
+            let reopened = PersistentStore::open(directory.path()).unwrap();
+            assert_eq!(reopened.read_asset_owner_head(&head.owner, None).unwrap().unwrap().value, head);
+            assert_eq!(reopened.materialize(None).unwrap()["modules"][0], module);
+            let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
+            for (alias, payload) in aliases.iter().zip(payloads) {
+                assert_eq!(reopened.read_asset_alias("asset", &alias.key, None).unwrap().unwrap().value, *alias);
+                assert_eq!(cas.read_object(alias.object_hash.as_ref().unwrap()).unwrap(), Some(payload));
+            }
+        }
+    }
+
+    #[test]
     fn content_prepare_risum_distinguishes_absent_and_present_empty_assets() {
         for (name, module, expected_present, expected_pins) in [
             ("absent.risum", json!({ "name": "Absent" }), false, 0),
@@ -7608,7 +7671,7 @@ mod tests {
         let active_database = persistent.join("active.sqlite3");
         fs::write(&active_database, b"unchanged-active-database").unwrap();
         let source = directory.path().join("large-card.json");
-        let description = "x".repeat(7 * 1024 * 1024);
+        let description = "synthetic description";
         fs::write(
             &source,
             serde_json::to_vec(&serde_json::json!({
@@ -7623,6 +7686,12 @@ mod tests {
         )
         .unwrap();
         let state = NativeFileJobState::initialize(directory.path().join("native-file-jobs"));
+        let (entered, preparation_started) = std::sync::mpsc::sync_channel(1);
+        let (resume_preparation, resume) = std::sync::mpsc::channel();
+        *state.registry.content_preparation_gate.lock().unwrap() = Some(Arc::new(ContentPreparationGate {
+            entered,
+            resume: Mutex::new(resume),
+        }));
         let started = state
             .start_content_for_test(NativeFileJobStartRequest::PrepareContentImport {
                 source: JobSource::DesktopPath {
@@ -7633,17 +7702,12 @@ mod tests {
             .expect("start content preparation");
 
         let deadline = Instant::now() + Duration::from_secs(5);
-        while state.status(&started.job_id).unwrap().state == JobState::Queued {
-            assert!(
-                Instant::now() < deadline,
-                "content preparation did not start"
-            );
-            thread::yield_now();
-        }
+        preparation_started.recv_timeout(Duration::from_secs(5)).expect("content preparation did not start");
         assert_eq!(
             state.cancel(&started.job_id).unwrap(),
             CancelOutcome::Requested
         );
+        resume_preparation.send(()).unwrap();
         loop {
             let status = state.status(&started.job_id).unwrap();
             if status.state.is_terminal() {

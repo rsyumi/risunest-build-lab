@@ -408,6 +408,11 @@ describe('createChatRenderSignature', () => {
         const afterAppend = signatureFor(settled, { index: 10, totalLength: 101 })
 
         expect(sameSignature(afterAppend, beforeAppend)).toBe(true)
+        // A row leaving a `{{? {{lastmessageid}}-3}}` window renders again.
+        expect(sameSignature(
+            signatureFor(settled, { index: 96, totalLength: 101 }),
+            signatureFor(settled, { index: 96, totalLength: 100 }),
+        )).toBe(false)
     })
 
     it('retains content by reference and tracks parser dependency identities and reload revisions', () => {

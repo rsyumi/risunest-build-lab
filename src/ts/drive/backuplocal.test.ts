@@ -1,18 +1,24 @@
 import 'fake-indexeddb/auto'
 import { UNOWNED_PLUGIN_OWNER } from '../plugins/pluginOwner'
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { BlobStore } from '../storage/blobStore'
 import type { Database } from '../storage/database.svelte'
 import { IndexedDbPersistentDataStore } from '../storage/indexedDbPersistentDataStore'
 import type { PersistentDataRuntime } from '../storage/persistentDataRuntime'
+import { createLeaseStub } from '../storage/persistentDataStore.testSupport'
 import { decodeRisuSave, encodeRisuSaveLegacy } from '../storage/risuSave'
 import { risuSaveFixtureDatabase } from '../storage/tests/risuSaveFixtures'
 import { sleep } from '../util'
+import { invoke } from '@tauri-apps/api/core'
 import { getBackupInlayName } from './backupAssets'
+import { backupArchive, backupEntry, backupFile } from './backupRestore.testSupport'
+import { readableFile } from '../storage/tauriFs.testSupport'
 
 const state = vi.hoisted(() => ({
     native: true,
+    mobile: false,
+    characters: true,
     blobStore: null as BlobStore | null,
     currentDatabase: null as Database | null,
     runtime: null as PersistentDataRuntime | null,
@@ -34,16 +40,11 @@ const state = vi.hoisted(() => ({
     },
 }))
 
-vi.mock('../alert', () => ({
-    alertConfirm: vi.fn(async () => true), alertCheckboxConfirm: vi.fn(async () => ({ confirmed: true, checked: true })),
-    alertError: vi.fn(),
-    alertMd: vi.fn(),
-    alertNormal: vi.fn(),
-    alertStore: { set: vi.fn() },
-    alertWait: vi.fn(),
+vi.mock('../alert', async () => (await import('./backupRestore.testSupport')).alertModule())
+vi.mock('@tauri-apps/api/core', async importOriginal => ({
+    ...await importOriginal<typeof import('@tauri-apps/api/core')>(), invoke: vi.fn(async () => undefined),
 }))
-
-vi.mock('../nativeLog', () => ({ recordNativeLogError: vi.fn(async () => undefined) }))
+vi.mock('../storage/libraryCharacters', async () => (await import('./backupRestore.testSupport')).libraryCharactersModule(async () => state.characters))
 
 vi.mock('../globalApi.svelte', () => ({
     forageStorage: { Init: vi.fn(async () => undefined), isAccount: false },
@@ -76,64 +77,28 @@ vi.mock('../globalApi.svelte', () => ({
     },
 }))
 
-vi.mock('../storage/platformBlobStore', () => ({
-    resolveBlobStore: async () => state.blobStore,
+vi.mock('../storage/platformBlobStore', async () => (await import('./backupRestore.testSupport')).blobStoreModule(() => state.blobStore!))
+vi.mock('../storage/database.svelte', async () => (await import('./backupRestore.testSupport')).databaseModule(() => state.currentDatabase!))
+vi.mock('../storage/persistentDataRuntime.svelte', async () => (await import('./backupRestore.testSupport')).persistentRuntimeModule({
+    getPersistentDataRuntime: () => state.runtime!,
+    replacePersistentDatabase: (database, reason, options) => state.replacePersistentDatabase(database, reason, options),
 }))
-
-vi.mock('../storage/database.svelte', () => ({
-    getDatabase: () => state.currentDatabase,
-    presetTemplate: {},
-}))
-
-vi.mock('../storage/persistentDataRuntime.svelte', () => ({
-    getPersistentDataRuntime: () => state.runtime,
-    publishCurrentOfficialRevision: vi.fn(async () => undefined),
-    replacePersistentDatabase: (database: Database, reason: string, options?: import('../storage/saveCoordinator').PersistentReplacementOptions) => (
-        state.replacePersistentDatabase(database, reason, options)
-    ),
-}))
-
-vi.mock('../process/coldstorage.svelte', () => ({
-    getColdStorageBackupKey: (name: string) => {
-        const match = /^coldstorage_(.+)\.json$/.exec(name)
-        return match?.[1] ?? null
-    },
-    isColdStorageBackupData: (value: unknown) => Boolean(
-        value
-        && typeof value === 'object'
-        && ('character' in value || 'message' in value),
-    ),
-    listColdDataKeys: async (database: Database) => database.characters
-        .map((character) => character.coldstorage)
-        .filter((key): key is string => Boolean(key)),
-}))
-
-vi.mock('src/ts/platform', () => ({
-    get isTauri() {return state.native},
-    isTauriDesktop: true,
-    isTauriAndroid: false,
-    isTauriIOS: false,
-}))
-
-vi.mock('@tauri-apps/plugin-fs', () => ({
-    BaseDirectory: {},
+vi.mock('../process/coldstorage.svelte', async () => (await import('./backupRestore.testSupport')).coldStorageModule())
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule(() => ({
+    runtime: state.native ? 'tauri' : 'web',
+    os: state.mobile ? 'android' : 'windows',
+})))
+vi.mock('@tauri-apps/plugin-fs', async () => (await import('../storage/tauriFs.testSupport')).pluginFsModule({
     open: state.openNativeFile,
     readFile: state.fullReadFile,
-    writeFile: vi.fn(),
 }))
-
-vi.mock('../desktopRelaunch', () => ({ relaunch: vi.fn() }))
+vi.mock('../desktopRelaunch', async () => (await import('./backupRestore.testSupport')).relaunchModule())
 vi.mock('../storage/nativeFileJobManager', async (original) => ({
     ...await original<object>(),
     runSharedNativeFileOperation: vi.fn(async (_kind, _label, run) => run(state.fallbackContext)),
 }))
-vi.mock('../util', () => ({
-    decryptBuffer: vi.fn(),
-    encryptBuffer: vi.fn(),
-    sleep: vi.fn(async () => undefined),
-}))
-vi.mock('../characterCards', () => ({ hubURL: 'https://hub.invalid' }))
-vi.mock('src/lang', async () => ({ language: (await import('src/lang/en')).languageEnglish }))
+vi.mock('../util', async () => (await import('./backupRestore.testSupport')).utilModule())
+vi.mock('../characterCards', async () => (await import('./backupRestore.testSupport')).characterCardsModule())
 
 function emptyBlobStore(): BlobStore {
     return {
@@ -147,8 +112,15 @@ function emptyBlobStore(): BlobStore {
 }
 
 describe('local backup persistent snapshot', () => {
+    afterEach(() => {
+        vi.restoreAllMocks()
+    })
+
     beforeEach(() => {
         state.native = true
+        state.mobile = false
+        delete window.RisuNativeFileSelection
+        state.characters = true
         vi.clearAllMocks()
         state.written.clear()
         state.restoreEvents = []
@@ -161,21 +133,12 @@ describe('local backup persistent snapshot', () => {
         state.nativeFileClose.mockClear()
         state.fullReadFile.mockClear()
         state.openNativeFile.mockReset()
-        let offset = 0
-        state.openNativeFile.mockResolvedValue({
-            read: vi.fn(async (buffer: Uint8Array) => {
-                if (offset >= state.nativeFile.byteLength) return null
-                const length = Math.min(2, state.nativeFile.byteLength - offset)
-                buffer.set(state.nativeFile.subarray(offset, offset + length))
-                offset += length
-                return length
-            }),
-            close: state.nativeFileClose,
-        })
+        state.openNativeFile.mockResolvedValue({ ...readableFile(state.nativeFile, 2), close: state.nativeFileClose })
     })
 
-    it('expands cold payloads into the replaced local backup database', async () => {
-        const coldKey = 'local-restore-cold'
+    it.each([false, true])('expands cold payloads into the replaced local backup database on mobile=%s', async (mobile) => {
+        state.mobile = mobile
+        const coldKey = '00000000-0000-4000-8000-00000000c01d'
         const database = structuredClone(risuSaveFixtureDatabase) as Database
         database.characters[0].coldstorage = coldKey
         const restoredName = 'Restored cold character'
@@ -186,54 +149,43 @@ describe('local backup persistent snapshot', () => {
                 coldstorage: undefined,
             },
         }
-        const encodeEntry = (name: string, data: Uint8Array) => {
-            const encodedName = new TextEncoder().encode(name)
-            const record = new Uint8Array(8 + encodedName.byteLength + data.byteLength)
-            const view = new DataView(record.buffer)
-            view.setUint32(0, encodedName.byteLength, true)
-            record.set(encodedName, 4)
-            view.setUint32(4 + encodedName.byteLength, data.byteLength, true)
-            record.set(data, 8 + encodedName.byteLength)
-            return record
+        const archive = backupArchive(
+            backupEntry(`coldstorage_${coldKey}.json`, new TextEncoder().encode(JSON.stringify(cold))),
+            backupEntry('database.risudat', encodeRisuSaveLegacy(database, 'compression')),
+        )
+        const file = backupFile('backup.bin', archive)
+        const input = document.createElement('input')
+        Object.defineProperty(input, 'files', { value: [file] })
+        const click = vi.spyOn(input, 'click').mockImplementation(() => {})
+        const createElement = vi.spyOn(document, 'createElement').mockReturnValueOnce(input)
+        const events: string[] = []
+        const discard = vi.fn(async () => { events.push('discard') })
+        if (mobile) {
+            // Android has no process relauncher, so the restore reloads the WebView.
+            vi.spyOn(location, 'search', 'set').mockImplementation(() => { events.push('relaunch') })
+            window.RisuNativeFileSelection = {
+                pick: vi.fn(async () => ({ cancelled: false, files: [{ path: '/owned/backup', name: file.name, bytes: file.size, mimeType: '' }] })),
+                discard,
+            }
+            state.openNativeFile.mockImplementation(async () => {
+                expect(discard).not.toHaveBeenCalled()
+                return { ...readableFile(archive), close: state.nativeFileClose }
+            })
         }
-        const entries = [
-            encodeEntry(`coldstorage_${coldKey}.json`, new TextEncoder().encode(JSON.stringify(cold))),
-            encodeEntry('database.risudat', encodeRisuSaveLegacy(database, 'compression')),
-        ]
-        const archive = new Uint8Array(entries.reduce((sum, entry) => sum + entry.byteLength, 0))
-        let offset = 0
-        for (const entry of entries) {
-            archive.set(entry, offset)
-            offset += entry.byteLength
-        }
-        const file = {
-            name: 'backup.bin',
-            size: archive.byteLength,
-            slice: (start: number, end: number) => ({ arrayBuffer: async () => archive.slice(start, end).buffer }),
-            stream: () => new ReadableStream<Uint8Array>({
-                start(controller) {
-                    controller.enqueue(archive)
-                    controller.close()
-                },
-            }),
-        } as File
-        const input = {
-            type: '',
-            accept: '',
-            files: [file],
-            onchange: null as null | (() => Promise<void>),
-            click: vi.fn(),
-            remove: vi.fn(),
-        }
-        const createElement = vi.spyOn(document, 'createElement')
-            .mockReturnValueOnce(input as unknown as HTMLInputElement)
         const { LoadLocalBackup } = await import('./backuplocal')
         const { alertWait } = await import('../alert')
-
         const pending = LoadLocalBackup()
-        await vi.waitFor(() => expect(input.onchange).not.toBeNull())
-        await input.onchange?.()
+        if (!mobile) {
+            await vi.waitFor(() => expect(click).toHaveBeenCalledOnce())
+            input.dispatchEvent(new Event('change'))
+        }
         await pending
+        if (mobile) {
+            expect(click).not.toHaveBeenCalled()
+            expect(discard).toHaveBeenCalledExactlyOnceWith('/owned/backup')
+            // The app reloads without returning, so the selected copy has to go first.
+            expect(events).toEqual(['discard', 'relaunch'])
+        }
         createElement.mockRestore()
 
         expect(state.restoreEvents).toEqual(['database'])
@@ -273,59 +225,28 @@ describe('local backup persistent snapshot', () => {
         expect(JSON.stringify(context.onStatus.mock.calls)).toContain(`coldstorage_${coldKey}.json`)
     })
 
-    it.each([[true,false,false],[false,false,false],[true,true,false],[true,false,true]])('preflights, acknowledges, and preserves committed outcomes (%s,%s,%s)', async (confirmed, bodyFails, native) => {
+    it.each([[true,false,false,false,true],[false,false,false,false,true],[true,true,false,false,true],[true,false,true,false,true],[true,false,true,true,true],[true,false,false,false,false]])('preflights, acknowledges, and preserves committed outcomes (%s,%s,%s, first run %s, characters %s)', async (confirmed, bodyFails, native, firstRun, characters) => {
         state.native = native
+        state.characters = characters
         const { alertCheckboxConfirm } = await import('../alert')
         vi.mocked(alertCheckboxConfirm).mockResolvedValueOnce({ confirmed, checked: confirmed })
         const database = structuredClone(risuSaveFixtureDatabase) as Database
-        const encodeEntry = (name: string, data: Uint8Array) => {
-            const encodedName = new TextEncoder().encode(name)
-            const record = new Uint8Array(8 + encodedName.byteLength + data.byteLength)
-            const view = new DataView(record.buffer)
-            view.setUint32(0, encodedName.byteLength, true)
-            record.set(encodedName, 4)
-            view.setUint32(4 + encodedName.byteLength, data.byteLength, true)
-            record.set(data, 8 + encodedName.byteLength)
-            return record
-        }
         const damagedInlayName = getBackupInlayName('damaged-inlay')
-        const entries = [
-            encodeEntry(damagedInlayName, Uint8Array.of(9, 0, 0, 0, 1, 2)),
-            encodeEntry('database.risudat', encodeRisuSaveLegacy(database, 'compression')),
-        ]
-        const archive = new Uint8Array(entries.reduce((sum, entry) => sum + entry.byteLength, 0))
-        let archiveOffset = 0
-        for (const entry of entries) {
-            archive.set(entry, archiveOffset)
-            archiveOffset += entry.byteLength
-        }
-        const file = {
-            name: 'damaged-inlay.bin',
-            size: archive.byteLength,
-            slice: (start: number, end: number) => ({ arrayBuffer: async () => {
-                if (start === 8 + new TextEncoder().encode(damagedInlayName).byteLength && end - start === 6) {
-                    expect(state.replacePersistentDatabase).toHaveBeenCalledOnce()
-                    if (bodyFails) throw new Error('synthetic attachment read failure')
-                }
-                return archive.slice(start, end).buffer
-            } }),
-            stream: () => new ReadableStream<Uint8Array>({
-                start(controller) {
-                    controller.enqueue(archive)
-                    controller.close()
-                },
-            }),
-        } as File
-        const input = {
-            type: '',
-            accept: '',
-            files: [file],
-            onchange: null as null | (() => Promise<void>),
-            click: vi.fn(),
-            remove: vi.fn(),
-        }
+        const archive = backupArchive(
+            backupEntry(damagedInlayName, Uint8Array.of(9, 0, 0, 0, 1, 2)),
+            backupEntry('database.risudat', encodeRisuSaveLegacy(database, 'compression')),
+        )
+        const file = backupFile('damaged-inlay.bin', archive, (start, end) => {
+            if (start === 8 + new TextEncoder().encode(damagedInlayName).byteLength && end - start === 6) {
+                expect(state.replacePersistentDatabase).toHaveBeenCalledOnce()
+                if (bodyFails) throw new Error('synthetic attachment read failure')
+            }
+        })
+        const input = document.createElement('input')
+        Object.defineProperty(input, 'files', { value: [file] })
+        const click = vi.spyOn(input, 'click').mockImplementation(() => {})
         const createElement = vi.spyOn(document, 'createElement')
-            .mockReturnValueOnce(input as unknown as HTMLInputElement)
+            .mockReturnValueOnce(input)
         const { importLegacyBackupWithWebView } = await import('./backuplocal')
         const context = {
             signal: new AbortController().signal,
@@ -335,9 +256,9 @@ describe('local backup persistent snapshot', () => {
         }
 
         const {language} = await import('../../lang')
-        const pending = importLegacyBackupWithWebView(context, {}, language.pocketRisuImportConfirm)
-        await vi.waitFor(() => expect(input.onchange).not.toBeNull())
-        await input.onchange?.()
+        const pending = importLegacyBackupWithWebView(context, {firstRun}, language.pocketRisuImportConfirm)
+        await vi.waitFor(() => expect(click).toHaveBeenCalledOnce())
+        input.dispatchEvent(new Event('change'))
         if (!confirmed) {
             await expect(pending).rejects.toMatchObject({name:'AbortError'})
             createElement.mockRestore()
@@ -358,10 +279,12 @@ describe('local backup persistent snapshot', () => {
         createElement.mockRestore()
         if (native) {
             expect(alertCheckboxConfirm).not.toHaveBeenCalled()
-            expect(state.replacePersistentDatabase.mock.calls[0][2]).toMatchObject({upstreamImport:true, upstreamImportWarnings:[language.checkboxConfirmation.dataReplacementDescription]})
-        } else {
+            expect(state.replacePersistentDatabase.mock.calls[0][2]).toMatchObject({upstreamImport:true, upstreamImportWarnings:[], ...(firstRun ? {firstRun:true} : {})})
+        } else if (characters) {
             expect(alertCheckboxConfirm).toHaveBeenCalledOnce()
             expect(alertCheckboxConfirm).toHaveBeenCalledWith(expect.objectContaining({title:language.pocketRisuImportConfirm}))
+        } else {
+            expect(alertCheckboxConfirm).not.toHaveBeenCalled()
         }
 
         expect(result).toEqual({ warningCodes: ['upstream-restore-losses'], upstreamLosses: {coldMissing:0,invalidInlays:1,pocketInlays:0} })
@@ -375,39 +298,41 @@ describe('local backup persistent snapshot', () => {
         })
     })
 
+    it.each([true, false])('shows only the cold storage warning on the web when the library holds no character, answer=%s', async answer => {
+        state.native = false
+        state.characters = false
+        const { alertActionConfirm, alertCheckboxConfirm } = await import('../alert')
+        vi.mocked(alertActionConfirm).mockResolvedValueOnce(answer)
+        const database = structuredClone(risuSaveFixtureDatabase) as Database
+        database.characters[0].coldstorage = 'missing-cold'
+        const file = backupFile('cold-missing.bin', backupEntry('database.risudat', encodeRisuSaveLegacy(database, 'compression')))
+        const input = document.createElement('input')
+        Object.defineProperty(input, 'files', { value: [file] })
+        const click = vi.spyOn(input, 'click').mockImplementation(() => {})
+        const createElement = vi.spyOn(document, 'createElement').mockReturnValueOnce(input)
+        const { importLegacyBackupWithWebView } = await import('./backuplocal')
+        const { language } = await import('../../lang')
+        const pending = importLegacyBackupWithWebView(state.fallbackContext, {}, language.backupLoadConfirm)
+        await vi.waitFor(() => expect(click).toHaveBeenCalledOnce())
+        input.dispatchEvent(new Event('change'))
+        if (answer) await pending
+        else await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+        createElement.mockRestore()
+        expect(alertCheckboxConfirm).not.toHaveBeenCalled()
+        expect(alertActionConfirm).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ title: language.backupLoadConfirm }))
+        expect(vi.mocked(alertActionConfirm).mock.calls[0][0].description).not.toContain(language.checkboxConfirmation.dataReplacementDescription)
+        expect(state.replacePersistentDatabase).toHaveBeenCalledTimes(answer ? 1 : 0)
+    })
+
     it('stops a WebView import after cancellation without publishing staged attachments', async () => {
-        const assetName = 'partial-asset.png'
-        const encodedName = new TextEncoder().encode(assetName)
-        const data = new Uint8Array([1, 2, 3])
-        const entry = new Uint8Array(8 + encodedName.byteLength + data.byteLength)
-        const view = new DataView(entry.buffer)
-        view.setUint32(0, encodedName.byteLength, true)
-        entry.set(encodedName, 4)
-        view.setUint32(4 + encodedName.byteLength, data.byteLength, true)
-        entry.set(data, 8 + encodedName.byteLength)
         const controller = new AbortController()
         // Cancel after reading the first entry header, before any attachment body.
-        const file = {
-            name: 'partial.bin',
-            size: entry.byteLength,
-            slice: (start: number, end: number) => ({ arrayBuffer: async () => entry.slice(start, end).buffer }),
-            stream: () => new ReadableStream<Uint8Array>({
-                start(stream) {
-                    stream.enqueue(entry)
-                    stream.close()
-                },
-            }),
-        } as File
-        const input = {
-            type: '',
-            accept: '',
-            files: [file],
-            onchange: null as null | (() => Promise<void>),
-            click: vi.fn(),
-            remove: vi.fn(),
-        }
+        const file = backupFile('partial.bin', backupEntry('partial-asset.png', new Uint8Array([1, 2, 3])))
+        const input = document.createElement('input')
+        Object.defineProperty(input, 'files', { value: [file] })
+        const click = vi.spyOn(input, 'click').mockImplementation(() => {})
         const createElement = vi.spyOn(document, 'createElement')
-            .mockReturnValueOnce(input as unknown as HTMLInputElement)
+            .mockReturnValueOnce(input)
         const { importLegacyBackupWithWebView } = await import('./backuplocal')
         const context = {
             signal: controller.signal,
@@ -417,8 +342,8 @@ describe('local backup persistent snapshot', () => {
         }
 
         const pending = importLegacyBackupWithWebView(context)
-        await vi.waitFor(() => expect(input.onchange).not.toBeNull())
-        await input.onchange?.()
+        await vi.waitFor(() => expect(click).toHaveBeenCalledOnce())
+        input.dispatchEvent(new Event('change'))
         await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
         createElement.mockRestore()
 
@@ -446,17 +371,15 @@ describe('local backup persistent snapshot', () => {
         const { runSharedNativeFileOperation } = await import('../storage/nativeFileJobManager')
         const { NativeFileJobError } = await import('../storage/nativeFileJobs')
         const { alertError } = await import('../alert')
-        const { recordNativeLogError } = await import('../nativeLog')
-        vi.mocked(recordNativeLogError).mockClear()
         vi.mocked(alertError).mockClear()
         vi.mocked(runSharedNativeFileOperation).mockRejectedValueOnce(
             new NativeFileJobError('revision-conflict', 'The database changed during import'),
         )
         const { LoadLocalBackup } = await import('./backuplocal')
         await LoadLocalBackup()
-        expect(recordNativeLogError).toHaveBeenCalledWith(
-            'Backup import failed [revision-conflict]: The database changed during import',
-        )
+        expect(invoke).toHaveBeenCalledWith('native_log_error', {
+            message: 'Backup import failed [revision-conflict]: The database changed during import',
+        })
         expect(alertError).not.toHaveBeenCalled()
     })
 
@@ -464,36 +387,34 @@ describe('local backup persistent snapshot', () => {
         const { runSharedNativeFileOperation } = await import('../storage/nativeFileJobManager')
         const { NativeFileJobActivationCommittedError } = await import('../storage/nativeFileJobs')
         const { alertError } = await import('../alert')
-        const { recordNativeLogError } = await import('../nativeLog')
-        vi.mocked(recordNativeLogError).mockClear()
         vi.mocked(alertError).mockClear()
         vi.mocked(runSharedNativeFileOperation).mockRejectedValueOnce(
             new NativeFileJobActivationCommittedError(2, new Error('Synthetic refresh failed')),
         )
         const { LoadLocalBackup } = await import('./backuplocal')
         await LoadLocalBackup()
-        expect(recordNativeLogError).toHaveBeenCalledWith(
-            expect.stringContaining('Backup data was imported, but the app could not refresh'),
-        )
-        expect(recordNativeLogError).toHaveBeenCalledWith(
-            expect.stringContaining('activation-committed-refresh-failed'),
-        )
-        expect(recordNativeLogError).toHaveBeenCalledWith(expect.stringContaining('Synthetic refresh failed'))
+        expect(invoke).toHaveBeenCalledWith('native_log_error', {
+            message: expect.stringContaining('Backup data was imported, but the app could not refresh'),
+        })
+        expect(invoke).toHaveBeenCalledWith('native_log_error', {
+            message: expect.stringContaining('activation-committed-refresh-failed'),
+        })
+        expect(invoke).toHaveBeenCalledWith('native_log_error', {
+            message: expect.stringContaining('Synthetic refresh failed'),
+        })
         expect(alertError).not.toHaveBeenCalled()
     })
 
     it('stays silent for cancelled imports because the dialog already reported them', async () => {
         const { runSharedNativeFileOperation } = await import('../storage/nativeFileJobManager')
         const { alertError } = await import('../alert')
-        const { recordNativeLogError } = await import('../nativeLog')
-        vi.mocked(recordNativeLogError).mockClear()
         vi.mocked(alertError).mockClear()
         vi.mocked(runSharedNativeFileOperation).mockRejectedValueOnce(
             new DOMException('cancelled', 'AbortError'),
         )
         const { LoadLocalBackup } = await import('./backuplocal')
         await LoadLocalBackup()
-        expect(recordNativeLogError).not.toHaveBeenCalled()
+        expect(invoke).not.toHaveBeenCalledWith('native_log_error', expect.anything())
         expect(alertError).not.toHaveBeenCalled()
     })
 
@@ -701,7 +622,7 @@ describe('local backup persistent snapshot', () => {
         await expect(writePinnedLocalBackupDatabase({ writeBackupStream } as any, {
             revision: 3,
             mutationGeneration: 0,
-            reader: { revision: 3 } as never,
+            reader: createLeaseStub({ revision: 3 }),
             countCharacters: vi.fn(),
             materializeDatabase: vi.fn(),
             stream: vi.fn(),
@@ -748,7 +669,7 @@ describe('local backup persistent snapshot', () => {
         await expect(writePinnedLocalBackupDatabase(writer as any, {
             revision: 3,
             mutationGeneration: 0,
-            reader: { revision: 3 } as never,
+            reader: createLeaseStub({ revision: 3 }),
             countCharacters: vi.fn(),
             materializeDatabase: vi.fn(),
             stream: vi.fn(),
@@ -780,7 +701,7 @@ describe('local backup persistent snapshot', () => {
         await expect(writePinnedLocalBackupDatabase(writer as any, {
             revision: 3,
             mutationGeneration: 0,
-            reader: { revision: 3 } as never,
+            reader: createLeaseStub({ revision: 3 }),
             countCharacters: vi.fn(),
             materializeDatabase: vi.fn(),
             stream: vi.fn(),

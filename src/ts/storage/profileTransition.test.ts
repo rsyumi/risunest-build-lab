@@ -17,6 +17,7 @@ import type {
     PluginStorageCatalog,
     PresetCatalog,
 } from './persistentDataStore'
+import { createStoreStub } from './persistentDataStore.testSupport'
 import {
     getCatalogCharacterMetadata,
     isCatalogCharacterStub,
@@ -350,7 +351,7 @@ function createRuntimeStore(
     lease: PersistentRevisionLease,
     revision = 7,
 ): PersistentDataStore {
-    return {
+    return createStoreStub({
         open: vi.fn(async () => undefined),
         readRoot: vi.fn(async () => ({
             revision,
@@ -361,7 +362,7 @@ function createRuntimeStore(
         materializeDatabase: vi.fn(async () => {
             throw new Error('legacy materializer must not be called')
         }),
-    } as unknown as PersistentDataStore
+    })
 }
 
 function deferred<T>() {

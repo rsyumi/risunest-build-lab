@@ -38,6 +38,7 @@ async_command_arity!(A, B, C, D);
 async_command_arity!(A, B, C, D, E);
 async_command_arity!(A, B, C, D, E, G);
 async_command_arity!(A, B, C, D, E, G, H);
+async_command_arity!(A, B, C, D, E, G, H, I);
 
 fn future_bytes<Args>(command: impl AsyncCommand<Args>) -> usize {
     command.future_bytes()
@@ -55,6 +56,7 @@ macro_rules! async_commands {
 }
 
 async_commands![
+    network_log::network_log_command,
     app_paths::app_paths_roots,
     app_cleanup::app_cleanup_request,
     app_cleanup::app_cleanup_resume,

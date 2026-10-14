@@ -1,11 +1,11 @@
 use super::{Device, Store};
-#[cfg(test)]
+#[cfg(all(test, feature = "source-observer"))]
 use crate::source_observer::shared_wire::{
     delta,
     transfer::{self, Frame},
 };
 use crate::{Error, Result};
-#[cfg(not(test))]
+#[cfg(not(all(test, feature = "source-observer")))]
 use risunest_sync_wire::{
     delta,
     transfer::{self, Frame},
@@ -21,7 +21,7 @@ pub struct TransferRequest {
 }
 impl Store {
     pub fn receive_frames(&self, device: &Device, bytes: &[u8]) -> Result<Vec<String>> {
-        #[cfg(test)]
+        #[cfg(all(test, feature = "source-observer"))]
         let _observed = crate::source_observer::ingress(&self.root);
         #[cfg(test)]
         let measured = std::time::Instant::now();
@@ -67,6 +67,8 @@ impl Store {
             };
             let digest = hash(&bytes);
             #[cfg(test)]
+            super::objects::frame_metrics::hashed("frame", bytes.len());
+            #[cfg(all(test, feature = "source-observer"))]
             crate::source_observer::hashed(&digest, "frame-ingress-sha256", bytes.len());
             #[cfg(test)]
             super::objects::frame_metrics::record(1, measured);
@@ -77,7 +79,7 @@ impl Store {
             objects.push((digest.clone(), bytes));
             verified.push(digest);
         }
-        self.put_objects(device, &objects)?;
+        self.put_hashed_objects(device, &objects)?;
         Ok(verified)
     }
     pub fn transfer_objects(
@@ -85,7 +87,7 @@ impl Store {
         device: &Device,
         requests: &[TransferRequest],
     ) -> Result<Vec<u8>> {
-        #[cfg(test)]
+        #[cfg(all(test, feature = "source-observer"))]
         let _observed = crate::source_observer::operation(&self.root);
         if requests.len() > 1024 {
             return Err(Error::new("too-many-candidates", 400));
@@ -170,10 +172,8 @@ impl Store {
                     )
                     .ok();
                     if let Some(recipe) = recipe {
-                        if let Ok(bytes) = recipe.encode() {
-                            if bytes.len() + 64 < target.len()
-                                && used + bytes.len() + 5 <= 8 * 1024 * 1024
-                            {
+                        if let Ok(length) = recipe.encoded_len() {
+                            if length + 64 < target.len() && used + length + 5 <= 8 * 1024 * 1024 {
                                 frame = Frame::Delta(recipe);
                             }
                         }
@@ -183,11 +183,11 @@ impl Store {
                     frame = Frame::Full(target);
                 }
             }
-            let encoded = transfer::encode(std::slice::from_ref(&frame))?;
-            if used + encoded.len() - 8 > 8 * 1024 * 1024 {
+            let encoded = transfer::encoded_len(std::slice::from_ref(&frame))?;
+            if used + encoded - 8 > 8 * 1024 * 1024 {
                 return Err(Error::new("batch-too-large", 413));
             }
-            used += encoded.len() - 8;
+            used += encoded - 8;
             if !matches!(frame, Frame::FullRequired { .. }) {
                 materialized += size;
             }
@@ -250,6 +250,48 @@ mod tests {
         );
     }
 
+    /// A reply is sized without hashing, so a carried body is hashed once,
+    /// when the reply is encoded for sending. The source observer run checks
+    /// the same reply through its own copy of the wire code.
+    #[cfg(not(feature = "source-observer"))]
+    #[test]
+    fn a_carried_body_is_hashed_only_when_the_reply_is_encoded() {
+        use delta::source_test_observer::{install, Event};
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::init(directory.path()).unwrap();
+        let registration = store.add_device().unwrap();
+        let device = store
+            .authenticate(&registration.library_id, &registration.token)
+            .unwrap();
+        let bytes = body(0, 4096);
+        let target = hash(&bytes);
+        store.put_object(&device, &target, &bytes).unwrap();
+        let thread = std::thread::current().id();
+        let hashed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = hashed.clone();
+        install(std::sync::Arc::new(move |event: Event| {
+            if std::thread::current().id() == thread
+                && event.domain == "transfer-full-encode-sha256"
+            {
+                seen.lock().unwrap().push((event.calls, event.bytes));
+            }
+        }));
+        let encoded = store
+            .transfer_objects(
+                &device,
+                &[TransferRequest {
+                    target,
+                    bases: Vec::new(),
+                }],
+            )
+            .unwrap();
+        assert_eq!(*hashed.lock().unwrap(), [(1, bytes.len() as u64)]);
+        assert!(matches!(
+            transfer::decode(&encoded).unwrap().as_slice(),
+            [Frame::Full(carried)] if *carried == bytes
+        ));
+    }
+
     /// The deduplicated target and base union is leased once per bounded
     /// group, not once per object inside the reply loop.
     #[test]
@@ -286,5 +328,33 @@ mod tests {
             .query_row("SELECT count(*) FROM object_leases", [], |r| r.get(0))
             .unwrap();
         assert_eq!(leases, 1);
+    }
+
+    /// A delta frame's target is hashed once when it is materialized, and
+    /// publication reuses that identity instead of hashing the body again.
+    #[test]
+    fn delta_ingress_reuses_only_the_immediate_materialized_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::init(directory.path()).unwrap();
+        let registration = store.add_device().unwrap();
+        let device = store
+            .authenticate(&registration.library_id, &registration.token)
+            .unwrap();
+        let base = b"synthetic inline control".to_vec();
+        store.put_object(&device, &hash(&base), &base).unwrap();
+        let target = [base.as_slice(), b" changed"].concat();
+        let digest = hash(&target);
+        let recipe = delta::create(&[&base], &target).unwrap();
+        let encoded = transfer::encode(&[Frame::Delta(recipe)]).unwrap();
+        super::super::objects::frame_metrics::take_hashes();
+        assert_eq!(
+            store.receive_frames(&device, &encoded).unwrap(),
+            std::slice::from_ref(&digest)
+        );
+        assert_eq!(
+            super::super::objects::frame_metrics::take_hashes(),
+            [("frame", target.len())]
+        );
+        assert_eq!(store.get_object(&digest).unwrap(), target);
     }
 }

@@ -10,7 +10,7 @@ import { prepareSummaryAwareGeneration } from './summaryAwareGenerationPreparati
 
 vi.mock('../storage/database.svelte', () => ({ presetTemplate: {} }))
 vi.mock('../globalApi.svelte', () => ({ forageStorage: {} }))
-vi.mock('src/ts/platform', () => ({ isTauri: false }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 
 it('streams through the real session and save coordinator and reopens the exact completed response', async () => {
     const name = `generation-reopen-${crypto.randomUUID()}`

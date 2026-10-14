@@ -55,6 +55,7 @@ const PAGE_SIZE: u16 = 1000;
 /// The one mutable head, kept inside the heads folder like any other head write.
 const HEAD_NAME: &str = "head.bin";
 const MAX_LIST_PAGES: usize = 256;
+const MAX_CACHE_REFRESH_ATTEMPTS: usize = 3;
 
 pub(crate) fn create(dependencies: Dependencies) -> Result<Arc<dyn Provider>> {
     Ok(Arc::new(Mybox { deps: dependencies }))
@@ -64,7 +65,7 @@ struct Mybox {
     deps: Dependencies,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct Entry {
     id: String,
     size: u64,
@@ -73,6 +74,7 @@ struct Entry {
 struct Listed {
     files: BTreeMap<String, Entry>,
     complete: bool,
+    generation: u64,
 }
 /// Resolved once per open. MYBOX addresses files by resource id only, so a
 /// name has to be looked up in its role folder; the listing is cached and
@@ -104,30 +106,44 @@ impl Context {
             None => listed.complete.then_some(None),
         }
     }
-    fn store(&self, folder: &str, files: BTreeMap<String, Entry>) {
-        if let Ok(mut entries) = self.entries.lock() {
-            entries.insert(
-                folder.to_owned(),
-                Listed {
-                    files,
-                    complete: true,
-                },
-            );
+    fn generation(&self, folder: &str) -> u64 {
+        self.entries.lock().unwrap().entry(folder.to_owned()).or_default().generation
+    }
+    fn store(&self, folder: &str, generation: u64, files: BTreeMap<String, Entry>, complete: bool) -> bool {
+        let mut entries = self.entries.lock().unwrap();
+        let listed = entries.entry(folder.to_owned()).or_default();
+        if listed.generation != generation {
+            listed.complete = false;
+            return false;
         }
+        let changed = if complete {
+            listed.files != files
+        } else {
+            files.iter().any(|(name, entry)| listed.files.get(name) != Some(entry))
+        };
+        if complete {
+            listed.files = files;
+        } else {
+            listed.files.extend(files);
+        }
+        listed.complete |= complete;
+        if changed {
+            listed.generation += 1;
+        }
+        true
     }
     fn record(&self, folder: &str, name: &str, entry: Entry) {
-        if let Ok(mut entries) = self.entries.lock() {
-            entries
-                .entry(folder.to_owned())
-                .or_default()
-                .files
-                .insert(name.to_owned(), entry);
-        }
+        let mut entries = self.entries.lock().unwrap();
+        let listed = entries.entry(folder.to_owned()).or_default();
+        listed.generation += 1;
+        listed.files.insert(name.to_owned(), entry);
     }
     fn forget(&self, folder: &str) {
-        if let Ok(mut entries) = self.entries.lock() {
-            entries.remove(folder);
-        }
+        let mut entries = self.entries.lock().unwrap();
+        let listed = entries.entry(folder.to_owned()).or_default();
+        listed.generation += 1;
+        listed.files.clear();
+        listed.complete = false;
     }
 }
 
@@ -354,23 +370,17 @@ impl Mybox {
     }
     async fn load(&self, context: &Context, folder: &str, cancel: &Cancellation) -> Result<()> {
         let folder_id = context.folder_id(folder)?.to_owned();
-        let files = self
-            .pages(context, Some(&folder_id), cancel)
-            .await?
-            .into_iter()
-            .filter(|resource| resource.kind == "file")
-            .map(|resource| {
-                (
-                    resource.name,
-                    Entry {
-                        id: resource.resource_id,
-                        size: resource.size,
-                    },
-                )
-            })
-            .collect();
-        context.store(folder, files);
-        Ok(())
+        for _ in 0..MAX_CACHE_REFRESH_ATTEMPTS {
+            let generation = context.generation(folder);
+            let files = self.pages(context, Some(&folder_id), cancel).await?
+                .into_iter().filter(|resource| resource.kind == "file")
+                .map(|resource| (resource.name, Entry { id: resource.resource_id, size: resource.size }))
+                .collect();
+            if context.store(folder, generation, files, true) {
+                return Ok(());
+            }
+        }
+        Err(ProviderError::new(ErrorKind::Transient))
     }
     async fn lookup(
         &self,
@@ -383,7 +393,7 @@ impl Mybox {
             return Ok(found);
         }
         self.load(context, folder, cancel).await?;
-        Ok(context.cached(folder, name).unwrap_or_default())
+        context.cached(folder, name).ok_or_else(|| ProviderError::new(ErrorKind::Transient))
     }
     /// Re-reads the role folder after a write so the answer is the service's.
     async fn confirm(
@@ -393,31 +403,32 @@ impl Mybox {
         name: &str,
         cancel: &Cancellation,
     ) -> Result<Option<Entry>> {
-        let mut url = config::endpoint(&context.base,
-            &["drive", "folders", context.folder_id(folder)?, "resources"])?;
-        url.query_pairs_mut().append_pair("count", &PAGE_SIZE.to_string())
-            .append_pair("sort", "createdAt,desc");
-        let page: api::Listing = self.json(context, ProviderOperation::List, Method::GET,
-            url, None, &[200], cancel).await?;
-        let complete = page.cursor()?.is_none();
-        let mut files = BTreeMap::new();
-        for resource in page.resources.into_iter().filter(|resource| resource.kind == "file") {
-            if files.insert(resource.name, Entry { id: resource.resource_id, size: resource.size }).is_some() {
-                return Err(ProviderError::new(ErrorKind::Corrupt));
+        for _ in 0..MAX_CACHE_REFRESH_ATTEMPTS {
+            let generation = context.generation(folder);
+            let mut url = config::endpoint(&context.base,
+                &["drive", "folders", context.folder_id(folder)?, "resources"])?;
+            url.query_pairs_mut().append_pair("count", &PAGE_SIZE.to_string())
+                .append_pair("sort", "createdAt,desc");
+            let page: api::Listing = self.json(context, ProviderOperation::List, Method::GET,
+                url, None, &[200], cancel).await?;
+            let complete = page.cursor()?.is_none();
+            let mut files = BTreeMap::new();
+            for resource in page.resources.into_iter().filter(|resource| resource.kind == "file") {
+                if files.insert(resource.name, Entry { id: resource.resource_id, size: resource.size }).is_some() {
+                    return Err(ProviderError::new(ErrorKind::Corrupt));
+                }
             }
+            let found = files.get(name).cloned();
+            if !context.store(folder, generation, files, complete) {
+                continue;
+            }
+            if complete || found.is_some() {
+                return Ok(found);
+            }
+            self.load(context, folder, cancel).await?;
+            return context.cached(folder, name).ok_or_else(|| ProviderError::new(ErrorKind::Transient));
         }
-        let found = files.get(name).cloned();
-        if complete {
-            context.store(folder, files);
-            return Ok(found);
-        }
-        if let Some(entry) = found {
-            context.record(folder, name, entry.clone());
-            return Ok(Some(entry));
-        }
-        context.forget(folder);
-        self.load(context, folder, cancel).await?;
-        Ok(context.cached(folder, name).unwrap_or_default())
+        Err(ProviderError::new(ErrorKind::Transient))
     }
 
     async fn create_folder(

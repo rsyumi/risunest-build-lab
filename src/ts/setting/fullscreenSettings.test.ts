@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const state = vi.hoisted(() => ({ desktop: false, fullscreen: false, fullScreen: true,
     isFullscreen: vi.fn(), setFullscreen: vi.fn() }))
-vi.mock('../platform', () => ({ isTauri: true, get isTauriDesktop() { return state.desktop }, isTauriMobile: false, isIOS: () => false }))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule(() => ({ runtime: 'tauri', os: state.desktop ? 'windows' : 'android' })))
 vi.mock('@tauri-apps/api/webviewWindow', () => ({ getCurrentWebviewWindow: () => state }))
 vi.mock('../storage/database.svelte', () => ({ getDatabase: () => state }))
 vi.mock('../characters', () => ({ createBlankChar: vi.fn(), getCharImage: vi.fn() }))

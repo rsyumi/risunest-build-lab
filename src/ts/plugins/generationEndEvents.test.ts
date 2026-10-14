@@ -19,7 +19,7 @@ vi.mock('../storage/database.svelte', () => ({
     presetTemplate: {},
 }))
 vi.mock('../globalApi.svelte', () => ({ forageStorage: {} }))
-vi.mock('src/ts/platform', () => ({ isTauri: false }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 
 const record = (overrides: Partial<GenerationEndRecord> = {}): GenerationEndRecord => ({
     characterId: 'char-b',

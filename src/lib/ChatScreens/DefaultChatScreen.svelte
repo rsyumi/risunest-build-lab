@@ -16,6 +16,7 @@
     import { DBState } from 'src/ts/stores.svelte';
     import { chatProcessStage, doingChat, sendChat, notifyGenerationCompletion, getSelectedBoundedGenerationFallbackReason, getHistoryWindowMemoryMode, openSelectedHistoryWindow } from "../../ts/process/index.svelte";
     import { beginGenerationEndRun, type GenerationEndRun, type GenerationEndStatus } from "../../ts/process/generationEnd";
+    import { generationCancellation, reserveGeneration, type GenerationReservation } from '../../ts/process/generationState';
     import { getPersonaPrompt, parseKeyValue, sleep } from "../../ts/util";
     import { language } from "../../lang";
     import { isExpTranslator, translate } from "../../ts/translator/translator";
@@ -372,6 +373,14 @@
         void viewport.jumpTo(index, { align: 'center', highlight: true })
     })
 
+    type ChatGeneration = GenerationReservation & { signal: AbortSignal }
+
+    function reserveChatGeneration(): ChatGeneration | null {
+        const controller = new AbortController()
+        const reservation = reserveGeneration(() => controller.abort())
+        return reservation ? { ...reservation, signal: controller.signal } : null
+    }
+
     async function send(){
         return sendMain(false)
     }
@@ -383,6 +392,8 @@
         if($doingChat || sending || rerollBusy){
             return
         }
+        const generation = reserveChatGeneration()
+        if (!generation) return
         sending = true
         const submittedComposer = captureComposerInput()
         const submittedInput = submittedComposer.text
@@ -391,7 +402,7 @@
         try {
             if (!submittedInput.startsWith('/') && historyLimitApplies()) {
                 windowed = true
-                return await sendMainWindowed(continueResponse, submittedInput, submittedFiles, submittedComposer)
+                return await sendMainWindowed(continueResponse, submittedInput, submittedFiles, submittedComposer, generation)
             }
             if (getSelectedBoundedGenerationFallbackReason() === null &&
                 !submittedInput.startsWith('/') && submittedFiles.length === 0 &&
@@ -415,16 +426,17 @@
                 const current = persistentRuntime.captureSelectedConversationTarget()
                 if (!current || current.characterId !== target.characterId || current.conversationId !== target.conversationId || current.navigationGeneration !== target.navigationGeneration) return
                 updateInputSizeAll()
-                return await sendChatMainRaw(continueResponse)
+                return await sendChatMainRaw(continueResponse, generation)
             }
             return await runSelectedConversationOperation(
                 continueResponse ? 'continue-response' : 'send-message',
-                (context) => sendMainComplete(context, continueResponse, submittedInput, submittedFiles, submittedComposer),
+                (context) => sendMainComplete(context, continueResponse, submittedInput, submittedFiles, submittedComposer, generation),
             )
         } catch (error) {
             // A lost history window has already been reported.
             if (!windowed || !(error instanceof PersistentMutationFencedError)) alertError(error)
         } finally {
+            generation.release()
             sending = false
         }
     }
@@ -470,6 +482,7 @@
         submittedInput: string,
         submittedFiles: string[],
         submittedComposer: SubmittedChatComposer,
+        generation: ChatGeneration,
     ) {
         const character = DBState.db.characters[$selectedCharID]
         const target = persistentRuntime.captureSelectedConversationTarget()
@@ -478,12 +491,13 @@
         for (const file of submittedFiles) {
             input += `{{inlayed::${file}}}`
         }
-        const window = await openSelectedHistoryWindow({ register: true })
+        const window = await openSelectedHistoryWindow({ register: true, signal: generation.signal })
         if (!window) {
-            reportUnopenedHistoryWindow(target)
+            if (!generation.signal.aborted) reportUnopenedHistoryWindow(target)
             return
         }
         try {
+            if (generation.signal.aborted) return
             const name = null
             if (input === '') {
                 if (DBState.db.useSayNothing && window.chat.message.at(-1)?.role !== 'user') {
@@ -491,7 +505,11 @@
                     if (!window.controller.applyRange(window.chat.message.length, 0, [message], 'append')) return
                 }
             } else {
-                const triggerResult = await runTrigger(character, 'input', { chat: window.chat })
+                const triggerResult = await runTrigger(character, 'input', {
+                    chat: window.chat,
+                    generation: { signal: generation.signal, reservation: generation },
+                })
+                if (generation.signal.aborted) return
                 if (triggerResult && !writeHistoryWindowChat(window.controller, triggerResult.chat)) return
                 const scope = createPromptScriptOperationScope(character, {
                     historyWindow: { chat: window.chat, conversationId: target.conversationId },
@@ -501,6 +519,7 @@
                     processedInput = await processScript(character, input, 'editinput', {}, {
                         promptOperationScope: scope,
                     })
+                    if (generation.signal.aborted) return
                     scope.finish()
                 } finally {
                     scope.release()
@@ -520,7 +539,7 @@
         await sleep(10)
         if (!isSelectedConversationTarget(target)) return
         updateInputSizeAll()
-        await sendChatMainRaw(continueResponse)
+        await sendChatMainRaw(continueResponse, generation)
     }
 
     const openResponseTailWindow: OpenResponseTail = (tailStart) => openSelectedHistoryWindow({ tailStart })
@@ -531,14 +550,17 @@
         submittedInput: string,
         submittedFiles: string[],
         submittedComposer: SubmittedChatComposer,
+        generation: ChatGeneration,
     ) {
+        if (generation.signal.aborted) return
         let input = submittedInput
         let mutationTarget = requireConversationMutationTarget(context)
         const character = mutationTarget.character
         let messages = mutationTarget.conversation.message
 
         if(input.startsWith('/')){
-            const commandProcessed = await processMultiCommand(input)
+            const commandProcessed = await processMultiCommand(input, undefined, { signal: generation.signal, reservation: generation })
+            if (generation.signal.aborted) return
             context.requireCurrent()
             if(commandProcessed !== false){
                 chatScreenState.clearSubmittedComposer(submittedComposer)
@@ -572,6 +594,7 @@
                     runTrigger(character, 'input', {
                         chat: mutationTarget.conversation,
                         onConversationCommit,
+                        generation: { signal: generation.signal, reservation: generation },
                     }),
                 processInput: (onConversationCommit) =>
                     processScript(
@@ -582,6 +605,7 @@
                         { onConversationCommit },
                     ),
                 isTargetCurrent: (target) => {
+                    if (generation.signal.aborted) return false
                     context.requireCurrent()
                     return conversationTargetIsCurrent(target)
                 },
@@ -607,7 +631,7 @@
         mutationTarget = requireConversationMutationTarget(context)
         updateInputSizeAll()
         // Slash-command input keeps loading the whole conversation for its generation.
-        await sendChatMainComplete(context, continueResponse, !submittedInput.startsWith('/'))
+        await sendChatMainComplete(context, continueResponse, generation, !submittedInput.startsWith('/'))
         context.requireCurrent()
 
     }
@@ -618,12 +642,13 @@
 
     async function rerollCandidate(expectedLastMessage?: string) {
         if ($doingChat || rerollBusy || sending) return
+        const generation = reserveChatGeneration()
+        if (!generation) return
         rerollBusy = true
-        abortController = new AbortController()
-        const signal = abortController.signal
+        const signal = generation.signal
         const endTarget = persistentRuntime.captureSelectedConversationTarget()
         const endRun = endTarget ? beginGenerationEndRun(endTarget, { reroll: true }) : null
-        const generate = captureGeneration(endRun, () => sendChat({ signal, historyLimit: true }))
+        const generate = captureGeneration(endRun, () => signal.aborted ? Promise.resolve(false) : sendChat({ signal, historyLimit: true }, generation))
         let completed = false
         let windowed = false
         try {
@@ -666,7 +691,7 @@
             if (!windowed || !(error instanceof PersistentMutationFencedError)) alertError(error)
         } finally {
             rerollBusy = false
-            $doingChat = false
+            generation.release()
             if (endTarget) endRun?.finish(generationEndStatus(completed, signal, endTarget))
         }
     }
@@ -742,7 +767,7 @@
             context.requireCurrent()
             generate =
                 confirmed &&
-                session?.version === version &&
+                (!session || session.isContentUnchangedSince(version!)) &&
                 JSON.stringify(conversation.message.at(-1)) === selected
         })
         if (generate) await reroll()
@@ -807,30 +832,35 @@
         }
     }
 
-    let abortController:null|AbortController = null
-
     async function sendChatMain(continued:boolean = false) {
-        if (historyLimitApplies() || getSelectedBoundedGenerationFallbackReason() === null) {
-            return sendChatMainRaw(continued)
+        const generation = reserveChatGeneration()
+        if (!generation) return
+        try {
+            if (historyLimitApplies() || getSelectedBoundedGenerationFallbackReason() === null) {
+                return await sendChatMainRaw(continued, generation)
+            }
+            return await runSelectedConversationOperation(
+                continued ? 'continue-generation' : 'generate-response',
+                (context) => sendChatMainComplete(context, continued, generation),
+            )
+        } finally {
+            generation.release()
         }
-        return runSelectedConversationOperation(
-            continued ? 'continue-generation' : 'generate-response',
-            (context) => sendChatMainComplete(context, continued),
-        )
     }
 
     async function sendChatMainComplete(
         context: ConversationOperationContext,
-        continued: boolean = false,
+        continued: boolean,
+        generation: ChatGeneration,
         historyLimit = true,
     ) {
         requireConversationMutationTarget(context)
-        return sendChatMainRaw(continued, historyLimit)
+        return sendChatMainRaw(continued, generation, historyLimit)
     }
 
-    async function sendChatMainRaw(continued: boolean, historyLimit = true) {
-        abortController = new AbortController()
-        const signal = abortController.signal
+    async function sendChatMainRaw(continued: boolean, generation: ChatGeneration, historyLimit = true) {
+        const signal = generation.signal
+        if (signal.aborted || !generation.isCurrent()) return
         const endTarget = persistentRuntime.captureSelectedConversationTarget()
         const endRun = endTarget ? beginGenerationEndRun(endTarget) : null
         let completed = false
@@ -839,13 +869,13 @@
                 signal,
                 continue: continued,
                 historyLimit,
-            }))()
+            }, generation))()
         } catch (error) {
             if (error instanceof SelectedConversationPromotionStaleError) return
             console.error(error)
             alertError(error)
         } finally {
-            $doingChat = false
+            generation.release()
             if (endTarget) endRun?.finish(generationEndStatus(completed, signal, endTarget))
         }
         if (completed && DBState.db.playMessage) {
@@ -855,9 +885,7 @@
     }
 
     function abortChat(){
-        if(abortController){
-            abortController.abort()
-        }
+        $generationCancellation?.()
     }
 
 

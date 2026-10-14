@@ -18,17 +18,10 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({ save: mocks.save }))
-vi.mock('../platform', () => ({
-    get isTauri() {
-        return mocks.platform !== 'web'
-    },
-    get isTauriIOS() {
-        return mocks.platform === 'ios'
-    },
-    get isTauriAndroid() {
-        return mocks.platform === 'android'
-    },
-}))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule(() => ({
+    runtime: mocks.platform === 'web' ? 'web' : 'tauri',
+    os: mocks.platform === 'android' || mocks.platform === 'ios' ? mocks.platform : 'windows',
+})))
 vi.mock('./persistentDataRuntime.svelte', () => ({
     getPersistentDataRuntime: () => mocks.runtime,
 }))

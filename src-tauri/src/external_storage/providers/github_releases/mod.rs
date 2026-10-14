@@ -409,10 +409,19 @@ impl GithubReleases {
         batch: &str,
         cancel: &Cancellation,
     ) -> Result<(u64, String)> {
+        let lock = context.batch_lock(batch);
+        let _guard = tokio::select! {
+            _ = cancel.cancelled() => return Err(ProviderError::new(ErrorKind::Cancelled)),
+            guard = lock.lock() => guard,
+        };
+        cancel.check()?;
         let mut state = context.batches().get(batch).copied();
         for _ in 0..MAX_BATCH_ROLLOVERS {
             let resolved = match state {
-                Some(current) if current.assets < api::MAX_ASSETS_PER_RELEASE => {
+                Some(mut current) if current.assets < api::MAX_ASSETS_PER_RELEASE => {
+                    // An uncertain or failed upload may still occupy its slot.
+                    current.assets += 1;
+                    context.batches().insert(batch.to_owned(), current);
                     return Ok((current.release, context.tag(batch, current.seq)))
                 }
                 Some(current) => {
@@ -695,8 +704,8 @@ impl Provider for GithubReleases {
             }
             let batch = api::batch_key(intent.role, &intent.job_id);
             let name = api::asset_name(intent.role, &intent.object_id);
-            let (release, tag) = self.batch_release(context, &batch, cancel).await?;
             for attempt in 0..2 {
+                let (release, tag) = self.batch_release(context, &batch, cancel).await?;
                 let url = context.upload_url(release, &name)?;
                 let mut request = self.request(context, Method::POST, url, ProviderOperation::Create);
                 request
@@ -709,14 +718,6 @@ impl Provider for GithubReleases {
                     201 => {
                         let asset: AssetView = self.decode(response, cancel).await?;
                         Self::verify(&asset, intent)?;
-                        {
-                            let mut batches = context.batches();
-                            if let Some(state) = batches.get_mut(&batch) {
-                                if state.release == release {
-                                    state.assets += 1;
-                                }
-                            }
-                        }
                         return Ok(Self::receipt(context, &tag, release, &asset, intent));
                     }
                     422 => {

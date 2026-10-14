@@ -1,9 +1,8 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
-import { languageEnglish } from '../../lang/en'
+import { language } from '../../lang'
 const mocks = vi.hoisted(() => ({ horde: vi.fn(async () => []), changed: vi.fn() }))
 vi.mock('src/ts/stores.svelte', () => ({ DBState: { db: { customModels: [] } } }))
-vi.mock('src/lang', () => ({ language: languageEnglish }))
 vi.mock('src/ts/alert', () => ({ alertMd: vi.fn() }))
 vi.mock('src/ts/setting/utils', () => ({ resolveLanguagePath: () => '' }))
 vi.mock('src/ts/horde/getModels', () => ({ getHordeModels: mocks.horde }))
@@ -39,13 +38,13 @@ it('opens a selected plugin on its own tab, filters it and preserves blank selec
     })
     document.querySelector('button')!.click()
     await tick()
-    expect(document.querySelector('[role=tab][aria-selected=true]')?.textContent).toBe(languageEnglish.plugin)
+    expect(document.querySelector('[role=tab][aria-selected=true]')?.textContent).toBe(language.plugin)
     expect(document.body.textContent).toContain('Plugin one')
     expect(document.body.textContent).not.toContain('Plugin two')
     expect(document.body.textContent).not.toContain('Base model')
     expect(mocks.horde).not.toHaveBeenCalled()
     const none = [...document.querySelectorAll('button')].find(
-        (button) => button.textContent === languageEnglish.none,
+        (button) => button.textContent === language.none,
     )!
     none.click()
     await tick()
@@ -58,6 +57,6 @@ it('shows a missing selected plugin without clearing its value', async () => {
     })
     document.querySelector('button')!.click()
     await tick()
-    expect(document.body.textContent).toContain(languageEnglish.pluginModelUnavailable)
+    expect(document.body.textContent).toContain(language.pluginModelUnavailable)
     expect(mocks.changed).not.toHaveBeenCalled()
 })

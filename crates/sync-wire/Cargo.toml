@@ -16,3 +16,6 @@ zstd = { version = "0.13", default-features = false, optional = true }
 [features]
 # zstd request and response bodies, for the Sync server and the app.
 body-codec = ["dep:zstd"]
+# Compiles the source observer hooks outside this crate's own tests, for
+# the Sync server's tests, which enable it as a dev-dependency.
+source-observer = []

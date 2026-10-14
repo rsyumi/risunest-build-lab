@@ -18,7 +18,7 @@ async fn client_reconnects_without_replaying_issuance_and_rejects_stale_edits() 
     let first = client.status().await.unwrap();
     client.mutate("connection", json!({"revision":first["revision"],"options":{"endpoint":"https://synthetic.example.com","cloudflared":null,"registryUrl":null}})).await.unwrap();
     let state = client.status().await.unwrap();
-    let request = "a".repeat(64);
+    let request = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned();
     let issued = client
         .mutate(
             "devices",
@@ -59,7 +59,7 @@ async fn client_reconnects_without_replaying_issuance_and_rejects_stale_edits() 
         .unwrap();
     let refreshed = client.status().await.unwrap();
     assert_ne!(refreshed["revision"], current["revision"]);
-    assert_eq!(client.mutate("devices",json!({"revision":current["revision"],"name":"다른 기기","requestId":"b".repeat(64)})).await.unwrap_err(),"management-stale-state");
+    assert_eq!(client.mutate("devices",json!({"revision":current["revision"],"name":"다른 기기","requestId":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".to_owned()})).await.unwrap_err(),"management-stale-state");
     assert_eq!(
         client
             .mutate("../../shutdown", json!({}))

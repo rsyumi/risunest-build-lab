@@ -2,9 +2,7 @@ import fc from 'fast-check'
 import { expect, test, vi } from 'vitest'
 import { parseChatML } from '../chatML'
 
-vi.mock(import('../parser.svelte'), () => ({
-  risuChatParser: (s: string) => s,
-}))
+vi.mock('../parser.svelte', async () => (await import('../parser.testSupport')).parserStubModule())
 
 const anythingNotToken = fc
   .string({ unit: 'grapheme' })

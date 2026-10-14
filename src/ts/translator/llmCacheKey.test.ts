@@ -9,19 +9,7 @@ vi.mock("../process/modules", () => ({
     moduleUpdate: () => {},
 }));
 
-vi.mock("localforage", () => {
-    const store = new Map<string, string>();
-    return {
-        default: {
-            createInstance: () => ({
-                getItem: async (key: string) => (store.has(key) ? store.get(key)! : null),
-                setItem: async (key: string, value: string) => { store.set(key, value); },
-                iterate: async () => undefined,
-                clear: async () => { store.clear(); },
-            }),
-        },
-    };
-});
+vi.mock("localforage", async () => (await import("../plugins/localforage.testSupport")).localforageModule(new Map()));
 
 import { getLLMCache, setLLMCache } from "./translator";
 

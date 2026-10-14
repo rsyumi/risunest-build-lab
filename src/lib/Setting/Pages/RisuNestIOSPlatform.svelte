@@ -7,6 +7,7 @@
   import SettingGroup from "../RisuNest/SettingGroup.svelte";
   import SettingRow from "../RisuNest/SettingRow.svelte";
   import SettingButton from "../RisuNest/SettingButton.svelte";
+  import WebViewRefreshButton from "../RisuNest/WebViewRefreshButton.svelte";
 
   let notifications = $state<boolean | null>(null);
   let os = $state("");
@@ -78,4 +79,5 @@
       <dd>{os}</dd>
     </dl>
   {/if}
+  <WebViewRefreshButton />
 </SettingGroup>

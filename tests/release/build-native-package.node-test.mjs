@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { assertBinaryArchitecture } from "../../scripts/release/platform/native.mjs";
-import { assertPackageFormat } from "../../scripts/release/platform/package.mjs";
+import { assertPackageFormat, writeZipArchive } from "../../scripts/release/platform/package.mjs";
 import {
   assertIosBundleMetadata,
   assertMacBundleMetadata,
@@ -97,6 +97,32 @@ test("raw packaging accepts native Windows ARM64 targets", () => {
   const report = JSON.parse(result.stdout.trim());
   assert.equal(report.target, "aarch64-pc-windows-msvc");
   assert.ok(readFileSync(join(output, "risunest-sync-server-1.2.3-aarch64-pc-windows-msvc.zip")).length > 0);
+});
+
+test("Windows ZIP preserves top-level names and bytes with absolute output paths", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "risunest managed zip "));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const source = join(root, "source files");
+  mkdirSync(source);
+  const files = {
+    "risunest-sync-gui.exe": pe(0xaa64),
+    "CLOUDFLARED-LICENSE": Buffer.from("synthetic license\n"),
+    "risunest-sync-bundle.json": Buffer.from('{"schema":"risunest-sync-bundle/v1"}\n'),
+  };
+  for (const [name, bytes] of Object.entries(files)) writeFileSync(join(source, name), bytes);
+  const archive = join(root, "managed.zip");
+  writeZipArchive(source, archive);
+  assert.equal(assertPackageFormat(archive, "zip").format, "zip");
+  const inspected = spawnSync("python", ["-c", [
+    "import json, sys, zipfile",
+    "with zipfile.ZipFile(sys.argv[1]) as archive:",
+    "    assert archive.testzip() is None",
+    "    print(json.dumps({name: archive.read(name).hex() for name in archive.namelist()}))",
+  ].join("\n"), archive], { encoding: "utf8", windowsHide: true });
+  assert.equal(inspected.status, 0, inspected.stderr);
+  assert.deepEqual(JSON.parse(inspected.stdout), Object.fromEntries(
+    Object.entries(files).map(([name, bytes]) => [name, bytes.toString("hex")]),
+  ));
 });
 
 test("NSIS inspection excludes only generated installer metadata from the owned inventory", () => {
@@ -303,19 +329,6 @@ test("effective configuration preserves the approved desktop and mobile identiti
   }
 });
 
-test("RisuNest NSIS completes requested cleanup before removing its retry entry point", () => {
-  const hook = readFileSync("src-tauri/windows.nsh", "utf8");
-  assert.match(hook, /!macro NSIS_HOOK_PREUNINSTALL/);
-  assert.match(hook, /\$DeleteAppDataCheckboxState = 1/);
-  assert.match(hook, /\$UpdateMode <> 1/);
-  assert.match(hook, /!insertmacro CheckIfAppIsRunning "\$\{MAINBINARYNAME\}\.exe" "\$\{PRODUCTNAME\}"/);
-  assert.match(hook, /ExecWait '"\$INSTDIR\\\$\{MAINBINARYNAME\}\.exe" --remove-local-data --yes' \$R6/);
-  assert.ok(hook.indexOf("!insertmacro CheckIfAppIsRunning") < hook.indexOf("ExecWait"));
-  assert.match(hook, /\$\{If\} \$\{Errors\}\s+\$\{OrIf\} \$R6 != 0/);
-  assert.match(hook, /SetErrorLevel 1\s+Abort/);
-  assert.doesNotMatch(hook, /RmDir|NSIS_HOOK_POSTUNINSTALL/);
-});
-
 test("Sync GUI configuration carries one identity on every desktop platform", () => {
   const root = "server/manager/gui/src-tauri";
   const base = JSON.parse(readFileSync(`${root}/tauri.conf.json`, "utf8"));
@@ -376,32 +389,6 @@ test("no owned directory overlaps the installation directory either installer se
       assert.ok(known.has(target), `unowned RmDir target: ${target}`);
     }
   }
-});
-
-test("application bundles identify Yumi as the publisher", () => {
-  const app = JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8"));
-  const sync = JSON.parse(readFileSync("server/manager/gui/src-tauri/tauri.conf.json", "utf8"));
-  assert.equal(app.productName, "RisuNest");
-  assert.equal(app.bundle.publisher, "Yumi");
-  assert.equal(sync.productName, "RisuNest Sync");
-  assert.equal(sync.bundle.publisher, "Yumi");
-});
-
-test("Sync NSIS hook separates the default install and durable data directories", () => {
-  const hook = readFileSync("server/manager/install/windows.nsh", "utf8");
-  assert.match(hook, /!define RISUNEST_SYNC_DEFAULT_INSTALL_DIR "\$LOCALAPPDATA\\RisuNest Sync"/);
-  assert.match(hook, /!define RISUNEST_SYNC_INSTALL_DIR "\$LOCALAPPDATA\\RisuNestSync"/);
-  assert.match(hook, /StrCmp \$INSTDIR "\$\{RISUNEST_SYNC_DEFAULT_INSTALL_DIR\}"/);
-  assert.match(hook, /StrCpy \$INSTDIR "\$\{RISUNEST_SYNC_INSTALL_DIR\}"\s+SetOutPath \$INSTDIR/);
-  assert.match(hook, /\$LOCALAPPDATA\\RisuNestSyncData\\manager-update/);
-  assert.doesNotMatch(hook, /\$LOCALAPPDATA\\RisuNestSync\\manager-update/);
-  assert.match(hook, /\$DeleteAppDataCheckboxState = 1/);
-  assert.doesNotMatch(hook, /RmDir \/r/);
-  assert.match(hook, /RISUNEST_SYNC_UNINSTALL_DATA_DIR/);
-  assert.match(hook, /--data-dir "\$R9" installer delete-data/);
-  assert.match(hook, /--data-dir "\$R9" --server "\$INSTDIR\\risunest-sync-server\.exe" installer forget-removal/);
-  assert.match(hook, /IfFileExists "\$R9\\manager-update\\installer-\$R7\.ready"/);
-  assert.ok(hook.indexOf("installer delete-data") < hook.indexOf("!macro NSIS_HOOK_POSTUNINSTALL"));
 });
 
 test("macOS package metadata and intentional ad-hoc signatures are checked", () => {

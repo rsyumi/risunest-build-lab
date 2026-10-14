@@ -1,4 +1,4 @@
-import { safeStructuredClone } from '../polyfill'
+import { safeStructuredClone } from '../safeStructuredClone'
 import {
     CONVERSATION_RANGE_MAX_LIMIT,
     RevisionConflictError,

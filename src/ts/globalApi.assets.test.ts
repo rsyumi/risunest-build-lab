@@ -1,14 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { setRuntimePerformanceProfile } from './runtimePerformanceProfile'
+import type { PlatformShape } from './platform.testSupport'
 
 const state = vi.hoisted(() => ({
-    isTauri: false,
-    isTauriIOS: false,
+    platform: { runtime: 'web', os: 'windows' } as PlatformShape,
     exportIOSFile: vi.fn(),
     fileWrite: vi.fn(async (data: Uint8Array) => data.byteLength),
     fileClose: vi.fn(async () => undefined),
     downloadThroughAndroidSaf: vi.fn(async (_name: string, _data: Uint8Array) => true),
-    isTauriMobile: false,
     blobStore: null as any,
     database: { characters: [] as any[] },
     activateConversation: vi.fn(async (_id: string) => true),
@@ -20,124 +19,43 @@ const state = vi.hoisted(() => ({
 vi.mock('./storage/iosFiles', () => ({ downloadIOSFile: vi.fn(), exportIOSFile: state.exportIOSFile }))
 vi.mock('./storage/androidSafDownload', () => ({ downloadThroughAndroidSaf: state.downloadThroughAndroidSaf }))
 vi.mock('./storage/nativePaths', () => ({ iosStagingPath: async () => '/synthetic/staging/owned', nativeDataPath: async () => '/synthetic/data' }))
-vi.mock('./platform', () => ({
-    get isTauriIOS() { return state.isTauriIOS },
-    get isTauri() {
-        return state.isTauri
-    },
-    get isTauriMobile() {
-        return state.isTauriMobile
-    },
-}))
-vi.mock('./storage/platformBlobStore', () => ({
-    configureBlobStoreStorageProvider: vi.fn(),
-    readBlobForFacade: vi.fn(),
-    resolveBlobStore: async () => state.blobStore,
-    subscribeNativeMediaEndpointChanges: vi.fn(() => vi.fn()),
-}))
-vi.mock('./storage/autoStorage', () => ({
-    AutoStorage: class {
-        isAccount = false
-        realStorage = {}
-        async Init() { /* no-op */ }
-        async getItem() { return null }
-        async setItem() { /* no-op */ }
-        async removeItem() { /* no-op */ }
-        async keys() { return [] }
-    },
-}))
-vi.mock('./characterCards', () => ({
-    hubURL: 'https://hub.example',
-    // `/rs/` is a Realm-classified path (scripts/realmBlocklist.mjs), so the
-    // account asset route must build it from realmHubURL, not hubURL.
-    realmHubURL: 'https://realm-hub.example',
-    characterURLImport: vi.fn(),
-}))
-vi.mock('./util', () => ({
-    changeFullscreen: vi.fn(),
-    sleep: async () => undefined,
-}))
-vi.mock('./storage/database.svelte', () => ({
-    getDatabase: () => ({}),
-    getCurrentCharacter: () => ({ chats: [], chatPage: 0 }),
-    defaultSdDataFunc: () => [],
-    appVer: '0.0.0',
-    appSubVer: '',
-}))
-vi.mock('./stores.svelte', () => ({
-    MobileGUI: { set: vi.fn() },
-    botMakerMode: { set: vi.fn() },
-    selectedCharID: { set: vi.fn() },
-    loadedStore: { set: vi.fn() },
-    DBState: { db: state.database },
-    LoadingStatusState: {},
-    selIdState: { selId: 0 },
-    ReloadGUIPointer: { set: vi.fn() },
-    bodyIntercepterStore: [],
-}))
-vi.mock('./alert', () => ({
-    alertConfirm: vi.fn(),
-    alertError: vi.fn(),
-    alertMd: vi.fn(),
-    alertNormal: vi.fn(),
-    alertNormalWait: vi.fn(),
-    alertSelect: vi.fn(),
-    alertToast: vi.fn(),
-    alertTOS: vi.fn(), alertRisuServiceTOS: vi.fn(),
-    waitAlert: vi.fn(),
-}))
-vi.mock('./storage/persistentDataRuntime.svelte', () => ({
+vi.mock('./platform', async () => (await import('./platform.testSupport')).platformModule(() => state.platform))
+vi.mock('./storage/platformBlobStore', async () => (await import('./globalApi.testSupport')).platformBlobStoreModule(async () => state.blobStore))
+vi.mock('./storage/autoStorage', async () => (await import('./globalApi.testSupport')).autoStorageModule())
+vi.mock('./characterCards', async () => (await import('./globalApi.testSupport')).characterCardsModule())
+vi.mock('./util', async () => (await import('./globalApi.testSupport')).utilModule())
+vi.mock('./storage/database.svelte', async () => (await import('./globalApi.testSupport')).databaseModule(() => ({})))
+vi.mock('./stores.svelte', async () => (await import('./globalApi.testSupport')).storesModule(state.database))
+vi.mock('./alert', async () => (await import('./globalApi.testSupport')).alertModule())
+vi.mock('./storage/persistentDataRuntime.svelte', async () => (await import('./globalApi.testSupport')).persistentDataRuntimeModule({
     activateConversation: state.activateConversation,
     captureSelectedConversationTarget: state.captureSelectedConversationTarget,
     fencePersistentNavigation: state.fencePersistentNavigation,
-    configurePersistentDataRuntime: vi.fn(),
-    markPersistentDataDirty: vi.fn(),
-    replacePersistentDatabase: vi.fn(),
 }))
 vi.mock('./ui/yieldToUi', () => ({ yieldToUi: state.yieldToUi }))
-vi.mock('./storage/persistentSaveNotifications', () => ({
-    createPersistentSaveObserverInstallation: () => ({ install: vi.fn() }),
-    installPersistentSaveNotifications: vi.fn(),
-}))
-vi.mock('./storage/databasePreparation', () => ({ checkCharOrder: vi.fn() }))
-vi.mock('./storage/risuSave', () => ({ decodeRisuSave: vi.fn() }))
-vi.mock('./storage/defaultPrompts', () => ({
-    defaultJailbreak: '', defaultMainPrompt: '', oldJailbreak: '', oldMainPrompt: '',
-}))
-vi.mock('./process/modules', () => ({ moduleUpdate: vi.fn() }))
-vi.mock('./process/coldstorage.svelte', () => ({
-    getColdStorageItem: vi.fn(),
-    makeColdData: vi.fn(),
-}))
-vi.mock('./process/coldstorageData', () => ({
-    listCharacterResources: () => [],
-    listDatabaseRootResources: () => [],
-    replaceCharacterResources: vi.fn(),
-    replaceDatabaseRootResources: vi.fn(),
-}))
-vi.mock('./plugins/plugins.svelte', () => ({ loadPlugins: vi.fn() }))
-vi.mock('./parser/parser.svelte', () => ({ hasher: vi.fn(async () => 'hashed') }))
-vi.mock('./drive/accounter', () => ({ loadRisuAccountData: vi.fn() }))
-vi.mock('./update', () => ({ checkRisuUpdate: vi.fn() }))
-vi.mock('./observer.svelte', () => ({ startObserveDom: vi.fn() }))
-vi.mock('./characters', () => ({ updateLorebooks: vi.fn() }))
-vi.mock('./hotkey', () => ({ initMobileGesture: vi.fn() }))
-vi.mock('./gui/animation', () => ({ updateAnimationSpeed: vi.fn() }))
-vi.mock('./gui/colorscheme', () => ({ updateColorScheme: vi.fn(), updateTextThemeAndCSS: vi.fn() }))
-vi.mock('./gui/guisize', () => ({ updateGuisize: vi.fn() }))
-vi.mock('src/lang', () => ({ language: {} }))
-vi.mock('streamsaver', () => ({ default: { createWriteStream: vi.fn() } }))
-vi.mock('@tauri-apps/plugin-fs', () => ({
-    open: vi.fn(async () => ({ write: state.fileWrite, close: state.fileClose })),
-    writeFile: vi.fn(), readFile: vi.fn(), exists: vi.fn(), mkdir: vi.fn(),
-    readDir: vi.fn(), remove: vi.fn(), BaseDirectory: { Download: 1, AppData: 2 },
-}))
-vi.mock('@tauri-apps/api/core', () => ({ convertFileSrc: (path: string) => `asset://${path}` }))
-vi.mock('@tauri-apps/api/path', () => ({ join: vi.fn(async (...parts: string[]) => parts.join('/')) }))
-vi.mock('@tauri-apps/plugin-shell', () => ({ open: vi.fn() }))
-vi.mock('@tauri-apps/plugin-dialog', () => ({ save: vi.fn() }))
-vi.mock('@tauri-apps/api/webviewWindow', () => ({ getCurrentWebviewWindow: vi.fn(() => ({})) }))
-vi.mock('@tauri-apps/plugin-http', () => ({ fetch: vi.fn() }))
+vi.mock('./storage/persistentSaveNotifications', async () => (await import('./globalApi.testSupport')).persistentSaveNotificationsModule())
+vi.mock('./storage/databasePreparation', async () => (await import('./globalApi.testSupport')).databasePreparationModule())
+vi.mock('./storage/risuSave', async () => (await import('./globalApi.testSupport')).risuSaveModule())
+vi.mock('./storage/defaultPrompts', async () => (await import('./globalApi.testSupport')).defaultPromptsModule())
+vi.mock('./process/modules', async () => (await import('./globalApi.testSupport')).modulesModule())
+vi.mock('./process/coldstorageData', async () => (await import('./globalApi.testSupport')).coldStorageDataModule())
+vi.mock('./plugins/plugins.svelte', async () => (await import('./globalApi.testSupport')).pluginsModule())
+vi.mock('./parser/parser.svelte', async () => (await import('./parser/parser.testSupport')).parserStubModule())
+vi.mock('./drive/accounter', async () => (await import('./globalApi.testSupport')).accounterModule())
+vi.mock('./observer.svelte', async () => (await import('./globalApi.testSupport')).observerModule())
+vi.mock('./characters', async () => (await import('./globalApi.testSupport')).charactersModule())
+vi.mock('./hotkey', async () => (await import('./globalApi.testSupport')).hotkeyModule())
+vi.mock('./gui/animation', async () => (await import('./globalApi.testSupport')).animationModule())
+vi.mock('./gui/colorscheme', async () => (await import('./globalApi.testSupport')).colorschemeModule())
+vi.mock('./gui/guisize', async () => (await import('./globalApi.testSupport')).guisizeModule())
+vi.mock('streamsaver', async () => (await import('./globalApi.testSupport')).streamsaverModule())
+vi.mock('@tauri-apps/plugin-fs', async () => (await import('./globalApi.testSupport')).tauriFsModule({ write: state.fileWrite, close: state.fileClose }))
+vi.mock('@tauri-apps/api/core', async () => (await import('./globalApi.testSupport')).tauriCoreModule())
+vi.mock('@tauri-apps/api/path', async () => (await import('./globalApi.testSupport')).tauriPathModule())
+vi.mock('@tauri-apps/plugin-shell', async () => (await import('./globalApi.testSupport')).tauriShellModule())
+vi.mock('@tauri-apps/plugin-dialog', async () => (await import('./globalApi.testSupport')).tauriDialogModule())
+vi.mock('@tauri-apps/api/webviewWindow', async () => (await import('./globalApi.testSupport')).webviewWindowModule())
+vi.mock('@tauri-apps/plugin-http', async () => (await import('./globalApi.testSupport')).tauriHttpModule())
 
 import {
     changeChatTo,
@@ -187,15 +105,11 @@ beforeEach(() => {
     state.fileWrite.mockReset().mockImplementation(async data => data.byteLength)
     state.fileClose.mockReset().mockResolvedValue(undefined)
     vi.mocked(openFile).mockClear()
-    state.isTauriIOS = false
-    state.isTauri = false
-    state.isTauriMobile = false
+    state.platform = { runtime: 'web', os: 'windows' }
     state.database.characters.length = 0
     state.activateConversation.mockResolvedValue(true)
     state.yieldToUi.mockResolvedValue(undefined)
     setRuntimePerformanceProfile('normal')
-    state.isTauriIOS = false
-    state.isTauri = false
     ;(forageStorage as any).isAccount = false
     vi.spyOn(console, 'error').mockImplementation(() => undefined)
 })
@@ -367,7 +281,7 @@ describe('getFileSrc account route', () => {
     })
 
     test('serves the resolved file URL on Tauri before the hub URL', async () => {
-        state.isTauri = true
+        state.platform = { runtime: 'tauri', os: 'windows' }
         state.blobStore = createFakeBlobStore({ 'assets/acc-tauri.png': { data: new Uint8Array([1]), mime: 'image/png' } })
         ;(forageStorage as any).isAccount = true
 
@@ -378,7 +292,7 @@ describe('getFileSrc account route', () => {
 
 describe('getFileSrc tauri asset route', () => {
     test('resolves a native asset without initializing AutoStorage', async () => {
-        state.isTauri = true
+        state.platform = { runtime: 'tauri', os: 'windows' }
         state.blobStore = createFakeBlobStore({ 'assets/native.png': { data: new Uint8Array([7]), mime: 'image/png' } })
         const init = vi.spyOn(forageStorage, 'Init')
 
@@ -387,7 +301,7 @@ describe('getFileSrc tauri asset route', () => {
     })
 
     test('memoizes the resolved URL per key and invalidates it on saveAsset', async () => {
-        state.isTauri = true
+        state.platform = { runtime: 'tauri', os: 'windows' }
         state.blobStore = createFakeBlobStore({ 'assets/avatar.png': { data: new Uint8Array([7]), mime: 'image/png' } })
 
         expect(await getFileSrc('assets/avatar.png')).toBe('asset:///data/assets/avatar.png')
@@ -402,7 +316,7 @@ describe('getFileSrc tauri asset route', () => {
     })
 
     test('shares one in-flight native URL lookup for concurrent requests to the same key', async () => {
-        state.isTauri = true
+        state.platform = { runtime: 'tauri', os: 'windows' }
         const pending = deferred<string | null>()
         const started = deferred<void>()
         state.blobStore = createFakeBlobStore({
@@ -426,7 +340,7 @@ describe('getFileSrc tauri asset route', () => {
     })
 
     test('does not reuse an in-flight native URL after overwriting the asset', async () => {
-        state.isTauri = true
+        state.platform = { runtime: 'tauri', os: 'windows' }
         const stale = deferred<string | null>()
         const started = deferred<void>()
         state.blobStore = createFakeBlobStore({
@@ -458,7 +372,7 @@ describe('getFileSrc tauri asset route', () => {
     })
 
     test('retries a native URL lookup after an in-flight rejection', async () => {
-        state.isTauri = true
+        state.platform = { runtime: 'tauri', os: 'windows' }
         state.blobStore = createFakeBlobStore({
             'assets/retry.png': { data: new Uint8Array([7]), mime: 'image/png' },
         })
@@ -472,7 +386,7 @@ describe('getFileSrc tauri asset route', () => {
     })
 
     test('does not cache a native URL lookup that was invalidated while in flight', async () => {
-        state.isTauri = true
+        state.platform = { runtime: 'tauri', os: 'windows' }
         const stale = deferred<string | null>()
         const fresh = deferred<string | null>()
         const bothStarted = deferred<void>()
@@ -509,7 +423,7 @@ describe('getFileSrc tauri asset route', () => {
     })
 
     test('does not cache a missing asset resolution', async () => {
-        state.isTauri = true
+        state.platform = { runtime: 'tauri', os: 'windows' }
         state.blobStore = createFakeBlobStore({})
 
         expect(await getFileSrc('assets/ghost.png')).toBe('')
@@ -518,7 +432,7 @@ describe('getFileSrc tauri asset route', () => {
     })
 
     test('bounds native URL entries without revoking protocol URLs', async () => {
-        state.isTauri = true
+        state.platform = { runtime: 'tauri', os: 'windows' }
         const entries = Object.fromEntries(
             Array.from({ length: 257 }, (_, index) => [`assets/native-${index}.png`, {
                 data: new Uint8Array([index]), mime: 'image/png',
@@ -607,8 +521,7 @@ describe('LocalWriter streamed backup entries', () => {
     })
 
     test('hands an Android download to the picker bridge and reports its cancellation', async () => {
-        state.isTauri = true
-        state.isTauriMobile = true
+        state.platform = { runtime: 'tauri', os: 'android' }
         state.downloadThroughAndroidSaf.mockResolvedValueOnce(false)
 
         await expect(downloadFile('chat:1.txt', 'text')).resolves.toBe(false)
@@ -669,8 +582,7 @@ describe('LocalWriter streamed backup entries', () => {
 
 describe('iOS LocalWriter completed-file publication', () => {
     beforeEach(() => {
-        state.isTauri = true
-        state.isTauriIOS = true
+        state.platform = { runtime: 'tauri', os: 'ios' }
         state.exportIOSFile.mockReset().mockResolvedValue({ bytes: 3 })
     })
     test('streams to owned staging and publishes only after closing', async () => {
@@ -743,7 +655,7 @@ describe('bounded TauriWriter', () => {
     })
 
     test.each([false, true])('bounds every buffer and request with a huge input (Android: %s)', async android => {
-        state.isTauriMobile = android
+        state.platform = { runtime: 'tauri', os: android ? 'android' : 'windows' }
         const limit = android ? 64 * 1024 : 4 * 1024 * 1024
         const input = Uint8Array.from({ length: limit * 2 + 71 }, (_, index) => index % 251)
         const inputSlice = vi.spyOn(input, 'slice')
@@ -803,7 +715,7 @@ describe('bounded TauriWriter', () => {
     })
 
     test('serializes overlapping writes and close without reusing an in-flight buffer', async () => {
-        state.isTauriMobile = true
+        state.platform = { runtime: 'tauri', os: 'android' }
         const gate = deferred<number>()
         const chunks: Uint8Array[] = []
         state.fileWrite.mockImplementationOnce(async chunk => {
@@ -827,7 +739,7 @@ describe('bounded TauriWriter', () => {
     })
 
     test('cancels between bounded requests and closes the active handle without deleting the destination', async () => {
-        state.isTauriMobile = true
+        state.platform = { runtime: 'tauri', os: 'android' }
         const gate = deferred<number>()
         state.fileWrite.mockImplementationOnce(() => gate.promise)
         const writer = new TauriWriter('existing.bin')
@@ -856,7 +768,7 @@ describe('bounded TauriWriter', () => {
     })
 
     test('keeps a write failure terminal and closes once', async () => {
-        state.isTauriMobile = true
+        state.platform = { runtime: 'tauri', os: 'android' }
         const failure = new Error('synthetic destination failure')
         state.fileWrite.mockRejectedValueOnce(failure)
         const writer = new TauriWriter('existing.bin')
@@ -883,8 +795,7 @@ describe('bounded TauriWriter', () => {
     })
 
     test('does not publish an iOS staging file if closing its handle fails', async () => {
-        state.isTauri = true
-        state.isTauriIOS = true
+        state.platform = { runtime: 'tauri', os: 'ios' }
         const failure = new Error('synthetic close failure')
         state.fileClose.mockRejectedValueOnce(failure)
         const writer = new LocalWriter()
@@ -909,7 +820,7 @@ describe('bounded TauriWriter', () => {
 
 
 test('reloads newly persisted image dimensions from the existing native URL cache after calculation', async () => {
-    state.isTauri = true
+    state.platform = { runtime: 'tauri', os: 'windows' }
     let known = false
     const resolveImageSource = vi.fn(async () => ({
         url: 'risuasset://synthetic-geometry', contentHash: 'a'.repeat(64),

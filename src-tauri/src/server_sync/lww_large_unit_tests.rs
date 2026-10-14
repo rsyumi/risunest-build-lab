@@ -64,6 +64,10 @@ fn a_rejected_single_entry_push_reports_unit_too_large_and_keeps_the_entry() {
         router.layer(axum::middleware::from_fn(
             |request: axum::extract::Request, next: axum::middleware::Next| async move {
                 if request.uri().path() == "/push" {
+                    // Finish the upload so an early disconnect cannot hide the 413 response.
+                    axum::body::to_bytes(request.into_body(), MAX_METADATA_BYTES)
+                        .await
+                        .expect("synthetic push request body");
                     return axum::response::Response::builder()
                         .status(413)
                         .body(axum::body::Body::from("{\"error\":\"body-too-large\"}"))
@@ -73,13 +77,17 @@ fn a_rejected_single_entry_push_reports_unit_too_large_and_keeps_the_entry() {
             },
         ))
     });
-    let (_a, mut a) = local();
-    let ca = server.client(&a);
-    save(&mut a, &["root", "language"], json!("synthetic"));
-    let request = header(&a);
-    let error = ca.push(&mut a, &request, &[]).unwrap_err();
-    assert_eq!((error.code.as_str(), error.retryable), ("unit-too-large", false));
-    assert_eq!(pending(&a), 1);
+    for value in ["synthetic".to_owned(), random_text(32 * 1024, 7)] {
+        let (_a, mut a) = local();
+        let ca = server.client(&a);
+        save(&mut a, &["root", "language"], json!(value));
+        let request = header(&a);
+        let entry = a.lww_read_outbox(request.binding_authority, 1).unwrap().entries.remove(0);
+        ca.admit_synthetic_clock(entry.stamp.physical_ms.0);
+        let error = ca.push(&mut a, &request, &[]).unwrap_err();
+        assert_eq!((error.code.as_str(), error.retryable), ("unit-too-large", false), "{error:?}");
+        assert_eq!(pending(&a), 1);
+    }
 }
 
 type Routes = std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>;

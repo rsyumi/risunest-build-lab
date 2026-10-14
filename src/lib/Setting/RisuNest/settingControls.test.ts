@@ -6,7 +6,6 @@ import ButtonHarness from './SettingButton.test.svelte'
 import ToggleHarness from './SettingToggle.test.svelte'
 
 vi.mock('@lucide/svelte', () => ({ LoaderCircleIcon: () => {} }))
-vi.mock('src/lang', () => ({ language: { loading: 'Loading synthetic operation' } }))
 
 let target: HTMLDivElement
 let mounted: ReturnType<typeof mount> | undefined

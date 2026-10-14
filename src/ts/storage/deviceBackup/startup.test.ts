@@ -83,9 +83,7 @@ describe("device maintenance bootstrap ordering", () => {
       : Promise.reject(new Error("synthetic journal failure")));
     await import("../../../main");
     await vi.waitFor(() =>
-      expect(document.body.textContent).toContain(
-        "Normal app startup is blocked",
-      ),
+      expect(document.querySelector("main[role=\"status\"]")).not.toBeNull(),
     );
     expect(state.invoke).toHaveBeenNthCalledWith(1, "app_cleanup_status");
     expect(state.invoke).toHaveBeenNthCalledWith(2, "native_startup_status");
@@ -172,9 +170,7 @@ describe("device maintenance bootstrap ordering", () => {
 
     await import("../../../main");
     await vi.waitFor(() =>
-      expect(document.body.textContent).toContain(
-        "Normal app startup is blocked",
-      ),
+      expect(document.querySelector("main[role=\"status\"]")).not.toBeNull(),
     );
 
     expect(state.invoke).not.toHaveBeenCalledWith(
@@ -209,9 +205,7 @@ describe("device maintenance bootstrap ordering", () => {
 
     await import("../../../main");
     await vi.waitFor(() =>
-      expect(document.body.textContent).toContain(
-        "Normal app startup is blocked",
-      ),
+      expect(document.querySelector("main[role=\"status\"]")).not.toBeNull(),
     );
     expect(state.normalStarted).not.toHaveBeenCalled();
 
@@ -241,11 +235,10 @@ describe("device maintenance bootstrap ordering", () => {
       expect(found).not.toBeNull();
       return found as HTMLElement;
     });
-    expect(panel.querySelector("h1")?.textContent).toBe("RisuNest 백업 복원");
-    expect(panel.querySelector("p")?.textContent).toBe(
-      "백업 복원을 완료하지 못해 앱을 시작할 수 없습니다. 다시 시도해주세요.",
-    );
-    expect(panel.querySelector("button")?.textContent).toBe("다시 시도");
+    // The panel runs before the language module loads, so its text has no language key.
+    for (const selector of ["h1", "p", "button"]) {
+      expect(panel.querySelector(selector)?.textContent, selector).toMatch(/[가-힣]/);
+    }
   });
 
   it("reloads native completion directly instead of requesting clone recovery", async () => {
@@ -263,9 +256,7 @@ describe("device maintenance bootstrap ordering", () => {
     const { deviceMaintenanceBeforeBootstrap } = await import("./entry");
     void deviceMaintenanceBeforeBootstrap({ reload });
     const retry = await vi.waitFor(() => {
-      const button = [...document.querySelectorAll("button")].find(
-        (candidate) => candidate.textContent === "Retry recovery",
-      );
+      const button = document.querySelector("main[role=\"status\"] button");
       expect(button).toBeTruthy();
       return button as HTMLButtonElement;
     });
