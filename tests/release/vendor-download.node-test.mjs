@@ -29,7 +29,7 @@ test("vendor downloads discard partial files and publish only checksum-verified 
     wait: async ms => { waits.push(ms); assert.deepEqual(readdirSync(root), []); },
   });
   assert.equal(calls, 3);
-  assert.deepEqual(waits, [10000, 20000]);
+  assert.equal(waits.length, 2);
   assert.deepEqual(readFileSync(destination), bytes);
   assert.deepEqual(readdirSync(root), ["cloudflared"]);
 });

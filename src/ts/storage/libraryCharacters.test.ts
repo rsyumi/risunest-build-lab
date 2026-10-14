@@ -1,34 +1,45 @@
-import { beforeEach, expect, it, vi } from 'vitest'
-const queryCharacters = vi.hoisted(() => vi.fn())
-vi.mock('./persistentDataStoreFactory', () => ({ getPersistentDataStore: () => ({ queryCharacters }) }))
+import { expect, it, vi } from 'vitest'
+import { createPersistentStoreHarness } from '../../../tests/support/persistentStoreHarness'
+import type { character, Database } from './database.svelte'
+import type { PersistentDataStore } from './persistentDataStore'
+const factory = vi.hoisted(() => ({ store: null as PersistentDataStore | null }))
+vi.mock('./persistentDataStoreFactory', () => ({ getPersistentDataStore: () => factory.store! }))
 import { hasLibraryCharacters } from './libraryCharacters'
 
-const page = (count: number) => ({ revision: 1, items: Array.from({ length: count }, (_, index) => ({ id: `character-${index}` })) })
+const entry = (id: string, fields: Record<string, unknown> = {}) =>
+    ({ type: 'character', chaId: id, name: id, chats: [], ...fields }) as unknown as character
 
-beforeEach(() => { queryCharacters.mockReset() })
+async function library(characters: character[]) {
+    const harness = await createPersistentStoreHarness({ username: 'Fixture', botPresets: [], characters } as unknown as Database)
+    factory.store = harness.store
+    return harness
+}
 
 it('finds no character when neither the list nor the trash holds one', async () => {
-    queryCharacters.mockResolvedValue(page(0))
+    await library([])
     expect(await hasLibraryCharacters()).toBe(false)
-    expect(queryCharacters.mock.calls).toEqual([
-        [{ order: 'configured', trash: false, limit: 1 }],
-        [{ order: 'configured', trash: true, limit: 1 }],
-    ])
 })
 
-it('finds a listed character without reading the trash', async () => {
-    queryCharacters.mockResolvedValue(page(1))
+it.each([
+    ['a listed character', entry('listed')],
+    ['a group', entry('group', { type: 'group' })],
+    ['a character only in the trash', entry('trashed', { trashTime: 1 })],
+    ['a group only in the trash', entry('trashed-group', { type: 'group', trashTime: 1 })],
+])('finds %s', async (_name, value) => {
+    await library([value])
     expect(await hasLibraryCharacters()).toBe(true)
-    expect(queryCharacters).toHaveBeenCalledOnce()
 })
 
-it('finds a character that is only in the trash', async () => {
-    queryCharacters.mockImplementation(async ({ trash }: { trash: boolean }) => page(trash ? 1 : 0))
+it('reads at most one character per list, however large the library', async () => {
+    const harness = await library(Array.from({ length: 3 }, (_, index) => entry(`trashed-${index}`, { trashTime: 1 })))
+    const query = harness.spy('queryCharacters')
     expect(await hasLibraryCharacters()).toBe(true)
-    expect(queryCharacters).toHaveBeenCalledTimes(2)
+    const pages = await Promise.all(query.mock.results.map((result) => result.value))
+    expect(Math.max(...pages.map((page) => page.items.length))).toBe(1)
 })
 
 it('counts an unreadable library as holding a character', async () => {
-    queryCharacters.mockRejectedValue(new Error('unreadable'))
+    const harness = await library([])
+    harness.failNext('queryCharacters', new Error('unreadable'))
     expect(await hasLibraryCharacters()).toBe(true)
 })

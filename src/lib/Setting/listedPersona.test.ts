@@ -14,7 +14,6 @@ vi.mock('src/ts/stores.svelte', () => ({
         },
     },
 }))
-vi.mock('../../lang', () => ({ language: languageEnglish }))
 vi.mock('src/ts/persona', () => ({ changeUserPersona: mocks.change }))
 import ListedPersona from './listedPersona.svelte'
 let instance: ReturnType<typeof mount> | undefined

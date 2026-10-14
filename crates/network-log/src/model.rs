@@ -4,6 +4,8 @@ pub const MIB: u64 = 1024 * 1024;
 pub const PAGE_BYTES: usize = 256 * 1024;
 pub const BODY_BYTES: u64 = 512 * MIB;
 pub const METADATA_BYTES: usize = 128 * 1024;
+/// Shared capture buffer sizes the settings accept, ascending.
+pub(crate) const BUFFER_MIB_CHOICES: [u64; 6] = [4, 8, 16, 32, 64, 128];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,7 +44,7 @@ impl Settings {
         if ![100, 200, 500, 1000].contains(&self.recent_count)
             || !budgets.contains(&self.recent_mib)
             || !budgets.contains(&self.retained_mib)
-            || ![4, 8, 16, 32, 64, 128].contains(&self.buffer_mib)
+            || !BUFFER_MIB_CHOICES.contains(&self.buffer_mib)
         {
             return Err("invalid-network-log-settings".into());
         }

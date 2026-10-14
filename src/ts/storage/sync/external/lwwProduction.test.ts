@@ -10,7 +10,7 @@ const fixture = vi.hoisted(() => ({
 }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: fixture.invoke, Channel: class { onmessage = (_value: unknown) => {} } }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: fixture.listen }))
-vi.mock('../../../platform', () => ({ get isTauri() { return fixture.native } }))
+vi.mock('../../../platform', async () => (await import('../../../platform.testSupport')).platformModule(() => ({ runtime: fixture.native ? 'tauri' : 'web', os: 'windows' })))
 vi.mock('../../../mobileBackgroundTask', () => ({ runWithMobileBackgroundTask: fixture.mobile }))
 vi.mock('../../generatingConversationRegistry', () => ({ generatingConversations: { snapshot: () => [] } }))
 vi.mock('../../persistentDataRuntime.svelte', () => ({

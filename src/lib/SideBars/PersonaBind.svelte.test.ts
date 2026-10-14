@@ -11,7 +11,6 @@ const mocks = vi.hoisted(() => ({
     list: vi.fn(),
     blocked: vi.fn(() => false),
 }))
-vi.mock('src/lang', () => ({ language: languageEnglish }))
 vi.mock('src/ts/stores.svelte', () => {
     const DBState = $state({ db: {} })
     return { DBState, selectedCharID: writable(0) }

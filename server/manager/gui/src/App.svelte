@@ -36,6 +36,9 @@
   let busy = $state(false);
   let notice = $state("");
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  type NoticeSource = "action" | "copy" | "environment" | "platform";
+  let noticeSource: NoticeSource = "action";
+  let noticeSequence = 0;
   let dialog = $state<"register" | "issued" | "revoke" | "forget" | "stop" | "leave" | "uninstall" | null>(null);
   let deleteServerData = $state(false);
   let name = $state("");
@@ -101,12 +104,14 @@
     return platformFlight ??= backend.platformStatus().then((next) => {
       platformState = next;
       if (environment) environment = { ...environment, ...next };
-    }).catch((error) => { notice = message(error); }).finally(() => { platformFlight = null; });
+      clearNotice("platform");
+    }).catch((error) => { showNotice(message(error), "platform"); }).finally(() => { platformFlight = null; });
   }
   async function fetchEnvironment() {
     try {
       const next = await backend.environment();
       environment = { ...next, ...platformState };
+      clearNotice("environment");
       if (
         next.updateSettings.policy === "automatic" &&
         next.updateStatus.phase === "deferred" &&
@@ -124,7 +129,7 @@
         queueMicrotask(() => void checkUpdate(true));
       }
     } catch {
-      notice = "실행 설정을 확인하지 못했습니다.";
+      showNotice("실행 설정을 확인하지 못했습니다.", "environment");
     }
   }
   function navigate(id: string) {
@@ -145,14 +150,14 @@
   }
   async function saveNetwork(settings: NetworkSettings): Promise<boolean> {
     busy = true;
-    notice = "";
+    showNotice("");
     try {
       await backend.network(settings);
       await loadEnvironment();
-      notice = "네트워크 설정을 저장했습니다. 다음 서버 시작부터 적용됩니다.";
+      showCompletionNotice("네트워크 설정을 저장했습니다. 다음 서버 시작부터 적용됩니다.");
       return true;
     } catch (error) {
-      notice = message(error);
+      showNotice(message(error));
       return false;
     } finally { busy = false; }
   }
@@ -179,17 +184,25 @@
       stopped = true;
       clearTimeout(timer);
       clearTimeout(noticeTimer);
+      noticeSequence += 1;
       clearInterval(environmentTimer);
       uri = "";
       svg = "";
     };
   });
-  function showCompletionNotice(text: string) {
+  function showNotice(text: string, source: NoticeSource = "action") {
     clearTimeout(noticeTimer);
+    noticeTimer = undefined;
+    noticeSequence += 1;
+    noticeSource = source;
     notice = text;
-    noticeTimer = setTimeout(() => {
-      if (notice === text) notice = "";
-    }, 4000);
+  }
+  function clearNotice(source: NoticeSource) {
+    if (noticeSource === source) showNotice("");
+  }
+  function showCompletionNotice(text: string, source: NoticeSource = "action") {
+    showNotice(text, source);
+    noticeTimer = setTimeout(() => showNotice(""), 4000);
   }
   async function mutate(
     path: string,
@@ -197,7 +210,7 @@
   ): Promise<string | null> {
     if (!connected || busy || !status) return null;
     busy = true;
-    notice = "";
+    showNotice("");
     try {
       const result = await backend.mutate(path, {
         revision: status.revision,
@@ -220,7 +233,7 @@
       );
       return resultRevision ?? status?.revision ?? null;
     } catch (error) {
-      notice = message(error);
+      showNotice(message(error));
       await refresh();
       return null;
     } finally {
@@ -228,11 +241,13 @@
     }
   }
   async function copy(text: string) {
+    showNotice("", "copy");
+    const sequence = noticeSequence;
     try {
       await navigator.clipboard.writeText(text);
-      notice = "복사했습니다.";
+      if (sequence === noticeSequence) showCompletionNotice("복사했습니다.", "copy");
     } catch {
-      notice = "복사하지 못했습니다. 입력란의 내용을 선택해 복사하세요.";
+      if (sequence === noticeSequence) showNotice("복사하지 못했습니다. 입력란의 내용을 선택해 복사하세요.", "copy");
     }
   }
   function open(kind: typeof dialog, device: Device | null = null) {
@@ -243,11 +258,12 @@
     name = "";
     uri = "";
     svg = "";
-    notice = "";
+    showNotice("");
     dialogElement.showModal();
   }
   function close() {
     if (busy) return;
+    clearNotice("copy");
     dialogElement.close();
     dialog = null;
     uri = "";
@@ -259,7 +275,7 @@
   async function register() {
     if (!status || !connected || busy) return;
     busy = true;
-    notice = "";
+    showNotice("");
     try {
       const requestId = await backend.requestId();
       const result = (await backend.mutate("devices", {
@@ -279,7 +295,7 @@
       svg = code;
       dialog = "issued";
     } catch (error) {
-      notice = message(error) + " 다시 발급하기 전에 기기 목록을 확인하세요.";
+      showNotice(message(error) + " 다시 발급하기 전에 기기 목록을 확인하세요.");
       await refresh();
     } finally {
       busy = false;
@@ -287,50 +303,50 @@
   }
   async function start() {
     busy = true;
-    notice = "";
+    showNotice("");
     try {
       await backend.start();
       await refresh();
     } catch (error) {
-      notice = message(error);
+      showNotice(message(error));
     } finally {
       busy = false;
     }
   }
   async function startup(enabled: boolean) {
     busy = true;
-    notice = "";
+    showNotice("");
     try {
       await backend.startup(enabled ? "install" : "remove");
       await Promise.all([loadEnvironment(), loadPlatform()]);
-      notice = "자동 실행 설정을 변경했습니다.";
+      showCompletionNotice("자동 실행 설정을 변경했습니다.");
     } catch (error) {
-      notice = message(error);
+      showNotice(message(error));
     } finally {
       busy = false;
     }
   }
   async function tray(enabled: boolean) {
     busy = true;
-    notice = "";
+    showNotice("");
     try {
       await backend.trayStartup(enabled);
       await Promise.all([loadEnvironment(), loadPlatform()]);
     } catch (error) {
-      notice = message(error);
+      showNotice(message(error));
     } finally {
       busy = false;
     }
   }
   async function updatePolicy(policy: "automatic" | "notify" | "off") {
     busy = true;
-    notice = "";
+    showNotice("");
     try {
       await backend.updatePolicy(policy);
       await Promise.all([loadEnvironment(), loadPlatform()]);
-      notice = "업데이트 정책과 예약 확인 설정을 변경했습니다.";
+      showCompletionNotice("업데이트 정책과 예약 확인 설정을 변경했습니다.");
     } catch (error) {
-      notice = message(error);
+      showNotice(message(error));
       await loadEnvironment();
     } finally {
       busy = false;
@@ -348,34 +364,34 @@
   async function checkUpdate(automatic = false) {
     if (busy || updating || dialog !== null || connectionDirty) {
       if (!automatic)
-        notice = "진행 중인 작업이나 적용하지 않은 설정을 마친 뒤 업데이트를 확인하세요.";
+        showNotice("진행 중인 작업이나 적용하지 않은 설정을 마친 뒤 업데이트를 확인하세요.");
       return;
     }
     updating = true;
     busy = true;
     let exitingForUpdate = false;
-    notice = automatic
+    showNotice(automatic
       ? "관리 앱을 종료하고 예약된 업데이트를 안전하게 적용합니다."
-      : "업데이트를 확인하고 있습니다.";
+      : "업데이트를 확인하고 있습니다.");
     try {
       const outcome = await backend.updateCheck(automatic);
       if (outcome.result === "started") {
         exitingForUpdate = true;
-        notice = "관리 앱을 종료하고 적용합니다.";
+        showNotice("관리 앱을 종료하고 적용합니다.");
       } else if (outcome.result === "available") {
-        notice = `Sync ${outcome.value ?? "새 버전"} 업데이트를 사용할 수 있습니다.`;
+        showNotice(`Sync ${outcome.value ?? "새 버전"} 업데이트를 사용할 수 있습니다.`);
       } else if (outcome.result === "deferred") {
-        notice = deferredUpdateMessage(outcome.value);
+        showNotice(deferredUpdateMessage(outcome.value));
       } else if (outcome.result === "skipped") {
-        notice = "예약된 업데이트 확인 시간이 아직 되지 않았습니다.";
+        showCompletionNotice("예약된 업데이트 확인 시간이 아직 되지 않았습니다.");
       } else if (outcome.result === "completed") {
-        notice = `Sync ${outcome.value ?? "새 버전"} 업데이트를 완료했습니다.`;
+        showCompletionNotice(`Sync ${outcome.value ?? "새 버전"} 업데이트를 완료했습니다.`);
       } else {
-        notice = updateReason("already-current");
+        showCompletionNotice(updateReason("already-current"));
       }
       await loadEnvironment();
     } catch (error) {
-      notice = message(error);
+      showNotice(message(error));
       await loadEnvironment();
     } finally {
       if (!exitingForUpdate) {
@@ -400,6 +416,7 @@
       {#each navigation as item}<button
           class:active={page === item.id}
           aria-current={page === item.id ? "page" : undefined}
+          data-page={item.id}
           onclick={() => navigate(item.id)}
           ><item.icon size={17} />{item.label}</button
         >{/each}
@@ -620,9 +637,9 @@
       <button onclick={close} disabled={busy}>취소</button>
       <button class="primary" disabled={busy} onclick={async () => {
         busy = true;
-        notice = "";
+        showNotice("");
         try { await backend.uninstall(deleteServerData); }
-        catch (error) { notice = message(error); busy = false; }
+        catch (error) { showNotice(message(error)); busy = false; }
       }}>제거</button>
     </div>
   {:else if dialog === "leave"}

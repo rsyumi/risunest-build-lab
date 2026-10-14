@@ -4,7 +4,7 @@ vi.mock('@tauri-apps/api/path', () => ({
     downloadDir: vi.fn(async () => 'C:\\Users\\me\\Downloads'),
     join: vi.fn(async (...parts: string[]) => parts.join('\\')),
 }))
-vi.mock('../platform', () => ({ isTauriAndroid: false, isTauriDesktop: false, isTauriIOS: false }))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 vi.mock('./persistentDataRuntime.svelte', () => ({
     getPersistentDataRuntime: vi.fn(),
 }))

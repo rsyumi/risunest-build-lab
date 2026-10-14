@@ -1,5 +1,6 @@
 package io.github.rsyumi.risunest
 
+import android.os.SystemClock
 import android.webkit.WebView
 import androidx.webkit.WebMessageCompat
 import androidx.webkit.WebViewCompat
@@ -50,11 +51,29 @@ internal fun androidControlArgumentCount(method: String): Int? = when (method) {
   else -> null
 }
 
+internal class AndroidControlCopyProgress(
+  private val nowMillis: () -> Long = SystemClock::elapsedRealtime,
+  private val emit: (SafSpoolProgress) -> Unit,
+) {
+  private var lastBytes = -1L
+  private var lastSentAt: Long? = null
+
+  fun report(progress: SafSpoolProgress) {
+    if (progress.copiedBytes <= lastBytes) return
+    val now = nowMillis()
+    val previous = lastSentAt
+    if (previous != null && now - previous < 250 && progress.copiedBytes != progress.totalBytes) return
+    lastBytes = progress.copiedBytes
+    lastSentAt = now
+    emit(progress)
+  }
+}
+
 /** Control messages carry no file bytes and never accept requests from plugin frames. */
 internal class AndroidControlBridge private constructor(
   private val view: WebView,
   private val name: String,
-  private val dispatch: suspend (String, List<String>) -> Any?,
+  private val dispatch: suspend (String, List<String>, (SafSpoolProgress) -> Unit) -> Any?,
 ) : AutoCloseable {
   private val origins = androidControlOrigins(BuildConfig.DEBUG, BuildConfig.CONTROL_DEV_ORIGIN)
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -85,7 +104,16 @@ internal class AndroidControlBridge private constructor(
       pending++
       scope.launch {
         try {
-          val result = runCatching { dispatch(method, args) }
+          val progress = AndroidControlCopyProgress { copied ->
+            if (id != null && method == "saf.materializeBackupSource") scope.launch {
+              if (!closed) runCatching {
+                reply.postMessage(JSONObject().put("id", id).put("progress", JSONObject()
+                  .put("copiedBytes", copied.copiedBytes)
+                  .put("totalBytes", copied.totalBytes ?: JSONObject.NULL)).toString())
+              }
+            }
+          }
+          val result = runCatching { dispatch(method, args, progress::report) }
           if (!closed && id != null) {
             val response = JSONObject().put("id", id)
             result.fold(
@@ -115,7 +143,7 @@ internal class AndroidControlBridge private constructor(
 
     fun attach(
       view: WebView,
-      dispatch: suspend (String, List<String>) -> Any?,
+      dispatch: suspend (String, List<String>, (SafSpoolProgress) -> Unit) -> Any?,
       name: String = NAME,
     ): AndroidControlBridge? {
       if (!runCatching {

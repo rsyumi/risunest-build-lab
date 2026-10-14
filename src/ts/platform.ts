@@ -14,10 +14,11 @@ type BrowserNavigator = Navigator & {
 
 export type RisuEnvironmentLabel = "local" | "web" | "web(dev)"
 
-const browserNavigator = navigator as BrowserNavigator
+// Outside a browser (Node test runs) every check reads as a plain non-Tauri browser.
+const browserNavigator = (typeof navigator === 'undefined' ? { userAgent: '' } : navigator) as BrowserNavigator
 
-export const isTauri: boolean = !!(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
-export const isWeb: boolean = !isTauri && location.hostname === 'risuai.xyz'
+export const isTauri: boolean = typeof window !== 'undefined' && !!(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
+export const isWeb: boolean = !isTauri && typeof location !== 'undefined' && location.hostname === 'risuai.xyz'
 export const isAndroid: boolean = /Android/i.test(browserNavigator.userAgent)
 export const isMobile: boolean =
   /Android|webOS/i.test(browserNavigator.userAgent) || isIOS();
@@ -151,6 +152,6 @@ export async function getDetailedOSLabel(): Promise<string> {
 }
 
 export const isInStandaloneMode =
-    window.matchMedia("(display-mode: standalone)").matches ||
+    (typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia("(display-mode: standalone)").matches) ||
     !!browserNavigator.standalone ||
-    document.referrer.includes("android-app://");
+    (typeof document !== 'undefined' && document.referrer.includes("android-app://"));

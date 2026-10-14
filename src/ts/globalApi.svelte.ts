@@ -949,7 +949,7 @@ export function getFetchLogs() {
  * @param {string} url - The URL to open.
  */
 export function openURL(url: string) {
-    if (isTauriIOS) {
+    if (isTauriMobile) {
         void openUrl(url).catch((error) => alertError(String(error)))
     }
     else if (isTauri) {

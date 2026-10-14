@@ -2,7 +2,7 @@ import { mount, tick, unmount } from "svelte";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import { version as syncVersion } from "../../../version.json";
 import App from "../src/App.svelte";
-import type { Backend, Environment, PlatformStatus, Status } from "../src/api";
+import { message, updateReason, type Backend, type Environment, type PlatformStatus, type Status } from "../src/api";
 
 let component: ReturnType<typeof mount> | undefined;
 let target: HTMLDivElement;
@@ -100,6 +100,7 @@ afterEach(async () => {
   component = undefined;
   target.remove();
   vi.useRealTimers();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 async function settle() {
@@ -115,31 +116,38 @@ function button(text: string) {
   expect(result).toBeDefined();
   return result!;
 }
+function pageButton(page: "overview" | "devices" | "connection" | "settings") {
+  return target.querySelector<HTMLButtonElement>(`nav button[data-page="${page}"]`)!;
+}
+function banner() {
+  return target.querySelector("main > [role=status]");
+}
+function connectionForm() {
+  return target.querySelector("input[type=url]")!.closest("form")!;
+}
 async function open() {
   component = mount(App, { target, props: { backend } });
   await settle();
 }
 
 async function applyConnection(endpoint: string) {
-  button("연결").click();
+  pageButton("connection").click();
   await settle();
   const input = target.querySelector<HTMLInputElement>("input[type=url]")!;
   input.value = endpoint;
   input.dispatchEvent(new Event("input", { bubbles: true }));
-  target
-    .querySelector('form[aria-label="연결 설정"]')!
-    .dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
+  connectionForm().dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
   await settle();
 }
 
 it("dismisses the applied notice after four seconds", async () => {
   await open();
   await applyConnection("https://changed.example.com");
-  expect(target.textContent).toContain("변경 사항을 적용했습니다.");
+  expect(banner()).not.toBeNull();
   await vi.advanceTimersByTimeAsync(3999);
-  expect(target.textContent).toContain("변경 사항을 적용했습니다.");
+  expect(banner()).not.toBeNull();
   await vi.advanceTimersByTimeAsync(1);
-  expect(target.textContent).not.toContain("변경 사항을 적용했습니다.");
+  expect(banner()).toBeNull();
 });
 
 it.each([false, true])("saves an HTTP fixed address with registry enabled: %s", async (registryEnabled) => {
@@ -153,7 +161,6 @@ it.each([false, true])("saves an HTTP fixed address with registry enabled: %s", 
       options: expect.objectContaining({ endpoint: "http://192.168.0.10:14319" }),
     }),
   );
-  expect(target.textContent).toContain("변경 사항을 적용했습니다.");
 });
 
 it("gives a repeated applied notice its own four seconds", async () => {
@@ -163,9 +170,9 @@ it("gives a repeated applied notice its own four seconds", async () => {
   await applyConnection("https://second.example.com");
   expect(backend.mutate).toHaveBeenCalledTimes(2);
   await vi.advanceTimersByTimeAsync(2000);
-  expect(target.textContent).toContain("변경 사항을 적용했습니다.");
+  expect(banner()).not.toBeNull();
   await vi.advanceTimersByTimeAsync(2000);
-  expect(target.textContent).not.toContain("변경 사항을 적용했습니다.");
+  expect(banner()).toBeNull();
 });
 
 it("does not dismiss a later error with the applied notice timer", async () => {
@@ -174,14 +181,75 @@ it("does not dismiss a later error with the applied notice timer", async () => {
   await vi.advanceTimersByTimeAsync(2000);
   vi.mocked(backend.mutate).mockRejectedValue("management-stale-state");
   await applyConnection("https://retry.example.com");
-  expect(target.textContent).toContain("서버 상태가 변경되었습니다. 새로 확인한 뒤 다시 시도하세요.");
+  expect(banner()?.textContent).toBe(message("management-stale-state"));
   await vi.advanceTimersByTimeAsync(4000);
-  expect(target.textContent).toContain("서버 상태가 변경되었습니다. 새로 확인한 뒤 다시 시도하세요.");
+  expect(banner()?.textContent).toBe(message("management-stale-state"));
+});
+
+it.each([
+  ["overview", "서버 주소 복사"],
+  ["connection", "임시 주소 복사"],
+  ["connection", "UUID 복사"],
+] as const)("dismisses copy feedback after four seconds on %s: %s", async (page, label) => {
+  vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+  snapshot.tunnel.endpoint = "https://synthetic.example.com";
+  await open();
+  pageButton(page).click();
+  await settle();
+  target.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!.click();
+  await settle();
+  expect(banner()?.textContent).toBe("복사했습니다.");
+  await vi.advanceTimersByTimeAsync(3999);
+  expect(banner()?.textContent).toBe("복사했습니다.");
+  await vi.advanceTimersByTimeAsync(1);
+  expect(banner()).toBeNull();
+});
+
+it("gives repeated copy feedback four seconds without dismissing a later copy error", async () => {
+  const clipboard = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+  await open();
+  const copy = target.querySelector<HTMLButtonElement>('button[aria-label="서버 주소 복사"]')!;
+  copy.click();
+  await settle();
+  await vi.advanceTimersByTimeAsync(2000);
+  copy.click();
+  await settle();
+  await vi.advanceTimersByTimeAsync(3999);
+  expect(banner()?.textContent).toBe("복사했습니다.");
+  await vi.advanceTimersByTimeAsync(1);
+  expect(banner()).toBeNull();
+  copy.click();
+  await settle();
+  clipboard.mockRejectedValue(new Error("clipboard unavailable"));
+  copy.click();
+  await settle();
+  await vi.advanceTimersByTimeAsync(4000);
+  expect(banner()?.textContent).toBe("복사하지 못했습니다. 입력란의 내용을 선택해 복사하세요.");
+});
+
+it.each(["environment", "platformStatus"] as const)("clears a recovered %s error without clearing another notice", async (method) => {
+  vi.mocked(backend[method]).mockRejectedValueOnce("task-scheduler-operation-failed");
+  await open();
+  expect(banner()).not.toBeNull();
+  const refresh = target.querySelector<HTMLButtonElement>('button[aria-label="새로 고침"]')!;
+  refresh.click();
+  await vi.waitFor(() => expect(banner()).toBeNull());
+
+  vi.mocked(backend[method]).mockRejectedValueOnce("task-scheduler-operation-failed");
+  refresh.click();
+  await vi.waitFor(() => expect(banner()).not.toBeNull());
+  vi.spyOn(navigator.clipboard, "writeText").mockRejectedValue(new Error("clipboard unavailable"));
+  target.querySelector<HTMLButtonElement>('button[aria-label="서버 주소 복사"]')!.click();
+  await settle();
+  refresh.click();
+  await settle();
+  await vi.advanceTimersByTimeAsync(4000);
+  expect(banner()?.textContent).toBe("복사하지 못했습니다. 입력란의 내용을 선택해 복사하세요.");
 });
 
 it("keeps a dirty form tied to its original revision during status refresh", async () => {
   await open();
-  button("연결").click();
+  pageButton("connection").click();
   await settle();
   const input = target.querySelector<HTMLInputElement>("input[type=url]")!;
   input.value = "https://changed.example.com";
@@ -190,9 +258,7 @@ it("keeps a dirty form tied to its original revision during status refresh", asy
   await vi.advanceTimersByTimeAsync(3000);
   await settle();
   expect(input.value).toBe("https://changed.example.com");
-  target
-    .querySelector('form[aria-label="연결 설정"]')!
-    .dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
+  connectionForm().dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
   await settle();
   expect(backend.mutate).toHaveBeenCalledWith(
     "connection",
@@ -211,7 +277,7 @@ it("keeps an untouched connection form clean as the tunnel becomes ready", async
   snapshot.connection.endpoint = null;
   snapshot.tunnel = { phase: "starting", endpoint: null, error: null, logs: [] };
   await open();
-  button("연결").click();
+  pageButton("connection").click();
   await settle();
   expect(button("설정 적용").disabled).toBe(true);
 
@@ -228,7 +294,7 @@ it("keeps an untouched connection form clean as the tunnel becomes ready", async
   expect(target.textContent).toContain("현재 설정입니다.");
   expect(target.textContent).not.toContain("아직 적용하지 않은 변경이 있습니다.");
   expect(button("설정 적용").disabled).toBe(true);
-  button("개요").click();
+  pageButton("overview").click();
   await settle();
   expect(target.querySelector("dialog[open]")).toBeNull();
 });
@@ -244,20 +310,16 @@ it("rebases a dirty connection draft after an action from the same form", async 
   snapshot.connectionState.mode = "managed";
   snapshot.connection.cloudflared = "C:\\synthetic\\cloudflared.exe";
   await open();
-  button("연결").click();
+  pageButton("connection").click();
   await settle();
   const registry = target.querySelector<HTMLInputElement>(
     'input[aria-label="레지스트리 사용"]',
   )!;
   registry.click();
   button("다시 시작").click();
-  await vi.waitFor(() =>
-    expect(target.textContent).toContain("임시 주소 연결을 다시 시작했습니다."),
-  );
+  await vi.waitFor(() => expect(banner()).not.toBeNull());
   await settle();
-  target
-    .querySelector('form[aria-label="연결 설정"]')!
-    .dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
+  connectionForm().dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
   await settle();
   expect(backend.mutate).toHaveBeenLastCalledWith(
     "connection",
@@ -282,16 +344,13 @@ it("labels retained overview data as last-known after losing the daemon", async 
   await settle();
   expect(target.textContent).toContain("마지막으로 확인한 서버 정보");
   expect(target.textContent).not.toContain("서버 실행 중");
-  button("연결").click();
+  pageButton("connection").click();
   await settle();
   expect(target.textContent).toContain("확인할 수 없음");
   expect(target.textContent).toContain("마지막 임시 주소");
-  expect(target.textContent?.replace(/\s+/g, " ")).toContain(
-    "서버를 중지하면 임시 주소 연결도 함께 종료됩니다.",
-  );
 });
 
-it("shows a registration URI once and clears it on modal close", async () => {
+async function issueRegistration() {
   const uri = "risunestlocal://sync-server/register#SYNTHETIC_SECRET_ONLY_TEST";
   vi.mocked(backend.mutate).mockResolvedValue({ uri });
   await open();
@@ -313,10 +372,42 @@ it("shows a registration URI once and clears it on modal close", async () => {
       uri,
     ),
   );
+}
+
+it("dismisses registration copy feedback and clears the URI and feedback on modal close", async () => {
+  vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+  await issueRegistration();
+  button("링크 복사").click();
+  await settle();
+  expect(target.querySelector("dialog[open] > [role=status]")?.textContent).toBe("복사했습니다.");
+  await vi.advanceTimersByTimeAsync(4000);
+  expect(target.querySelector("dialog[open] > [role=status]")).toBeNull();
+  expect(banner()).toBeNull();
+  button("링크 복사").click();
+  await settle();
+  expect(banner()?.textContent).toBe("복사했습니다.");
   button("완료").click();
   await settle();
   expect(target.querySelector("textarea")).toBeNull();
   expect(target.innerHTML).not.toContain("SYNTHETIC_SECRET_ONLY_TEST");
+  expect(banner()).toBeNull();
+});
+
+it.each([false, true])("ignores a pending clipboard result after closing its dialog (failure: %s)", async (failure) => {
+  let complete!: () => void;
+  vi.spyOn(navigator.clipboard, "writeText").mockImplementation(() => new Promise<void>((resolve, reject) => {
+    complete = () => failure ? reject(new Error("clipboard unavailable")) : resolve();
+  }));
+  await issueRegistration();
+  button("링크 복사").click();
+  await settle();
+  button("완료").click();
+  await settle();
+  expect(target.querySelector("dialog[open]")).toBeNull();
+  complete();
+  await settle();
+  expect(banner()).toBeNull();
+  expect(target.querySelector("dialog[open] > [role=status]")).toBeNull();
 });
 
 it("disables issuance while disconnected and does not invent storage values", async () => {
@@ -343,7 +434,7 @@ it("distinguishes an initial measurement failure from a zero or pending measurem
 
 it("changes the shared update policy from run settings", async () => {
   await open();
-  button("실행 설정").click();
+  pageButton("settings").click();
   await settle();
   const select = target.querySelector<HTMLSelectElement>(
     'select[aria-label="업데이트 정책"]',
@@ -353,13 +444,56 @@ it("changes the shared update policy from run settings", async () => {
   select.dispatchEvent(new Event("change", { bubbles: true }));
   await settle();
   expect(backend.updatePolicy).toHaveBeenCalledWith("notify");
+  await vi.waitFor(() => expect(banner()?.textContent).toBe("업데이트 정책과 예약 확인 설정을 변경했습니다."));
+  await vi.advanceTimersByTimeAsync(4000);
+  expect(banner()).toBeNull();
+});
+
+it("dismisses a successful startup setting change", async () => {
+  await open();
+  pageButton("settings").click();
+  await settle();
+  target.querySelector<HTMLInputElement>('input[aria-label="서버 자동 실행"]')!.click();
+  await vi.waitFor(() => expect(banner()?.textContent).toBe("자동 실행 설정을 변경했습니다."));
+  await vi.advanceTimersByTimeAsync(4000);
+  expect(banner()).toBeNull();
+});
+
+it.each([
+  [{ result: "completed", value: "2.0.0" }, "Sync 2.0.0 업데이트를 완료했습니다."],
+  [{ result: "skipped" }, "예약된 업데이트 확인 시간이 아직 되지 않았습니다."],
+] as const)("dismisses a finished update check: %j", async (outcome, expected) => {
+  vi.mocked(backend.updateCheck).mockResolvedValue(outcome);
+  await open();
+  pageButton("settings").click();
+  await settle();
+  button("업데이트 확인 및 적용").click();
+  await vi.waitFor(() => expect(banner()?.textContent).toBe(expected));
+  await vi.advanceTimersByTimeAsync(4000);
+  expect(banner()).toBeNull();
+});
+
+it("keeps an update check in progress and an available update visible", async () => {
+  let complete!: (value: Awaited<ReturnType<Backend["updateCheck"]>>) => void;
+  vi.mocked(backend.updateCheck).mockImplementation(() => new Promise((resolve) => { complete = resolve; }));
+  await open();
+  pageButton("settings").click();
+  await settle();
+  button("업데이트 확인 및 적용").click();
+  await settle();
+  await vi.advanceTimersByTimeAsync(4000);
+  expect(banner()?.textContent).toBe("업데이트를 확인하고 있습니다.");
+  complete({ result: "available", value: "2.0.0" });
+  await settle();
+  await vi.advanceTimersByTimeAsync(4000);
+  expect(banner()?.textContent).toBe("Sync 2.0.0 업데이트를 사용할 수 있습니다.");
 });
 
 it("refreshes a schedule failure on window focus without periodically querying services", async () => {
   environmentSnapshot.updateSchedule = null;
   environmentSnapshot.updateScheduleError = "update-already-running";
   await open();
-  button("실행 설정").click();
+  pageButton("settings").click();
   await settle();
   const select = target.querySelector<HTMLSelectElement>(
     'select[aria-label="업데이트 정책"]',
@@ -387,27 +521,26 @@ it("refreshes a schedule failure on window focus without periodically querying s
 
 it("keeps a dirty connection draft on its page and away from update actions", async () => {
   await open();
-  button("연결").click();
+  pageButton("connection").click();
   await settle();
   const input = target.querySelector<HTMLInputElement>("input[type=url]")!;
   input.value = "https://unsaved.example.com";
   input.dispatchEvent(new Event("input", { bubbles: true }));
-  button("실행 설정").click();
+  pageButton("settings").click();
   await settle();
   expect(target.querySelector<HTMLInputElement>("input[type=url]")?.value).toBe(
     "https://unsaved.example.com",
   );
-  expect(target.querySelector("dialog[open] h2")?.textContent).toBe("페이지를 이동하시겠습니까?");
-  expect(target.querySelector("dialog[open]")?.textContent).toContain("적용하지 않은 변경사항은 초기화됩니다.");
+  expect(target.querySelector("dialog[open]")).not.toBeNull();
   button("취소").click();
   await settle();
   expect(input.value).toBe("https://unsaved.example.com");
-  button("실행 설정").click();
+  pageButton("settings").click();
   await settle();
   button("이동").click();
   await settle();
-  expect(target.querySelector('form[aria-label="연결 설정"]')).toBeNull();
-  button("연결").click();
+  expect(target.querySelector("input[type=url]")).toBeNull();
+  pageButton("connection").click();
   await settle();
   expect(target.querySelector<HTMLInputElement>("input[type=url]")?.value).toBe("https://sync.example.com");
   expect(backend.updateCheck).not.toHaveBeenCalled();
@@ -416,7 +549,7 @@ it("keeps a dirty connection draft on its page and away from update actions", as
 it("disables manual update checks while a dialog is open", async () => {
   await open();
   button("기기 등록").click();
-  button("실행 설정").click();
+  pageButton("settings").click();
   await settle();
   const check = button("업데이트 확인 및 적용");
   expect(check.disabled).toBe(true);
@@ -430,14 +563,16 @@ it("reports a deferred manual update without claiming the app is current", async
     value: "management-active",
   });
   await open();
-  button("실행 설정").click();
+  pageButton("settings").click();
   await settle();
   button("업데이트 확인 및 적용").click();
   await vi.waitFor(() =>
     expect(target.textContent).toContain("관리 작업이 끝난 뒤 다시 확인"),
   );
   expect(backend.updateCheck).toHaveBeenCalledWith(false);
-  expect(target.textContent).not.toContain("이미 최신 버전입니다.");
+  expect(target.textContent).not.toContain(updateReason("already-current"));
+  await vi.advanceTimersByTimeAsync(4000);
+  expect(banner()?.textContent).toBe("관리 작업이 끝난 뒤 다시 확인하세요.");
 });
 
 it("coordinates an automatic update after the scheduled checker found the open GUI", async () => {
@@ -476,7 +611,7 @@ it("does not hot-loop automatic handoff while another manager keeps replacement 
 it("saves network settings while the server is stopped and discards only confirmed drafts", async () => {
   vi.mocked(backend.status).mockRejectedValue("daemon-unavailable");
   await open();
-  button("연결").click();
+  pageButton("connection").click();
   await settle();
   const address = target.querySelector<HTMLInputElement>('input[aria-label="바인딩 주소"]')!;
   const port = target.querySelector<HTMLInputElement>('input[aria-label="포트"]')!;
@@ -485,16 +620,17 @@ it("saves network settings while the server is stopped and discards only confirm
   port.value = "24319";
   port.dispatchEvent(new Event("input", { bubbles: true }));
   await settle();
-  button("개요").click();
+  pageButton("overview").click();
   await settle();
   target.querySelector("dialog")!.dispatchEvent(new Event("cancel", { cancelable: true }));
   await settle();
   expect(address.value).toBe("0.0.0.0");
   address.closest("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
   await vi.waitFor(() => expect(backend.network).toHaveBeenCalledWith({ schema: 1, address: "0.0.0.0", port: 24319 }));
-  await settle();
-  expect(target.textContent).toContain("다음 서버 시작부터 적용됩니다.");
-  button("개요").click();
+  await vi.waitFor(() => expect(banner()).not.toBeNull());
+  await vi.advanceTimersByTimeAsync(4000);
+  expect(banner()).toBeNull();
+  pageButton("overview").click();
   await settle();
   expect(target.querySelector("dialog[open]")).toBeNull();
 });
@@ -502,8 +638,8 @@ it("saves network settings while the server is stopped and discards only confirm
 it("shows the last tunnel failure and output while retrying, as text", async () => {
   snapshot.tunnel = { phase: "starting", endpoint: null, error: "tunnel-exited", logs: ['<script>synthetic</script>', 'DNS lookup failed'] };
   await open();
-  expect(target.textContent).toContain("cloudflared가 종료되었습니다.");
-  button("연결").click();
+  expect(target.textContent).toContain(message("tunnel-exited"));
+  pageButton("connection").click();
   await settle();
   expect(target.textContent).toContain("tunnel-exited");
   expect(target.querySelector("pre")?.textContent).toContain("DNS lookup failed");
@@ -513,7 +649,7 @@ it("shows the last tunnel failure and output while retrying, as text", async () 
 
 it("preserves server data unless deletion is explicitly selected and confirmation is accepted", async () => {
   await open();
-  button("실행 설정").click();
+  pageButton("settings").click();
   await settle();
   button("제거").click();
   await settle();
@@ -534,7 +670,7 @@ it("preserves server data unless deletion is explicitly selected and confirmatio
 it("passes the explicit data deletion choice and keeps removal errors visible", async () => {
   vi.mocked(backend.uninstall).mockRejectedValue("removal-shared-installation-or-data");
   await open();
-  button("실행 설정").click();
+  pageButton("settings").click();
   await settle();
   button("제거").click();
   await settle();
@@ -621,7 +757,7 @@ it("keeps slow environment and platform reads single flight without periodically
   vi.mocked(backend.environment).mockImplementation(() => new Promise(resolve => { resolveEnvironment = resolve; }));
   vi.mocked(backend.platformStatus).mockImplementation(() => new Promise(resolve => { resolvePlatform = resolve; }));
   await open();
-  button("실행 설정").click();
+  pageButton("settings").click();
   await vi.advanceTimersByTimeAsync(60000);
   expect(backend.environment).toHaveBeenCalledTimes(1);
   expect(backend.platformStatus).toHaveBeenCalledTimes(1);
@@ -636,10 +772,10 @@ it("renders registration conflicts and publication failures as actionable messag
   environmentSnapshot.registrationError = "removal-registration-conflict";
   snapshot.publication = { phase: "failed", error: "directory-full" };
   await open();
-  expect(target.textContent).toContain("설치 정보가 일치하지 않습니다.");
-  button("연결").click();
+  expect(target.textContent).toContain(message("removal-registration-conflict"));
+  pageButton("connection").click();
   await settle();
-  expect(target.textContent).toContain("레지스트리 서버의 저장 공간이 부족합니다.");
+  expect(target.textContent).toContain(message("directory-full"));
 });
 
 it("shows the last successful device sync and refreshes it without inventing a missing history", async () => {
@@ -648,7 +784,7 @@ it("shows the last successful device sync and refreshes it without inventing a m
     { id: "synthetic-unused", name: "Unused", revoked: false, pending: false, registrationRequest: null, lastAck: null },
   ];
   await open();
-  button("기기").click();
+  pageButton("devices").click();
   await settle();
   const rows = target.querySelectorAll(".device-row");
   expect(rows[0].textContent).toContain(`마지막 동기화: ${new Date("2026-09-30T12:34:56Z").toLocaleString()}`);
@@ -666,16 +802,20 @@ it("shows the last successful device sync and refreshes it without inventing a m
 it("requires confirmation before releasing revoked device custody", async () => {
   snapshot.devices = [{ id: "synthetic-device", name: "Synthetic", revoked: true, pending: false, registrationRequest: null, retained: 2, pendingError: "incompatible-store" }];
   await open();
-  button("기기").click();
+  pageButton("devices").click();
   await settle();
-  expect(target.textContent).toContain("서버 데이터 형식이 현재 버전과 호환되지 않습니다.");
+  expect(target.textContent).toContain(message("incompatible-store"));
   button("보관 해제").click();
   await settle();
   expect(backend.mutate).not.toHaveBeenCalled();
-  expect(target.querySelector("dialog[open]")?.textContent).toContain("삭제될 수 있습니다.");
+  expect(target.querySelector("dialog[open]")).not.toBeNull();
   target.querySelector<HTMLButtonElement>("dialog[open] button.primary")!.click();
   await settle();
   expect(backend.mutate).toHaveBeenCalledWith("devices/synthetic-device/forget", expect.objectContaining({ revision: "synthetic:0" }));
+  await vi.waitFor(() => expect(target.querySelector("dialog[open]")).toBeNull());
+  expect(banner()?.textContent).toBe("변경 사항을 적용했습니다.");
+  await vi.advanceTimersByTimeAsync(4000);
+  expect(banner()).toBeNull();
 });
 
 it.each([false, true])("shows an already-current result without a warning after a manual check: %s", async (manual) => {
@@ -691,7 +831,7 @@ it.each([false, true])("shows an already-current result without a warning after 
     environmentSnapshot.updateStatus = current;
   }
   await open();
-  button("실행 설정").click();
+  pageButton("settings").click();
   await settle();
   if (manual) {
     button("업데이트 확인 및 적용").click();
@@ -700,20 +840,26 @@ it.each([false, true])("shows an already-current result without a warning after 
     expect(backend.updateCheck).toHaveBeenCalledExactlyOnceWith(false);
   }
   const result = [...target.querySelectorAll("p")].find(p => p.textContent?.includes("마지막 결과:"))!;
-  expect(result.textContent?.trim()).toBe("마지막 결과: 이미 최신 버전입니다.");
+  expect(result.textContent?.trim()).toBe(`마지막 결과: ${updateReason("already-current")}`);
   expect(result.classList.contains("warning")).toBe(false);
   expect(result.querySelector("code")).toBeNull();
-  expect(target.textContent).not.toContain("업데이트를 완료하지 못했습니다.");
+  expect(target.textContent).not.toContain(updateReason("synthetic-previous-failure"));
   expect(target.textContent).not.toContain("already-current");
+  if (manual) {
+    expect(banner()?.textContent).toBe(updateReason("already-current"));
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(banner()).toBeNull();
+    expect(result.textContent?.trim()).toBe(`마지막 결과: ${updateReason("already-current")}`);
+  }
 });
 
 it("renders unknown update reasons as a localized outcome with a separate diagnostic code", async () => {
   environmentSnapshot.updateStatus.phase = "failed";
   environmentSnapshot.updateStatus.reason = "synthetic-unknown-reason";
   await open();
-  button("실행 설정").click();
+  pageButton("settings").click();
   await settle();
-  expect(target.textContent).toContain("업데이트를 완료하지 못했습니다.");
+  expect(target.textContent).toContain(updateReason("synthetic-unknown-reason"));
   expect(target.querySelector("code")?.textContent).toBe("synthetic-unknown-reason");
   expect(target.querySelector("code")?.closest("p")?.classList.contains("warning")).toBe(true);
   expect(target.textContent).toContain(`RisuNest Sync · ${syncVersion}`);

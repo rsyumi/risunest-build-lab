@@ -1,7 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 import { languageEnglish } from 'src/lang/en'
-import { languageKorean } from 'src/lang/ko'
 import { DBState } from 'src/ts/stores.svelte'
 import { risuNestUiSettingsItems } from 'src/ts/setting/risuNestSettingsData'
 import { accessibilitySettingsItems } from 'src/ts/setting/accessibilitySettingsData'
@@ -9,8 +8,7 @@ import { getDeviceSettings, reloadDeviceSettings, updateDeviceSettings } from 's
 import { sharedRootFields } from 'src/ts/storage/persistentRootFields'
 import RisuNestSettingRows from './RisuNestSettingRows.svelte'
 
-vi.mock('src/lang', () => ({ language: languageEnglish }))
-vi.mock('src/ts/parser/parser.svelte', () => ({ risuChatParser: (text: string) => text }))
+vi.mock('src/ts/parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
 
 let mounted: ReturnType<typeof mount> | undefined
 afterEach(async () => {
@@ -44,19 +42,6 @@ it('renders and persists all three local choices in UI without changing shared s
     expect(sharedRootFields.has('messageSendKey')).toBe(false)
     expect(sharedRootFields.has('risuNestDeviceSettings')).toBe(false)
     expect(accessibilitySettingsItems.some(item => item.bindKey === 'sendWithEnter')).toBe(false)
-})
-
-it('describes each send key choice', () => {
-    expect(languageKorean.risuNest.ui).toMatchObject({
-        messageSendKey: '메시지 보내기 키',
-        messageSendKeyHelp: '채팅창에서 메시지를 보내는 단축키를 결정합니다. Enter를 선택하면 Shift+Enter로 줄바꿈이 가능하고, Enter가 아닌 다른 방식은 Enter로 줄바꿈을 할 수 있게 됩니다.',
-        messageSendKeyButton: '전송 버튼',
-    })
-    expect(languageEnglish.risuNest.ui).toMatchObject({
-        messageSendKey: 'Message send key',
-        messageSendKeyHelp: 'With Enter, Enter sends a message and Shift+Enter inserts a newline. With Ctrl/Shift+Enter, Ctrl+Enter or Shift+Enter sends a message and Enter inserts a newline. With Send button, Enter inserts a newline and only the send button sends a message.',
-        messageSendKeyButton: 'Send button',
-    })
 })
 
 it('reflects restored device settings without rewriting them', async () => {

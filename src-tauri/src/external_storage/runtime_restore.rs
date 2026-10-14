@@ -1523,8 +1523,10 @@ pub(super) mod tests {
     fn receiving_restored_bodies_opens_the_restore_journal_once() {
         use crate::asset_repository::job_pins::journal_opens;
         use std::sync::Arc;
+        // Three source pages: two full ones and a short last one.
+        super::super::job_store::TEST_RESTORE_BODY_PAGE.with(|page| page.set(16));
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-            let bodies=(0..300u16).map(|index| {
+            let bodies=(0..40u16).map(|index| {
                 let mut body=index.to_le_bytes().to_vec();
                 body.resize(1024+usize::from(index%64),(index%251) as u8);
                 body

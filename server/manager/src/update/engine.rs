@@ -83,7 +83,7 @@ fn http_client() -> Result<reqwest::Client> {
             }
         }))
         .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(60))
+        .read_timeout(Duration::from_secs(60))
         .build()
         .map_err(|_| "update-network-unavailable".into())
 }
@@ -1329,6 +1329,77 @@ mod tests {
     use crate::client::tests::read_request;
     use fs2::FileExt;
     use std::{io::Write, net::TcpListener, sync::Arc};
+
+    #[tokio::test(start_paused = true)]
+    async fn package_download_timeout_tracks_read_progress() {
+        for stalled in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("package");
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/package", listener.local_addr().unwrap());
+            let expected = if stalled { 5 } else { 4 };
+            let (send_chunk, receive_chunk) = std::sync::mpsc::channel::<()>();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                read_request(&mut stream);
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {expected}\r\n\r\na"
+                )
+                .unwrap();
+                while receive_chunk.recv().is_ok() {
+                    if stream.write_all(b"a").is_err() {
+                        break;
+                    }
+                }
+            });
+            let client = http_client().unwrap();
+            let destination = path.clone();
+            let download =
+                tokio::spawn(
+                    async move { fetch_file(&client, &url, expected, &destination).await },
+                );
+            for received in 1..=4 {
+                if received > 1 {
+                    tokio::time::advance(Duration::from_secs(30)).await;
+                    send_chunk.send(()).unwrap();
+                }
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while fs::metadata(&path).map_or(0, |metadata| metadata.len()) < received {
+                    assert!(
+                        !download.is_finished(),
+                        "download stopped despite read progress"
+                    );
+                    assert!(
+                        Instant::now() < deadline,
+                        "loopback download made no progress"
+                    );
+                    // Keep the paused clock from advancing while real socket I/O is pending.
+                    tokio::task::yield_now().await;
+                }
+            }
+            if stalled {
+                tokio::time::advance(Duration::from_secs(61)).await;
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !download.is_finished() {
+                    assert!(
+                        Instant::now() < deadline,
+                        "stalled download did not time out"
+                    );
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(
+                    download.await.unwrap().unwrap_err(),
+                    "update-download-failed"
+                );
+            } else {
+                download.await.unwrap().unwrap();
+            }
+            assert_eq!(fs::read(&path).unwrap(), b"aaaa");
+            drop(send_chunk);
+            server.join().unwrap();
+        }
+    }
 
     #[test]
     fn gui_relaunch_precedes_potentially_self_terminating_schedule_cleanup() {

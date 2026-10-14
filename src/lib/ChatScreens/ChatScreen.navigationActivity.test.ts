@@ -40,9 +40,6 @@ vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({
     }),
 }))
 
-vi.mock('../../lang', () => ({
-    language: { loadingChatData: 'Loading chat data' },
-}))
 vi.mock('./ResizeBox.svelte', () => ({ default: () => {} }))
 vi.mock('./DefaultChatScreen.svelte', async () => ({
     default: (await import('./test-fixtures/NavigationChatContentStub.svelte'))
@@ -60,6 +57,7 @@ vi.mock('../Setting/Pages/Module/ModuleChatMenu.svelte', () => ({
 }))
 
 import ChatScreen from './ChatScreen.svelte'
+import { language } from '../../lang'
 import { navigationActivity } from '../../ts/ui/navigationActivity'
 
 let mounted: ReturnType<typeof mount> | undefined
@@ -92,7 +90,7 @@ describe('ChatScreen navigation activity', () => {
         expect(content.hasAttribute('inert')).toBe(true)
         expect(
             target.querySelector('[role="status"]')?.textContent?.trim(),
-        ).toBe('Loading chat data')
+        ).toBe(language.loadingChatData)
         expect(oldChatControl?.closest('[inert]')).toBe(content)
         const chatListControl = target.querySelector('[data-chat-list-control]')
         expect(chatListControl?.closest('[inert]')).toBeNull()

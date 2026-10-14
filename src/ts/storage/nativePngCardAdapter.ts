@@ -6,11 +6,16 @@ export interface PreparedNativePngCardMetadata {
     ccv3?: string
 }
 
+/** Base64 length from which an inline V3 asset is skipped, as RisuAI skips it. */
+export const INLINE_ASSET_ENCODED_LIMIT = 50 * 1024 * 1024
+
 export interface PreparedNativePngCardDecodeDependencies {
     hash(bytes: Uint8Array): Promise<string>
     decrypt(bytes: Uint8Array, password: string): Promise<Uint8Array | ArrayBuffer>
     requestPassword(): Promise<string | null>
     onOversizedInlineAsset?(): void
+    /** Defaults to INLINE_ASSET_ENCODED_LIMIT. */
+    inlineAssetEncodedLimit?: number
     stageInlineAsset?(bytes: Uint8Array, name: string): Promise<PreparedCardContentAssetDescriptor>
 }
 
@@ -114,7 +119,7 @@ async function stageInlinePayloads(
                     if (encoded === undefined) {
                         throw new InvalidPreparedNativePngCardError('PNG data URI has no payload')
                     }
-                    if (encoded.length >= 50 * 1024 * 1024) {
+                    if (encoded.length >= (dependencies.inlineAssetEncodedLimit ?? INLINE_ASSET_ENCODED_LIMIT)) {
                         dependencies.onOversizedInlineAsset?.()
                         continue
                     }

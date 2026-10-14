@@ -1,6 +1,6 @@
 import type { Chat, Database, Message, character } from './database.svelte'
 import type { CommittedApplyOutcome } from './persistentDataRuntime'
-import { safeStructuredClone } from '../polyfill'
+import { safeStructuredClone } from '../safeStructuredClone'
 import { replaceArrayRange } from '../arrayRange'
 import {
     ActiveConversationSession,
@@ -123,6 +123,7 @@ export interface ActiveWorkingSetDependencies {
     isConversationOperationActive?(): boolean
     subscribeConversationOperationActive?(listener: (active: boolean) => void): () => void
     conversationViewportRowBudget?: number
+    conversationPageSize?: number
 }
 
 const selectedConversationTargetBrand = Symbol('selectedConversationTarget')
@@ -1919,7 +1920,7 @@ export class ActiveWorkingSet {
             const page = await this.dependencies.store.queryConversations({
                 characterId: id,
                 order: 'configured',
-                limit: 100,
+                limit: this.dependencies.conversationPageSize ?? 100,
                 cursor,
             })
             if (!this.isCurrent(generation, revision, mutationGeneration))
@@ -2573,7 +2574,7 @@ export class ActiveWorkingSet {
             const page = await this.dependencies.store.queryConversations({
                 characterId: id,
                 order: 'configured',
-                limit: 100,
+                limit: this.dependencies.conversationPageSize ?? 100,
                 cursor,
             })
             if (

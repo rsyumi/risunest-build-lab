@@ -1,13 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import { languageKorean } from 'src/lang/ko'
 import { bytePhase, createRateMeter, laneDeltas, routinePeak, serverSyncProgressView, serverSyncRoutineView, type ServerSyncAttempt, type ServerSyncLane } from './serverSyncProgress'
+import { serverSyncLane as lane } from './serverSyncProgress.testSupport'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 
 const text = languageKorean.risuNest.serverSync
-const lane = (name: ServerSyncLane['lane'], counts: Partial<ServerSyncLane> = {}): ServerSyncLane => ({
-    lane: name, active: false, sending: false, receiving: false, step: 'idle', listed: 0, itemsDone: 0, itemsTotal: 0, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, sentBytes: 0, receivedBytes: 0, backlogDone: 0, backlogLeft: 0, ...counts,
-})
 const attempt = (fields: Partial<ServerSyncAttempt>): ServerSyncAttempt => ({ mode: 'full', startedAt: 0, stages: ['publishing'], active: ['publishing'], current: 'publishing', ...fields })
 
 describe('server sync lane deltas', () => {

@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type {
+    CharacterDetail,
     ConversationPage,
     ConversationWindow,
     PersistentRevisionLease,
 } from '../storage/persistentDataStore'
+import { createLeaseStub } from '../storage/persistentDataStore.testSupport'
 
 const mocks = vi.hoisted(() => ({
     capturePersistentMutationToken: vi.fn(),
@@ -91,7 +93,7 @@ describe('chat branch visualization', () => {
             }
         })
         const release = vi.fn(async () => undefined)
-        const lease = {
+        const lease = createLeaseStub({
             revision: 7,
             readCharacter: vi.fn(async () => ({
                 revision: 7,
@@ -102,7 +104,7 @@ describe('chat branch visualization', () => {
                     firstMessage: 'Greeting',
                     alternateGreetings: ['Alternate greeting'],
                     chatPage: 0,
-                },
+                } as CharacterDetail,
             })),
             queryConversations,
             readConversationWindow,
@@ -110,7 +112,7 @@ describe('chat branch visualization', () => {
                 throw new Error('complete conversation materialized')
             }),
             release,
-        } as unknown as PersistentRevisionLease
+        })
         const store = {
             acquireRevision: vi.fn(async () => lease),
         }
@@ -141,7 +143,7 @@ describe('chat branch visualization', () => {
 
     it('bounds retained branch previews without changing the message identity hash', async () => {
         const data = 'x'.repeat(1_000)
-        const lease = {
+        const lease = createLeaseStub({
             revision: 8,
             readCharacter: vi.fn(async () => ({
                 revision: 8,
@@ -151,7 +153,7 @@ describe('chat branch visualization', () => {
                     name: 'Preview',
                     firstMessage: '',
                     alternateGreetings: [],
-                },
+                } as CharacterDetail,
             })),
             queryConversations: vi.fn(async () => ({
                 revision: 8,
@@ -170,7 +172,7 @@ describe('chat branch visualization', () => {
                 value: {
                     characterId: 'char-preview',
                     conversationId: 'chat-preview',
-                    messages: [{ role: 'char', data }],
+                    messages: [{ role: 'char' as const, data }],
                     startIndex: 0,
                     endIndex: 1,
                     totalMessages: 1,
@@ -179,7 +181,7 @@ describe('chat branch visualization', () => {
                 },
             })),
             release: vi.fn(async () => undefined),
-        } as unknown as PersistentRevisionLease
+        })
 
         const graph = await scanPinnedChatBranches(
             { acquireRevision: vi.fn(async () => lease) } as never,
@@ -223,7 +225,7 @@ describe('chat branch visualization', () => {
             }
         })
         const release = vi.fn(async () => undefined)
-        const lease = {
+        const lease = createLeaseStub({
             revision: 11,
             readCharacter: vi.fn(async () => ({
                 revision: 11,
@@ -233,7 +235,7 @@ describe('chat branch visualization', () => {
                     name: 'Large',
                     firstMessage: 'Greeting',
                     alternateGreetings: [],
-                },
+                } as CharacterDetail,
             })),
             queryConversations: vi.fn(async () => ({
                 revision: 11,
@@ -249,7 +251,7 @@ describe('chat branch visualization', () => {
             })),
             readConversationWindow,
             release,
-        } as unknown as PersistentRevisionLease
+        })
         const store = {
             acquireRevision: vi.fn(async () => lease),
         }
@@ -285,7 +287,7 @@ describe('chat branch visualization', () => {
         const makeLease = (
             queryConversations: PersistentRevisionLease['queryConversations'],
             release: () => Promise<void>,
-        ) => ({
+        ) => createLeaseStub({
             revision: 9,
             readCharacter: vi.fn(async () => ({
                 revision: 9,
@@ -294,11 +296,11 @@ describe('chat branch visualization', () => {
                     chaId: 'char-a',
                     name: 'Character',
                     firstMessage: 'Greeting',
-                },
+                } as CharacterDetail,
             })),
             queryConversations,
             release,
-        }) as unknown as PersistentRevisionLease
+        })
 
         const failedRelease = vi.fn(async () => undefined)
         const failedLease = makeLease(

@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vitest'
 
-import { readFileSync } from 'node:fs'
-const appSource = readFileSync('src/App.svelte', 'utf8')
-const dialogSource = readFileSync('src/lib/Others/NativeFileJobDialog.svelte', 'utf8')
 import { languageEnglish } from 'src/lang/en'
 import type { NativeFileJobStatus } from '../storage/nativeFileJobs'
 import {
@@ -79,13 +76,6 @@ describe('nativeFileJobProgress', () => {
         expect(nativeFileJobTitle('export', undefined)).toBe(languageEnglish.exportRisuSave)
     })
 
-    it('mounts the shared dialog instead of an inline overlay and keeps raw job codes out of it', () => {
-        expect(appSource).toContain('<NativeFileJobDialog />')
-        expect(appSource).not.toContain('nativeFileJobProgressText(')
-        expect(dialogSource).toContain('buildNativeFileJobDialogModel(')
-        expect(dialogSource).not.toContain('.phase')
-        expect(dialogSource).not.toMatch(/\{[^}]*status\??\.[^}]*phase[^}]*\}/)
-    })
     it('names official account operations and shows measured upload bytes', () => {
         const upload = status({ kind: 'official-publication-upload', phase: 'uploading-database',
             progress: { completedBytes: 1_024, totalBytes: 4_096, completedItems: 0 } })

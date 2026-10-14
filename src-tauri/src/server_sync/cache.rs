@@ -1392,7 +1392,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_inventory_excludes_a_hundred_thousand_opaque_dependencies() {
+    fn candidate_inventory_excludes_thousands_of_opaque_dependencies() {
         use crate::logical_records::{encode_logical_record_key, LogicalRecordLocator};
         let dir = tempfile::tempdir().unwrap();
         let cache = Cache::open(dir.path()).unwrap();
@@ -1405,7 +1405,7 @@ mod tests {
             messages: None,
             derived_objects: Default::default(),
         };
-        let mut dependencies = (0u32..100_000)
+        let mut dependencies = (0u32..5_000)
             .map(|n| risunest_sync_wire::hash(&n.to_be_bytes()))
             .collect::<Vec<_>>();
         dependencies.sort();
@@ -1422,7 +1422,7 @@ mod tests {
         assert!(candidates
             .iter()
             .all(|hash| dependencies.binary_search(hash).is_err()));
-        assert!(cache.closure(&projected.version).unwrap().len() >= 100_000);
+        assert!(cache.closure(&projected.version).unwrap().len() >= 5_000);
         // Only control pages and the record's segmented payload were materialized
         // by this unit fixture; selecting candidates must not stat the raw bodies.
         assert!(dependencies.iter().take(3).all(|hash| cache

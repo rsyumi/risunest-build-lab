@@ -1,4 +1,4 @@
-import { safeStructuredClone } from '../polyfill'
+import { safeStructuredClone } from '../safeStructuredClone'
 import type { Message } from './database.svelte'
 import type { ActiveConversationPinReason } from './activeConversationSession'
 import { CONVERSATION_RANGE_MAX_LIMIT, type DataRevision } from './persistentDataStore'

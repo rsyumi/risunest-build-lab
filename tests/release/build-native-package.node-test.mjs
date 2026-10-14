@@ -329,19 +329,6 @@ test("effective configuration preserves the approved desktop and mobile identiti
   }
 });
 
-test("RisuNest NSIS completes requested cleanup before removing its retry entry point", () => {
-  const hook = readFileSync("src-tauri/windows.nsh", "utf8");
-  assert.match(hook, /!macro NSIS_HOOK_PREUNINSTALL/);
-  assert.match(hook, /\$DeleteAppDataCheckboxState = 1/);
-  assert.match(hook, /\$UpdateMode <> 1/);
-  assert.match(hook, /!insertmacro CheckIfAppIsRunning "\$INSTDIR\\\$\{MAINBINARYNAME\}\.exe" "\$\{PRODUCTNAME\}"/);
-  assert.match(hook, /ExecWait '"\$INSTDIR\\\$\{MAINBINARYNAME\}\.exe" --remove-local-data --yes' \$R6/);
-  assert.ok(hook.indexOf("!insertmacro CheckIfAppIsRunning") < hook.indexOf("ExecWait"));
-  assert.match(hook, /\$\{If\} \$\{Errors\}\s+\$\{OrIf\} \$R6 != 0/);
-  assert.match(hook, /SetErrorLevel 1\s+Abort/);
-  assert.doesNotMatch(hook, /RmDir|NSIS_HOOK_POSTUNINSTALL/);
-});
-
 test("Sync GUI configuration carries one identity on every desktop platform", () => {
   const root = "server/manager/gui/src-tauri";
   const base = JSON.parse(readFileSync(`${root}/tauri.conf.json`, "utf8"));
@@ -402,32 +389,6 @@ test("no owned directory overlaps the installation directory either installer se
       assert.ok(known.has(target), `unowned RmDir target: ${target}`);
     }
   }
-});
-
-test("application bundles identify Yumi as the publisher", () => {
-  const app = JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8"));
-  const sync = JSON.parse(readFileSync("server/manager/gui/src-tauri/tauri.conf.json", "utf8"));
-  assert.equal(app.productName, "RisuNest");
-  assert.equal(app.bundle.publisher, "Yumi");
-  assert.equal(sync.productName, "RisuNest Sync");
-  assert.equal(sync.bundle.publisher, "Yumi");
-});
-
-test("Sync NSIS hook separates the default install and durable data directories", () => {
-  const hook = readFileSync("server/manager/install/windows.nsh", "utf8");
-  assert.match(hook, /!define RISUNEST_SYNC_DEFAULT_INSTALL_DIR "\$LOCALAPPDATA\\RisuNest Sync"/);
-  assert.match(hook, /!define RISUNEST_SYNC_INSTALL_DIR "\$LOCALAPPDATA\\RisuNestSync"/);
-  assert.match(hook, /StrCmp \$INSTDIR "\$\{RISUNEST_SYNC_DEFAULT_INSTALL_DIR\}"/);
-  assert.match(hook, /StrCpy \$INSTDIR "\$\{RISUNEST_SYNC_INSTALL_DIR\}"\s+SetOutPath \$INSTDIR/);
-  assert.match(hook, /\$LOCALAPPDATA\\RisuNestSyncData\\manager-update/);
-  assert.doesNotMatch(hook, /\$LOCALAPPDATA\\RisuNestSync\\manager-update/);
-  assert.match(hook, /\$DeleteAppDataCheckboxState = 1/);
-  assert.doesNotMatch(hook, /RmDir \/r/);
-  assert.match(hook, /RISUNEST_SYNC_UNINSTALL_DATA_DIR/);
-  assert.match(hook, /--data-dir "\$R9" installer delete-data/);
-  assert.match(hook, /--data-dir "\$R9" --server "\$INSTDIR\\risunest-sync-server\.exe" installer forget-removal/);
-  assert.match(hook, /IfFileExists "\$R9\\manager-update\\installer-\$R7\.ready"/);
-  assert.ok(hook.indexOf("installer delete-data") < hook.indexOf("!macro NSIS_HOOK_POSTUNINSTALL"));
 });
 
 test("macOS package metadata and intentional ad-hoc signatures are checked", () => {

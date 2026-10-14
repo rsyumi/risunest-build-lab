@@ -1,3 +1,4 @@
+import '../../src/styles.css'
 import { mount, unmount } from 'svelte'
 import * as monaco from 'monaco-editor'
 import TextEditorMonaco from '../../src/lib/Others/TextEditorMonaco.svelte'
@@ -38,10 +39,14 @@ export const monacoDriver = {
         const root = editor.getDomNode()!
         const input = root.querySelector<HTMLTextAreaElement>('textarea.inputarea')!
         const style = getComputedStyle(input)
+        const probe = document.body.appendChild(document.createElement('div'))
+        probe.style.backgroundColor = 'var(--risu-theme-darkbg)'
+        const theme = getComputedStyle(probe).backgroundColor
+        probe.remove()
         const lineTop = root.getBoundingClientRect().top + editor.getTopForLineNumber(lineNumber) - editor.getScrollTop()
         return {
             composing: input.classList.contains('ime-input'),
-            background: style.backgroundColor,
+            themeBackground: theme !== 'rgba(0, 0, 0, 0)' && style.backgroundColor === theme,
             fontMatchesLine: style.fontFamily === getComputedStyle(root.querySelector('.view-line span span')!).fontFamily,
             visible: style.opacity !== '0',
             onLine: Math.abs(input.getBoundingClientRect().top - lineTop) < 1,

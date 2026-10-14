@@ -1,17 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { PluginStorageValueQuery } from '../storage/persistentDataStore'
+import type { PersistentRevisionLease, PluginStorageValueQuery } from '../storage/persistentDataStore'
 
 const mock = vi.hoisted(() => ({
-    pages: vi.fn(), release: vi.fn(async () => {}),
+    pages: vi.fn<PersistentRevisionLease['readPluginStorageValues']>(), release: vi.fn(async () => {}),
 }))
-vi.mock('../platform', () => ({ isTauri: false }))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 vi.mock('./plugins.svelte', () => ({ pluginStorageStore: { invalidate: vi.fn() } }))
-vi.mock('../storage/persistentDataStoreFactory', () => ({
-    getPersistentDataStore: () => ({
-        readRoot: async () => ({ revision: 7 }),
-        acquireRevision: async () => ({ revision: 7, readPluginStorageValues: mock.pages, release: mock.release }),
-    }),
-}))
+vi.mock('../storage/persistentDataStoreFactory', async () => {
+    const { createLeaseStub } = await import('../storage/persistentDataStore.testSupport')
+    return {
+        getPersistentDataStore: () => ({
+            readRoot: async () => ({ revision: 7 }),
+            acquireRevision: async () => createLeaseStub({ revision: 7, readPluginStorageValues: mock.pages, release: mock.release }),
+        }),
+    }
+})
 import { searchPluginDataValues, pluginDataItemId, type PluginDataItem } from './pluginDataInventory'
 
 const items: PluginDataItem[] = Array.from({ length: 2000 }, (_, index) => ({

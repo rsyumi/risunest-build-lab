@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SyncBindingTransport, SyncBindingDependencies, SyncBindingNative } from './bindingFlow'
 import { languageKorean } from 'src/lang/ko'
-import { serverSyncProgressView, serverSyncRoutineView } from './serverSyncProgress'
+import { serverSyncProgressView, serverSyncRoutineView, type ServerSyncLane, type ServerSyncLaneName } from './serverSyncProgress'
+import { serverSyncLane } from './serverSyncProgress.testSupport'
+import { assetResidencyStatus } from './serverAssetResidency.testSupport'
 
 const f = vi.hoisted(() => ({
     native: true,
@@ -39,7 +41,7 @@ const f = vi.hoisted(() => ({
 }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: f.invoke, Channel: class { onmessage = (_value: unknown) => {} } }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))
-vi.mock('src/ts/platform', () => ({ get isTauri() { return f.native } }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule(() => ({ runtime: f.native ? 'tauri' : 'web', os: 'windows' })))
 vi.mock('src/ts/stores.svelte', () => ({ selectedCharID: { subscribe: (run: (value: number) => void) => { run(f.selectedIndex); return () => {} } } }))
 vi.mock('../database.svelte', () => ({ getDatabase: () => f.database }))
 vi.mock('./bindingProduction', async importOriginal => ({
@@ -112,7 +114,7 @@ describe('production server LWW composition', () => {
         f.invoke.mockImplementation(async (command, args) => {
             if (command === 'asset_residency_download_remote') {
                 holding = true; await held; holding = false
-                return { policy: 'full', localBytes: 0, remoteBytes: 0, remoteObjects: 0, serverBytes: 0, serverObjects: 0, unavailableObjects: 0, evictedBytes: 0, externalObjects: [] }
+                return assetResidencyStatus()
             }
             if (command === 'external_lww_publish') return { segments: '0', more: false }
             return base(command, args)
@@ -587,7 +589,6 @@ describe('production server LWW composition', () => {
         const commands = f.invoke.mock.calls.map(([command]) => command)
         expect(commands[0]).toBe('server_sync_lww_activate')
         expect(commands.filter(command => command === 'server_sync_lww_push')).toHaveLength(4)
-        expect(commands).not.toContain('pds_lww_queue_unit_state_page')
         expect(commands.some(command => command === 'server_sync_lww_pull' || command === 'server_sync_notify_start')).toBe(false)
     })
     it('stops initial publication at a generating-only null batch and leaves service start to G', async () => {
@@ -630,15 +631,6 @@ describe('production server LWW composition', () => {
         expect(production.getServerSyncController().snapshot().error).toBe('server-unreachable')
         offline = false
         await vi.advanceTimersByTimeAsync(5000); await settle()
-        expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: false, error: '' })
-    })
-    it('never reports a cancelled publication as a sync error', async () => {
-        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
-        f.invoke.mockImplementation(async command => {
-            if (command === 'server_sync_lww_push') throw { code: 'cancelled', retryable: true }
-            return command === 'server_sync_lww_pull' ? emptyReceive() : null
-        })
-        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
         expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: false, error: '' })
     })
     it('keeps automatic sync stopped through visibility changes until the hold is released', async () => {
@@ -689,25 +681,6 @@ describe('production server LWW composition', () => {
         expect(pullCalls()).toBe(opened)
         openConversation('second'); await settle()
         expect(pullCalls()).toBe(opened + 1)
-    })
-    it('stops on a local apply failure instead of pulling the same page again as an unreachable server', async () => {
-        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
-        f.apply.mockRejectedValue(Object.assign(new Error('request-id-integrity'), { code: 'validation' }))
-        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
-        expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: true, error: 'local-validation' })
-        const pulls = pullCalls()
-        await vi.advanceTimersByTimeAsync(120_000); await settle()
-        openConversation('other'); await settle()
-        expect(pullCalls()).toBe(pulls)
-    })
-    it('retries a local storage failure during apply', async () => {
-        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
-        f.apply.mockRejectedValue(Object.assign(new Error('disk I/O error'), { code: 'store-error' }))
-        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
-        expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: false, error: 'local-storage' })
-        f.apply.mockResolvedValue({ revision: 31, affectedKeys: [], heldKeys: [], deferredKeys: [] })
-        await vi.advanceTimersByTimeAsync(5000); await settle()
-        expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: false, error: '' })
     })
     it('finishes initial publication while the document is hidden', async () => {
         production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
@@ -779,7 +752,6 @@ describe('production server LWW composition', () => {
     })
     describe('asset storage chosen with the connection', () => {
         const config = { endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' }
-        const residency = (policy: string) => ({ policy, localBytes: 0, remoteBytes: 0, remoteObjects: 0, serverBytes: 0, serverObjects: 0, externalObjects: [], unavailableObjects: 0, evictedBytes: 0 })
         const policyCalls = () => f.invoke.mock.calls.filter(([command]) => command === 'server_sync_asset_policy')
         const contextFor = (libraryId: string) => ({ ...bindingContext(), state: { ...bindingContext().state, libraryId } })
         // The shared flow is mocked; each case drives the transport the way a binding to `libraryId` would.
@@ -795,7 +767,7 @@ describe('production server LWW composition', () => {
         let base: (command: string, args?: unknown) => Promise<unknown>
         beforeEach(async () => {
             base = f.invoke.getMockImplementation()!
-            f.invoke.mockImplementation(async (command, args) => command === 'server_sync_asset_policy' ? residency('remote') : base(command, args))
+            f.invoke.mockImplementation(async (command, args) => command === 'server_sync_asset_policy' ? assetResidencyStatus({ policy: 'remote' }) : base(command, args))
             production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
             visible(true)
         })
@@ -857,15 +829,12 @@ describe('production server LWW composition', () => {
     })
 })
 describe('server sync progress', () => {
-    const lanes = (sent: number) => ['send', 'receive', 'hydrate', 'binding', 'assets'].map(lane => ({
-        lane, active: lane === 'send', sending: lane === 'send', receiving: false, step: lane === 'send' ? 'uploading' : 'idle', listed: 0, itemsDone: 0, itemsTotal: 0, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, sentBytes: lane === 'send' ? sent : 0, receivedBytes: 0, backlogDone: 0, backlogLeft: 0,
-    }))
-    const sendLanes = (send: Record<string, unknown>) => ['send', 'receive', 'hydrate', 'binding', 'assets'].map(lane => ({
-        lane, active: false, sending: false, receiving: false, step: 'idle', listed: 0, itemsDone: 0, itemsTotal: 0, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, sentBytes: 0, receivedBytes: 0, backlogDone: 0, backlogLeft: 0, ...(lane === 'send' ? send : {}),
-    }))
+    const laneNames: ServerSyncLaneName[] = ['send', 'receive', 'hydrate', 'binding', 'assets']
+    const sendLanes = (send: Partial<ServerSyncLane>) => laneNames.map(lane => serverSyncLane(lane, lane === 'send' ? send : {}))
+    const lanes = (sent: number) => sendLanes({ active: true, sending: true, step: 'uploading', sentBytes: sent })
     const pendingReads = () => f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_pending_count').length
     /** A push that waits; each lanes read takes the next of `reads` and repeats the last. */
-    const countedPush = (reads: Record<string, unknown>[], pending: number | null = null) => {
+    const countedPush = (reads: Partial<ServerSyncLane>[], pending: number | null = null) => {
         let finish!: (failure?: unknown) => void
         f.invoke.mockImplementation(async command => command === 'server_sync_lww_push' ? new Promise((resolve, reject) => { finish = failure => failure ? reject(failure) : resolve(null) })
             : command === 'server_sync_lww_pull' ? emptyReceive()

@@ -1,14 +1,18 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { clearMocks, mockIPC } from '@tauri-apps/api/mocks'
+import type { Channel } from '@tauri-apps/api/core'
 const { invoke, alertError, waitAlert } = vi.hoisted(() => ({ invoke: vi.fn(), alertError: vi.fn(), waitAlert: vi.fn() }))
-vi.mock('@tauri-apps/api/core', () => ({ invoke }))
+vi.mock('@tauri-apps/api/core', async original => ({ ...(await original<typeof import('@tauri-apps/api/core')>()), invoke } satisfies typeof import('@tauri-apps/api/core')))
 vi.mock('../alert', () => ({ alertError, waitAlert }))
 vi.mock('../gui/nativeFileJobDialogModel', () => ({ failureReason: (code: string) => `reason:${code}` }))
 import { exportIOSFile, pickIOSFile, getIOSPublication, pickIOSBackupSource, materializeIOSBackupSource, reportInterruptedIOSBackupSources } from './iosFiles'
 beforeEach(() => {
+    mockIPC(() => undefined)
     invoke.mockReset()
     alertError.mockReset()
     waitAlert.mockReset().mockResolvedValue(undefined)
 })
+afterEach(() => clearMocks())
 describe('iOS file publication', () => {
     it('returns native custody without an app-owned copy or a descriptor in JavaScript', async () => {
         invoke.mockImplementation(async command => command === 'native_portable_source_cleanup_orphans' ? {names:[],cleanupFailed:false}
@@ -83,6 +87,50 @@ describe('iOS file publication', () => {
         invoke.mockResolvedValue({path:'/owned/synthetic.risudat',name:'synthetic.risudat',bytes:42})
         await expect(materializeIOSBackupSource('selected-token')).resolves.toEqual({path:'/owned/synthetic.risudat',name:'synthetic.risudat',bytes:42})
         expect(invoke).toHaveBeenCalledExactlyOnceWith('plugin:ios-native|materialize_backup_source',{token:'selected-token'})
+    })
+    it('reports large copy progress and ignores callbacks or cancellation after completion', async () => {
+        const controller = new AbortController()
+        const reports: unknown[] = []
+        let channel!: Channel<{ copiedBytes: number; totalBytes: number }>
+        invoke.mockImplementation(async (_command, args) => {
+            channel = args.onProgress
+            channel.onmessage({ copiedBytes: 4 * 1024 ** 3, totalBytes: 8 * 1024 ** 3 })
+            return { path: '/owned/copied.risudat', name: 'copied.risudat', bytes: 8 * 1024 ** 3 }
+        })
+        await expect(materializeIOSBackupSource('source', { signal: controller.signal, onProgress: progress => reports.push(progress) }))
+            .resolves.toMatchObject({ path: '/owned/copied.risudat' })
+        controller.abort()
+        channel.onmessage({ copiedBytes: 8 * 1024 ** 3, totalBytes: 8 * 1024 ** 3 })
+        expect(reports).toEqual([{ copiedBytes: 4 * 1024 ** 3, totalBytes: 8 * 1024 ** 3 }])
+        expect(invoke.mock.calls.map(call => call[0])).toEqual(['plugin:ios-native|materialize_backup_source'])
+    })
+    it.each([false, true])('cancels the selected copy and cleans any late result (failed %s)', async failed => {
+        const controller = new AbortController()
+        let finish!: (value: unknown) => void
+        let fail!: (error: Error) => void
+        const copy = new Promise((resolve, reject) => { finish = resolve; fail = reject })
+        const discarded: string[] = []
+        invoke.mockImplementation(async (command, args) => {
+            if (command === 'plugin:ios-native|materialize_backup_source') return copy
+            if (command === 'native_portable_source_discard') {
+                expect(args.source).toEqual({ type: 'iosScoped', token: 'source' })
+                if (failed) fail(new Error('Native copy cancelled'))
+                else finish({ path: '/owned/late.risudat', name: 'late.risudat', bytes: 42 })
+                return true
+            }
+            if (command === 'plugin:ios-native|discard_file') discarded.push(args.path)
+        })
+        const pending = materializeIOSBackupSource('source', { signal: controller.signal })
+        const rejected = expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+        controller.abort()
+        await rejected
+        expect(discarded).toEqual(failed ? [] : ['/owned/late.risudat'])
+    })
+    it('does not begin materialization when already cancelled', async () => {
+        const controller = new AbortController()
+        controller.abort()
+        await expect(materializeIOSBackupSource('source', { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+        expect(invoke).not.toHaveBeenCalled()
     })
     it('reports picker cancellation without publishing success', async () => {
         invoke.mockResolvedValue({ cancelled: true })

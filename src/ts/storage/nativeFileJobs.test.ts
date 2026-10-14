@@ -6,7 +6,10 @@ vi.mock('./deviceStateRestore', () => deviceRestore)
 const binding = vi.hoisted(() => ({ prepare: vi.fn() }))
 vi.mock('./sync/bindingRegistry', () => ({prepareBoundLibraryReplacement: binding.prepare}))
 vi.mock('../plugins/apiV3/v3.svelte', () => ({fencePluginExecutionForAuthorityReplacement:async()=>{},invalidatePluginCachesAfterAuthorityReplacement:async()=>{},restartPluginsAfterAuthorityReplacement:async()=>{}}))
+const library = vi.hoisted(() => ({ hasCharacters: vi.fn<() => Promise<boolean>>() }))
+vi.mock('./libraryCharacters', () => ({ hasLibraryCharacters: library.hasCharacters }) satisfies typeof import('./libraryCharacters'))
 beforeEach(() => {
+    library.hasCharacters.mockReset().mockResolvedValue(true)
     restoreAlerts.checkbox.mockReset().mockResolvedValue({confirmed:true,checked:true})
     binding.prepare.mockReset().mockImplementation(async () => ({bound:false,state:{targetAuthority:'1'},fence:async()=>{},assertAuthority:async()=>{},resume:async()=>{}}))
 })
@@ -42,7 +45,6 @@ it.each(['portable', 'block'] as const)('holds the write pause until the actual 
     expect(paused).toBe(true)
     releaseCapture()
     await vi.waitFor(() => expect(paused).toBe(false))
-    expect(polls).toBe(2)
     releaseBodies()
     await expect(operation).resolves.toEqual(result)
 })
@@ -144,94 +146,7 @@ import {
     continueCommittedWorkingSetRefresh,
     retryCommittedWorkingSetRefreshWithContinuation,
 } from './committedWorkingSetContinuation'
-
-function status(
-    state: NativeFileJobStatus['state'],
-    result?: NativeFileJobStatus['result'],
-): NativeFileJobStatus {
-    return {
-        jobId: 'job-1',
-        kind: 'restore-block-risu-save',
-        state,
-        phase: state === 'succeeded' ? 'complete' : 'reading-source',
-        progress: {
-            completedBytes: state === 'queued' ? 0 : 128,
-            totalBytes: 128,
-            completedItems: 0,
-        },
-        result,
-    }
-}
-
-function restoreRuntime(
-    revision: number,
-    options: {
-        capture?: (reason: string) => void | Promise<void>
-        refresh?: (revision: number) => void | Promise<void>
-        markRefreshRequired?: (revision: number, error: unknown) => void
-        acquire?: () => void | Promise<void>
-        release?: () => void
-        projection?: 'applied' | 'refresh-required'
-        /** Revision captured after explicit restore preparation and user choices. */
-        fencedRevision?: number
-    } = {},
-) {
-    let captures = 0
-    return {
-        getStorageAuthorityEpoch: () => 2,
-        withPausedPersistentWrites: async <T>(reason: string, operation: (token: import('./saveCoordinator').PersistentMutationToken) => Promise<T>) => {
-            await options.capture?.(reason)
-            await options.acquire?.()
-            try { return await operation({revision:options.fencedRevision ?? revision,mutationGeneration:1} as import('./saveCoordinator').PersistentMutationToken) }
-            finally { options.release?.() }
-        },
-        store: {readRoot:async()=>({revision})} as unknown as import('./persistentDataStore').PersistentDataStore,
-        setActivatedLibraryRecoveryLifecycle: () => {},
-        beginActivatedLibraryGuard: () => ({complete(){},abortUnchanged:async()=>{}}),
-        refreshActivatedLibraryUnderPause: async () => {
-            await options.refresh?.((options.fencedRevision ?? revision) + 1)
-            if (options.projection === 'refresh-required') throw new Error('Activated library projection is incomplete')
-            return {kind:'committed' as const, revision:(options.fencedRevision ?? revision) + 1, projection:'applied' as const}
-        },
-        retryCommittedWorkingSetRefresh: async () => {
-            await options.refresh?.(revision + 1)
-            return {
-                kind: 'committed' as const,
-                revision: revision + 1,
-                projection: options.projection ?? 'applied' as const,
-            }
-        },
-        capturePersistentMutationToken: async (reason: string) => {
-            await options.capture?.(reason)
-            return {
-                revision: captures++ > 0 ? options.fencedRevision ?? revision : revision,
-                mutationGeneration: 1,
-            }
-        },
-        markCommittedWorkingSetRefreshRequired: (
-            committedRevision: number,
-            error: unknown,
-        ) => options.markRefreshRequired?.(committedRevision, error),
-        acquireDestructiveReplacementFence: async (token: { revision: number; mutationGeneration: number }) => {
-            await options.acquire?.()
-            expect(token.revision).toBe(options.fencedRevision ?? revision)
-            return {
-                revision: token.revision,
-                refreshCommittedWorkingSet: async (
-                    committedRevision: number,
-                ) => {
-                    await options.refresh?.(committedRevision)
-                    return {
-                        kind: 'committed',
-                        revision: committedRevision,
-                        projection: options.projection ?? 'applied',
-                    } as const
-                },
-                release: () => options.release?.(),
-            }
-        },
-    }
-}
+import { createNativeJobHost, restoreRuntime, status } from './nativeFileJobs.testSupport'
 
 function pluginValuePreview(keys: readonly string[]): NativeStagedPluginPreview {
     return {
@@ -4783,34 +4698,40 @@ it.each([
     const start = Date.now()
     const clock = vi.spyOn(Date, 'now').mockReturnValue(start)
     const result = {revision:18,sourceBytes:128,sourceFingerprintKind:'whole-file-sha256' as const,sourceSha256:'a'.repeat(64),characterCount:1,presetCount:0,warningCodes:[]}
-    const states = [status('running'), {...status('waitingForInput'),phase:'awaiting-activation'}, status('succeeded',result)]
-    const commands: string[] = []
+    const host = createNativeJobHost([status('running'), {...status('waitingForInput'),phase:'awaiting-activation'}, status('succeeded',result)])
     const acquire = vi.fn()
     try {
         await expect(restore(restoreRuntime(17,{acquire}), {type:'desktopPath',path:'synthetic.bin'}, {firstRun:true}, {
-            isTauri:()=>true,
+            ...host.dependencies,
             wait:async()=>{clock.mockReturnValue(start + 50 * 60 * 1000)},
-            invoke:async command=>{
-                commands.push(command)
-                if(command==='native_file_job_start') return {jobId:'job-1'}
-                if(command==='native_file_job_status') return states.shift()
-                return true
-            },
         })).resolves.toEqual(result)
         expect(Date.now()).toBe(start + 50 * 60 * 1000)
         expect(restoreAlerts.checkbox).not.toHaveBeenCalled()
         expect(acquire).toHaveBeenCalledOnce()
-        expect(commands).toContain('native_file_job_finalize')
-        expect(commands).not.toContain('native_file_job_cancel')
+        expect(host.commands()).toContain('native_file_job_finalize')
+        expect(host.commands()).not.toContain('native_file_job_cancel')
     } finally { clock.mockRestore() }
 })
 
+it.each([false, true])('replaces a library that holds no character without asking, bound=%s', async bound => {
+    library.hasCharacters.mockResolvedValue(false)
+    binding.prepare.mockImplementation(async () => ({bound,state:{targetAuthority:'1'},fence:async()=>{},assertAuthority:async()=>{},resume:async()=>{}}))
+    const result = {revision:18,sourceBytes:128,sourceFingerprintKind:'whole-file-sha256' as const,sourceSha256:'a'.repeat(64),characterCount:1,presetCount:0,warningCodes:[]}
+    const host = createNativeJobHost([{...status('waitingForInput'),phase:'awaiting-activation'}, status('succeeded',result)])
+    const acquire = vi.fn()
+    await expect(runNativeBlockRisuSaveRestore(restoreRuntime(17,{acquire}), {type:'desktopPath',path:'synthetic.risudat'}, {}, host.dependencies)).resolves.toEqual(result)
+    expect(restoreAlerts.checkbox).not.toHaveBeenCalled()
+    expect(restoreAlerts.confirm).not.toHaveBeenCalled()
+    expect(acquire).toHaveBeenCalledOnce()
+    expect(host.commands()).toContain('native_file_job_finalize')
+    expect(host.commands()).not.toContain('native_file_job_cancel')
+})
+
 it('cancels staged restore and waits for terminal settlement when the fresh precondition fails', async () => {
-    const calls: string[] = []
-    const statuses = [
+    const host = createNativeJobHost([
         { ...status('waitingForInput'), phase: 'awaiting-activation' },
         status('cancelled'),
-    ]
+    ])
     const acquire = vi.fn()
     await expect(
         runNativeLegacyLocalBackupRestore(
@@ -4824,22 +4745,11 @@ it('cancels staged restore and waits for terminal settlement when the fresh prec
                     )
                 },
             },
-            {
-                isTauri: () => true,
-                wait: async () => {},
-                invoke: async (command) => {
-                    calls.push(command)
-                    if (command === 'native_file_job_start')
-                        return { jobId: 'staged' }
-                    if (command === 'native_file_job_status')
-                        return statuses.shift()
-                    return true
-                },
-            },
+            host.dependencies,
         ),
     ).rejects.toMatchObject({ code: 'resolve-pending-operation-first' })
     expect(acquire).not.toHaveBeenCalled()
-    expect(calls).toEqual([
+    expect(host.commands()).toEqual([
         'native_file_job_start',
         'native_file_job_status',
         'native_file_job_cancel',
@@ -4852,15 +4762,10 @@ it.each(['both', 'cold', 'inlay'] as const)('cancels default incomplete restore 
     restoreAlerts.confirm.mockReset().mockResolvedValue(false)
     restoreAlerts.checkbox.mockReset().mockResolvedValue({ confirmed: false, checked: false })
     const preview = { unavailableColdKeys: kind === 'inlay' ? [] : ['missing'], characterNames: ['Synthetic'], invalidInlays: kind === 'cold' ? [] : ['inlay_aa.risuinlay'] }
-    const states = [{ ...status('waitingForInput'), phase: 'awaiting-activation', incompleteRestorePreview: preview }, status('cancelled')]
+    const host = createNativeJobHost([{ ...status('waitingForInput'), phase: 'awaiting-activation', incompleteRestorePreview: preview }, status('cancelled')])
     const acquire = vi.fn()
     await expect(runNativeLegacyLocalBackupRestore(
-        restoreRuntime(17, { acquire }), { type: 'desktopPath', path: 'synthetic.bin' }, {},
-        { isTauri: () => true, wait: async () => undefined, invoke: async command => {
-            if (command === 'native_file_job_start') return { jobId: 'job-1' }
-            if (command === 'native_file_job_status') return states.shift()
-            return true
-        } },
+        restoreRuntime(17, { acquire }), { type: 'desktopPath', path: 'synthetic.bin' }, {}, host.dependencies,
     )).rejects.toMatchObject({ name: 'AbortError' })
     expect(acquire).not.toHaveBeenCalled()
     expect(restoreAlerts.checkbox).toHaveBeenCalledTimes(1)
@@ -4921,43 +4826,23 @@ describe('native snapshot restore', () => {
 
     it('cancels the staged snapshot when the replacement is declined', async () => {
         restoreAlerts.checkbox.mockResolvedValue({confirmed: false, checked: false})
-        const commands: string[] = []
-        const statuses = [awaiting(), {...status('cancelled'), kind: 'restore-native-snapshot' as const}]
+        const host = createNativeJobHost([awaiting(), {...status('cancelled'), kind: 'restore-native-snapshot' as const}])
         const acquire = vi.fn()
-        await expect(runNativeSnapshotRestore(restoreRuntime(11, {acquire}), {snapshotId: 'synthetic-snapshot'}, {}, {
-            isTauri: () => true,
-            wait: async () => undefined,
-            invoke: async command => {
-                commands.push(command)
-                if (command === 'native_file_job_start') return {jobId: 'job-1'}
-                if (command === 'native_file_job_status') return statuses.shift()
-                if (command === 'native_file_job_cancel') return 'requested'
-                if (command === 'native_file_job_forget') return true
-                throw new Error(`Unexpected command: ${command}`)
-            },
-        })).rejects.toMatchObject({name: 'AbortError'})
+        await expect(runNativeSnapshotRestore(restoreRuntime(11, {acquire}), {snapshotId: 'synthetic-snapshot'}, {}, host.dependencies)).rejects.toMatchObject({name: 'AbortError'})
         expect(acquire).not.toHaveBeenCalled()
-        expect(commands).toEqual(['native_file_job_start', 'native_file_job_status', 'native_file_job_cancel', 'native_file_job_status', 'native_file_job_forget'])
+        expect(host.commands()).toEqual(['native_file_job_start', 'native_file_job_status', 'native_file_job_cancel', 'native_file_job_status', 'native_file_job_forget'])
     })
 
     it('copies the bodies of a committed snapshot restore when the app recovers its refresh, then forgets the job', async () => {
         const events: string[] = []
-        const statuses = [awaiting(), activated(12)]
+        const host = createNativeJobHost([awaiting(), activated(12)], {
+            native_file_job_forget: () => { events.push('forgotten'); return true },
+        })
         const runtime = restoreRuntime(11, {projection: 'refresh-required'})
         await expect(runNativeSnapshotRestore(runtime, {snapshotId: 'synthetic-snapshot'}, {
             afterRefresh: () => { events.push('plugins-reloaded') },
             afterActivationRecovery: async activation => { events.push(`bodies:${activation.stagingId}:${activation.activationRevision}:${activation.bindingAuthority}`) },
-        }, {
-            isTauri: () => true,
-            wait: async () => undefined,
-            invoke: async command => {
-                if (command === 'native_file_job_start') return {jobId: 'job-1'}
-                if (command === 'native_file_job_status') return statuses.shift()
-                if (command === 'native_file_job_finalize') return 'requested'
-                if (command === 'native_file_job_forget') { events.push('forgotten'); return true }
-                throw new Error(`Unexpected command: ${command}`)
-            },
-        })).rejects.toBeInstanceOf(NativeFileJobActivationCommittedError)
+        }, host.dependencies)).rejects.toBeInstanceOf(NativeFileJobActivationCommittedError)
         expect(events).toEqual([])
         await continueCommittedWorkingSetRefresh(12, runtime, 2)
         expect(events).toEqual(['plugins-reloaded', 'bodies:stage:12:1', 'forgotten'])

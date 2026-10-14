@@ -5,6 +5,7 @@ vi.mock('src/ts/alert', () => ({ alertCheckboxConfirm: dialog }))
 vi.mock('./serverAssetResidency', () => ({ getAssetResidencyStatus: residency.status, downloadRemoteAssets: residency.download }))
 import { confirmPreviousStorageFiles, confirmSyncBindingReplacement, downloadPreviousStorageFiles } from './bindingDialog'
 import type { PreviousStorageFilesContext } from './bindingFlow'
+import { assetResidencyStatus } from './serverAssetResidency.testSupport'
 import { language } from 'src/lang'
 beforeEach(() => { dialog.mockReset(); residency.status.mockReset(); residency.download.mockReset() })
 it('uses one required acknowledgement with the settled copy', async () => {
@@ -28,8 +29,8 @@ describe('files held only by the previous storage', () => {
         target, libraryId: 'candidate-library', targetId: 'candidate-target', signal: new AbortController().signal,
         state: { target: { kind: 'none' }, targetAuthority: '0', selectionEpoch: '0', libraryId: null, progress: null },
     })
-    const status = (serverObjects: number, externalObjects: { connectionId: string, objects: number }[], previousStorageObjects = serverObjects + externalObjects.reduce((sum, entry) => sum + entry.objects, 0)) => ({ policy: 'remote', localBytes: 0, remoteBytes: 1, previousStorageObjects,
-        remoteObjects: serverObjects + externalObjects.reduce((sum, entry) => sum + entry.objects, 0), serverBytes: 0, serverObjects, externalObjects, unavailableObjects: 0, evictedBytes: 0 })
+    const status = (serverObjects: number, externalObjects: { connectionId: string, objects: number }[], previousStorageObjects = serverObjects + externalObjects.reduce((sum, entry) => sum + entry.objects, 0)) => assetResidencyStatus({ remoteBytes: 1, previousStorageObjects,
+        remoteObjects: serverObjects + externalObjects.reduce((sum, entry) => sum + entry.objects, 0), serverObjects, externalObjects })
     const server = { kind: 'server', connectionId: 'server' } as const
     const external = { kind: 'external', connectionId: 'next' } as const
     it.each([

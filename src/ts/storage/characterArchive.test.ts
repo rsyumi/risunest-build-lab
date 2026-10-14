@@ -9,16 +9,8 @@ const harness = vi.hoisted(() => ({
     database: { characters: [{ chaId: 'char-a' }], account: undefined },
     runtime: undefined as object | undefined,
 }))
-vi.mock('../platform', () => ({ isTauri: true }))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule({ runtime: 'tauri', os: 'windows' }))
 vi.mock('../alert', () => ({ alertConfirm: harness.confirm, alertError: harness.error }))
-vi.mock('src/lang', () => ({ language: { risuNest: { archive: {
-    confirmTitle: 'Archive', confirmBody: 'Confirm archive', confirmCounts: '{0}/{1}',
-    restoreTitle: 'Restore', restoreBody: 'Confirm restore',
-    archiveFailed: 'archive-failed', restoreFailed: 'restore-failed',
-    archiveRefreshFailed: 'archive-refresh-failed', restoreRefreshFailed: 'restore-refresh-failed',
-    archiveRemoteAssetUnavailable: 'archive-remote-unavailable', archiveAssetMissing: 'archive-asset-missing',
-    restoreRemoteAssetUnavailable: 'restore-remote-unavailable', restoreAssetMissing: 'restore-asset-missing',
-} } } }))
 vi.mock('../stores.svelte', () => ({ DBState: { db: harness.database }, selectedCharID: writable(0) }))
 vi.mock('src/lib/workingSetNavigation', () => ({ clearCharacterSelection: harness.clearSelection }))
 vi.mock('./persistentDataStoreFactory', () => ({ getPersistentDataStore: () => ({
@@ -27,6 +19,7 @@ vi.mock('./persistentDataStoreFactory', () => ({ getPersistentDataStore: () => (
 vi.mock('./persistentDataRuntime.svelte', () => ({ getPersistentDataRuntime: () => harness.runtime ?? ({
     capturePersistentMutationToken: harness.capture, acquireDestructiveReplacementFence: harness.acquire,
 }) }))
+import { language } from 'src/lang'
 import { archiveCharacterWithConfirmation, restoreArchivedCharacterWithConfirmation } from './characterArchive'
 import type { Database } from './database.svelte'
 import { IndexedDbPersistentDataStore } from './indexedDbPersistentDataStore'
@@ -100,7 +93,7 @@ describe('character archive ownership', () => {
     it('reports a committed restore with pending refresh as committed', async () => {
         harness.refresh.mockResolvedValue({ kind: 'committed', revision: 8, projection: 'refresh-required' })
         expect(await restoreArchivedCharacterWithConfirmation('char-a')).toBe(true)
-        expect(harness.error).toHaveBeenCalledWith('restore-refresh-failed')
+        expect(harness.error).toHaveBeenCalledWith(language.risuNest.archive.restoreRefreshFailed)
         expect(harness.release).toHaveBeenCalledOnce()
     })
 
@@ -109,7 +102,7 @@ describe('character archive ownership', () => {
         const log = vi.spyOn(console, 'error').mockImplementation(() => {})
         try {
             expect(await archiveCharacterWithConfirmation('char-a')).toBe(false)
-            expect(harness.error).toHaveBeenCalledWith('archive-failed')
+            expect(harness.error).toHaveBeenCalledWith(language.risuNest.archive.archiveFailed)
             expect(harness.refresh).not.toHaveBeenCalled()
             expect(harness.release).toHaveBeenCalledOnce()
         } finally { log.mockRestore() }
@@ -117,11 +110,12 @@ describe('character archive ownership', () => {
 
     it('names a file the native store could not fetch or find', async () => {
         const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+        const strings = language.risuNest.archive
         try {
             for (const [message, restoreText, archiveText] of [
-                ['character archive data could not be fetched', 'restore-remote-unavailable', 'archive-remote-unavailable'],
-                ['character archive data is missing', 'restore-asset-missing', 'archive-asset-missing'],
-                ['synthetic other failure', 'restore-failed', 'archive-failed'],
+                ['character archive data could not be fetched', strings.restoreRemoteAssetUnavailable, strings.archiveRemoteAssetUnavailable],
+                ['character archive data is missing', strings.restoreAssetMissing, strings.archiveAssetMissing],
+                ['synthetic other failure', strings.restoreFailed, strings.archiveFailed],
             ]) {
                 const failure = Object.assign(new Error(message), { code: 'validation' })
                 harness.error.mockClear()

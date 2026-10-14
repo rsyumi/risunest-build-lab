@@ -9,7 +9,6 @@ const mocks = vi.hoisted(() => ({
     selectMultiple: vi.fn(), selectSingle: vi.fn(), importRegex: vi.fn(), registerModel: vi.fn(),
     saveAsset: vi.fn(async () => 'assets/synthetic.bin'), mutate: vi.fn(), fileSrc: vi.fn(async () => ''),
 }))
-vi.mock('src/lang', () => ({ language: languageEnglish }))
 vi.mock('src/ts/stores.svelte', () => {
     const DBState = $state({ db: {} })
     return { DBState, CharConfigSubMenu: writable(4), selectedCharID: writable(0),

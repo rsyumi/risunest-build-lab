@@ -9,7 +9,7 @@ const state = vi.hoisted(() => ({
     markers: null as unknown as DeviceMarkerStorage,
     importPlugin: vi.fn(), loadPlugins: vi.fn(), flush: vi.fn(), markDirty: vi.fn(), yield: vi.fn(),
 }))
-vi.mock('../platform', () => ({ get isTauri() { return state.native } }))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule(() => ({ runtime: state.native ? 'tauri' : 'web', os: 'windows' })))
 vi.mock('../stores.svelte', () => ({ DBState: { get db() { return state.db } } }))
 vi.mock('../storage/deviceMarkers', async original => ({
     ...await original<object>(), getDeviceMarkers: () => state.markers,

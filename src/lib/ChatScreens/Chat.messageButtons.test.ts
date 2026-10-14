@@ -48,7 +48,6 @@ vi.mock('src/ts/util', () => ({
     getUserName: () => 'Live User',
     sleep: () => Promise.resolve(),
 }))
-vi.mock('../../lang', () => ({ language: { copy: 'Copy', remove: 'Remove', edit: 'Edit' } }))
 vi.mock('../../ts/alert', () => ({
     alertClear: vi.fn(), alertConfirm: vi.fn(), alertError: vi.fn(), alertInput: vi.fn(), alertNormal: vi.fn(),
     alertRequestData: vi.fn(), alertWait: vi.fn(), alertToast: vi.fn(),

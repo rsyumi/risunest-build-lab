@@ -86,23 +86,26 @@ export function sharedCargoTarget(commonGitDirectory, configuredTarget, root) {
 }
 
 export function nativeCommands(group, platform = process.platform) {
-  if (!['protocol', 'host'].includes(group)) throw new Error('Expected protocol or host')
+  if (!['protocol', 'host', 'harness'].includes(group)) throw new Error('Expected protocol, host or harness')
+  if (group === 'harness') {
+    // The Sync server's source observer serves the LWW benchmark and compiles only into test builds
+    // with this feature. Its copy of small-object-store repeats that crate's own tests, so they are skipped.
+    return [[
+      'cargo', 'test', '--manifest-path', 'server/sync/Cargo.toml', '--release', '--locked', '--lib',
+      '--features', 'source-observer', '--', '--skip', 'source_observer::small_object_store::tests',
+    ]]
+  }
   const commands = []
   for (const manifest of group === 'protocol' ? protocolManifests : hostManifests) {
     if (manifest === 'src-tauri/Cargo.toml' && platform === 'linux') {
       commands.push(['dbus-run-session', '--', 'bash', 'scripts/linux-native-tests.sh', '--release'])
     } else if (manifest === 'crates/network-log/Cargo.toml') {
       commands.push(['cargo', 'test', '--manifest-path', manifest, '--features', 'reqwest', '--release', '--locked'])
-    } else if (manifest === 'server/sync/Cargo.toml') {
-      commands.push(['cargo', 'test', '--manifest-path', manifest, '--release', '--locked', '--', '--skip', 'source_observer'])
     } else {
       commands.push(['cargo', 'test', '--manifest-path', manifest, '--release', '--locked'])
     }
   }
   if (group === 'host') {
-    const server = ['cargo', 'test', '--manifest-path', 'server/sync/Cargo.toml', '--release', '--locked', '--lib']
-    commands.push([...server, 'source_observer', '--', '--skip', 'source_observer::small_object_store::tests'])
-    commands.push([...server, 'source_observer::small_object_store::tests'])
     for (const entry of packageCrateTests.filter(entry => entry.platforms.includes(platform))) {
       commands.push([
         'cargo', 'test', '--manifest-path', entry.runnerManifest,
@@ -135,12 +138,14 @@ export function runNative(group) {
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
+  const usage = 'Usage: node scripts/testNative.mjs protocol|host|--harness'
+  const groups = { protocol: 'protocol', host: 'host', '--harness': 'harness' }
   try {
     if (process.argv[2] === '--help') {
-      console.log('Usage: node scripts/testNative.mjs protocol|host\nRequires the checked-in Rust toolchain and native build dependencies. Linux host tests require dbus-run-session and gnome-keyring-daemon. Uses only the main checkout src-tauri/target; never installs toolchains or skips missing prerequisites.')
+      console.log(`${usage}\n--harness runs only the benchmark harness tests, which stay out of the protocol and host runs and CI.\nRequires the checked-in Rust toolchain and native build dependencies. Linux host tests require dbus-run-session and gnome-keyring-daemon. Uses only the main checkout src-tauri/target; never installs toolchains or skips missing prerequisites.`)
     } else {
-      if (process.argv.length !== 3) throw new Error('Usage: node scripts/testNative.mjs protocol|host')
-      runNative(process.argv[2])
+      if (process.argv.length !== 3 || !Object.hasOwn(groups, process.argv[2])) throw new Error(usage)
+      runNative(groups[process.argv[2]])
     }
   } catch (error) {
     console.error(error)

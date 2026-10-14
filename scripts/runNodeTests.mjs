@@ -5,17 +5,16 @@ import { fileURLToPath } from 'node:url'
 import { discoverTestEntries, nodeTestExceptions, selectNodeTests } from '../tests/suiteOwnership.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+// Benchmark harness tests run only on request, never in `pnpm test:node` or CI.
+const harness = process.argv.includes('--harness')
 try {
-  const files = [
-    ...await discoverTestEntries(root, 'tests'),
-    ...await discoverTestEntries(root, 'benchmarks'),
-  ]
+  const files = await discoverTestEntries(root, harness ? 'benchmarks' : 'tests')
   for (const path of nodeTestExceptions) {
     await access(resolve(root, path))
     if (!files.includes(path)) files.push(path)
   }
-  const selected = selectNodeTests(files)
-  console.log(`Running ${selected.length} Node test files`)
+  const selected = selectNodeTests(files, harness ? 'harness-node' : 'node')
+  console.log(`Running ${selected.length} ${harness ? 'harness ' : ''}Node test files`)
   const result = spawnSync(process.execPath, ['--test', ...selected], { cwd: root, stdio: 'inherit', windowsHide: true })
   if (result.error) throw result.error
   if (result.signal) throw new Error(`Node tests terminated by ${result.signal}`)

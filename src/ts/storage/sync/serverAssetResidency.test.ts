@@ -9,8 +9,9 @@ import { assetCleanupProgress } from './serverAssetCleanupProgress'
 import { get } from 'svelte/store'
 import { clearExternalProgress, externalProgressFor, subscribeExternalProgress, type ExternalOperationProgress } from './external/progress'
 import { reserveLibraryFileOperation, waitForLibraryFileOperation } from '../libraryFileOperation'
+import { assetResidencyStatus } from './serverAssetResidency.testSupport'
 
-const status = { policy: 'full', localBytes: 2, remoteBytes: 1, remoteObjects: 1, serverBytes: 1, serverObjects: 1, externalObjects: [], unavailableObjects: 0, evictedBytes: 0 }
+const status = assetResidencyStatus({ localBytes: 2, remoteBytes: 1, remoteObjects: 1, serverBytes: 1, serverObjects: 1 })
 beforeEach(() => { vi.resetAllMocks(); mock.selectedIndex = 0; assetCleanupProgress.set(undefined) })
 afterEach(() => { clearExternalProgress('receiver'); vi.restoreAllMocks() })
 describe('asset residency mobile lifetime', () => {
@@ -252,7 +253,7 @@ describe('asset residency mobile lifetime', () => {
     })
     it('requires an exact target membership result and forwards the same target to download', async () => {
         const target = { kind: 'external', connectionId: 'shared-target' } as const
-        mock.invoke.mockResolvedValueOnce(status)
+        mock.invoke.mockResolvedValueOnce({ ...status, previousStorageObjects: undefined })
         await expect(getAssetResidencyStatus(target)).rejects.toThrow('invalid-asset-residency-status')
         mock.invoke.mockResolvedValue({ ...status, previousStorageObjects: 0 })
         await expect(getAssetResidencyStatus(target)).resolves.toMatchObject({ previousStorageObjects: 0 })

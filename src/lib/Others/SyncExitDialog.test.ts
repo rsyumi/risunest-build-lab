@@ -5,9 +5,6 @@ import { configureSyncExitCoordinator, syncExitDialogState } from 'src/ts/storag
 import type { SyncExitDecision } from 'src/ts/storage/syncExitCoordinator'
 import SyncExitDialog from './SyncExitDialog.svelte'
 
-vi.mock('src/lang', async () => ({
-    language: (await import('src/lang/en')).languageEnglish,
-}))
 
 let component: ReturnType<typeof mount> | undefined
 let target: HTMLDivElement | undefined

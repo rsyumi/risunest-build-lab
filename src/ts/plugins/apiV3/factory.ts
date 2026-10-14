@@ -1,5 +1,6 @@
 import { recordNativeLogError } from '../../nativeLog'
 import { isTauri } from '../../platform'
+import { consoleLog, installConsoleCapture, isConsoleLogLevel } from '../../consoleLog'
 import { attachPluginReadProvenance, collectPluginReadProvenance, type PluginReadProvenance } from '../pluginReadBaselines'
 
 type MsgType =
@@ -11,7 +12,8 @@ type MsgType =
     | 'RELEASE_INSTANCE'
     | 'ABORT_SIGNAL'
     | 'SCRIPT_SETTLED'
-    | 'PLUGIN_ERROR';
+    | 'PLUGIN_ERROR'
+    | 'PLUGIN_CONSOLE';
 
 interface RpcMessage {
     type: MsgType;
@@ -24,6 +26,8 @@ interface RpcMessage {
     abortId?: string;
     provenance?: PluginReadProvenance[];
     argProvenance?: PluginReadProvenance[][];
+    entries?: { level: unknown; message: unknown; tsMs: unknown }[];
+    generation?: number;
 }
 
 interface RemoteRef {
@@ -610,6 +614,7 @@ export class SandboxHost {
     private instanceRegistry = new Map<string, any>();
     private abortControllers = new Map<string, AbortController>();
     private messageHandlerRef: ((event: MessageEvent) => void) | null = null;
+    private disposeConsoleClear: (() => void) | null = null;
     private callbackWrapperCache = new Map<string, Function>();
 
     private pendingCallbacks = new Map<string, { resolve: Function, reject: Function, dispose: () => void }>();
@@ -1064,11 +1069,26 @@ export class SandboxHost {
             const data = event.data as RpcMessage;
             if (!data || typeof data !== 'object' || Array.isArray(data)) return;
 
+            if (data.type === 'PLUGIN_CONSOLE') {
+                if (!Array.isArray(data.entries)) return;
+                if (data.generation !== consoleLog.generation) {
+                    // A frame can finish loading after its clear notification was sent.
+                    this.iframe.contentWindow?.postMessage({ type: 'CLEAR_CONSOLE', generation: consoleLog.generation }, '*');
+                    return;
+                }
+                for (const entry of data.entries.slice(0, 200)) {
+                    if (!entry || !isConsoleLogLevel(entry.level) || typeof entry.message !== 'string') continue;
+                    consoleLog.append(entry.level, sourceLabel, entry.message,
+                        typeof entry.tsMs === 'number' && Number.isFinite(entry.tsMs) && Math.abs(entry.tsMs) < 8.64e15
+                            ? entry.tsMs : Date.now());
+                }
+                return;
+            }
+
             if (data.type === 'PLUGIN_ERROR') {
                 if (typeof data.error === 'string' && data.error.trim()) {
                     const message = `[${sourceLabel}] ${data.error.slice(0, 8192)}`;
                     if (isTauri) void recordNativeLogError(message).catch(() => {});
-                    this.apiFactory.alertError?.(message);
                 }
                 return;
             }
@@ -1218,6 +1238,9 @@ export class SandboxHost {
 
         this.messageHandlerRef = messageHandler;
         window.addEventListener('message', this.messageHandlerRef);
+        this.disposeConsoleClear = consoleLog.onClear(generation => {
+            this.iframe.contentWindow?.postMessage({ type: 'CLEAR_CONSOLE', generation }, '*');
+        });
 
 
         const html = `
@@ -1235,6 +1258,39 @@ export class SandboxHost {
         </style>
         <script nonce="${this.nonce}">
             document.querySelector('meta#csp-meta')?.remove();
+            let consoleEntries = [];
+            let consoleChars = 0;
+            let consoleDropped = 0;
+            let consoleTimer;
+            let consoleGeneration = ${consoleLog.generation};
+            window.addEventListener('message', event => {
+                if (event.source !== parent || event.data?.type !== 'CLEAR_CONSOLE') return;
+                consoleGeneration = event.data.generation;
+                consoleEntries = [];
+                consoleChars = consoleDropped = 0;
+                clearTimeout(consoleTimer);
+                consoleTimer = undefined;
+            });
+            const flushConsole = () => {
+                clearTimeout(consoleTimer);
+                consoleTimer = undefined;
+                if (consoleDropped) consoleEntries.push({ level: 'warn', message: consoleDropped + ' console messages omitted', tsMs: consoleEntries[consoleEntries.length - 1].tsMs });
+                const entries = consoleEntries;
+                consoleEntries = [];
+                consoleChars = consoleDropped = 0;
+                if (entries.length) {
+                    try { parent.postMessage({ type: 'PLUGIN_CONSOLE', entries, generation: consoleGeneration }, '*'); } catch (_) {}
+                }
+            };
+            (${installConsoleCapture.toString()})(console, (level, message) => {
+                while (consoleEntries.length && (consoleEntries.length >= 199 || consoleChars + message.length > 262144)) {
+                    consoleChars -= consoleEntries.shift().message.length;
+                    consoleDropped++;
+                }
+                consoleEntries.push({ level, message, tsMs: Date.now() });
+                consoleChars += message.length;
+                consoleTimer ??= setTimeout(flushConsole, 100);
+            });
             const reportedErrors = new WeakSet();
             const reportPluginError = (error) => {
                 if (error && typeof error === 'object') {
@@ -1251,36 +1307,18 @@ export class SandboxHost {
                     } catch (_) { parts.push('Unprintable plugin error'); }
                     try { current = current.cause; } catch (_) { break; }
                 }
-                try { parent.postMessage({ type: 'PLUGIN_ERROR', error: parts.join('\\n').slice(0, 8192) }, '*'); } catch (_) {}
+                const message = parts.join('\\n').slice(0, 8192);
+                try { console.error(message); } catch (_) {}
+                flushConsole();
+                try { parent.postMessage({ type: 'PLUGIN_ERROR', error: message }, '*'); } catch (_) {}
             };
             window.addEventListener('error', event => { if (event.error) reportPluginError(event.error); });
             window.addEventListener('unhandledrejection', event => reportPluginError(event.reason));
-            const observedReaders = new WeakSet();
-            for (const method of ['readAsArrayBuffer', 'readAsText', 'readAsDataURL', 'readAsBinaryString']) {
-                const read = FileReader.prototype[method];
-                if (typeof read !== 'function') continue;
-                FileReader.prototype[method] = function(...args) {
-                    if (!observedReaders.has(this)) {
-                        observedReaders.add(this);
-                        this.addEventListener('error', () => reportPluginError(this.error));
-                    }
-                    try { return read.apply(this, args); }
-                    catch (error) { reportPluginError(error); throw error; }
-                };
-            }
-            for (const method of ['arrayBuffer', 'text', 'bytes']) {
-                const read = Blob.prototype[method];
-                if (typeof read !== 'function') continue;
-                Blob.prototype[method] = function(...args) {
-                    try {
-                        return read.apply(this, args).catch(error => { reportPluginError(error); throw error; });
-                    } catch (error) { reportPluginError(error); throw error; }
-                };
-            }
             (async () => {
                 ${GUEST_BRIDGE_SCRIPT}
                     
                 const settled = () => {
+                    flushConsole();
                     try { parent.postMessage({ type: 'SCRIPT_SETTLED' }, '*'); } catch (_) {}
                 };
                 (async () => {
@@ -1302,6 +1340,8 @@ export class SandboxHost {
 
     public terminate() {
         this.terminated = true;
+        this.disposeConsoleClear?.();
+        this.disposeConsoleClear = null;
         for (const controller of this.abortControllers.values()) controller.abort();
         if (this.messageHandlerRef) {
             window.removeEventListener('message', this.messageHandlerRef);

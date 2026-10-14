@@ -1,5 +1,5 @@
 import { get } from "svelte/store";
-import { getChatVar, setChatVar } from '../parser/chatVar.svelte';
+import { getChatVar } from '../parser/chatVar.svelte';
 import {selectedCharID} from '../stores.svelte'
 import { type Message, type loreBook } from "../storage/database.svelte";
 import { DBState } from '../stores.svelte';
@@ -15,6 +15,7 @@ import { v4 } from "uuid";
 import type { ConversationHistoryOperation } from "../storage/conversationHistoryOperation";
 import { createCompatibilityConversationHistorySnapshot } from "../storage/conversationHistoryOperation";
 import { CONVERSATION_RANGE_MAX_LIMIT } from "../storage/persistentDataStore";
+import { setSelectedChatVariable } from "./selectedChatVariables";
 
 export function addLorebook(type:number) {
     const selectedID = get(selectedCharID)
@@ -679,10 +680,10 @@ export async function loadLoreBookV3Prompt(history: ConversationHistoryOperation
                 activatedIndexes.add(i)
 
                 if(keepActivateAfterMatch){
-                    setChatVar('__internal_ka_' + (fullLore[i].id ?? pickHashRand(5555,fullLore[i].content).toString()), 'true')
+                    setSelectedChatVariable('__internal_ka_' + (fullLore[i].id ?? pickHashRand(5555,fullLore[i].content).toString()), 'true')
                 }
                 if(dontActivateAfterMatch){
-                    setChatVar('__internal_da_' + (fullLore[i].id ?? pickHashRand(5555,fullLore[i].content).toString()), 'true')
+                    setSelectedChatVariable('__internal_da_' + (fullLore[i].id ?? pickHashRand(5555,fullLore[i].content).toString()), 'true')
                 }
 
 

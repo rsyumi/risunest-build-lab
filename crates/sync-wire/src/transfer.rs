@@ -51,7 +51,7 @@ pub fn encode(frames: &[Frame]) -> Result<Vec<u8>> {
             Frame::Full(bytes) => {
                 payload.push(0);
                 let digest = hash(bytes);
-                #[cfg(test)]
+                #[cfg(any(test, feature = "source-observer"))]
                 super::delta::source_test_observer::completed(
                     &digest,
                     "transfer-full-encode-sha256",
@@ -109,14 +109,14 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<Frame>> {
                     }
                     let bytes = take(&mut payload, size as usize)?;
                     let actual = hash(bytes);
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "source-observer"))]
                     super::delta::source_test_observer::completed(
                         &digest,
                         "transfer-full-decode-sha256",
                         bytes.len(),
                     );
                     if actual != digest {
-                        #[cfg(test)]
+                        #[cfg(any(test, feature = "source-observer"))]
                         super::delta::source_test_observer::failed(
                             &digest,
                             "transfer-full-decode-sha256",

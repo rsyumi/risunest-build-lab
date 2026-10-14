@@ -14,6 +14,7 @@ private struct OpenedArgs: Decodable { let urls: [String] }
 private struct PathArgs: Decodable { let path: String }
 private struct PickFilesArgs: Decodable { let multiple: Bool }
 private struct PortableSourceArgs: Decodable { let token: String; let jobId: String? }
+private struct BackupSourceCopyArgs: Decodable { let token: String; let onProgress: Channel? }
 private struct PortableSourceFormatArgs: Decodable { let token: String; let format: String }
 private struct PortableSourceProbeArgs: Decodable { let token: String; let probeId: String }
 private struct DataRootArgs: Decodable { let dataRoot: String }
@@ -507,6 +508,8 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
 
     @objc func releasePortableSource(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(PortableSourceArgs.self)
+        // Signal a running copy before queueing the descriptor and scope cleanup.
+        _ = portableSources.cancelCopy(token: args.token, jobId: args.jobId)
         fileQueue.async { invoke.resolve(self.portableSources.release(token: args.token, jobId: args.jobId)) }
     }
 
@@ -529,6 +532,7 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
 
     @objc func discardBackupSource(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(PortableSourceArgs.self)
+        _ = portableSources.cancelCopy(token: args.token, jobId: nil)
         fileQueue.async { invoke.resolve(self.portableSources.release(token: args.token, jobId: nil)) }
     }
 
@@ -539,10 +543,14 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
     }
 
     @objc func materializeBackupSource(_ invoke: Invoke) throws {
-        let args = try invoke.parseArgs(PortableSourceArgs.self)
+        let args = try invoke.parseArgs(BackupSourceCopyArgs.self)
         guard let staging = staging else { invoke.reject(rootUnavailable().localizedDescription); return }
         fileQueue.async {
-            do { invoke.resolve(try self.portableSources.materialize(token: args.token, staging: staging)) }
+            do {
+                invoke.resolve(try self.portableSources.materialize(token: args.token, staging: staging) { progress in
+                    try? args.onProgress?.send(progress)
+                })
+            }
             catch { invoke.reject("Backup source could not be copied") }
         }
     }

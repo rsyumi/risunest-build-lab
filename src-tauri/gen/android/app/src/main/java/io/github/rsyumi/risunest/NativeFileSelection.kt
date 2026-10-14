@@ -38,6 +38,17 @@ internal fun cleanupStaleSelectedDocuments(root: File, staleBefore: Long, discar
   }
 }
 
+internal fun discardSelectedDocument(root: File, path: String) {
+  val file = File(path).canonicalFile
+  require(file.name == "source" && file.parentFile?.parentFile == root.canonicalFile &&
+    runCatching { UUID.fromString(file.parentFile!!.name) }.isSuccess) {
+    "Invalid selected document path"
+  }
+  if (file.exists() && !file.delete()) throw IOException("Could not remove the temporary document")
+  val folder = file.parentFile!!
+  if (folder.exists() && !folder.delete()) throw IOException("Could not remove temporary document storage")
+}
+
 internal class NativeFileSelection(private val activity: ComponentActivity) {
   private val root get() = File(activity.cacheDir, "selected_documents")
   private var pending: CompletableDeferred<List<Uri>?>? = null
@@ -117,14 +128,5 @@ internal class NativeFileSelection(private val activity: ComponentActivity) {
     }
   }
 
-  fun discard(path: String) {
-    val file = File(path).canonicalFile
-    require(file.name == "source" && file.parentFile?.parentFile == root.canonicalFile &&
-      runCatching { UUID.fromString(file.parentFile!!.name) }.isSuccess) {
-      "Invalid selected document path"
-    }
-    if (file.exists() && !file.delete()) throw IOException("Could not remove the temporary document")
-    val folder = file.parentFile!!
-    if (folder.exists() && !folder.delete()) throw IOException("Could not remove temporary document storage")
-  }
+  fun discard(path: String) = discardSelectedDocument(root, path)
 }

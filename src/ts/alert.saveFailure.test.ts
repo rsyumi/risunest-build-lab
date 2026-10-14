@@ -10,12 +10,11 @@ vi.mock('./stores.svelte', async () => {
     return { alertStore: createAlertQueue({ type: 'none', msg: '' }, { gapMs: 0 }) }
 })
 vi.mock('./storage/database.svelte', () => ({ getDatabase: vi.fn(() => ({})) }))
-vi.mock('src/ts/platform', () => ({ isTauri: false }))
-vi.mock('src/lang', async () => ({ language: (await import('src/lang/en')).languageEnglish }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 
 import { alertStore } from './stores.svelte'
 import { alertClear, alertError } from './alert'
-import { languageEnglish } from 'src/lang/en'
+import { language } from 'src/lang'
 import {
     WindowedConversationRequiresCompatibilityError,
     WindowedConversationSaveError,
@@ -40,12 +39,12 @@ describe('error dialogs for local save failures', () => {
         [
             'a refused windowed capture',
             new WindowedConversationRequiresCompatibilityError('private reason'),
-            languageEnglish.risuNest.localSaveFailure.failed,
+            language.risuNest.localSaveFailure.failed,
         ],
         [
             'a current chat that cannot be completed',
             new WindowedConversationSaveError('private reason', new Error('private cause')),
-            languageEnglish.risuNest.localSaveFailure.currentChat,
+            language.risuNest.localSaveFailure.currentChat,
         ],
     ])('shows the save failure text for %s instead of the internal error', (_label, error, text) => {
         alertError(error)

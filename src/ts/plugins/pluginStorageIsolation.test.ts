@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { PersistentDataStore, PluginStorageMutation, PluginStorageValueQuery } from '../storage/persistentDataStore'
+import type { PersistentRoot, PluginStorageMutation, PluginStorageValueQuery } from '../storage/persistentDataStore'
+import { createLeaseStub, createStoreStub } from '../storage/persistentDataStore.testSupport'
 import { createPluginStorageStore } from './pluginStorageStore'
 import { applyPluginDatabaseUpdate } from './pluginDatabaseAccess'
 import type { Database } from '../storage/database.svelte'
@@ -15,9 +16,9 @@ interface Row {
 function sharedStore(initial: readonly Row[]) {
     let rows = initial.map((row) => ({ ...row }))
     const committed: PluginStorageMutation[] = []
-    const store = {
+    const store = createStoreStub({
         open: vi.fn(async () => undefined),
-        readRoot: vi.fn(async () => ({ revision: 1, value: {} })),
+        readRoot: vi.fn(async () => ({ revision: 1, value: {} as PersistentRoot })),
         queryPluginStorage: vi.fn(async () => ({
             revision: 1,
             items: rows.map((row) => ({
@@ -30,7 +31,7 @@ function sharedStore(initial: readonly Row[]) {
             const row = rows.find((item) => item.owner === owner && item.key === key)
             return row ? { revision: 1, value: structuredClone(row.value) } : null
         }),
-        acquireRevision: vi.fn(async () => ({
+        acquireRevision: vi.fn(async () => createLeaseStub({
             revision: 1,
             readPluginStorageValues: async ({ owner, afterKey, limit = 256 }: PluginStorageValueQuery) => {
                 const records = rows.map((row, ordinal) => ({ ...row, ordinal }))
@@ -60,7 +61,7 @@ function sharedStore(initial: readonly Row[]) {
             },
             release: vi.fn(async () => undefined),
         })),
-    } as unknown as PersistentDataStore
+    })
     const storage = createPluginStorageStore({
         store,
         getStorageAuthorityEpoch: () => 0,
@@ -213,11 +214,11 @@ describe('plugin storage isolation', () => {
             release = resolve
         })
         const rows: Row[] = []
-        const store = {
+        const store = createStoreStub({
             open: vi.fn(async () => undefined),
             queryPluginStorage: vi.fn(async () => ({ revision: 1, items: [] })),
             readPluginStorage: vi.fn(async () => null),
-        } as unknown as PersistentDataStore
+        })
         const storage = createPluginStorageStore({
             store,
             getStorageAuthorityEpoch: () => 0,

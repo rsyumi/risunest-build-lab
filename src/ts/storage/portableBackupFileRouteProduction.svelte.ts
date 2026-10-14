@@ -228,9 +228,27 @@ export async function restoreBackupFromNativeSource(
                 >('native_backup_source_format', { source: input })
                 checkSignal(joined.signal)
                 if (format !== 'portable') {
-                    if (input.type === 'androidSeekable') input = await materializeAndroidBackupSource(input.token)
+                    if (input.type === 'androidSeekable') input = await materializeAndroidBackupSource(input.token, {
+                        signal: joined.signal,
+                        onProgress: progress => onStatus(syntheticNativeFileJobStatus(
+                            { jobId: progress.requestId, kind: format === 'local-backup' ? 'restore-legacy-local-backup' : 'restore-block-risu-save' },
+                            'copying-source',
+                            {
+                                stageUnit: 'bytes', stageCompleted: progress.copiedBytes,
+                                ...(progress.totalBytes === null ? {} : { stageTotal: progress.totalBytes }),
+                            },
+                        )),
+                    })
                     else if (input.type === 'iosScoped') {
-                        const materialized = await materializeIOSBackupSource(input.token)
+                        const token = input.token
+                        const materialized = await materializeIOSBackupSource(token, {
+                            signal: joined.signal,
+                            onProgress: progress => onStatus(syntheticNativeFileJobStatus(
+                                { jobId: token, kind: format === 'local-backup' ? 'restore-legacy-local-backup' : 'restore-block-risu-save' },
+                                'copying-source',
+                                { stageUnit: 'bytes', stageCompleted: progress.copiedBytes, stageTotal: progress.totalBytes },
+                            )),
+                        })
                         materializedIOSPath = materialized.path
                         input = { type: 'desktopPath', path: materialized.path }
                     }

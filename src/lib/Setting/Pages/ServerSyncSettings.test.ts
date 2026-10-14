@@ -2,9 +2,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 import { languageEnglish } from 'src/lang/en'
+import type { PlatformShape } from 'src/ts/platform.testSupport'
 const f = vi.hoisted(() => ({ pending: vi.fn(async (): Promise<number | undefined> => undefined), ensure: vi.fn(), connect: vi.fn(), dismiss: vi.fn(), complete: vi.fn(), configure: vi.fn(), bind: vi.fn(), disconnect: vi.fn(), hold: vi.fn(), release: vi.fn(), status: vi.fn(), policy: vi.fn(), evict: vi.fn(), cancel: vi.fn(), checkbox: vi.fn(), action: vi.fn(), native: true, scan: false, scanner: { scan: vi.fn(), cancel: vi.fn() }, os: 'windows', listeners: new Set<(value: Record<string, unknown>) => void>(), bindingState: vi.fn(), preset: vi.fn(), state: { db: {} as Record<string, unknown> }, view: { status: { configured: false }, paused: false } as Record<string, unknown> }))
-vi.mock('src/lang', async () => ({ language: (await import('src/lang/en')).languageEnglish, changeLanguage: vi.fn() }))
-vi.mock('src/ts/platform', () => ({ get isTauri() { return f.native } }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule(() => ({ runtime: f.native ? 'tauri' : 'web', os: f.os as PlatformShape['os'] })))
 vi.mock('@tauri-apps/plugin-os', () => ({ platform: () => f.os }))
 vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn(), alertCheckboxConfirm: f.checkbox, alertActionConfirm: f.action, alertError: vi.fn(), alertNormal: vi.fn(), openRisuAccountLogin: vi.fn() }))
 vi.mock('src/ts/storage/sync/serverSyncProduction', () => ({
@@ -38,6 +38,9 @@ vi.mock('src/lib/Others/Onboarding/onboardingWeave', () => ({ observeOnboardingW
 vi.mock('src/ts/stores.svelte', () => ({ DBState: f.state }))
 import ServerSyncSettings from './ServerSyncSettings.svelte'
 import { assetCleanupProgress, type AssetCleanupState } from 'src/ts/storage/sync/serverAssetCleanupProgress'
+import type { AssetResidencyStatus } from 'src/ts/storage/sync/serverAssetResidency'
+import { assetResidencyStatus } from 'src/ts/storage/sync/serverAssetResidency.testSupport'
+import { serverSyncLane as lane } from 'src/ts/storage/sync/serverSyncProgress.testSupport'
 import { QrScanError } from 'src/ts/ui/qrScanner'
 import Onboarding from 'src/lib/Others/Onboarding/Onboarding.svelte'
 let component: ReturnType<typeof mount> | undefined
@@ -61,7 +64,7 @@ const findButton = (text: string) => [...host.querySelectorAll('button')].find(b
 it('shows cleanup phases immediately, survives remount, and refreshes after cancellation', async () => {
     const copy = languageEnglish.risuNest.serverSync
     f.view = { status: { configured: true, bound: true, assetPolicy: 'remote' }, running: false, paused: false }
-    const status = { policy: 'remote', localBytes: 8192, remoteBytes: 0, remoteObjects: 0, serverBytes: 0, serverObjects: 0, externalObjects: [], unavailableObjects: 0, evictedBytes: 0 }
+    const status = assetResidencyStatus({ policy: 'remote', localBytes: 8192 })
     f.status.mockResolvedValue(status)
     const reading: AssetCleanupState = { operationId: 'synthetic', state: 'running', sequence: 0, stage: 'preparing', completedItems: 0, totalItems: null, evictedItems: 0, evictedBytes: 0 }
     let finish!: () => void
@@ -95,7 +98,7 @@ it('shows cleanup phases immediately, survives remount, and refreshes after canc
 it.each([false, true])('refreshes capacity after a partial cleanup failure and preserves its error (refresh fails: %s)', async refreshFails => {
     const copy = languageEnglish.risuNest.serverSync
     f.view = { status: { configured: true, bound: true, assetPolicy: 'remote' }, running: false, paused: false }
-    const status = { policy: 'remote', localBytes: 8192, remoteBytes: 0, remoteObjects: 0, serverBytes: 0, serverObjects: 0, externalObjects: [], unavailableObjects: 0, evictedBytes: 0 }
+    const status = assetResidencyStatus({ policy: 'remote', localBytes: 8192 })
     f.status.mockResolvedValue(status)
     component = mount(ServerSyncSettings, { target: host }); await settle()
     f.status.mockClear()
@@ -402,9 +405,9 @@ it('hides the native server connection UI on web', async () => {
 })
 
 const sync = languageEnglish.risuNest.serverSync
-const residencyStatus = (overrides: Record<string, unknown> = {}) => ({ policy: 'remote', localBytes: 0, remoteBytes: 4096, remoteObjects: 2, serverBytes: 4096, serverObjects: 2, externalObjects: [], unavailableObjects: 0, evictedBytes: 0, ...overrides })
+const residencyStatus = (overrides: Partial<AssetResidencyStatus> = {}) => assetResidencyStatus({ policy: 'remote', remoteBytes: 4096, remoteObjects: 2, serverBytes: 4096, serverObjects: 2, ...overrides })
 const externalOnly = { serverObjects: 0, serverBytes: 0, externalObjects: [{ connectionId: 'external', objects: 2 }] }
-async function mountBound(status: Record<string, unknown> = residencyStatus()) {
+async function mountBound(status: AssetResidencyStatus = residencyStatus()) {
     f.view = { status: { configured: true, bound: true }, paused: false, error: '' }
     f.status.mockResolvedValue(status)
     component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
@@ -711,7 +714,7 @@ describe('downloading files kept only on the server', () => {
         { name: 'files only in external storage', policy: 'full', status: { ...externalOnly, remoteBytes: 4096 }, shown: true },
         { name: 'no remote files', policy: 'full', status: { remoteObjects: 0, remoteBytes: 0, serverObjects: 0, serverBytes: 0 }, shown: false },
         { name: 'files only on the server', policy: 'remote', status: {}, shown: false },
-    ])('offers the download for policy $policy with $name: $shown', async ({ policy, status, shown }) => {
+    ] as const)('offers the download for policy $policy with $name: $shown', async ({ policy, status, shown }) => {
         await mountBound(residencyStatus({ policy, ...status }))
         expect(!!findButton(sync.residency.download)).toBe(shown)
     })
@@ -1048,7 +1051,6 @@ describe('layout', () => {
     })
 })
 describe('progress', () => {
-    const lane = (name: string, counts: Record<string, unknown> = {}) => ({ lane: name, active: false, sending: false, receiving: false, step: 'idle', listed: 0, itemsDone: 0, itemsTotal: 0, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, sentBytes: 0, receivedBytes: 0, backlogDone: 0, backlogLeft: 0, ...counts })
     const running = (startedAt: number) => ({
         status: { configured: true, bound: true }, paused: false, running: true, error: '',
         progress: { mode: 'full', startedAt, stages: ['downloading', 'publishing'], active: ['publishing'], current: 'publishing', plannedSend: 4, lanes: [lane('send', { active: true, step: 'uploading', itemsDone: 1, itemsTotal: 2, filesDone: 1, filesTotal: 2, bytesDone: 1024, bytesTotal: 4096, sentBytes: 3000 }), lane('receive', { receivedBytes: 500 })] },

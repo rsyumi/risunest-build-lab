@@ -3,13 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushSync } from 'svelte'
 import { get } from 'svelte/store'
 
-vi.mock('../parser/parser.svelte', () => ({
-    assetRegex: /$^/,
-    hasher: vi.fn(async () => 'hash'),
-    parseMarkdownSafe: (value: string) => value,
-    ParseMarkdown: vi.fn(async (value: string) => value),
-    risuChatParser: (value: string) => value,
-}))
+vi.mock('../parser/parser.svelte', async () => (await import('../parser/parser.testSupport')).parserStubModule())
 vi.mock('../process/modules', () => ({ moduleUpdate: vi.fn() }))
 vi.mock('../process/scripts', () => ({ resetScriptCache: vi.fn() }))
 
@@ -18,6 +12,7 @@ import { selectedCharID, selIdState } from '../stores.svelte'
 import type { Chat, Database, Message, character } from './database.svelte'
 import { getDatabase, setDatabaseLite } from './database.svelte'
 import { IndexedDbPersistentDataStore } from './indexedDbPersistentDataStore'
+import { CONVERSATION_RANGE_MAX_LIMIT } from './persistentDataStore'
 import { createPersistentDataRuntime } from './persistentDataRuntime'
 import { createProductionStateAdapter } from './persistentDataRuntime.svelte'
 import { workingSetResidency } from './workingSetResidency'
@@ -34,7 +29,8 @@ function makeLargeLegacyDatabase(): {
     database: Database
     messages: Message[]
 } {
-    const messages = Array.from({ length: 10_000 }, (_, index) => ({
+    // One row more than a single range read can return.
+    const messages = Array.from({ length: CONVERSATION_RANGE_MAX_LIMIT + 1 }, (_, index) => ({
         role: index % 2 === 0 ? 'user' : 'char',
         data: `synthetic-message-${index}`,
         chatId: `synthetic-id-${index}`,

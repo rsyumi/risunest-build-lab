@@ -1013,7 +1013,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     }
   }
 
-  private suspend fun dispatchControl(method: String, args: List<String>): Any? {
+  private suspend fun dispatchControl(method: String, args: List<String>, onProgress: (SafSpoolProgress) -> Unit): Any? {
     if (method.startsWith("saf.") && !BuildConfig.ENABLE_EXPERIMENTAL_SAF_FILE_JOBS) {
       error("android-saf-unavailable")
     }
@@ -1053,7 +1053,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
           "saf.cancelExport" -> safCommands.cancelExport(args[0])
           "saf.discardSource" -> safCommands.discardSource(args[0])
           "saf.discardPortableSource" -> PortableSourceNative.discard(args[0])
-          "saf.materializeBackupSource" -> portableSourceBatchJson(PortableSourceNative.materialize(args[0], safSpoolStore()), sourceType = "androidSpool")
+          "saf.materializeBackupSource" -> portableSourceBatchJson(PortableSourceNative.materialize(args[0], safSpoolStore(), onProgress), sourceType = "androidSpool")
           "saf.getActiveSourceRequestIds" -> safCommands.getActiveSourceRequestIds()
           "saf.getExportStatus" -> safCommands.getExportStatus()
           "saf.getExportSourceId" -> safCommands.getExportSourceId()

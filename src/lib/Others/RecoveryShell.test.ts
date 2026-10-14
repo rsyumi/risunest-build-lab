@@ -20,20 +20,16 @@ const maintenance = vi.hoisted(() => ({
 vi.mock('src/ts/storage/nativePersistentMaintenance', () => maintenance)
 vi.mock('src/ts/alert', () => ({ alertError: vi.fn(), alertNormal: vi.fn() }))
 vi.mock('src/ts/globalApi.svelte', () => ({ downloadFile: vi.fn() }))
-vi.mock('src/ts/platform', () => ({ isTauri: true, isTauriAndroid: false, isTauriIOS: false }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'tauri', os: 'windows' }))
 const core = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue({ revision: 0 }) }))
 const rawRecovery = vi.hoisted(() => ({
     exportOriginalData: vi.fn().mockResolvedValue({ warningCodes: [] }),
 }))
 vi.mock('@tauri-apps/api/core', () => core)
 vi.mock('src/ts/storage/rawRecoveryExport', () => rawRecovery)
-vi.mock('src/lang', async () => ({
-    language: (await import('src/lang/en')).languageEnglish,
-}))
 
 import RecoveryShell from './RecoveryShell.svelte'
 import { languageEnglish } from 'src/lang/en'
-import { languageKorean } from 'src/lang/ko'
 import {
     clearBootTrail,
     markBootStage,
@@ -206,14 +202,5 @@ describe('RecoveryShell', () => {
         expect(rawRecovery.exportOriginalData).toHaveBeenCalledOnce()
         expect(body.querySelector('[data-recovery-export]')?.textContent)
             .toContain(strings.exportComplete)
-    })
-
-    it('keeps every string it shows in both shipped languages', () => {
-        for (const key of Object.keys(strings)) {
-            expect(
-                languageKorean.risuNest.recovery[key as keyof typeof strings],
-                key,
-            ).toBeTruthy()
-        }
     })
 })

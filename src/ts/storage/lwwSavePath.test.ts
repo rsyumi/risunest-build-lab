@@ -12,8 +12,9 @@ import { diffRecordCollection } from './persistentUnitCapture'
 import { createConversationSummaryStubFromChat } from './conversationResidency'
 import { createCatalogCharacterStub, isCatalogCharacterStub } from './workingSetCatalog'
 import { createMetadataOnlySelectedConversation, isMetadataOnlySelectedConversation } from './selectedConversationLifecycle'
-import type { Database, character } from './database.svelte'
-import type { LwwStageReceive, PersistentDataStore, WorkingSetCommit } from './persistentDataStore'
+import type { Database, Message, character } from './database.svelte'
+import type { ConversationSummary, LwwStageReceive, PersistentDataStore, WorkingSetCommit } from './persistentDataStore'
+import { createLeaseStub } from './persistentDataStore.testSupport'
 import { planConversationInsertPages } from './conversationInsertPages'
 import { PluginDeviceKeyspace } from '../plugins/pluginDeviceKeyspace'
 
@@ -337,9 +338,9 @@ describe('LWW renderer save path', () => {
         const baseline = captureLwwWorkingSetBaseline(database, capturePersistentRoot(database), database.botPresets)
         const root = { ...capturePersistentRoot(database), personas: [...database.personas].reverse() }
         const presets = [...database.botPresets].reverse()
-        const reader = { readRoot: async () => ({ revision: 2, value: root }),
+        const reader = createLeaseStub({ readRoot: async () => ({ revision: 2, value: root }),
             queryPresets: async () => ({ revision: 2, items: presets.map((preset, configuredIndex) => ({ id: preset['id'], name: preset.name, configuredIndex })) }),
-        } as unknown as import('./persistentDataStore').PersistentRevisionReader
+        })
         await applyLwwWorkingSetUnits(database, baseline, reader, ['["order","presets"]', '["order","personas"]'])
         expect(database.botPresets[database.botPresetsId]['id']).toBe(selectedPreset)
         expect(database.personas[database.selectedPersona].id).toBe('two')
@@ -362,7 +363,7 @@ describe('LWW renderer save path', () => {
         await runtime.commitPersistentUnitIntent('opaque-local',[{key:'["root","opaqueFutureField"]',type:'set',value:{local:true}}])
         expect((database as unknown as Record<string,unknown>).opaqueFutureField).toEqual({local:true})
         const baseline = captureLwwWorkingSetBaseline(database,capturePersistentRoot(database),database.botPresets)
-        const reader = {readRoot:async()=>({revision:runtime.revision,value:{...capturePersistentRoot(database),unknownReceived:'opaque',vertexAccessToken:'remote token',loreBookPage:99}})} as unknown as import('./persistentDataStore').PersistentRevisionReader
+        const reader = createLeaseStub({readRoot:async()=>({revision:runtime.revision,value:{...capturePersistentRoot(database),unknownReceived:'opaque',vertexAccessToken:'remote token',loreBookPage:99}})})
         await applyLwwWorkingSetUnits(database,baseline,reader,['["root","unknownReceived"]','["root","vertexAccessToken"]','["root","loreBookPage"]'])
         expect(database).not.toHaveProperty('unknownReceived')
         expect(database.vertexAccessToken).not.toBe('remote token')
@@ -375,7 +376,7 @@ describe('LWW renderer save path', () => {
         database.risunestChatEditPopup = true
         const baseline = captureLwwWorkingSetBaseline(database,capturePersistentRoot(database),database.botPresets)
         const colorScheme = {...database.colorScheme,bgcolor:'#101010'}
-        const reader = {readRoot:async()=>({revision:2,value:{...capturePersistentRoot(database),risunestChatEditPopup:false,colorScheme}})} as unknown as import('./persistentDataStore').PersistentRevisionReader
+        const reader = createLeaseStub({readRoot:async()=>({revision:2,value:{...capturePersistentRoot(database),risunestChatEditPopup:false,colorScheme}})})
         await applyLwwWorkingSetUnits(database,baseline,reader,['["root","risunestChatEditPopup"]','["root","colorScheme"]'])
         expect(database.risunestChatEditPopup).toBe(false)
         expect(database.colorScheme).toEqual(colorScheme)
@@ -463,10 +464,10 @@ describe('LWW renderer save path', () => {
         Object.assign(live.chats[0],{opaqueOwn:'local-chat',isStreaming:true})
         const baseline = captureLwwWorkingSetBaseline(database,capturePersistentRoot(database),database.botPresets)
         live['statics'].messages = 5
-        const reader = {
+        const reader = createLeaseStub({
             readCharacter:async()=>({revision:2,value:{...live,opaqueOwn:'remote',lastInteraction:99,statics:{messages:100,shared:42}}}),
-            readConversationMetadata:async()=>({revision:2,value:{conversation:{...live.chats[0],opaqueOwn:'remote-chat',isStreaming:false,note:'shared note'}}}),
-        } as unknown as import('./persistentDataStore').PersistentRevisionReader
+            readConversationMetadata:async()=>({revision:2,value:{characterId:live.chaId,conversationId:live.chats[0].id,conversation:{...live.chats[0],opaqueOwn:'remote-chat',isStreaming:false,note:'shared note'},totalMessages:live.chats[0].message.length}}),
+        })
         await applyLwwWorkingSetUnits(database,baseline,reader,['["character","char-a","opaqueOwn"]','["character","char-a","lastInteraction"]','["character","char-a","statics"]','["conversation","char-a","conv-long","opaqueOwn"]','["conversation","char-a","conv-long","isStreaming"]','["conversation","char-a","conv-long","note"]'])
         expect(live).toMatchObject({opaqueOwn:'local',lastInteraction:7,statics:{messages:5,shared:42}})
         expect(live.chats[0]).toMatchObject({opaqueOwn:'local-chat',isStreaming:true,note:'shared note'})
@@ -482,9 +483,9 @@ describe('LWW renderer save path', () => {
         const baseline = captureLwwWorkingSetBaseline(database, capturePersistentRoot(database), database.botPresets)
         database.characters[2] = stub
         const {trashTime: _trashTime, ...restored} = structuredClone(full)
-        const reader = {
+        const reader = createLeaseStub({
             readCharacter: async () => ({revision: 2, value: {...restored, name: 'Restored', nickname: 'Remote nickname', chats: []}}),
-        } as unknown as import('./persistentDataStore').PersistentRevisionReader
+        })
         await applyLwwWorkingSetUnits(database, baseline, reader, ['["character","char-c","trashTime"]', '["character","char-c","name"]', '["character","char-c","nickname"]'])
         expect(database.characters[2]).toBe(stub)
         expect(isCatalogCharacterStub(stub)).toBe(true)
@@ -502,12 +503,12 @@ describe('LWW renderer save path', () => {
             trashed: true, conversationCount: full.chats.length, type: full.type, trashTime: full.trashTime})
         database.characters[2] = stub
         const folders = [{id: 'folder', name: 'Folder', folded: false}]
-        const reader = {
+        const reader = createLeaseStub({
             readRoot: async () => ({revision: 2, value: capturePersistentRoot(database)}),
             readCharacter: async () => ({revision: 2, value: {...structuredClone(full), chatFolders: folders, chats: []}}),
-            queryConversations: async () => ({revision: 2, items: [{id: 'conv-trash'}, {id: 'conv-new'}]}),
-            readConversationMetadata: async () => ({revision: 2, value: {conversation: {id: 'conv-new', name: 'New', note: '', localLore: []}, totalMessages: 0}}),
-        } as unknown as import('./persistentDataStore').PersistentRevisionReader
+            queryConversations: async () => ({revision: 2, items: [{id: 'conv-trash'}, {id: 'conv-new'}] as ConversationSummary[]}),
+            readConversationMetadata: async () => ({revision: 2, value: {characterId: full.chaId, conversationId: 'conv-new', conversation: {id: 'conv-new', name: 'New', note: '', localLore: []}, totalMessages: 0}}),
+        })
         await applyLwwWorkingSetUnits(database, baseline, reader, ['["exists","conversation","char-c","conv-new"]', '["order","conversations","char-c"]'])
         expect(database.characters[2]).toBe(stub)
         expect(isCatalogCharacterStub(stub)).toBe(true)
@@ -520,11 +521,11 @@ describe('LWW renderer save path', () => {
         const live = database.characters.find((value) => value.chaId === 'char-a')!
         const chat = live.chats.find((value) => value.id === 'conv-long')!
         const {message: _message, ...metadata} = chat
-        const remoteMessages = [...structuredClone(chat.message), {role: 'char', data: 'remote reply'}]
-        const reader = {
-            readConversationMetadata: async () => ({revision: 2, value: {conversation: {...structuredClone(metadata), note: 'shared note'}}}),
+        const remoteMessages: Message[] = [...structuredClone(chat.message), {role: 'char', data: 'remote reply'}]
+        const reader = createLeaseStub({
+            readConversationMetadata: async () => ({revision: 2, value: {characterId: live.chaId, conversationId: chat.id, conversation: {...structuredClone(metadata), note: 'shared note'}, totalMessages: remoteMessages.length}}),
             readConversation: async () => ({revision: 2, value: {...structuredClone(metadata), message: remoteMessages}}),
-        } as unknown as import('./persistentDataStore').PersistentRevisionReader
+        })
         const baseline = captureLwwWorkingSetBaseline(database, capturePersistentRoot(database), database.botPresets)
         await applyLwwWorkingSetUnits(database, baseline, reader, ['["conversation","char-a","conv-long","note"]', '["messages","char-a","conv-long"]'])
         expect(live.chats.find((value) => value.id === 'conv-long')).toBe(chat)
@@ -538,10 +539,10 @@ describe('LWW renderer save path', () => {
         const index = live.chats.findIndex((value) => value.id === 'conv-long')
         const shell = createMetadataOnlySelectedConversation(live.chats[index])
         live.chats[index] = shell
-        const {message: _message, ...metadata} = structuredClone(fixtureDatabase.characters.find((value) => value.chaId === 'char-a')!.chats.find((value) => value.id === 'conv-long')!)
-        const reader = {
-            readConversationMetadata: async () => ({revision: 2, value: {conversation: {...metadata, note: 'shared note'}}}),
-        } as unknown as import('./persistentDataStore').PersistentRevisionReader
+        const {message, ...metadata} = structuredClone(fixtureDatabase.characters.find((value) => value.chaId === 'char-a')!.chats.find((value) => value.id === 'conv-long')!)
+        const reader = createLeaseStub({
+            readConversationMetadata: async () => ({revision: 2, value: {characterId: live.chaId, conversationId: metadata.id, conversation: {...metadata, note: 'shared note'}, totalMessages: message.length}}),
+        })
         const baseline = captureLwwWorkingSetBaseline(database, capturePersistentRoot(database), database.botPresets)
         await applyLwwWorkingSetUnits(database, baseline, reader, ['["conversation","char-a","conv-long","note"]'])
         // Comparing by identity keeps the failure report from reading the shell's message accessor.

@@ -3,13 +3,10 @@ import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushSync } from 'svelte'
 
-const lang = vi.hoisted(() => ({ current: undefined as unknown }))
-vi.mock('src/lang', () => ({ get language() { return lang.current } }))
 vi.mock('src/ts/stores.svelte', async () => ({ alertStore: (await import('svelte/store')).writable({ type: 'none', msg: '' }) }))
 
-import merge from 'lodash/merge'
+import { changeLanguage, language } from 'src/lang'
 import { languageEnglish } from 'src/lang/en'
-import { languageKorean } from 'src/lang/ko'
 import { QR_SCAN_ATTRIBUTE, showQrScanOverlay } from './qrScanOverlay'
 
 const overlay = () => document.body.querySelector<HTMLElement>(':scope > .risunest-qr-scan')
@@ -17,10 +14,10 @@ const buttonText = (text: string) => [...document.querySelectorAll('button')].fi
 let hide: (() => void) | undefined
 
 beforeEach(() => {
-    lang.current = languageEnglish
     vi.spyOn(history, 'go').mockImplementation(() => {})
 })
 afterEach(async () => {
+    changeLanguage('en')
     hide?.()
     hide = undefined
     flushSync()
@@ -56,14 +53,16 @@ describe('QR scan overlay', () => {
     })
 
     it.each([
-        ['settings', 'QR 코드를 사각형 안에 맞추세요.'],
-        ['onboarding', 'QR 코드를 사각형 안에 맞춰주세요.'],
-    ] as const)('words the instruction for the %s screen', (tone, text) => {
-        lang.current = merge({}, languageEnglish, languageKorean)
+        ['settings', 'instruction'],
+        ['onboarding', 'instructionOnboarding'],
+    ] as const)('words the instruction for the %s screen', (tone, key) => {
+        // Korean words the two screens differently, so a swapped instruction shows.
+        changeLanguage('ko')
+        const copy = language.risuNest.qrScan
         hide = showQrScanOverlay(vi.fn(), tone)
         flushSync()
-        expect(overlay()!.querySelector('p')?.textContent?.trim()).toBe(text)
-        expect(buttonText('취소')).toBeDefined()
+        expect(overlay()!.querySelector('p')?.textContent?.trim()).toBe(copy[key])
+        expect(buttonText(language.cancel)).toBeDefined()
     })
 
     it.each([

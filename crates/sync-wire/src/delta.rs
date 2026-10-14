@@ -98,7 +98,7 @@ impl Recipe {
         for (bytes, base) in bases.iter().zip(&self.bases) {
             if bytes.len() as u64 != base.size || {
                 let actual = hash(bytes);
-                #[cfg(test)]
+                #[cfg(any(test, feature = "source-observer"))]
                 source_test_observer::completed(
                     &base.hash,
                     "memory-delta-apply-base-sha256",
@@ -107,7 +107,7 @@ impl Recipe {
                 actual
             } != base.hash
             {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "source-observer"))]
                 source_test_observer::failed(&base.hash, "memory-delta-apply-base-sha256");
                 return Err(WireError("base-hash-mismatch"));
             }
@@ -127,7 +127,7 @@ impl Recipe {
         }
         if {
             let actual = hash(&output);
-            #[cfg(test)]
+            #[cfg(any(test, feature = "source-observer"))]
             source_test_observer::completed(
                 &self.target_hash,
                 "memory-delta-apply-target-sha256",
@@ -136,7 +136,7 @@ impl Recipe {
             actual
         } != self.target_hash
         {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "source-observer"))]
             source_test_observer::failed(&self.target_hash, "memory-delta-apply-target-sha256");
             return Err(WireError("target-hash-mismatch"));
         }
@@ -387,7 +387,7 @@ pub fn create(bases: &[&[u8]], target: &[u8]) -> Result<Recipe> {
             .iter()
             .map(|b| {
                 let digest = hash(b);
-                #[cfg(test)]
+                #[cfg(any(test, feature = "source-observer"))]
                 source_test_observer::completed(
                     &digest,
                     "memory-delta-create-base-sha256",
@@ -401,7 +401,7 @@ pub fn create(bases: &[&[u8]], target: &[u8]) -> Result<Recipe> {
             .collect(),
         target_hash: {
             let digest = hash(target);
-            #[cfg(test)]
+            #[cfg(any(test, feature = "source-observer"))]
             source_test_observer::completed(
                 &digest,
                 "memory-delta-create-target-sha256",
@@ -416,12 +416,12 @@ pub fn create(bases: &[&[u8]], target: &[u8]) -> Result<Recipe> {
     Ok(recipe)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "source-observer"))]
 #[allow(dead_code)]
-pub(crate) mod source_test_observer {
+pub mod source_test_observer {
     use std::sync::{Arc, Mutex, OnceLock};
     #[derive(Clone, Debug)]
-    pub(crate) struct Event {
+    pub struct Event {
         pub hash: String,
         pub domain: &'static str,
         pub calls: u64,
@@ -429,9 +429,9 @@ pub(crate) mod source_test_observer {
         pub finalizations: u64,
         pub failed: bool,
     }
-    type Hook = Arc<dyn Fn(Event) + Send + Sync>;
+    pub type Hook = Arc<dyn Fn(Event) + Send + Sync>;
     static HOOK: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
-    pub(crate) fn install(hook: Hook) {
+    pub fn install(hook: Hook) {
         *HOOK.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(hook);
     }
     fn emit(

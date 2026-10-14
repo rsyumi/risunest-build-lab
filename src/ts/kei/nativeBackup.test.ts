@@ -3,33 +3,16 @@ import { describe, expect, it, vi } from 'vitest'
 import { nativePersistentRevisionLease } from '../storage/nativePersistentExport'
 import type { PersistentDataRuntime } from '../storage/persistentDataRuntime'
 import type { PersistentRevisionLease } from '../storage/persistentDataStore'
+import { createLeaseStub } from '../storage/persistentDataStore.testSupport'
 import { runNativeKeiBackupJob, tryNativeKeiBackup } from './nativeBackup'
 
 function nativeRuntime() {
     const release = vi.fn(async () => undefined)
     const acquireRevision = vi.fn(
-        async (revision: number): Promise<PersistentRevisionLease> => ({
-            revision,
-            [nativePersistentRevisionLease]: 'lease-7',
-            readRoot: vi.fn(),
-            queryPresets: vi.fn(),
-            readPreset: vi.fn(),
-            queryCharacters: vi.fn(),
-            readCharacterSummary: vi.fn(async () => null),
-            readCharacter: vi.fn(),
-            queryConversations: vi.fn(),
-            readConversation: vi.fn(),
-            readConversationMetadata: vi.fn(),
-            readConversationWindow: vi.fn(),
-            queryPluginStorage: vi.fn(),
-            readPluginStorage: vi.fn(),
-            readPluginStorageValues: vi.fn(async () => ({ items: [], nextCursor: null, revision })),
-            readAssetAlias: vi.fn(),
-            readAssetAliasesByKeys: vi.fn(),
-            listAssetAliases: vi.fn(),
-            readAssetOwnerHead: vi.fn(),
-            release,
-        }) as PersistentRevisionLease,
+        async (revision: number): Promise<PersistentRevisionLease> => createLeaseStub(
+            { revision, release },
+            { [nativePersistentRevisionLease]: 'lease-7' },
+        ),
     )
     const flushPendingData = vi.fn(async () => undefined)
     const runtime = {
@@ -104,27 +87,7 @@ describe('tryNativeKeiBackup', () => {
     it('rejects after releasing a non-native revision lease', async () => {
         const harness = nativeRuntime()
         const release = vi.fn(async () => undefined)
-        harness.acquireRevision.mockResolvedValueOnce({
-            revision: 7,
-            readRoot: vi.fn(),
-            queryPresets: vi.fn(),
-            readPreset: vi.fn(),
-            queryCharacters: vi.fn(),
-            readCharacterSummary: vi.fn(async () => null),
-            readCharacter: vi.fn(),
-            queryConversations: vi.fn(),
-            readConversation: vi.fn(),
-            readConversationMetadata: vi.fn(),
-            readConversationWindow: vi.fn(),
-            queryPluginStorage: vi.fn(),
-            readPluginStorage: vi.fn(),
-            readPluginStorageValues: vi.fn(async () => ({ items: [], nextCursor: null, revision: 7 })),
-            readAssetAlias: vi.fn(),
-            readAssetAliasesByKeys: vi.fn(),
-            listAssetAliases: vi.fn(),
-            readAssetOwnerHead: vi.fn(),
-            release,
-        })
+        harness.acquireRevision.mockResolvedValueOnce(createLeaseStub({ revision: 7, release }))
         const invoke = vi.fn()
 
         await expect(

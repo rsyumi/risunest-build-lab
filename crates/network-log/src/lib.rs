@@ -1,7 +1,7 @@
 mod export;
 mod masking;
 mod model;
-#[cfg(feature = "reqwest")]
+#[cfg(any(test, feature = "reqwest"))]
 pub mod reqwest;
 mod storage;
 pub use model::*;
@@ -20,6 +20,8 @@ use std::{
 const QUEUE_EVENTS: usize = 16_384;
 const ACTIVE_LIMIT: usize = 64;
 const CHUNK_BYTES: usize = 64 * 1024;
+// A burst that fills the largest buffer runs out of bytes before the event queue fills.
+const _: () = assert!(QUEUE_EVENTS * CHUNK_BYTES >= (BUFFER_MIB_CHOICES[BUFFER_MIB_CHOICES.len() - 1] * MIB) as usize);
 static GLOBAL: OnceLock<RwLock<Option<Recorder>>> = OnceLock::new();
 
 #[derive(Clone)]

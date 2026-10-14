@@ -18,31 +18,11 @@ import {
     nativePersistentRevisionLease,
     type NativePersistentRevisionLease,
 } from '../nativePersistentExport'
+import { createLeaseStub } from '../persistentDataStore.testSupport'
 import { createNativeOfficialPublicationJobPublisher } from './nativeOfficialPublicationJob'
 
 function pinnedLease(): NativePersistentRevisionLease {
-    return {
-        revision: 7,
-        [nativePersistentRevisionLease]: 'snapshot-publication-1',
-        readRoot: vi.fn(),
-        queryPresets: vi.fn(),
-        readPreset: vi.fn(),
-        queryCharacters: vi.fn(),
-        readCharacterSummary: vi.fn(async () => null),
-        readCharacter: vi.fn(),
-        queryConversations: vi.fn(),
-        readConversation: vi.fn(),
-        readConversationMetadata: vi.fn(),
-        readConversationWindow: vi.fn(),
-        readPluginStorageValues: vi.fn(async () => { throw new Error('Unexpected renderer plugin storage read') }),
-        queryPluginStorage: vi.fn(),
-        readPluginStorage: vi.fn(),
-        readAssetAlias: vi.fn(),
-        readAssetAliasesByKeys: vi.fn(),
-        listAssetAliases: vi.fn(),
-        readAssetOwnerHead: vi.fn(),
-        release: vi.fn(),
-    }
+    return createLeaseStub({ revision: 7 }, { [nativePersistentRevisionLease]: 'snapshot-publication-1' })
 }
 
 function receipt(

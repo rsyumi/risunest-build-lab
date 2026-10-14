@@ -3,21 +3,23 @@ import { test } from 'node:test'
 import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { assertInventory, discoverTestEntries, ownerOf, selectNodeTests } from './suiteOwnership.mjs'
+import { assertInventory, assertListedTestsExist, discoverTestEntries, extendedAppTests, nodeAppTests, ownerOf, selectNodeTests } from './suiteOwnership.mjs'
 import { parseVitestInventory } from './testInventory.mjs'
 
 const ordinary = 'src/ts/storage/newRegression.test.ts'
 const extended = 'src/ts/storage/selectedConversationEvictionCorpus.test.ts'
+const nodeOnly = nodeAppTests[0]
 
 test('classifies ordinary, extended, harness, Node and independent entries', () => {
   for (const [path, expected] of [
-    [ordinary, 'app'], [extended, 'app-extended'],
+    [ordinary, 'app'], [extended, 'app-extended'], [nodeOnly, 'app-node'],
     ['scripts/example.spec.mjs', 'app'],
-    ['src-tauri/src/ios_ipc.test.ts', 'app'],
+    ['src-tauri/src/newRegression.test.ts', 'app'],
     ['benchmarks/tokenizer/nativeTokenizerBenchmark.test.ts', 'harness'],
-    ['src/ts/process/luaWorkerPilotClient.test.ts', 'harness'],
+    ['src/ts/process/regexSafePlan.profile.test.ts', 'harness'],
     ['tests/release/contract.node-test.mjs', 'node'],
-    ['benchmarks/sync-server/transfer-comparison.test.mjs', 'node'],
+    ['benchmarks/sync-server/transfer-comparison.test.mjs', 'harness-node'],
+    ['benchmarks/startup/startup.node-test.mjs', 'harness-node'],
     ['crates/sync-wire/tests/golden.test.mjs', 'node'],
     ['server/manager/gui/tests/App.test.ts', 'manager'],
     ['server/endpoint-registry/tests/registry.worker.ts', 'registry'],
@@ -38,10 +40,17 @@ test('detects exclusions, duplicate ownership and missing runner owners', () => 
   assert.throws(() => assertInventory([extended], { app: [extended] }), /Unexpected/)
 })
 
+test('every listed extended and node entry exists', () => {
+  const listed = [...extendedAppTests, ...nodeAppTests]
+  assert.doesNotThrow(() => assertListedTestsExist(listed))
+  assert.throws(() => assertListedTestsExist(listed.filter(path => path !== nodeOnly)), new RegExp(nodeOnly))
+})
+
 test('accepts the installed CLI JSON shape and rejects unexpected output', () => {
   const root = join(tmpdir(), 'inventory')
-  assert.deepEqual(parseVitestInventory(JSON.stringify([{ file: join(root, ordinary), projectName: 'app' }]), root), {
-    app: [ordinary], 'app-extended': [], harness: [],
+  const listed = [{ file: join(root, ordinary), projectName: 'app' }, { file: join(root, nodeOnly), projectName: 'app-node' }]
+  assert.deepEqual(parseVitestInventory(JSON.stringify(listed), root), {
+    app: [ordinary], 'app-node': [nodeOnly], 'app-extended': [], harness: [],
   })
   for (const invalid of ['warning\n[]', '{}', '[]', '[{}]', JSON.stringify([{ file: join(root, ordinary), projectName: 'unknown' }])]) {
     assert.throws(() => parseVitestInventory(invalid, root))
@@ -50,9 +59,9 @@ test('accepts the installed CLI JSON shape and rejects unexpected output', () =>
 })
 
 test('Node selection is bounded, deterministic and never selects measurement scripts', () => {
-  assert.deepEqual(selectNodeTests([ordinary, 'tests/externalStorageWasm.mjs', 'tests/b.node-test.mjs', 'tests/a.node-test.mjs']), [
-    'tests/a.node-test.mjs', 'tests/b.node-test.mjs',
-  ])
+  const files = [ordinary, 'tests/externalStorageWasm.mjs', 'tests/b.node-test.mjs', 'tests/a.node-test.mjs', 'benchmarks/startup/startup.node-test.mjs']
+  assert.deepEqual(selectNodeTests(files), ['tests/a.node-test.mjs', 'tests/b.node-test.mjs'])
+  assert.deepEqual(selectNodeTests(files, 'harness-node'), ['benchmarks/startup/startup.node-test.mjs'])
   assert.throws(() => selectNodeTests([ordinary]), /No Node/)
   assert.throws(() => selectNodeTests(['tests/a.node-test.mjs', 'tests/a.node-test.mjs']), /Duplicate/)
 })

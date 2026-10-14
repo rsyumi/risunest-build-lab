@@ -17,7 +17,7 @@
     import CustomSideBar from "./CustomSidebar.svelte";
     import { getGlobalChatVar, isLocallyHandledGlobalChatVar } from "src/ts/parser/chatVar.svelte";
     import { removeLocalToggleValue, setCharacterMemory, setLocalToggleMode, setToggleValue } from 'src/ts/sidebarToggles'
-    import { toggleValueChanged } from 'src/ts/toggleBindings'
+    import { applyToggleValues, snapshotToggleValues, toggleValueChanged, type ToggleValues } from 'src/ts/toggleBindings'
     import { PinIcon } from "@lucide/svelte";
     import { doingChat } from 'src/ts/process/generationState'
 
@@ -104,31 +104,67 @@
         const character = DBState.db.characters[$selectedCharID]
         return character?.chats[character.chatPage]?.savedToggleValues
     })
+    let savingToggles = $state(false)
+    let toggleEditor = $derived.by(() => {
+        const character = DBState.db.characters[$selectedCharID]
+        const chat = character?.chats[character.chatPage]
+        // An underlying binding, selection or local-mode change discards unapplied input.
+        void chat?.id
+        void chat?.useLocallySetGlobalVariables
+        snapshotToggleValues(chat?.GLGlobalVariables ?? {})
+        snapshotToggleValues(savedToggles ?? {})
+        return { values: snapshotToggleValues(DBState.db.globalChatVariables), unpinKeys: [] as string[] }
+    })
+    const editToggle = (key: string, value: string) => {
+        if (savingToggles) return
+        const chat = getCurrentChat()
+        if (savedToggles === undefined || chat?.useLocallySetGlobalVariables) {
+            void setToggleValue(key, value)
+            return
+        }
+        const unpinKeys = new Set(toggleEditor.unpinKeys)
+        if (chat?.GLGlobalVariables?.[key] !== undefined) unpinKeys.add(key)
+        toggleEditor = { values: { ...toggleEditor.values, [key]: value }, unpinKeys: [...unpinKeys] }
+    }
+    const applyTogglePreset = (values: ToggleValues, keys: readonly string[]) => {
+        if (savingToggles) return
+        if (savedToggles === undefined) {
+            applyToggleValues(DBState.db.globalChatVariables, values, keys)
+            return
+        }
+        const next = { ...toggleEditor.values }
+        applyToggleValues(next, values, keys)
+        toggleEditor = { ...toggleEditor, values: next }
+    }
     const isToggleDirty = (key: string | undefined) =>
         savedToggles !== undefined &&
-        toggleValueChanged(DBState.db.globalChatVariables[`toggle_${key}`], savedToggles[`toggle_${key}`])
+        (toggleEditor.unpinKeys.includes(`toggle_${key}`)
+            || toggleValueChanged(toggleEditor.values[`toggle_${key}`], savedToggles[`toggle_${key}`]))
     const dirtyClass = (key: string | undefined) => (isToggleDirty(key) ? 'bg-draculared/15' : '')
 
     // Switch rows sit in the same list as the select/text rows below, which set their own spacing.
     const switchRow = 'mt-2 px-1'
 
     const getGlobalChatVarNH = (key: string) => {
-        const value = getGlobalChatVar(key)
+        const preview = savedToggles !== undefined && (
+            toggleEditor.unpinKeys.includes(key) || !isLocallyHandledGlobalChatVar(key)
+        )
+        const value = preview ? (toggleEditor.values[key] ?? 'null') : getGlobalChatVar(key)
         if (value === 'null') {
             return ''
         }
         return value
     }
-    const localEditBlocked = (key: string) => $doingChat && (
+    const localEditBlocked = (key: string) => savingToggles || ($doingChat && (
         getCurrentChat()?.useLocallySetGlobalVariables
         || getCurrentChat()?.GLGlobalVariables?.[key] !== undefined
-    )
+    ))
 </script>
 
 {#snippet localToggle(toggle: sidebarToggle)}
     {#if isLocallyHandledGlobalChatVar(`toggle_${toggle.key}`)}
         <button
-            disabled={$doingChat}
+            disabled={$doingChat || savingToggles}
             onclick={() => {
                 void removeLocalToggleValue(`toggle_${toggle.key}`)
             }}
@@ -160,7 +196,7 @@
                     className="w-32 shrink-0"
                     value={getGlobalChatVarNH(`toggle_${toggle.key}`)}
                     onchange={(e) => {
-                        void setToggleValue(`toggle_${toggle.key}`, e.currentTarget.value)
+                        editToggle(`toggle_${toggle.key}`, e.currentTarget.value)
                     }}
                 >
                     {#each toggle.options as option, i}
@@ -176,7 +212,7 @@
                     disabled={localEditBlocked(`toggle_${toggle.key}`)}
                     value={getGlobalChatVarNH(`toggle_${toggle.key}`)}
                     onchange={(e) => {
-                        void setToggleValue(`toggle_${toggle.key}`, e.currentTarget.value)
+                        editToggle(`toggle_${toggle.key}`, e.currentTarget.value)
                     }}
                 />
             </div>
@@ -190,9 +226,9 @@
                     onchange={(e) => {
                         //check is div
                         if (e.currentTarget instanceof HTMLDivElement) {
-                            void setToggleValue(`toggle_${toggle.key}`, e.currentTarget.innerText)
+                            editToggle(`toggle_${toggle.key}`, e.currentTarget.innerText)
                         } else {
-                            void setToggleValue(`toggle_${toggle.key}`, e.currentTarget.value)
+                            editToggle(`toggle_${toggle.key}`, e.currentTarget.value)
                         }
                     }}
                 />
@@ -219,7 +255,7 @@
                 name={toggle.value}
                 highlight={isToggleDirty(toggle.key)}
                 onChange={(checked) => {
-                    void setToggleValue(`toggle_${toggle.key}`, checked ? '1' : '0')
+                    editToggle(`toggle_${toggle.key}`, checked ? '1' : '0')
                 }}
             >
                 {@render localToggle(toggle)}
@@ -231,7 +267,7 @@
 <div class="flex flex-col gap-4 w-full mt-3">
     {#if !DBState.db.customSidebarItems?.some((item) => item.type === 'model')}<ModelBind />{/if}
     {#if !DBState.db.customSidebarItems?.some((item) => item.type === 'persona')}<PersonaBind />{/if}
-    <ToggleBind />
+    <ToggleBind values={toggleEditor.values} unpinKeys={toggleEditor.unpinKeys} onApplyPreset={applyTogglePreset} bind:saving={savingToggles} />
 </div>
 {#if !noContainer && groupedToggles.length > 4}
     <div class="h-48 border-darkborderc p-2 border rounded-sm flex flex-col items-start mt-2 overflow-y-auto">
@@ -283,7 +319,7 @@
         <SwitchInput
             className={switchRow}
             check={getCurrentChat()?.useLocallySetGlobalVariables}
-            disabled={$doingChat}
+            disabled={$doingChat || savingToggles}
             name={language.localToggles}
             onChange={(checked) => void setLocalToggleMode(checked)}
         />

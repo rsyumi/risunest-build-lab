@@ -1,5 +1,6 @@
 import { resolve } from 'node:path'
 import type { Plugin } from 'vite'
+import { stubbed } from './autoStubPlugin'
 
 const root = resolve(import.meta.dirname, '../..').replaceAll('\\', '/')
 const fixture = resolve(import.meta.dirname).replaceAll('\\', '/')
@@ -20,7 +21,7 @@ export function lazyAppBoundaries(): Plugin {
                 return route ? `(window as any).lazyImportBoundary.load('${route}', () => ${expression})` : expression
             })
         },
-        resolveId(source, importer) {
+        async resolveId(source, importer, options) {
             const owner = importer?.replaceAll('\\', '/')
             if (!owner?.startsWith(`${root}/src/`) || !(owner === `${root}/src/App.svelte` || [...retained].some(file => owner.endsWith(`/${file}`)))) return null
             if (!(source.startsWith('.') || source.startsWith('src/') || source.replaceAll('\\', '/').startsWith(`${root}/src/`))) return null
@@ -31,8 +32,8 @@ export function lazyAppBoundaries(): Plugin {
                 if (retained.has(file)) return null
                 return `${fixture}/${file === 'Sidebar.svelte' ? 'LazyAppSidebar.svelte' : 'Empty.svelte'}`
             }
-            if (source === '@lucide/svelte' || source.endsWith('.mp3') || file === 'dragTypes') return null
-            return `${fixture}/lazyAppAdapters.ts`
+            if (source === '@lucide/svelte' || source.endsWith('.mp3') || source.includes('?svelte&type=style') || file === 'dragTypes' || file === 'platform') return null
+            return stubbed(this, `${fixture}/lazyAppAdapters.ts`, source, importer!, options)
         },
         load(id) {
             if (!id.startsWith('\0lazy-app-')) return null

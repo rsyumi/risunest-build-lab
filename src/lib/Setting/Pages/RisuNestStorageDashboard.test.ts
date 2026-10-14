@@ -33,12 +33,11 @@ const alerts = vi.hoisted(() => ({
 vi.mock('src/ts/storage/nativePersistentMaintenance', () => maintenance)
 vi.mock('src/ts/storage/sync/syncConflictBackup', () => ({ getSyncConflictBackupStore: () => backups }))
 vi.mock('src/ts/alert', () => alerts)
-vi.mock('src/ts/platform', () => ({ isTauri: true }))
-vi.mock('src/lang', async () => ({ language: (await import('src/lang/en')).languageEnglish }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'tauri', os: 'windows' }))
 
 import RisuNestStorageDashboard from './RisuNestStorageDashboard.svelte'
+import { assetResidencyStatus } from 'src/ts/storage/sync/serverAssetResidency.testSupport'
 import { languageEnglish } from 'src/lang/en'
-import { languageKorean } from 'src/lang/ko'
 
 const syncText = languageEnglish.risuNest.serverSync
 const stats = {
@@ -84,6 +83,14 @@ describe('RisuNestStorageDashboard', () => {
         expect(target.textContent).toContain(languageEnglish.risuNest.storage.snapshotReasons.dataHealthRepair)
         expect(target.textContent).not.toContain('synthetic-unknown')
         expect(target.textContent).not.toContain('data-health-repair')
+    })
+
+    it('describes a blocked temporary file cleanup without exposing the reason token', async () => {
+        server.getServerSyncCacheUsage.mockResolvedValueOnce({ totalBytes: 1024, cacheBytes: 1024, protectedBytes: 0, reclaimableBytes: 1024, ledgerBytes: 0, databaseBytes: 0, blockedReason: 'server-sync-busy' })
+        const target = setup()
+        await vi.waitFor(() => expect(target.textContent).toContain(syncText.management.blockedReasons['server-sync-busy']))
+        expect(target.textContent).not.toContain('server-sync-busy')
+        expect(exact(target, syncText.management.clean)?.disabled).toBe(true)
     })
 
     function setup(
@@ -161,10 +168,9 @@ describe('RisuNestStorageDashboard', () => {
             assetBodies: { count: 1, bytes: 1024 * 1024 },
             missingAssetBodies: { count: 3, bytes: 1024 * 1024 * 1024 },
         }
-        const status = {
-            policy: 'remote', localBytes: 1024 * 1024, remoteBytes: 1024 * 1024 * 1024, remoteObjects: 3,
-            serverBytes: 1024 * 1024 * 1024, serverObjects: 3, externalObjects: [], unavailableObjects: 0, evictedBytes: 0,
-        }
+        const status = assetResidencyStatus({
+            localBytes: 1024 * 1024, remoteBytes: 1024 * 1024 * 1024, remoteObjects: 3, serverBytes: 1024 * 1024 * 1024, serverObjects: 3,
+        })
         const mediaItem = (target: HTMLElement) =>
             [...target.querySelectorAll<HTMLElement>('[data-storage-legend] > li')]
                 .find((item) => item.textContent?.includes(languageEnglish.risuNest.storage.media))!
@@ -394,17 +400,15 @@ describe('RisuNestStorageDashboard', () => {
     it('uses a dedicated localized confirmation before deleting a conflict backup', async () => {
         const target = setup()
         alerts.alertConfirm.mockResolvedValue(false)
-        await vi.waitFor(() => expect(target.textContent).toContain('Conflict backups'))
+        await vi.waitFor(() => expect(target.textContent).toContain(languageEnglish.risuNest.storage.conflictBackups))
 
         const conflictRow = target.querySelectorAll<HTMLElement>('[data-storage-backup-list]')[1]
         conflictRow?.querySelector<HTMLButtonElement>('button')?.click()
 
         await vi.waitFor(() => expect(alerts.alertConfirm).toHaveBeenCalledWith(
-            'Delete this conflict backup? This conflict backup cannot be recovered after deletion.',
+            languageEnglish.risuNest.storage.deleteConflictBackupConfirm,
         ))
         expect(backups.remove).not.toHaveBeenCalled()
-        expect(languageKorean.risuNest.storage.deleteConflictBackupConfirm)
-            .toBe('이 충돌 백업을 삭제하시겠습니까? 삭제한 충돌 백업은 복구할 수 없습니다.')
     })
 
     it('orders all backup lists before the storage action rows', async () => {

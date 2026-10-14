@@ -1,21 +1,19 @@
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { parseReleaseNotes, selectLocalizedNotes } from './notes'
 
 describe('release notes', () => {
-    it.each([
-        ['app', 'RisuNest v1.0.0'],
-        ['sync', 'RisuNest Sync v1.0.0'],
-    ])('preserves the %s release title and content when rendering fallback notes', (product, title) => {
-        const notes = readFileSync(`release-notes/${product}/1.0.0.md`, 'utf8')
-        const blocks = parseReleaseNotes(selectLocalizedNotes({}, 'ko', notes))
-        expect(blocks).toEqual([
-            { type: 'heading', level: 1, content: [{ type: 'text', text: title }] },
-            { type: 'heading', level: 2, content: [{ type: 'text', text: 'English' }] },
-            { type: 'list-item', depth: 1, marker: '•', content: [{ type: 'text', text: 'Initial release.' }] },
-            { type: 'heading', level: 2, content: [{ type: 'text', text: '한국어' }] },
-            { type: 'list-item', depth: 1, marker: '•', content: [{ type: 'text', text: '최초 릴리즈.' }] },
-        ])
+    it.each(['app', 'sync'])('keeps the title, sections and items of every %s release when rendering fallback notes', (product) => {
+        const files = readdirSync(`release-notes/${product}`).filter(name => name.endsWith('.md'))
+        expect(files.length).toBeGreaterThan(0)
+        for (const file of files) {
+            const notes = readFileSync(`release-notes/${product}/${file}`, 'utf8')
+            const blocks = parseReleaseNotes(selectLocalizedNotes({}, 'ko', notes))
+            expect(blocks[0], file).toMatchObject({ type: 'heading', level: 1 })
+            expect(blocks.filter(block => block.type === 'heading' && block.level === 2), file).toHaveLength(2)
+            const items = notes.split(/\r?\n/).filter(line => /^\s*(?:[-*+]|\d+\.)\s/.test(line))
+            expect(blocks.filter(block => block.type === 'list-item'), file).toHaveLength(items.length)
+        }
     })
 
     it('selects locale, English, first locale, then default notes', () => {

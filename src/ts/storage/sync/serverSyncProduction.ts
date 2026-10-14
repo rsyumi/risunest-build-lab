@@ -13,6 +13,7 @@ import type { SyncBindingTransport, BindingContext, BindingOutcome, SyncBindingO
 import { createNativeSyncBindingBridge, replaceNativeSyncBinding, replaceNativeSyncBindingAsNewDevice } from './bindingNative'
 import { createServerSyncScheduler, integrityCodes, serverSyncErrorCode } from './serverSyncScheduler'
 import { subscribeLocalPersistentRevision } from '../persistentRevisionEvents'
+import { SERVER_SYNC_REMOTE_HINT_EVENT } from './serverSyncNativeSignals'
 import { listen } from '@tauri-apps/api/event'
 import { generatingConversations } from '../generatingConversationRegistry'
 import { bindSyncTarget, unbindSyncTarget } from './bindingRegistry'
@@ -440,7 +441,7 @@ export async function installServerSyncProduction({ resumeBound = true }: { resu
         openedConversation = identity
         void scheduler.conversationOpened().then(continueHydration)
     }))
-    disposers.push(await listen('risu-server-sync-remote-hint', () => scheduler.remoteHint()))
+    disposers.push(await listen(SERVER_SYNC_REMOTE_HINT_EVENT, () => scheduler.remoteHint()))
     disposers.push(await listen<{ connected: boolean }>('risu-server-sync-notification', event => scheduler.socket(event.payload.connected)))
     const visibility = () => { void updateForeground(document.visibilityState !== 'hidden').catch(value => { if (serverSyncErrorCode(value) === 'cancelled') return; error = serverSyncErrorCode(value) || 'server-unreachable'; changed() }) }
     document.addEventListener('visibilitychange', visibility)

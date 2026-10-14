@@ -210,6 +210,15 @@ async fn management_http_auth_revision_and_live_issuance() {
             .status(),
         401
     );
+    // The rejected body stays unread, so the connection is not offered for reuse.
+    let rejected = client
+        .post(format!("{url}/devices"))
+        .json(&serde_json::json!({"name":"HTTP 테스트"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), 401);
+    assert_eq!(rejected.headers()["connection"], "close");
     assert_eq!(
         client
             .get(format!("{url}/status"))

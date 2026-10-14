@@ -7,9 +7,9 @@ pub mod management;
 mod management_tests;
 pub mod publication;
 pub mod runtime;
-#[cfg(test)]
+#[cfg(all(test, feature = "source-observer"))]
 mod source_observer;
-#[cfg(test)]
+#[cfg(all(test, feature = "source-observer"))]
 mod source_observer_harness;
 pub mod store;
 pub mod tunnel;

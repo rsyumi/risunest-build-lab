@@ -33,30 +33,16 @@ function ownedStorage(owner: string) {
 }
 
 vi.mock('../plugins.svelte', async () => {
+    const host = await import('./v3Host.testSupport')
     const { createPluginLoadOrchestrator } = await import('../pluginCompatibility')
     const load = createPluginLoadOrchestrator<RisuPlugin>({
         resetRegistry: async () => undefined,
         loadV3: async (plugins) => (await import('./v3.svelte')).loadV3Plugins([...plugins]),
     })
-    const unrelated = vi.fn()
-    return {
-        allowedDbKeys: [],
-        applyPreparedPluginDatabaseUpdate: vi.fn(),
-        customProviderStore: {
-            subscribe(run: (value: string[]) => void) { run([]); return () => undefined },
-            set: vi.fn(),
-        },
-        getV2PluginAPIs: () => new Proxy({}, { get: () => unrelated }),
-        handlePluginInstallViaPlugin: vi.fn(),
+    return host.pluginsModule({
         loadPlugins: () => load(fixture.database.plugins.filter((plugin: RisuPlugin) => plugin.enabled)),
-        pluginStorageStore: {
-            forOwner: ownedStorage,
-            ownerOf: () => 'removal-plugin',
-            invalidateOwner: vi.fn(),
-            synchronizeCommittedMutation: vi.fn(),
-        },
-        pluginV2: { providers: new Map(), providerOptions: new Map(), chatOutput: new Set() },
-    }
+        pluginStorageStore: host.pluginStorageStoreStub('removal-plugin', ownedStorage),
+    })
 })
 vi.mock('../../storage/persistentDataStoreFactory', () => ({
     getPersistentDataStore: () => ({
@@ -65,67 +51,28 @@ vi.mock('../../storage/persistentDataStoreFactory', () => ({
         }))),
     }),
 }))
-vi.mock('src/ts/storage/database.svelte', () => ({ getDatabase: () => fixture.database }))
-vi.mock('../pluginSafeClass', () => ({ SafeLocalPluginStorage: class {}, SafeLocalStorage: class {}, tagWhitelist: [] }))
-vi.mock('src/ts/stores.svelte', () => ({
-    DBState: { get db() { return fixture.database } },
-    selectedCharID: {
-        subscribe(run: (value: number) => void) { run(0); return () => undefined },
-    },
-    additionalChatMenu: [], additionalFloatingActionButtons: [], additionalHamburgerMenu: [],
-    additionalSettingsMenu: [], bodyIntercepterStore: [], chatPanelStore: [],
-}))
-vi.mock('src/ts/alert', () => ({
-    alertConfirm: vi.fn(async () => true), alertError: vi.fn(), alertNormal: vi.fn(),
-}))
+vi.mock('src/ts/storage/database.svelte', async () => (await import('./v3Host.testSupport')).databaseModule({ read: () => fixture.database }))
+vi.mock('../pluginSafeClass', async () => (await import('./v3Host.testSupport')).pluginSafeClassModule())
+vi.mock('src/ts/stores.svelte', async () => (await import('./v3Host.testSupport')).storesModule({ read: () => fixture.database }))
+vi.mock('src/ts/alert', async () => (await import('./v3Host.testSupport')).alertModule())
 // Unload callbacks race this timeout, so it has to be a real one.
-vi.mock('src/ts/util', () => ({ sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)) }))
-vi.mock('src/lang', () => ({ language: {} }))
+vi.mock('src/ts/util', async () => (await import('./v3Host.testSupport')).utilModule({ sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)) }))
 vi.mock('src/ts/globalApi.svelte', () => ({
     checkCharOrder: vi.fn(), forageStorage: {}, getFetchLogs: vi.fn(),
 }))
-vi.mock('src/ts/gui/colorscheme', () => ({
-    changeColorScheme: vi.fn(), updateColorScheme: vi.fn(), updateTextThemeAndCSS: vi.fn(),
-}))
-vi.mock('src/ts/platform', () => ({ isTauri: false }))
-vi.mock('src/ts/process/mcp/pluginmcp', () => ({
-    registerMCPModule: vi.fn(), unregisterMCPModule: vi.fn(),
-}))
-vi.mock('src/ts/process/files/inlays', () => ({ getInlayAsset: vi.fn() }))
-vi.mock('src/ts/translator/translator', () => ({ getLLMCache: vi.fn(), searchLLMCache: vi.fn() }))
-vi.mock('src/ts/parser/parser.svelte', () => ({ hasher: vi.fn(async () => 'hash') }))
-vi.mock('localforage', () => ({ default: { createInstance: () => ({
-    getItem: vi.fn(async () => null),
-    setItem: vi.fn(),
-}) } }))
-vi.mock('src/ts/process/index.svelte', () => ({
-    sendChat: vi.fn(),
-    doingChat: { subscribe(run: (value: boolean) => void) { run(false); return () => undefined } },
-}))
-vi.mock('src/ts/model/modellist', () => ({ getModelInfo: () => ({ id: 'test-model' }) }))
-vi.mock('src/ts/process/request/request', () => ({ requestChatDataMain: vi.fn() }))
-vi.mock('src/ts/process/modules', () => ({ getModuleLorebooks: vi.fn() }))
-vi.mock('src/ts/process/ttsHooks', () => ({
-    registerTTSPreprocessor: vi.fn(), unregisterTTSPreprocessor: vi.fn(),
-    registerTTSPostprocessor: vi.fn(), unregisterTTSPostprocessor: vi.fn(),
-}))
-vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({
-    getPersistentRevision: () => 0,
-    commitPersistentUnitIntent: vi.fn(),
-    acquireCompleteConversation: vi.fn(),
-    captureSelectedConversationTarget: vi.fn(() => null),
-    flushPendingDataLocally: vi.fn(),
-    assertPersistentMutationAllowed: vi.fn(),
-    getPersistentStorageAuthorityEpoch: () => 0,
-    getActiveConversationSession: vi.fn(() => null),
-    getPersistentNavigationGeneration: vi.fn(() => 0),
-    invalidateActiveConversationSession: vi.fn(),
-    materializePersistentDatabaseSnapshotWithRevision: vi.fn(),
-    refreshSelectedConversationAfterReplacement: vi.fn(),
-    replacePersistentCompleteCharacter: vi.fn(),
-    replacePersistentConversation: vi.fn(),
-    replacePersistentDatabase: vi.fn(),
-}))
+vi.mock('src/ts/gui/colorscheme', async () => (await import('./v3Host.testSupport')).colorschemeModule())
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
+vi.mock('src/ts/process/mcp/pluginmcp', async () => (await import('./v3Host.testSupport')).pluginMcpModule())
+vi.mock('src/ts/process/files/inlays', async () => (await import('./v3Host.testSupport')).inlaysModule())
+vi.mock('src/ts/translator/translator', async () => (await import('./v3Host.testSupport')).translatorModule())
+vi.mock('src/ts/parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
+vi.mock('localforage', async () => (await import('../localforage.testSupport')).localforageModule())
+vi.mock('src/ts/process/index.svelte', async () => (await import('./v3Host.testSupport')).processIndexModule())
+vi.mock('src/ts/model/modellist', async () => (await import('./v3Host.testSupport')).modellistModule())
+vi.mock('src/ts/process/request/request', async () => (await import('./v3Host.testSupport')).requestModule())
+vi.mock('src/ts/process/modules', async () => (await import('./v3Host.testSupport')).modulesModule())
+vi.mock('src/ts/process/ttsHooks', async () => (await import('./v3Host.testSupport')).ttsHooksModule())
+vi.mock('src/ts/storage/persistentDataRuntime.svelte', async () => (await import('./v3Host.testSupport')).persistentRuntimeModule())
 
 import { listPluginDataItems } from '../pluginDataInventory'
 import { removeInstalledPlugin } from '../pluginRemoval'

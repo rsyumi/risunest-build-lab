@@ -26,6 +26,8 @@ export interface PersistentBootstrapDependencies {
     prepareRoot?(root: PersistentRoot): Promise<PersistentRoot>
     projectScalableWorkingSet?(input: ScalableBootstrapProjection): Database
     now?(): number
+    /** Characters per catalog page. */
+    catalogPageSize?: number
 }
 
 export interface ScalableBootstrapProjection {
@@ -123,7 +125,11 @@ async function projectScalableRevision(
 ): Promise<{ database: Database; revision: DataRevision }> {
     const currentRoot = root
     const currentRevision = revision
-    const characters = await queryAllCharacterSummaries(dependencies.store, revision)
+    const characters = await queryAllCharacterSummaries(
+        dependencies.store,
+        revision,
+        dependencies.catalogPageSize ?? BOOTSTRAP_CATALOG_PAGE_SIZE,
+    )
     const presets = await readSelectedPreset(
         dependencies.store,
         currentRevision,
@@ -143,6 +149,7 @@ async function projectScalableRevision(
 async function queryAllCharacterSummaries(
     store: PersistentDataStore,
     revision: DataRevision,
+    pageSize: number,
 ): Promise<CharacterSummary[]> {
     const characters: CharacterSummary[] = []
     const trashStates = [false, true] as const
@@ -152,7 +159,7 @@ async function queryAllCharacterSummaries(
             const page = await store.queryCharacters({
                 order: 'configured',
                 trash,
-                limit: BOOTSTRAP_CATALOG_PAGE_SIZE,
+                limit: pageSize,
                 cursor,
             })
             assertRevision(revision, page.revision)

@@ -19,12 +19,9 @@ vi.mock('@tauri-apps/api/event', () => ({
     },
 }))
 vi.mock('./alert', () => ({ alertError: mocks.alertError }))
-vi.mock('src/ts/platform', () => ({
-    isTauri: true,
-    get isTauriAndroid() { return mocks.android },
-    get isTauriDesktop() { return !mocks.ios && !mocks.android },
-    get isTauriIOS() { return mocks.ios },
-}))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule(() => ({
+    runtime: 'tauri', os: mocks.ios ? 'ios' : mocks.android ? 'android' : 'windows',
+})))
 
 let api: typeof import('./openedFiles')
 let consumeOpenedFiles: typeof api.consumeOpenedFiles

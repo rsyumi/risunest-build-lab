@@ -1731,6 +1731,7 @@ export const languageKorean = {
     nanoGPTManualModelSelect: "수동 모델 선택",
     risuNest: {
         backgroundDataFailed: '일부 데이터 변경을 완료하지 못했습니다.',
+        scriptTimeout: 'Lua 스크립트 실행 시간이 초과되어 중단되었습니다.',
         localSaveFailure: {
             failed: '변경 사항을 저장하지 못했습니다. 앱을 종료하기 전에 저장을 다시 시도해주세요.',
             invalid: '{0} 데이터를 저장하지 못했습니다. 해당 데이터를 확인한 후 저장을 다시 시도해주세요.',
@@ -2744,6 +2745,10 @@ export const languageKorean = {
                 '최근 오류 기록입니다. 문제를 신고할 때 함께 보내면 도움이 됩니다.',
             viewLog: '보기',
             copyLog: '복사',
+            consoleTitle: '콘솔 로그',
+            consoleHelp: '앱과 플러그인의 최근 로그를 조회할 수 있으며, 앱을 다시 시작하면 기록이 비워집니다.',
+            consoleEmpty: '기록된 콘솔 로그가 없습니다.',
+            clearLog: '비우기',
             fileLog: '오류 로그를 파일로 저장',
             fileLogHelp: 'API 키 같은 비밀 정보는 가려서 기록합니다.',
             logEmpty: '기록된 오류가 없습니다.',

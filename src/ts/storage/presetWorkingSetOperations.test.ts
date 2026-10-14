@@ -18,7 +18,7 @@ vi.mock('../translator/presets', () => ({ normalizeTranslatorPresetState: vi.fn(
 vi.mock('../model/modellist', () => ({ LLMFlags: {}, LLMFormat: {}, LLMTokenizer: {} }))
 vi.mock('../process/modules', () => ({ moduleUpdate: vi.fn() }))
 vi.mock('../process/scripts', () => ({ resetScriptCache: vi.fn() }))
-vi.mock('../parser/parser.svelte', () => ({}))
+vi.mock('../parser/parser.svelte', async () => (await import('../parser/parser.testSupport')).parserStubModule())
 vi.mock('../process/memory/hypav3', () => ({ createHypaV3Preset: vi.fn() }))
 const runtime = vi.hoisted(() => ({
     mutatePersistentPresets: vi.fn(),

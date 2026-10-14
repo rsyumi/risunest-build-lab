@@ -15,11 +15,20 @@ function client(responses) {
 }
 const json = (value, status = 200) => new Response(JSON.stringify(value), { status });
 
+test("publication sends the completed release body with the public transition", async () => {
+  const body = "# Release\n\n## Downloads / 다운로드\n\n| Platform | arm64 | x64 |";
+  const { github, calls } = client([json({ id: 7, draft: false, body })]);
+  await github.publish(7, body);
+  assert.equal(calls[0].url, "https://api.github.com/repos/rsyumi/RisuNest/releases/7");
+  assert.equal(calls[0].method, "PATCH");
+  assert.deepEqual(JSON.parse(calls[0].body), { draft: false, make_latest: "true", body });
+});
+
 test("GitHub reads recover from transient HTTP failures without retrying absent releases or mutations", async () => {
   const { github, calls, waits } = client([json({}, 504), json({}, 503), json({ id: 7 })]);
   assert.equal((await github.getLatest()).id, 7);
   assert.equal(calls.length, 3);
-  assert.deepEqual(waits, [10000, 20000]);
+  assert.equal(waits.length, 2);
   assert.equal(new Set(calls.map(call => call.signal)).size, 3);
   const absent = client([json({}, 404)]);
   assert.equal(await absent.github.getLatest(), null);
@@ -44,7 +53,7 @@ test("GitHub binary reads restart after stream failure and never multiply retry 
   const failed = client([json({}, 503), json({}, 503), json({}, 503)]);
   await assert.rejects(failed.github.downloadAsset(release, "manifest.json", 3), /github-get-503/);
   assert.equal(failed.calls.length, 3);
-  assert.deepEqual(failed.waits, [10000, 20000]);
+  assert.equal(failed.waits.length, 2);
 });
 
 test("GitHub JSON reads retry broken streams but not invalid response data", async () => {

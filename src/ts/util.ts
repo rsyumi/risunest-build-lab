@@ -12,6 +12,7 @@ import { isIOS, isTauri, isTauriMobile, isTauriDesktop } from "src/ts/platform"
 import type { Attachment } from "svelte/attachments"
 import { mount, unmount, type Snippet } from "svelte"
 import PopupList from "src/lib/UI/PopupList.svelte"
+import { indexCharactersById } from "./characterIndex"
 const appWindow = isTauri ? getCurrentWebviewWindow() : null
 
 export interface Messagec extends Message{
@@ -261,14 +262,7 @@ export function findCharacterIndexbyId(id:string) {
 }
 
 export function getCharacterIndexObject() {
-    const db = getDatabase()
-    let i=0;
-    let result:{[key:string]:number} = {}
-    for(const char of db.characters){
-        result[char.chaId] = i
-        i += 1
-    }
-    return result
+    return indexCharactersById(getDatabase().characters)
 }
 
 export function defaultEmotion(em:[string,string][]){
@@ -1051,14 +1045,7 @@ export function parseToggleSyntax(template:string){
     }
 }
 
-export const sortableOptions = {
-	delay: 300, // time in milliseconds to define when the sorting should start
-	delayOnTouchOnly: true,
-    filter: '.no-sort',
-    onMove: (event) => {
-        return event.related.className.indexOf('no-sort') === -1
-    }
-} as const
+export { sortableOptions } from './sortableOptions'
 
 
 export function pickHashRand(cid:number,word:string) {

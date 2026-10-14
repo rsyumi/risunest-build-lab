@@ -4378,7 +4378,7 @@ dependencies = [
 
 [[package]]
 name = "risunest"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "async-trait",
  "axum",
@@ -4538,7 +4538,7 @@ dependencies = [
 
 [[package]]
 name = "risunest-sync-server"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "async-trait",
  "axum",
@@ -4546,6 +4546,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.2.17",
  "hex",
+ "http-body",
  "libc",
  "qrcode",
  "reqwest 0.12.28",

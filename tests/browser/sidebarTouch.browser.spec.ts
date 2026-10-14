@@ -11,8 +11,8 @@ async function move(page: Page, hold: number, source: string | Locator, target: 
     const y = from!.y + from!.height / 2
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] })
     await page.waitForTimeout(hold)
-    for (let step = 1; step <= 10; step++) {
-        await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x, y: y + (to!.y + to!.height / 2 - y) * step / 10 }] })
+    for (let step = 1; step <= 3; step++) {
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x, y: y + (to!.y + to!.height / 2 - y) * step / 3 }] })
         await page.waitForTimeout(35)
     }
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
@@ -26,11 +26,17 @@ test('tap, early swipe and held drag coexist with the iOS polyfill', async ({ pa
     await page.getByRole('button', { name: 'Bot 1', exact: true }).tap()
     await expect(page.getByText('sidebar-clicks:1', { exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Reset sidebar' }).tap()
+    // A tap during inertial scrolling stops the fling instead of activating Reset.
+    const scrollEnded = page.locator('#touch-sidebar').evaluate(list => new Promise<void>(resolve => {
+        list.addEventListener('scrollend', () => resolve(), { once: true })
+    }))
     await move(page, 50, 'Bot 4', 'Bot 1')
     await expect(page.getByText('sidebar-scrolled', { exact: true })).toBeVisible()
     await expect(page.getByText('sidebar-drops:0', { exact: true })).toBeVisible()
     await expect(page.getByText('sidebar-clicks:0', { exact: true })).toBeVisible()
+    await scrollEnded
     await page.getByRole('button', { name: 'Reset sidebar' }).tap()
+    await expect(page.getByText('sidebar-top', { exact: true })).toBeVisible()
     await move(page, 600, 'Bot 3', 'Before Bot 1')
     await expect(page.getByText('sidebar-first:3', { exact: true })).toBeVisible()
     await expect(page.getByText('sidebar-drops:1', { exact: true })).toBeVisible()

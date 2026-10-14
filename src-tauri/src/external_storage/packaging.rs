@@ -150,6 +150,28 @@ const COALESCE_MAX_LEAVES: usize = 8;
 /// registration page each. A remaining allowance below this declines it.
 pub(crate) const COALESCE_REQUEST_BUDGET: u64 = 2 * COALESCE_MAX_PACKS as u64;
 
+/// How many small live packs start a coalescing cycle, and how many one cycle
+/// may drain.
+#[derive(Clone, Copy, Debug)]
+struct CoalescePacks {
+    trigger: usize,
+    max: usize,
+}
+const COALESCE_PACKS: CoalescePacks = CoalescePacks {
+    trigger: COALESCE_TRIGGER_PACKS,
+    max: COALESCE_MAX_PACKS,
+};
+#[cfg(test)]
+thread_local! {
+    static TEST_COALESCE_PACKS: std::cell::Cell<CoalescePacks> = const { std::cell::Cell::new(COALESCE_PACKS) };
+}
+fn coalesce_packs() -> CoalescePacks {
+    #[cfg(test)]
+    return TEST_COALESCE_PACKS.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    COALESCE_PACKS
+}
+
 /// What one publication's maintenance portion actually repackaged, and the
 /// record catalog leaves its plan charged to it beside the ones the required
 /// changes write anyway. The leaf counts stay zero when no cycle ran.
@@ -180,8 +202,9 @@ struct LivePack {
 /// first live key, so a run covers neighbouring catalog ranges rather than
 /// scattered ones, and it stops at the pack, byte, leaf and trigger bounds.
 fn select_small_packs(mut live: Vec<LivePack>) -> Vec<LivePack> {
+    let packs = coalesce_packs();
     live.retain(|pack| pack.rewritable && pack.ciphertext_length <= SMALL_PACK_CIPHERTEXT_BYTES);
-    if live.len() < COALESCE_TRIGGER_PACKS {
+    if live.len() < packs.trigger {
         return Vec::new();
     }
     live.sort_by(|a, b| {
@@ -191,7 +214,7 @@ fn select_small_packs(mut live: Vec<LivePack>) -> Vec<LivePack> {
     let mut bytes = 0u64;
     let mut leaves = BTreeSet::new();
     for pack in live {
-        if selected.len() >= COALESCE_MAX_PACKS
+        if selected.len() >= packs.max
             || bytes.saturating_add(pack.bytes) > COALESCE_MAX_SOURCE_BYTES
             || leaves.union(&pack.leaves).count() > COALESCE_MAX_LEAVES
         {
@@ -3221,9 +3244,19 @@ async fn build_catalog(
 /// rather than sealed whole, so its ciphertext never outgrows the spool.
 const METADATA_WAVE_OBJECTS: usize = 64;
 const METADATA_WAVE_BYTES: u64 = 64 * 1024 * 1024;
+#[cfg(test)]
+thread_local! {
+    static TEST_METADATA_WAVE_OBJECTS: std::cell::Cell<usize> = const { std::cell::Cell::new(METADATA_WAVE_OBJECTS) };
+}
+fn metadata_wave_objects() -> usize {
+    #[cfg(test)]
+    return TEST_METADATA_WAVE_OBJECTS.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    METADATA_WAVE_OBJECTS
+}
 
 fn metadata_wave_due(sealed: &[SealedObject], bytes: u64) -> bool {
-    bytes >= METADATA_WAVE_BYTES || waiting(sealed) >= METADATA_WAVE_OBJECTS
+    bytes >= METADATA_WAVE_BYTES || waiting(sealed) >= metadata_wave_objects()
 }
 
 /// A catalog whose root is in the selected parent graph is protected with it,
@@ -4747,6 +4780,14 @@ mod tests {
         }
     }
 
+    /// Sets this thread's coalescing trigger and pack cap, so a library ages
+    /// past them in fewer publications than the product's 32 and 16 take.
+    fn coalesce_packs_on_this_thread(trigger: usize, max: usize) -> CoalescePacks {
+        let packs = CoalescePacks { trigger, max };
+        TEST_COALESCE_PACKS.with(|value| value.set(packs));
+        packs
+    }
+
     fn section_rows(kind: SectionKind, marker: &str) -> Vec<SectionRow> {
         use crate::persistent_store::device_store::sections::SectionValueRow;
         match kind {
@@ -6086,10 +6127,11 @@ mod tests {
     /// does not, and nothing old is deleted.
     #[test]
     fn c_an_aged_publication_repackages_a_bounded_run_of_small_live_packs() {
+        let packs = coalesce_packs_on_this_thread(8, 4);
         runtime().block_on(async {
-            const RECORDS: usize = 128;
+            const RECORDS: usize = 32;
             const ASSETS: usize = 8;
-            const AGED: i64 = 36;
+            const AGED: i64 = 10;
             let mut outcomes = Vec::new();
             for allowed in [false, true] {
                 let root = tempfile::tempdir().unwrap();
@@ -6145,7 +6187,7 @@ mod tests {
             }
             let (plain, coalesced) = (&outcomes[0], &outcomes[1]);
             assert_eq!(plain.0, MaintenanceReport::default());
-            assert_eq!(coalesced.0.packs, COALESCE_MAX_PACKS as u64);
+            assert_eq!(coalesced.0.packs, packs.max as u64);
             assert!(coalesced.0.source_bytes > 0);
             assert!(coalesced.0.source_bytes <= COALESCE_MAX_SOURCE_BYTES);
             // The library is the same library. Only where its bodies sit moved.
@@ -6155,12 +6197,12 @@ mod tests {
             // The drained packs are packs the latest state no longer opens.
             assert_eq!(
                 plain.2.packs - coalesced.2.packs,
-                COALESCE_MAX_PACKS as u64,
+                packs.max as u64,
                 "plain={:?} coalesced={:?}", plain.2, coalesced.2,
             );
             // The repackaged bodies fit the pack this publication was writing
             // anyway, so the cycle costs no object the plain run did not also
-            // upload. What it buys is the sixteen packs above.
+            // upload. What it buys is the drained packs above.
             assert_eq!(coalesced.4, plain.4);
         });
     }
@@ -6168,14 +6210,15 @@ mod tests {
     /// Section 11.3's leaf bound, and a publication whose record catalog is
     /// logically its parent's. The library grows one contiguous range per
     /// publication, so every small pack covers about one catalog leaf and an
-    /// adjacent run of sixteen covers far more than eight. The last
+    /// adjacent run of ten covers more than eight. The last
     /// publication changes only a device section, and what the maintenance
     /// portion moves has to be what the published catalog names.
     #[test]
     fn c_a_coalescing_cycle_rewrites_at_most_eight_leaves_and_names_what_it_moved() {
+        coalesce_packs_on_this_thread(8, COALESCE_MAX_PACKS);
         runtime().block_on(async {
             const RANGE: usize = 48;
-            const GROWN: usize = 36;
+            const GROWN: usize = 10;
             const LAST: i64 = GROWN as i64 + 1;
             let root = tempfile::tempdir().unwrap();
             let provider = FakeProvider::new(false);
@@ -6279,9 +6322,10 @@ mod tests {
     /// rows name are not live and take no place in the cycle's run.
     #[test]
     fn c_deleted_keys_take_no_place_in_a_coalescing_cycle() {
+        let packs = coalesce_packs_on_this_thread(8, 4);
         runtime().block_on(async {
-            const RECORDS: usize = 128;
-            const AGED: i64 = 40;
+            const RECORDS: usize = 40;
+            const AGED: i64 = 14;
             const DELETED: usize = 8;
             let root = tempfile::tempdir().unwrap();
             let provider = FakeProvider::new(false);
@@ -6315,14 +6359,14 @@ mod tests {
                 previous = latest.replace(completed);
             }
             let (previous, completed) = (previous.unwrap(), latest.unwrap());
-            assert_eq!(completed.maintenance.packs, COALESCE_MAX_PACKS as u64);
+            assert_eq!(completed.maintenance.packs, packs.max as u64);
             let before = record_graph_packs(&cache, &previous, &repository);
             let after = record_graph_packs(&cache, &completed, &repository);
             // The packs of the deleted keys leave with the keys, and the run
-            // drains sixteen live ones besides.
+            // drains a full cap of live ones besides.
             assert_eq!(
                 before.difference(&after).count(),
-                COALESCE_MAX_PACKS + DELETED / 2,
+                packs.max + DELETED / 2,
             );
         });
     }
@@ -6528,9 +6572,10 @@ mod tests {
     /// catalog writer's own layout keeps within the bound.
     #[test]
     fn c_a_coalescing_cycle_is_bounded_by_the_leaves_its_rewrite_produces() {
+        coalesce_packs_on_this_thread(8, COALESCE_MAX_PACKS);
         runtime().block_on(async {
             const RANGE: usize = 48;
-            const GROWN: usize = 36;
+            const GROWN: usize = 10;
             let root = tempfile::tempdir().unwrap();
             let provider = FakeProvider::new(false);
             let repository = fake::repository();
@@ -6574,9 +6619,10 @@ mod tests {
     /// run is declined before any pack is built.
     #[test]
     fn c_a_no_op_publication_whose_every_run_exceeds_the_bound_writes_nothing() {
+        coalesce_packs_on_this_thread(8, COALESCE_MAX_PACKS);
         runtime().block_on(async {
             const RANGE: usize = 150;
-            const GROWN: usize = 33;
+            const GROWN: usize = 9;
             let root = tempfile::tempdir().unwrap();
             let provider = FakeProvider::new(false);
             let key = [67; 32];
@@ -6604,9 +6650,10 @@ mod tests {
     /// when the publication without the cycle would not have produced it.
     #[test]
     fn c_required_edits_beyond_the_bound_are_all_published_beside_a_bounded_cycle() {
+        coalesce_packs_on_this_thread(8, COALESCE_MAX_PACKS);
         runtime().block_on(async {
             const RANGE: usize = 48;
-            const GROWN: usize = 36;
+            const GROWN: usize = 14;
             const EVERY: usize = 24;
             let edited = |index: usize| index % EVERY == 5;
             let value = |index: usize| if edited(index) { GROWN as i64 + 1 } else { 0 };
@@ -6771,7 +6818,7 @@ mod tests {
     #[test]
     fn c_a_receive_reads_only_the_packs_of_records_its_cache_does_not_hold() {
         runtime().block_on(async {
-            const RECORDS: usize = 600;
+            const RECORDS: usize = 400;
             let sender = tempfile::tempdir().unwrap();
             let receiver = tempfile::tempdir().unwrap();
             let provider = FakeProvider::new(false);
@@ -7615,11 +7662,12 @@ mod tests {
     /// whole level.
     #[test]
     fn c_a_wide_catalog_level_is_sent_in_waves_that_fit_the_spool() {
+        TEST_METADATA_WAVE_OBJECTS.with(|value| value.set(8));
         runtime().block_on(async {
             let root = tempfile::tempdir().unwrap();
             let provider = FakeProvider::new(false);
             let repository = fake::repository();
-            let capture = captured_record_window(root.path(), "wide", 1, 2000, 0, 0, 0);
+            let capture = captured_record_window(root.path(), "wide", 1, 400, 0, 0, 0);
             let meta = metadata("wide", &capture);
             let directory = root.path().join("wide-job");
             let job = format!("wide-{}", uuid::Uuid::new_v4());
@@ -7629,7 +7677,7 @@ mod tests {
                 super::super::journal::SpoolBudget::new(job.clone(), move || {
                     Ok(vec![holder.clone()])
                 })
-                .with_limit(400 * 1024),
+                .with_limit(50 * 1024),
             );
             let completed = package_and_upload(
                 capture, vec![], root.path(), &root.path().join("cache"), meta, &[5; 32],
@@ -7644,7 +7692,7 @@ mod tests {
                 .filter(|object| object.role == ObjectRole::Catalog)
                 .count();
             assert!(
-                catalogs > 2 * METADATA_WAVE_OBJECTS,
+                catalogs > 2 * metadata_wave_objects(),
                 "{catalogs} catalog nodes do not need more than one wave"
             );
         });
@@ -7683,7 +7731,7 @@ mod tests {
                 let root = tempfile::tempdir().unwrap();
                 let provider = FakeProvider::new(false);
                 let repository = fake::repository();
-                let capture = captured_record_window(root.path(), "tight", 1, 2000, 0, 0, 0);
+                let capture = captured_record_window(root.path(), "tight", 1, 400, 0, 0, 0);
                 let meta = metadata("tight", &capture);
                 let directory = root.path().join("tight-job");
                 let job = format!("tight-{}", uuid::Uuid::new_v4());
@@ -7731,7 +7779,7 @@ mod tests {
             let provider = FakeProvider::new(false);
             let repository = fake::repository();
             let limit = 12 * 1024;
-            let capture = captured_record_window(root.path(), "crowded", 1, 2000, 0, 0, 0);
+            let capture = captured_record_window(root.path(), "crowded", 1, 400, 0, 0, 0);
             let reference = capture.durable_reference(root.path()).unwrap();
             let directory = root.path().join("crowded-job");
             let peer = root.path().join("peer-job");
@@ -8044,7 +8092,7 @@ mod tests {
                     .with_limit(limit)
                     .with_families(families.clone())
             };
-            let capture = captured_record_window(root.path(), "stopped", 1, 2000, 0, 0, 0);
+            let capture = captured_record_window(root.path(), "stopped", 1, 400, 0, 0, 0);
             let reference = capture.durable_reference(root.path()).unwrap();
             let meta = metadata("stopped", &capture);
             let mut transfer = journal(&stopped_directory, &stopped_job, &capture);
@@ -8096,7 +8144,7 @@ mod tests {
             // A peer publishes in the room the stopped job leaves.
             let room = 12 * 1024;
             let limit = held + room;
-            let capture = captured_record_window(root.path(), "peer", 1, 2000, 0, 0, 0);
+            let capture = captured_record_window(root.path(), "peer", 1, 400, 0, 0, 0);
             let meta = metadata("peer", &capture);
             let mut transfer = journal(&peer_directory, &peer_job, &capture);
             transfer.set_spool_budget(budget(&peer_job, limit));

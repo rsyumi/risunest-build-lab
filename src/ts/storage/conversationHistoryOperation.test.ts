@@ -62,7 +62,7 @@ describe('ConversationHistoryOperation', () => {
         expect(() => operation.readLatest(1)).toThrow(ConversationHistoryOperationDisposedError)
     })
 
-    it('rejects every later read when the pinned session version changes', () => {
+    it('keeps reading across variable commits and rejects every later read when messages change', () => {
         const conversation = chat([message('before')])
         const session = new ActiveConversationSession({
             characterId: 'character-a',
@@ -71,7 +71,12 @@ describe('ConversationHistoryOperation', () => {
             storeRevision: 2,
         })
         const operation = beginPinnedConversationHistoryOperation(session)
+        const locator = operation.readLatest(1).locators[0]
 
+        session.updateChatVariables(new Map([['scratch', 'display']]), { origin: 'display' })
+
+        expect(operation.readRange(0, 1).messages).toEqual([message('before')])
+        expect(operation.resolveMessage(locator).data).toBe('before')
         session.append(message('after'))
 
         expect(() => operation.assertCurrent()).toThrow(ConversationSessionStaleError)

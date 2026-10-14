@@ -1,5 +1,5 @@
 import type { AndroidGenerationKeepAliveBridge } from './androidGenerationKeepAlive'
-import type { AndroidSafJavascriptBridge } from './storage/androidSafBridge'
+import type { AndroidBackupCopyProgress, AndroidSafJavascriptBridge } from './storage/androidSafBridge'
 import type { NativeFileSelectionBridge } from './storage/nativeFileSelection'
 
 export interface AndroidControlMessagePort {
@@ -32,9 +32,54 @@ export function createAndroidControlClient(port: AndroidControlMessagePort) {
         resolve(value: unknown): void
         reject(error: Error): void
         timer: ReturnType<typeof setTimeout> | undefined
+        progress?(value: unknown): void
     }>()
+    function request<T>(method: string, args: string[], onProgress?: (progress: AndroidBackupCopyProgress) => void): Promise<T> {
+        if (pending.size >= 32) return Promise.reject(new Error('android-control-busy'))
+        const id = crypto.randomUUID()
+        const copying = method === 'saf.materializeBackupSource'
+        const timeout = copying ? 120_000 : 15_000
+        return new Promise<T>((resolve, reject) => {
+            const entry = {
+                resolve: (value: unknown) => resolve(value as T),
+                reject,
+                timer: undefined as ReturnType<typeof setTimeout> | undefined,
+                progress: undefined as ((value: unknown) => void) | undefined,
+            }
+            const renewTimeout = () => {
+                clearTimeout(entry.timer)
+                entry.timer = setTimeout(() => {
+                    pending.delete(id)
+                    reject(new Error('android-control-timeout'))
+                }, timeout)
+            }
+            if (copying) {
+                let copiedBytes = 0
+                entry.progress = value => {
+                    if (!value || typeof value !== 'object') return
+                    const progress = value as Partial<AndroidBackupCopyProgress>
+                    if (typeof progress.copiedBytes !== 'number' || !Number.isSafeInteger(progress.copiedBytes)
+                        || progress.copiedBytes <= copiedBytes) return
+                    if (progress.totalBytes !== null && (typeof progress.totalBytes !== 'number'
+                        || !Number.isSafeInteger(progress.totalBytes) || progress.totalBytes < progress.copiedBytes)) return
+                    copiedBytes = progress.copiedBytes
+                    renewTimeout()
+                    onProgress?.({ copiedBytes, totalBytes: progress.totalBytes })
+                }
+            }
+            if (method !== 'files.pick') renewTimeout()
+            pending.set(id, entry)
+            try {
+                port.postMessage(JSON.stringify({ id, method, args }))
+            } catch (error) {
+                pending.delete(id)
+                clearTimeout(entry.timer)
+                reject(error)
+            }
+        })
+    }
     port.onmessage = (event) => {
-        let response: { id?: unknown; result?: unknown; error?: unknown }
+        let response: { id?: unknown; result?: unknown; error?: unknown; progress?: unknown }
         try {
             response = JSON.parse(event.data)
         } catch {
@@ -43,6 +88,10 @@ export function createAndroidControlClient(port: AndroidControlMessagePort) {
         if (!response || typeof response.id !== 'string') return
         const request = pending.get(response.id)
         if (!request) return
+        if ('progress' in response) {
+            request.progress?.(response.progress)
+            return
+        }
         pending.delete(response.id)
         clearTimeout(request.timer)
         if (typeof response.error === 'string') request.reject(new Error(response.error))
@@ -53,22 +102,10 @@ export function createAndroidControlClient(port: AndroidControlMessagePort) {
             port.postMessage(JSON.stringify({ method, args }))
         },
         request<T>(method: string, ...args: string[]): Promise<T> {
-            if (pending.size >= 32) return Promise.reject(new Error('android-control-busy'))
-            const id = crypto.randomUUID()
-            return new Promise<T>((resolve, reject) => {
-                const timer = method === 'files.pick' ? undefined : setTimeout(() => {
-                    pending.delete(id)
-                    reject(new Error('android-control-timeout'))
-                }, 15_000)
-                pending.set(id, { resolve: (value) => resolve(value as T), reject, timer })
-                try {
-                    port.postMessage(JSON.stringify({ id, method, args }))
-                } catch (error) {
-                    pending.delete(id)
-                    clearTimeout(timer)
-                    reject(error)
-                }
-            })
+            return request<T>(method, args)
+        },
+        requestWithProgress<T>(method: 'saf.materializeBackupSource', onProgress: ((progress: AndroidBackupCopyProgress) => void) | undefined, ...args: string[]): Promise<T> {
+            return request<T>(method, args, onProgress)
         },
     }
 }
@@ -118,7 +155,7 @@ function installAndroidNativeControl(): void {
         pickBackupSource: (id) => saf.notify('saf.pickBackupSource', id),
         pickPortableBackupSource: (id) => saf.notify('saf.pickPortableBackupSource', id),
         discardPortableSource: (token) => saf.request<boolean>('saf.discardPortableSource', token),
-        materializeBackupSource: (token) => saf.request<string>('saf.materializeBackupSource', token),
+        materializeBackupSource: (token, onProgress) => saf.requestWithProgress<string>('saf.materializeBackupSource', onProgress, token),
         pickContentSource: (id, destination) => saf.notify('saf.pickContentSource', id, destination),
         pickLegacyBackupSource: (id) => saf.notify('saf.pickLegacyBackupSource', id),
         discardSource: (token) => saf.request<boolean>('saf.discardSource', token),

@@ -2,7 +2,8 @@ import { applyRootMutations } from './rootMutation'
 import { acquireUpstreamImportPause } from './upstreamReplacement'
 import { describe, expect, it, vi } from 'vitest'
 import type { Database } from './database.svelte'
-import type { PersistentDataStore, PersistentRevisionLease } from './persistentDataStore'
+import type { PersistentRevisionLease } from './persistentDataStore'
+import { createLeaseStub, createStoreStub } from './persistentDataStore.testSupport'
 import {
     capturePersistentPluginStorage,
     capturePersistentPresets,
@@ -33,7 +34,7 @@ async function createHarness(officialPublisher?: OfficialRevisionPublisher, capt
     const onBackgroundError = vi.fn()
     const afterRemoteRootChange = vi.fn()
     const publishPresetWorkingSet = vi.fn()
-    const store = {
+    const store = createStoreStub({
         open: vi.fn(async () => undefined),
         readRoot: vi.fn(async () => ({ revision, value: capturePersistentRoot(durable) })),
         commit: vi.fn(async () => { throw new Error('Unexpected content commit') }),
@@ -45,7 +46,7 @@ async function createHarness(officialPublisher?: OfficialRevisionPublisher, capt
         acquireRevision: vi.fn(async (expected: number) => {
             expect(expected).toBe(revision)
             const snapshot = structuredClone(durable)
-            const lease = {
+            const lease = createLeaseStub({
                 revision: expected,
                 readRoot: vi.fn(async () => ({ revision: expected, value: capturePersistentRoot(snapshot) })),
                 queryPresets: vi.fn(async () => ({ revision: expected, items: [] })),
@@ -80,12 +81,12 @@ async function createHarness(officialPublisher?: OfficialRevisionPublisher, capt
                 queryConversations: vi.fn(async () => ({ revision: expected, items: [] })),
                 queryPluginStorage: vi.fn(async () => ({ revision: expected, items: [] })),
                 release: vi.fn(async () => undefined),
-            } as unknown as PersistentRevisionLease
+            })
             leases.push(lease)
             return lease
         }),
         materializeDatabase: vi.fn(async () => { throw new Error('Unexpected complete materialization') }),
-    } as unknown as PersistentDataStore
+    })
     const runtime = createPersistentDataRuntime({
         store,
         state: {

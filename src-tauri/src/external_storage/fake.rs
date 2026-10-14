@@ -106,7 +106,8 @@ pub(super) struct FakeState {
     read_barrier: Option<(String,Arc<FakeReadBarrier>)>,
     requests: usize,
 }
-/// One actual exact-object read is held before delivering bytes to its real sink.
+/// One actual exact-object read is held once its real sink is open, before any
+/// byte reaches it, until it is released or cancelled.
 pub(crate) struct FakeReadBarrier {
     pub object_id:String,
     pub reached:tokio::sync::Notify,
@@ -414,14 +415,15 @@ impl Provider for FakeProvider {
             if unchanged == Some(&token) && !self.state.lock().unwrap().ignore_unchanged {
                 return Ok(ReadReceipt::NotModified(token));
             }
+            let hash = risunest_sync_wire::hash(&bytes);
+            let mut writer = sink.open(0, bytes.len() as u64, c).await?;
             let barrier={let mut state=self.state.lock().unwrap();
                 if state.read_barrier.as_ref().is_some_and(|(object,_)|object==&l.object) {state.read_barrier.take().map(|(_,barrier)|barrier)}else{None}};
             if let Some(barrier)=barrier {
                 barrier.was_reached.store(true,Ordering::SeqCst);barrier.reached.notify_one();
-                barrier.release.notified().await;c.check()?;
+                tokio::select! {_=barrier.release.notified()=>(),_=c.cancelled()=>()}
+                c.check()?;
             }
-            let hash = risunest_sync_wire::hash(&bytes);
-            let mut writer = sink.open(0, bytes.len() as u64, c).await?;
             writer
                 .write_all(&bytes)
                 .await

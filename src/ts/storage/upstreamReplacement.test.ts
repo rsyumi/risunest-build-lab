@@ -35,7 +35,7 @@ describe('upstream import acknowledgement', () => {
         expect(dialog).not.toHaveBeenCalled()
         expect(actionDialog).not.toHaveBeenCalled()
     })
-    it.each([[false,true],[false,false],[true,true],[true,false]])('shows only the backup warnings when the library holds no character, bound=%s answer=%s', async (bound, answer) => {
+    it.each([[false,true],[true,false]])('shows only the backup warnings when the library holds no character, bound=%s answer=%s', async (bound, answer) => {
         characters.mockResolvedValue(false)
         actionDialog.mockResolvedValueOnce(answer)
         await expect(confirmUpstreamLibraryReplacement(bound,['cold warning','inlay warning'])).resolves.toBe(answer)

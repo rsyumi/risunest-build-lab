@@ -5,12 +5,9 @@ import { mount, tick, unmount } from 'svelte'
 const platform = vi.hoisted(() => ({ native: false, android: false, desktop: false }))
 const characters = vi.hoisted(() => vi.fn(async () => true))
 
-vi.mock('src/ts/platform', async (importOriginal) => ({
-    ...(await importOriginal<typeof import('src/ts/platform')>()),
-    get isTauri() { return platform.native },
-    get isTauriAndroid() { return platform.android },
-    get isTauriDesktop() { return platform.desktop },
-}))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule(() => ({
+    runtime: platform.native ? 'tauri' : 'web', os: platform.android ? 'android' : !platform.native || platform.desktop ? 'windows' : 'ios',
+})))
 vi.mock('src/ts/stores.svelte', () => ({ DBState: { db: { account: undefined } } }))
 vi.mock('src/ts/alert', () => ({
     alertConfirm: vi.fn(),

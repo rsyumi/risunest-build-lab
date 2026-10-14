@@ -5,6 +5,7 @@ import { DBState, selIdState } from '../stores.svelte';
 import { aiWatermarkingLawApplies, getFileSrc, getFileImageSource } from '../globalApi.svelte';
 import { isTauri } from "src/ts/platform"
 import { getChatVar, setChatVar, getGlobalChatVar } from './chatVar.svelte';
+import { noteChatVariableRead, noteUntrackedVariableRead, recordChatVariableReads, type DisplayReadRecord } from '../process/scriptVariableReads';
 import { processScriptFull, type ProcessScriptCaptureContext } from '../process/scripts';
 import { get } from 'svelte/store';
 import css, { type CssAtRuleAST, type CssDeclarationAST } from '@adobe/css-tools'
@@ -705,6 +706,8 @@ export interface ParseMarkdownRenderContext {
     markdownSettings?: MarkdownRenderSettings
     returnCSSError?: boolean
     projectedChatID?: number
+    /** Collects the chat variables this render reads. */
+    variableReads?: DisplayReadRecord
 }
 
 function parseThoughtsAndTools(
@@ -771,6 +774,7 @@ export async function ParseMarkdown(
             cache: renderContext.scriptContext ? 'bypass' : 'normal',
             projectedChatID: renderContext.projectedChatID,
             signal: renderContext.signal,
+            variableReads: renderContext.variableReads,
         })).data
     }
 
@@ -796,7 +800,7 @@ export async function ParseMarkdown(
             return data
         }
     }
-    return trimMarkdown(data, {
+    return recordChatVariableReads(renderContext.variableReads, () => trimMarkdown(data, {
         hideAllImages: renderContext.hideAllImages,
         returnCSSError: renderContext.returnCSSError,
         parserContext: renderContext.scriptContext?.parserContext,
@@ -804,7 +808,7 @@ export async function ParseMarkdown(
         projectedChatID: renderContext.projectedChatID,
         cbsConditions,
         deferredInlays: renderContext.deferredInlays,
-    })
+    }))
 }
 
 const trimPurifyConfig = {
@@ -1093,12 +1097,14 @@ let activeMatcherContext: matcherArg | null = null
 const matcherMap = new Map<string, RegisterCallback>()
 
 function readMatcherChatVar(context: matcherArg | null, key: string): string {
+    noteChatVariableRead(key)
     if (context?.chatVariables) return context.chatVariables[key] ?? 'null'
     if (context?.getChatVar) return context.getChatVar(key)
     return getChatVar(key)
 }
 
 function readMatcherGlobalChatVar(context: matcherArg | null, key: string): string {
+    noteUntrackedVariableRead()
     return context?.globalChatVariables
         ? context.globalChatVariables[key] ?? 'null'
         : getGlobalChatVar(key)

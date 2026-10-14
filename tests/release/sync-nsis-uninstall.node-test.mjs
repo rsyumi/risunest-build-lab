@@ -6,8 +6,10 @@ import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 
 const compiler = process.env.NSIS_MAKENSIS ?? join(process.env.LOCALAPPDATA ?? '', 'tauri', 'NSIS', 'makensis.exe');
+const skip = process.platform !== 'win32' || !existsSync(compiler);
+if (process.env.RISUNEST_REQUIRE_NSIS === '1' && skip) throw new Error('NSIS compiler is required');
 const installedExecutable = '$INSTDIR\\${MAINBINARYNAME}.exe';
-test('Sync removal hooks compile in the uninstaller context', { skip: process.platform !== 'win32' || !existsSync(compiler) }, () => {
+test('Sync removal hooks compile in the uninstaller context', { skip }, () => {
   const directory = mkdtempSync(join(tmpdir(), 'risunest-sync-nsis-'));
   try {
     const script = join(directory, 'test.nsi');
@@ -38,7 +40,7 @@ SectionEnd
 });
 import { readFileSync, mkdirSync } from 'node:fs';
 
-test('Sync NSIS preserves data by default, protects updates, and aborts before binary removal on cleanup failure', { skip: process.platform !== 'win32' || !existsSync(compiler) }, () => {
+test('Sync NSIS preserves data by default, protects updates, and aborts before binary removal on cleanup failure', { skip }, () => {
   const directory = mkdtempSync(join(tmpdir(), 'risunest-sync-nsis-runtime-'));
   const q = value => value.replaceAll('$', '$$').replaceAll('"', '$\\"');
   try {
@@ -149,7 +151,7 @@ SectionEnd
   }
 });
 
-test('Sync preinstall checks the resolved installation directory', { skip: process.platform !== 'win32' || !existsSync(compiler) }, () => {
+test('Sync preinstall checks the resolved installation directory', { skip }, () => {
   const directory = mkdtempSync(join(tmpdir(), 'risunest-sync-nsis-path-'));
   const q = value => value.replaceAll('$', '$$').replaceAll('"', '$\\"');
   const original = join(directory, 'original');

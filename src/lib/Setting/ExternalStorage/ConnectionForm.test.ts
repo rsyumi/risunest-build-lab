@@ -27,10 +27,9 @@ vi.mock('src/ts/ui/qrScanner', async importOriginal => ({
     ...await importOriginal<typeof import('src/ts/ui/qrScanner')>(),
     createQrScanner: () => qr,
 }))
-vi.mock('src/ts/platform', () => ({
-    get isTauriAndroid() { return platformState.android },
-    get isTauriIOS() { return platformState.ios },
-}))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule(() => ({
+    runtime: 'tauri', os: platformState.ios ? 'ios' : platformState.android ? 'android' : 'windows',
+})))
 vi.mock('@tauri-apps/plugin-os', () => ({ type: () => 'android' }))
 vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: state.openUrl }))
 vi.mock('src/ts/storage/sync/external/bridge', () => ({

@@ -88,7 +88,7 @@ export class GitHubReleases {
     await this.request(`/releases/${release.id}/assets?name=${encodeURIComponent(name)}`, { method: "POST", body: bytes, upload: true });
   }
 
-  publish(id) { return this.request(`/releases/${Number(id)}`, { method: "PATCH", body: { draft: false, make_latest: "true" } }); }
+  publish(id, body) { return this.request(`/releases/${Number(id)}`, { method: "PATCH", body: { draft: false, make_latest: "true", body } }); }
   makeLatest(id) { return this.request(`/releases/${Number(id)}`, { method: "PATCH", body: { make_latest: "true" } }); }
 
   async assertTagCommit(tag, commit) {

@@ -9,24 +9,15 @@ const mocks = vi.hoisted(() => ({
     saveAsset: vi.fn(async (_data: Uint8Array) => ''),
 }))
 
-vi.mock('../platform', () => ({
-    get isTauri() { return mocks.platform !== 'web' },
-    get isTauriDesktop() { return mocks.platform === 'desktop' },
-    get isTauriIOS() { return mocks.platform === 'ios' },
-    get isTauriAndroid() { return mocks.platform === 'android' },
-}))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule(() => ({
+    runtime: mocks.platform === 'web' ? 'web' : 'tauri',
+    os: mocks.platform === 'ios' || mocks.platform === 'android' ? mocks.platform : 'windows',
+})))
 vi.mock('../storage/iosContentPicker', () => ({ importIOSContentFromPicker: mocks.importIOS }))
 vi.mock('../storage/androidContentPicker', () => ({ importAndroidContentFromPicker: mocks.importAndroid }))
 vi.mock('../storage/nativeModuleFileRoute', () => ({ importDesktopNativeModulePath: mocks.importDesktop }))
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: mocks.open }))
 
-vi.mock('src/lang', () => ({
-    language: {
-        errors: { noData: 'no data' },
-        successExport: 'exported',
-        mcpStdioModuleImportBlocked: 'Local MCP module import blocked',
-    },
-}))
 vi.mock('../alert', () => ({
     alertClear: vi.fn(),
     alertConfirm: vi.fn(),

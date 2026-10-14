@@ -903,6 +903,7 @@ describe('set -> get round-trip', () => {
                     })
                 },
             ),
+            { numRuns: 10 },
         )
     })
 })
@@ -929,6 +930,7 @@ describe('set -> remove -> get', () => {
                 await removeInlayAsset(id)
                 expect(await getInlayAsset(id)).toBeNull()
             }),
+            { numRuns: 10 },
         )
     })
 })

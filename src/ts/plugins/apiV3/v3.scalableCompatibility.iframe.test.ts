@@ -64,122 +64,46 @@ const fixture = vi.hoisted(() => {
     }
 })
 
-const ownedStorageStub = {
-    getItem: vi.fn(), setItem: vi.fn(), removeItem: vi.fn(), clear: vi.fn(),
-    key: vi.fn(), keys: vi.fn(), length: vi.fn(), snapshot: vi.fn(async () => ({})),
-    mutate: vi.fn(),
-}
-
-vi.mock('../plugins.svelte', () => {
-    const unrelated = vi.fn()
-    const oldApis = new Proxy({
+vi.mock('../plugins.svelte', async () => {
+    const host = await import('./v3Host.testSupport')
+    const apis = host.v2PluginApis({
         safeLocalStorage: {
-            getItem: unrelated,
-            setItem: unrelated,
-            removeItem: unrelated,
-            clear: unrelated,
-            key: unrelated,
-            keys: unrelated,
-            length: unrelated,
+            getItem: vi.fn(), setItem: vi.fn(), removeItem: vi.fn(), clear: vi.fn(),
+            key: vi.fn(), keys: vi.fn(), length: vi.fn(),
         },
-    }, { get: (target, property) => Reflect.get(target, property) ?? unrelated })
-    return {
-        allowedDbKeys: [],
-        applyPreparedPluginDatabaseUpdate: vi.fn(),
-        customProviderStore: {
-            subscribe(run: (value: string[]) => void) { run([]); return () => undefined },
-            set: vi.fn(),
-        },
-        getV2PluginAPIs: () => oldApis,
-        handlePluginInstallViaPlugin: vi.fn(),
-        pluginStorageStore: {
-            forOwner: () => ownedStorageStub,
-            ownerOf: () => 'test-plugin',
-            invalidateOwner: vi.fn(),
-            synchronizeCommittedMutation: vi.fn(),
-            snapshot: vi.fn(async () => []), mutate: unrelated, invalidate: unrelated,
-            getItem: unrelated, setItem: unrelated, removeItem: unrelated,
-            clear: unrelated, key: unrelated, keys: unrelated, length: unrelated,
-        },
-        pluginV2: {
-            providers: new Map(),
-            providerOptions: new Map(),
-            chatOutput: fixture.listeners,
-        },
-    }
+    })
+    return host.pluginsModule({
+        getV2PluginAPIs: () => apis,
+        pluginV2: { providers: new Map(), providerOptions: new Map(), chatOutput: fixture.listeners },
+    })
 })
-vi.mock('src/ts/storage/database.svelte', () => ({ getDatabase: () => fixture.database }))
-vi.mock('../pluginSafeClass', () => ({ SafeLocalPluginStorage: class {}, SafeLocalStorage: class {}, tagWhitelist: [] }))
-vi.mock('src/ts/stores.svelte', () => ({
-    DBState: { get db() { return fixture.database } },
-    selectedCharID: {
-        subscribe(run: (value: number) => void) { run(0); return () => undefined },
-    },
-    additionalChatMenu: [], additionalFloatingActionButtons: [], additionalHamburgerMenu: [],
-    additionalSettingsMenu: [], bodyIntercepterStore: [], chatPanelStore: [],
-}))
-vi.mock('src/ts/alert', () => ({
-    alertConfirm: vi.fn(async () => true), alertError: vi.fn(), alertNormal: vi.fn(),
-}))
-vi.mock('src/ts/util', () => ({ sleep: vi.fn(async () => undefined) }))
-vi.mock('src/lang', () => ({ language: {
-    fetchLogConsent: '{}', getFullDatabaseConsent: '{}', mainDomAccessConsent: '{}',
-    replacerPermissionConsent: '{}', providerPermissionConsent: '{}', sendChatConsent: '{}',
-    inlayPermissionConsent: '{}',
-} }))
+vi.mock('src/ts/storage/database.svelte', async () => (await import('./v3Host.testSupport')).databaseModule({ read: () => fixture.database }))
+vi.mock('../pluginSafeClass', async () => (await import('./v3Host.testSupport')).pluginSafeClassModule())
+vi.mock('src/ts/stores.svelte', async () => (await import('./v3Host.testSupport')).storesModule({ read: () => fixture.database }))
+vi.mock('src/ts/alert', async () => (await import('./v3Host.testSupport')).alertModule())
+vi.mock('src/ts/util', async () => (await import('./v3Host.testSupport')).utilModule())
 vi.mock('src/ts/globalApi.svelte', () => ({
     checkCharOrder: vi.fn(), forageStorage: {}, getFetchLogs: vi.fn(),
 }))
-vi.mock('src/ts/gui/colorscheme', () => ({
-    changeColorScheme: vi.fn(), updateColorScheme: vi.fn(), updateTextThemeAndCSS: vi.fn(),
-}))
-vi.mock('src/ts/platform', () => ({ isTauri: false }))
-vi.mock('src/ts/process/mcp/pluginmcp', () => ({
-    registerMCPModule: vi.fn(), unregisterMCPModule: vi.fn(),
-}))
-vi.mock('src/ts/process/files/inlays', () => ({ getInlayAsset: vi.fn() }))
-vi.mock('src/ts/translator/translator', () => ({ getLLMCache: vi.fn(), searchLLMCache: vi.fn() }))
-vi.mock('src/ts/parser/parser.svelte', () => ({ hasher: vi.fn(async () => 'hash') }))
-vi.mock('localforage', () => ({ default: { createInstance: () => ({
-    getItem: fixture.permissionGetItem,
-    setItem: vi.fn(),
-}) } }))
-vi.mock('src/ts/process/index.svelte', () => ({
-    sendChat: vi.fn(),
-    doingChat: { subscribe(run: (value: boolean) => void) { run(false); return () => undefined } },
-}))
-vi.mock('src/ts/model/modellist', () => ({ getModelInfo: () => ({ id: 'test-model' }) }))
-vi.mock('src/ts/process/request/request', () => ({ requestChatDataMain: vi.fn() }))
-vi.mock('src/ts/process/modules', () => ({ getModuleLorebooks: vi.fn() }))
-vi.mock('src/ts/process/ttsHooks', () => ({
-    registerTTSPreprocessor: vi.fn(), unregisterTTSPreprocessor: vi.fn(),
-    registerTTSPostprocessor: vi.fn(), unregisterTTSPostprocessor: vi.fn(),
-}))
-vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({
-    getPersistentRevision: () => 0,
-    commitPersistentUnitIntent: vi.fn(),
-    acquireCompleteConversation: vi.fn(),
-    captureSelectedConversationTarget: vi.fn(() => null),
-    flushPendingDataLocally: vi.fn(),
-    assertPersistentMutationAllowed: vi.fn(),
-    getPersistentStorageAuthorityEpoch: () => 0,
-    getActiveConversationSession: vi.fn(() => null),
-    getPersistentNavigationGeneration: vi.fn(() => 0),
-    invalidateActiveConversationSession: vi.fn(),
-    materializePersistentDatabaseSnapshotWithRevision: vi.fn(),
-    refreshSelectedConversationAfterReplacement: vi.fn(),
-    replacePersistentCompleteCharacter: vi.fn(),
-    replacePersistentConversation: vi.fn(),
-    replacePersistentDatabase: vi.fn(),
-}))
-vi.mock('../pluginDatabaseAccess', async (importOriginal) => {
-    const actual = await importOriginal<typeof import('../pluginDatabaseAccess')>()
-    return {
-        ...actual,
+vi.mock('src/ts/gui/colorscheme', async () => (await import('./v3Host.testSupport')).colorschemeModule())
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
+vi.mock('src/ts/process/mcp/pluginmcp', async () => (await import('./v3Host.testSupport')).pluginMcpModule())
+vi.mock('src/ts/process/files/inlays', async () => (await import('./v3Host.testSupport')).inlaysModule())
+vi.mock('src/ts/translator/translator', async () => (await import('./v3Host.testSupport')).translatorModule())
+vi.mock('src/ts/parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
+vi.mock('localforage', async () => (await import('../localforage.testSupport')).localforageModule(undefined, { getItem: fixture.permissionGetItem }))
+vi.mock('src/ts/process/index.svelte', async () => (await import('./v3Host.testSupport')).processIndexModule())
+vi.mock('src/ts/model/modellist', async () => (await import('./v3Host.testSupport')).modellistModule())
+vi.mock('src/ts/process/request/request', async () => (await import('./v3Host.testSupport')).requestModule())
+vi.mock('src/ts/process/modules', async () => (await import('./v3Host.testSupport')).modulesModule())
+vi.mock('src/ts/process/ttsHooks', async () => (await import('./v3Host.testSupport')).ttsHooksModule())
+vi.mock('src/ts/storage/persistentDataRuntime.svelte', async () => (await import('./v3Host.testSupport')).persistentRuntimeModule())
+vi.mock('../pluginDatabaseAccess', async (importOriginal) => ({
+    ...await importOriginal<typeof import('../pluginDatabaseAccess')>(),
+    ...(await import('./v3Host.testSupport')).pluginDatabaseAccessModule({
         createProductionPluginDatabaseAccess: vi.fn(() => fixture.scopedAccess),
-        linkPluginQueryAbortSignals: vi.fn(),
-    }
-})
+    }),
+}))
 
 import { loadV3Plugins } from './v3.svelte'
 

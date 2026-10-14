@@ -121,6 +121,22 @@ FunctionEnd
 Function un.HideFixture
   HideWindow
 FunctionEnd
+; The probe reads control text, so the window never needs to reach the screen or the taskbar.
+!macro KeepFixtureOffScreen
+  Push $0
+  System::Call 'user32::GetWindowLongW(p $HWNDPARENT, i -20) i .r0'
+  IntOp $0 $0 | 0x08080080
+  System::Call 'user32::SetWindowLongW(p $HWNDPARENT, i -20, i r0)'
+  System::Call 'user32::SetLayeredWindowAttributes(p $HWNDPARENT, i 0, i 0, i 2)'
+  System::Call 'user32::SetWindowPos(p $HWNDPARENT, p 0, i -32000, i -32000, i 0, i 0, i 0x15)'
+  Pop $0
+!macroend
+Function .onGUIInit
+  !insertmacro KeepFixtureOffScreen
+FunctionEnd
+Function un.onGUIInit
+  !insertmacro KeepFixtureOffScreen
+FunctionEnd
 !macro InitFixture
   ReadEnvStr $FixtureFail RISUNEST_NSIS_FIXTURE_FAIL
   ReadEnvStr $UpdateMode RISUNEST_NSIS_FIXTURE_UPDATE

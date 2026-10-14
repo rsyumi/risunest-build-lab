@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SandboxHost } from './factory'
 import { invoke } from '@tauri-apps/api/core'
+import { consoleLog } from '../../consoleLog'
 const platform = vi.hoisted(() => ({ native: false }))
-vi.mock('../../platform', () => ({ get isTauri() { return platform.native } }))
+vi.mock('../../platform', async () => (await import('../../platform.testSupport')).platformModule(() => ({ runtime: platform.native ? 'tauri' : 'web', os: 'windows' })))
 vi.mock('@tauri-apps/api/core', async importOriginal => ({
     ...await importOriginal<typeof import('@tauri-apps/api/core')>(), invoke: vi.fn(async () => {}),
 }))
@@ -58,7 +59,9 @@ function bridgeStubs(): Record<string, unknown> {
 }
 
 describe('sandbox script completion', () => {
-    it.each([false, true])('shows a file-read failure and logs only on native=%s', async native => {
+    beforeEach(() => consoleLog.clear())
+
+    it.each([false, true])('lets the plugin handle file-read failure without reporting it on native=%s', async native => {
         platform.native = native
         vi.mocked(invoke).mockClear()
         const alertError = vi.fn()
@@ -74,14 +77,13 @@ describe('sandbox script completion', () => {
             })
         })
         await vi.waitFor(() => expect((child as any).readError).toBe('NotReadableError'))
-        expect(alertError).toHaveBeenCalledWith('[settled-test] NotReadableError: Provider denied access')
-        const logged = { message: '[settled-test] NotReadableError: Provider denied access' }
-        if (native) expect(invoke).toHaveBeenCalledWith('native_log_error', logged)
-        else expect(invoke).not.toHaveBeenCalledWith('native_log_error', logged)
+        expect(alertError).not.toHaveBeenCalled()
+        expect(consoleLog.snapshot().some(entry => entry.level === 'error')).toBe(false)
+        expect(invoke).not.toHaveBeenCalledWith('native_log_error', expect.anything())
         host.terminate()
     })
 
-    it('shows the original promise-based read error without converting the rejection to success', async () => {
+    it('preserves a handled promise-based read failure without reporting it', async () => {
         const alertError = vi.fn()
         const host = new SandboxHost({ ...bridgeStubs(), alertError })
         const failure = new DOMException('File disappeared', 'NotFoundError')
@@ -92,15 +94,24 @@ describe('sandbox script completion', () => {
             vi.spyOn(child.Blob.prototype, 'arrayBuffer').mockRejectedValue(failure)
         })
         await vi.waitFor(() => expect((child as any).readError).toBe('File disappeared'))
-        expect(alertError).toHaveBeenCalledWith('[settled-test] NotFoundError: File disappeared')
+        expect(alertError).not.toHaveBeenCalled()
+        expect(consoleLog.snapshot().some(entry => entry.level === 'error')).toBe(false)
         host.terminate()
     })
 
-    it('does not silently swallow top-level plugin failures and includes their causes', async () => {
+    it.each([false, true])('records top-level failures and causes without a popup on native=%s', async native => {
+        platform.native = native
+        vi.mocked(invoke).mockClear()
         const alertError = vi.fn()
         const host = new SandboxHost({ ...bridgeStubs(), alertError })
         await runGuest(host, `throw new Error('Failed to read file', {cause: new DOMException('Provider failed', 'NotReadableError')});`)
-        await vi.waitFor(() => expect(alertError).toHaveBeenCalledWith('[settled-test] Error: Failed to read file\nNotReadableError: Provider failed'))
+        await vi.waitFor(() => expect(consoleLog.snapshot()).toContainEqual(expect.objectContaining({
+            level: 'error', source: 'settled-test', message: 'Error: Failed to read file\nNotReadableError: Provider failed',
+        })))
+        expect(alertError).not.toHaveBeenCalled()
+        const logged = { message: '[settled-test] Error: Failed to read file\nNotReadableError: Provider failed' }
+        if (native) expect(invoke).toHaveBeenCalledWith('native_log_error', logged)
+        else expect(invoke).not.toHaveBeenCalledWith('native_log_error', logged)
         expect(host.isIdle()).toBe(true)
         host.terminate()
     })
@@ -114,25 +125,79 @@ describe('sandbox script completion', () => {
         const host = new SandboxHost({ ...bridgeStubs(), alertError })
         await runGuest(host, `throw ${expression};`)
         await vi.waitFor(() => expect(host.isIdle()).toBe(true))
-        expect(alertError).toHaveBeenCalledOnce()
+        expect(consoleLog.snapshot().filter(entry => entry.level === 'error')).toHaveLength(1)
+        expect(alertError).not.toHaveBeenCalled()
         host.terminate()
     })
 
-    it('rejects file error reports from unrelated frames and from terminated sandboxes', () => {
+    it('accepts console entries only from its live plugin frame with the host-owned name', () => {
         const alertError = vi.fn()
         const host = new SandboxHost({ alertError })
         const frame = document.createElement('iframe')
         document.body.append(frame)
         host.run(frame, '', 'file-plugin')
-        const data = { type: 'PLUGIN_ERROR', error: 'NotReadableError: synthetic' }
+        const tsMs = 0
+        const data = { type: 'PLUGIN_CONSOLE', generation: consoleLog.generation, source: 'forged', entries: [{ level: 'log', message: 'synthetic', tsMs }] }
         window.dispatchEvent(new MessageEvent('message', { source: window, data }))
-        expect(alertError).not.toHaveBeenCalled()
+        expect(consoleLog.snapshot()).toEqual([])
         const source = frame.contentWindow
         window.dispatchEvent(new MessageEvent('message', { source, data }))
-        expect(alertError).toHaveBeenCalledOnce()
+        expect(consoleLog.snapshot()).toEqual([{ level: 'log', source: 'file-plugin', message: 'synthetic', tsMs }])
         host.terminate()
         window.dispatchEvent(new MessageEvent('message', { source, data }))
-        expect(alertError).toHaveBeenCalledOnce()
+        expect(consoleLog.snapshot()).toHaveLength(1)
+        expect(alertError).not.toHaveBeenCalled()
+    })
+
+    it('captures ordinary iframe output at every level and still allows explicit alerts', async () => {
+        const alertError = vi.fn()
+        const host = new SandboxHost({ ...bridgeStubs(), alertError })
+        await runGuest(host, `
+            for (const level of ['log', 'info', 'debug', 'warn', 'error']) console[level]('synthetic-' + level, { count: 3 });
+            await risuai.alertError('explicit alert');
+        `)
+        await vi.waitFor(() => expect(host.isIdle()).toBe(true))
+        for (const level of ['log', 'info', 'debug', 'warn', 'error']) {
+            expect(consoleLog.snapshot()).toContainEqual(expect.objectContaining({
+                level, source: 'settled-test', message: 'synthetic-' + level + ' {count: 3}',
+            }))
+        }
+        expect(alertError).toHaveBeenCalledWith('explicit alert')
+        host.terminate()
+        expect(consoleLog.snapshot().some(entry => entry.message.startsWith('synthetic-log'))).toBe(true)
+    })
+
+    it('discards a delayed iframe batch from before clear and keeps later output', () => {
+        const host = new SandboxHost(bridgeStubs())
+        const frame = document.createElement('iframe')
+        document.body.append(frame)
+        host.run(frame, '', 'clear-test')
+        const post = vi.spyOn(frame.contentWindow!, 'postMessage')
+        const beforeClear = consoleLog.generation
+        consoleLog.clear()
+        post.mockClear()
+        window.dispatchEvent(new MessageEvent('message', { source: frame.contentWindow, data: {
+            type: 'PLUGIN_CONSOLE', generation: beforeClear, entries: [{ level: 'log', message: 'old', tsMs: 0 }],
+        } }))
+        expect(post).toHaveBeenCalledWith({ type: 'CLEAR_CONSOLE', generation: consoleLog.generation }, '*')
+        window.dispatchEvent(new MessageEvent('message', { source: frame.contentWindow, data: {
+            type: 'PLUGIN_CONSOLE', generation: consoleLog.generation, entries: [{ level: 'info', message: 'new', tsMs: 0 }],
+        } }))
+        expect(consoleLog.snapshot().map(entry => entry.message)).toEqual(['new'])
+        host.terminate()
+    })
+
+    it('keeps the end of an iframe log burst and reports omitted entries', async () => {
+        const host = new SandboxHost(bridgeStubs())
+        await runGuest(host, `for (let n = 0; n < 201; n++) console.log('burst-' + n);`, child => {
+            vi.spyOn(child.console, 'log').mockImplementation(() => {})
+        })
+        await vi.waitFor(() => expect(host.isIdle()).toBe(true))
+        expect(consoleLog.snapshot()).toContainEqual(expect.objectContaining({ message: 'burst-200' }))
+        expect(consoleLog.snapshot().some(entry => entry.message === 'burst-0')).toBe(false)
+        expect(consoleLog.snapshot().some(entry => entry.message.includes('console messages omitted'))).toBe(true)
+        expect(consoleLog.snapshot().length).toBeLessThanOrEqual(200)
+        host.terminate()
     })
 
     it('stays busy after a callback returns until its stream finishes', async () => {

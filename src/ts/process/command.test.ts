@@ -1,9 +1,12 @@
+import { get } from 'svelte/store'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ActiveConversationSession } from '../storage/activeConversationSession'
 import type { Chat, Database } from '../storage/database.svelte'
 import { setCurrentChat } from '../storage/database.svelte'
+import { ReloadChatPointer } from '../stores.svelte'
 import { createConversationOperationContext } from './conversationOperationContext'
+import { DisplayReadRecord, registerDisplayRow } from './scriptVariableReads'
 import { runTrigger } from './triggers'
 
 const mocks = vi.hoisted(() => ({
@@ -24,27 +27,33 @@ vi.mock('../storage/database.svelte', () => ({
     setCurrentChat: vi.fn(),
     setDatabase: mocks.setDatabase,
 }))
-vi.mock('../stores.svelte', () => ({
-    selectedCharID: {
-        subscribe(run: (value: number) => void) {
-            run(mocks.selectedCharacterIndex)
-            return () => undefined
+vi.mock('../stores.svelte', async () => {
+    const { writable } = await import('svelte/store')
+    return {
+        selectedCharID: {
+            subscribe(run: (value: number) => void) {
+                run(mocks.selectedCharacterIndex)
+                return () => undefined
+            },
         },
-    },
-}))
+        ReloadChatPointer: writable({}),
+        ScriptDisplayRefreshPointer: writable(0),
+    }
+})
 vi.mock('../alert', () => ({
     alertInput: vi.fn(async () => ''),
     alertMd: vi.fn(),
     alertNormal: vi.fn(),
     alertSelect: vi.fn(async () => ''),
 }))
-vi.mock('../parser/parser.svelte', () => ({ risuChatParser: (value: string) => value }))
+vi.mock('../parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
 vi.mock('./index.svelte', () => ({ sendChat: mocks.sendChat }))
 vi.mock('./lorebook.svelte', () => ({ loadLoreBookV3Prompt: vi.fn() }))
 vi.mock('./triggers', () => ({ runTrigger: vi.fn() }))
 vi.mock('./tts', () => ({ sayTTS: vi.fn() }))
 vi.mock('../storage/persistentDataRuntime.svelte', () => ({
     getActiveConversationSession: () => mocks.session,
+    peekActiveConversationSession: () => mocks.session,
 }))
 
 import { processMultiCommand } from './command'
@@ -107,6 +116,44 @@ describe('processMultiCommand conversation mutations', () => {
 
         expect(conversation.message.map((message) => message.data)).toEqual(['before', 'hello'])
         expect(onMutation).toHaveBeenCalledWith(expect.objectContaining({ commands: ['append'] }))
+    })
+
+    it.each([
+        ['/setvar key=score 5'],
+        ['/addvar key=score 2'],
+    ])('commits %s through the active session and refreshes the rows reading the variable', async (command) => {
+        const character = mocks.database!.characters[0]
+        const conversation = character.chats[0]
+        conversation.scriptstate = { $score: '3' }
+        const session = new ActiveConversationSession({
+            characterId: character.chaId,
+            conversationId: conversation.id,
+            conversation,
+            storeRevision: 1,
+        })
+        mocks.session = session
+        ReloadChatPointer.set({})
+        const reads = new DisplayReadRecord()
+        reads.note('score')
+        const row = registerDisplayRow(() => 0)
+        row.track('message', reads)
+        try {
+            await expect(processMultiCommand(command)).resolves.toBe('')
+
+            expect(session.version).toBe(1)
+            expect(session.readChatVariable('score')).toBe('5')
+            await vi.waitFor(() => expect(get(ReloadChatPointer)).toEqual({ 0: 1 }))
+        } finally {
+            row.dispose()
+        }
+    })
+
+    it('writes /setvar to the selected conversation when no session owns it', async () => {
+        const conversation = mocks.database!.characters[0].chats[0]
+
+        await expect(processMultiCommand('/setvar key=score 5')).resolves.toBe('')
+
+        expect(conversation.scriptstate).toEqual({ $score: '5' })
     })
 
     it('passes the parent operation through a nested trigger command', async () => {

@@ -7,7 +7,6 @@ import UpdatePopup from './UpdatePopup.svelte'
 
 const native = vi.hoisted(() => ({ close: vi.fn() }))
 vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => native }))
-vi.mock('src/lang', async () => ({ language: (await import('src/lang/en')).languageEnglish }))
 vi.mock('src/ts/storage/database.svelte', () => ({ getDatabase: () => ({ language: 'en' }) }))
 vi.mock('src/ts/globalApi.svelte', () => ({ openURL: vi.fn() }))
 vi.mock('src/ts/update/controller', () => ({

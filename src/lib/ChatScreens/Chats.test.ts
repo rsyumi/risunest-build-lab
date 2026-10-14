@@ -4038,15 +4038,16 @@ describe('Chats imperative mount lifecycle', () => {
         },
     )
 
-    test('keeps row DOM without a second position adjustment after delayed content growth', async () => {
+    test.each([false, true])('keeps row DOM and native anchoring through a publication and delayed content growth (streaming: %s)', async streaming => {
         const messages = Array.from({ length: 200 }, (_, index) =>
             makeMessage(index),
         )
+        messages.at(-1)!.role = 'char'
         mounted = mount(ChatsHarness, {
             target,
             props: {
                 initialMessages: messages,
-                initialCharacter: makeCharacter(messages),
+                initialCharacter: makeCharacter(messages, streaming),
             },
         })
         await vi.waitFor(() => expect(probeElements(target)).toHaveLength(64))
@@ -4086,6 +4087,15 @@ describe('Chats imperative mount lifecycle', () => {
         scrollParent.dispatchEvent(new Event('scroll'))
         const readerOffset = anchor.getBoundingClientRect().top
         expect(readerOffset).toBe(100)
+
+        // A publication must leave native anchoring available for the later body layout.
+        scrollParent.style.overflowAnchor = 'auto'
+        ;(mounted as HarnessInstance).setMessages(messages.map((message, index) =>
+            index === 199 ? { ...message, data: 'growing response' } : message,
+        ))
+        await tick()
+        expect(scrollParent.style.overflowAnchor).toBe('auto')
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
 
         // ResizeObserver runs after layout has already moved the content.
         growth = 80

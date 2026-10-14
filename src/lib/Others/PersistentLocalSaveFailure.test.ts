@@ -8,7 +8,6 @@ vi.mock('src/ts/storage/persistentDataRuntime.svelte', async () => {
     persistentLocalSaveFailure: writable<unknown | null>(null),
     getPersistentDataRuntime: () => ({ flushPendingDataLocally: state.retry }),
 }) })
-vi.mock('src/lang', async () => ({ language: (await import('src/lang/en')).languageEnglish }))
 import { persistentLocalSaveFailure } from 'src/ts/storage/persistentDataRuntime.svelte'
 import { languageEnglish } from 'src/lang/en'
 import Banner from './PersistentLocalSaveFailure.svelte'

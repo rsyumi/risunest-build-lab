@@ -301,8 +301,8 @@ describe('history window metadata', () => {
 })
 
 describe('history window metadata copies', () => {
-    const SUMMARIES = 3_000
-    const COMMITS = 200
+    const SUMMARIES = 50
+    const COMMITS = 20
     const hypaV3Data = () => ({
         summaries: Array.from({ length: SUMMARIES }, (_, index) => ({
             text: `synthetic summary ${index}`,

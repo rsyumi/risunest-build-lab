@@ -876,8 +876,10 @@ fn an_unchanged_token_produces_a_conditional_not_modified_read() {
 
 #[test]
 fn cancellation_during_the_download_body_stops_the_read() {
+    use crate::external_storage::provider_contract::{a_read_cancelled_during_its_body_stops, held_body};
     runtime().block_on(async {
-        let download = WireServer::start(vec![Reply::DelayedBody]);
+        let (held, _release) = held_body();
+        let download = WireServer::start(vec![held]);
         let mut replies = existing_open();
         replies.push(Reply::Http {
             status: 302,
@@ -896,30 +898,8 @@ fn cancellation_during_the_download_body_stops_the_read() {
         )
         .await
         .unwrap();
-        let directory = tempfile::tempdir().unwrap();
-        let mut sink = SpoolSink::create(&directory.path().join("partial"), 100).unwrap();
         let locator = locator_for(&repository, "packs/pack-1");
-        let read = async {
-            let error = provider
-                .read_object(&repository, &locator, None, &mut sink, &cancel)
-                .await
-                .unwrap_err();
-            assert_eq!(error.kind, ErrorKind::Cancelled);
-        };
-        let trigger = async {
-            while download.requests.lock().unwrap().is_empty() {
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            cancel.cancel();
-        };
-        tokio::time::timeout(
-            std::time::Duration::from_millis(2_000),
-            futures::future::join(read, trigger),
-        )
-        .await
-        .unwrap();
-        assert!(!sink.is_verified());
+        a_read_cancelled_during_its_body_stops(provider.as_ref(), &repository, &locator, &cancel).await;
     });
 }
 

@@ -3,10 +3,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 
-vi.mock('src/lang', async () => ({
-    language: (await import('src/lang/en')).languageEnglish,
-}))
-vi.mock('src/ts/platform', () => ({ isTauri: false }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 vi.mock('src/ts/stores.svelte', () => ({ DBState: { db: { plugins: [] } } }))
 vi.mock('src/ts/plugins/plugins.svelte', () => ({

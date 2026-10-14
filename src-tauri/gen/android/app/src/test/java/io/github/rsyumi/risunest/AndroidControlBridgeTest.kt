@@ -7,6 +7,25 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AndroidControlBridgeTest {
+  @Test fun copyReportsAdvancingBytesWithoutFloodingTheWebView() {
+    var now = 0L
+    val delivered = mutableListOf<SafSpoolProgress>()
+    val progress = AndroidControlCopyProgress(nowMillis = { now }, emit = { delivered.add(it) })
+    val total = 8L * 1024 * 1024 * 1024
+    progress.report(SafSpoolProgress("copy", 1, total))
+    for (bytes in 2L..100L) progress.report(SafSpoolProgress("copy", bytes, total))
+    now = 250
+    progress.report(SafSpoolProgress("copy", total / 2, total))
+    now = 500
+    progress.report(SafSpoolProgress("copy", total / 2, total))
+    progress.report(SafSpoolProgress("copy", 1, total))
+    now = 501
+    progress.report(SafSpoolProgress("copy", total - 1, total))
+    progress.report(SafSpoolProgress("copy", total, total))
+    assertEquals(listOf(1L, total / 2, total - 1, total), delivered.map { it.copiedBytes })
+    assertTrue(delivered.all { it.totalBytes == total })
+  }
+
   @Test fun acceptsOnlyTheExactAppOriginInTheMainFrame() {
     for (origin in listOf("http://tauri.localhost", "https://tauri.localhost")) {
       assertTrue(acceptsAndroidControl(origin, true))

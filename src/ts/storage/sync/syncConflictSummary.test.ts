@@ -3,8 +3,8 @@ import type { Database } from '../database.svelte'
 import type {
     CharacterSummary,
     ConversationSummary,
-    PersistentRevisionReader,
 } from '../persistentDataStore'
+import { createLeaseStub } from '../persistentDataStore.testSupport'
 import {
     formatNameList,
     summarizePinnedSyncConflict,
@@ -55,7 +55,7 @@ describe('summarizePinnedSyncConflict', () => {
         }))
         const readCharacter = vi.fn()
         const readConversation = vi.fn()
-        const reader = {
+        const reader = createLeaseStub({
             revision: 8,
             queryCharacters: vi.fn(async ({ trash: trashed, cursor }: {
                 trash: boolean
@@ -85,7 +85,7 @@ describe('summarizePinnedSyncConflict', () => {
             }),
             readCharacter,
             readConversation,
-        } as unknown as PersistentRevisionReader
+        })
         const remote = makeDatabase([
             { chaId: 'shared', name: 'Shared', chats: Array.from({ length: 129 }, (_, index) => ({
                 message: index === 128 ? [1] : [1],
@@ -114,11 +114,11 @@ describe('summarizePinnedSyncConflict', () => {
             { id: 'empty', name: 'Empty', conversationCount: 0 },
             { id: 'renamed', name: 'Before', conversationCount: 1 },
             { id: 'count', name: 'Count', conversationCount: 2 },
-        ]
-        const reader = { revision: 3,
+        ] as CharacterSummary[]
+        const reader = createLeaseStub({ revision: 3,
             queryCharacters: vi.fn(async ({ trash }) => ({ revision: 3, items: trash ? [] : summaries })),
             queryConversations: vi.fn(),
-        } as unknown as PersistentRevisionReader
+        })
         const remote = makeDatabase([
             { chaId: 'archived', name: 'Archived', chats: [{ message: [1, 2] }] },
             { chaId: 'empty', name: 'Empty', chats: [] },

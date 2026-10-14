@@ -6,7 +6,7 @@ const sqlite = vi.hoisted(() => ({
     SqlitePersistentDataStore: class SqlitePersistentDataStore {},
 }))
 
-vi.mock('../platform', () => platform)
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule(() => ({ runtime: platform.isTauri ? 'tauri' : 'web', os: 'windows' })))
 vi.mock('./sqlitePersistentDataStore', () => sqlite)
 
 async function createStore(isTauri: boolean) {

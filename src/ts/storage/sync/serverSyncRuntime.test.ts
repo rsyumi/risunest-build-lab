@@ -12,7 +12,7 @@ const h = vi.hoisted(() => ({
 }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: h.invoke }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: async (name: string, handler: () => void) => { h.events.set(name, handler); return () => { h.events.delete(name) } } }))
-vi.mock('src/ts/platform', () => ({ isTauri: true }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'tauri', os: 'windows' }))
 vi.mock('src/ts/stores.svelte', () => ({ selectedCharID: { subscribe: (run: (value: number) => void) => { run(-1); return () => {} } } }))
 vi.mock('../database.svelte', () => ({ getDatabase: () => ({ characters: [] }) }))
 vi.mock('./bindingDialog', () => ({ confirmSyncBindingReplacement: async () => true, confirmPreviousStorageFiles: async () => 'connect', downloadPreviousStorageFiles: async () => {} }))
@@ -43,9 +43,11 @@ const binding = { target: { kind: 'server', connectionId: 'server' }, targetAuth
 const pulls = () => h.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_pull').length
 const pushes = () => h.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_push').length
 // A local change is sent after the scheduler's quiet period.
-const afterSendDelay = async () => { await new Promise(resolve => setTimeout(resolve, 2_200)); await settle() }
+const afterSendDelay = async () => { await vi.advanceTimersByTimeAsync(2_200); await settle() }
+// fake-indexeddb schedules with setImmediate, which stays real.
+const useSchedulerClock = () => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
 const notesKey = JSON.stringify(['character', 'char-a', 'notes'])
-const settle = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); await new Promise(resolve => setTimeout(resolve, 0)) }
+const settle = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); await new Promise(resolve => setImmediate(resolve)) }
 
 function conversation(messages: number): Chat {
     return {
@@ -121,7 +123,7 @@ beforeEach(async () => {
     production = await import('./serverSyncProduction')
     production.initializeNativeSyncBindings()
 })
-afterEach(() => { production?.disposeNativeSyncBindings() })
+afterEach(() => { vi.useRealTimers(); production?.disposeNativeSyncBindings() })
 
 it('pulls when the bound library opens, and not again for local saves that renew the open conversation', async () => {
     await production.installServerSyncProduction(); await settle()
@@ -151,6 +153,7 @@ it('tries again after a native storage failure instead of stopping', async () =>
 })
 
 it('sends a change committed under a replacement fence, as archiving and restoring a character commit, once', async () => {
+    useSchedulerClock()
     await production.installServerSyncProduction(); await afterSendDelay()
     const sent = pushes()
     const token = await h.runtime.capturePersistentMutationToken('character-archive')
@@ -162,15 +165,18 @@ it('sends a change committed under a replacement fence, as archiving and restori
     await afterSendDelay()
     expect(h.runtime.revision).toBe(token.revision + 1)
     expect(pushes()).toBe(sent + 1)
-}, 15_000)
+})
 
 it('does not send a received change back', async () => {
+    useSchedulerClock()
     await production.installServerSyncProduction(); await afterSendDelay()
     const sent = pushes()
     const revision = h.runtime.revision
     h.receivedChange = 'remote'
     h.events.get('risu-server-sync-remote-hint')!()
+    // The quiet period starts only once the received revision has landed.
+    await vi.waitFor(() => expect(h.runtime.revision).toBe(revision + 1))
+    await settle()
     await afterSendDelay()
-    expect(h.runtime.revision).toBe(revision + 1)
     expect(pushes()).toBe(sent)
-}, 15_000)
+})

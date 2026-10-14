@@ -9,6 +9,8 @@ pub mod head;
 pub mod payload;
 pub mod stream_delta;
 pub mod transfer;
+#[cfg(test)]
+mod transfer_tests;
 pub mod stamp;
 pub mod unit;
 pub mod order;

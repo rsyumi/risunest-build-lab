@@ -8,28 +8,13 @@ vi.mock('src/ts/stores.svelte', async () => {
     return { alertStore: createAlertQueue({ type: 'none', msg: '' }, { gapMs: 0 }) }
 })
 
-vi.mock('src/lang', () => ({
-    language: {
-        screenshot: 'Screenshot',
-        screenshotTurns: 'Total turns: {total}',
-        screenshotInclusiveRange: 'Turn range (1-based, inclusive)',
-        screenshotStart: 'Start',
-        screenshotEnd: 'End',
-        screenshotRecent50: 'Recent 50',
-        screenshotFull: 'Full',
-        screenshotCapture: 'Capture',
-        screenshotProgress: '{completed} of {total} turns',
-        screenshotEmpty: 'There are no turns to capture.',
-        screenshotIntegerRange: 'Enter whole turn numbers.',
-        screenshotRangeBounds: 'Turn numbers must be within the conversation.',
-        screenshotRangeOrder: 'Start must not be after end.',
-        screenshotConversationStartNote: 'The greeting is not counted as a turn.',
-        cancel: 'Cancel',
-    },
-}))
-
+import { language } from 'src/lang'
 import ChatScreenshotDialog from './ChatScreenshotDialog.svelte'
 import ChatScreenshotDialogHarness from './ChatScreenshotDialogHarness.test.svelte'
+
+const progress = (completed: number, total: number) => language.screenshotProgress
+    .replace('{completed}', String(completed))
+    .replace('{total}', String(total))
 
 describe('ChatScreenshotDialog', () => {
     let target: HTMLDivElement
@@ -53,8 +38,8 @@ describe('ChatScreenshotDialog', () => {
         })
         const inputs = () => [...target.querySelectorAll<HTMLInputElement>('input')]
 
-        expect(target.textContent).toContain('Total turns: 120')
-        expect(target.textContent).toContain('Turn range (1-based, inclusive)')
+        expect(target.textContent).toContain(language.screenshotTurns.replace('{total}', '120'))
+        expect(target.textContent).toContain(language.screenshotInclusiveRange)
         expect(inputs().map((input) => input.value)).toEqual(['71', '120'])
 
         target.querySelector<HTMLButtonElement>('[data-full]')!.click()
@@ -81,7 +66,7 @@ describe('ChatScreenshotDialog', () => {
 
         const capture = target.querySelector<HTMLButtonElement>('[data-capture]')!
         expect(capture.disabled).toBe(true)
-        expect(target.textContent).toContain('Start must not be after end.')
+        expect(target.textContent).toContain(language.screenshotRangeOrder)
 
         end.value = '10'
         end.dispatchEvent(new Event('input', { bubbles: true }))
@@ -104,7 +89,7 @@ describe('ChatScreenshotDialog', () => {
             },
         })
 
-        expect(target.textContent).toContain('4 of 10 turns')
+        expect(target.textContent).toContain(progress(4, 10))
         target.querySelector<HTMLButtonElement>('[data-cancel]')!.click()
         expect(onCancel).toHaveBeenCalledOnce()
 
@@ -163,11 +148,11 @@ describe('ChatScreenshotDialog', () => {
 
         harness.setRunning(true)
         await tick()
-        expect(target.textContent).toContain('0 of 10 turns')
+        expect(target.textContent).toContain(progress(0, 10))
 
         harness.setTotalTurns(0)
         await tick()
-        expect(target.textContent).toContain('0 of 10 turns')
+        expect(target.textContent).toContain(progress(0, 10))
     })
 
     test('shows the error while the dialog stays open after a failed capture', async () => {

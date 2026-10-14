@@ -1,17 +1,30 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { PlatformShape } from './platform.testSupport'
 
-const settings = vi.hoisted(() => ({ allowAllExtentionFiles: false, ios: false, mobile: false }))
-const nativeData = vi.hoisted(() => vi.fn())
-vi.mock('./storage/nativeFileSelection', () => ({ selectNativeFileData: nativeData }))
+const settings = vi.hoisted(() => ({ allowAllExtentionFiles: false }))
+const native = vi.hoisted(() => ({
+    platform: { runtime: 'web', os: 'windows' } as PlatformShape,
+    invoke: vi.fn(),
+    open: vi.fn(),
+}))
+vi.mock('@tauri-apps/api/core', async importOriginal => ({
+    ...await importOriginal<typeof import('@tauri-apps/api/core')>(), invoke: native.invoke,
+}))
+vi.mock('@tauri-apps/plugin-fs', async () => (await import('./storage/tauriFs.testSupport')).pluginFsModule({ open: native.open }))
 vi.mock('./storage/database.svelte', () => ({ getDatabase: () => settings }))
 vi.mock('./characters', () => ({ createBlankChar: vi.fn(), getCharImage: vi.fn() }))
 vi.mock('./stores.svelte', () => ({ DBState: { db: {} }, selectedCharID: { subscribe: vi.fn() } }))
-vi.mock('./platform', () => ({ isTauri: false, get isTauriMobile() { return settings.mobile }, isIOS: () => settings.ios }))
+vi.mock('./platform', async () => (await import('./platform.testSupport')).platformModule(() => native.platform))
 vi.mock('src/lib/UI/PopupList.svelte', () => ({ default: {} }))
 
+import { language } from 'src/lang'
 import { selectFileByDom, selectSingleFile, selectMultipleFile } from './util'
 import { isLibraryFileOperationReserved } from './storage/libraryFileOperation'
 import { selectDomFiles } from './storage/fileSelection'
+import { readableFile } from './storage/tauriFs.testSupport'
+
+const bytes = new Uint8Array([0, 128, 255])
+const picked = (name: string) => ({ path: `/owned/${name}/source`, name, bytes: bytes.length, mimeType: '' })
 
 function input(): HTMLInputElement {
     const element = document.querySelector<HTMLInputElement>('input[type="file"]')
@@ -22,32 +35,49 @@ function input(): HTMLInputElement {
 beforeEach(() => {
     vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(() => {})
     settings.allowAllExtentionFiles = false
-    settings.ios = false
-    settings.mobile = false
-    nativeData.mockReset()
+    native.platform = { runtime: 'web', os: 'windows' }
+    native.invoke.mockReset().mockResolvedValue(undefined)
+    native.open.mockReset().mockImplementation(async () => readableFile(bytes))
 })
 
 describe('mobile file wrappers', () => {
-    it('returns native bytes for single and multiple selection without a WebView file read', async () => {
-        settings.mobile = true
-        const file = { name: 'synthetic.risup', data: new Uint8Array([0, 128, 255]), mimeType: '' }
-        nativeData.mockResolvedValue([file])
+    it('returns the picked bytes for single and multiple selection without a WebView file read', async () => {
+        native.platform = { runtime: 'tauri', os: 'ios' }
+        native.invoke.mockImplementation(async (command: string) => command === 'plugin:ios-native|pick_files'
+            ? { cancelled: false, files: [picked('first.risup'), picked('second.json')] }
+            : undefined)
         const read = vi.spyOn(FileReader.prototype, 'readAsArrayBuffer')
-        expect(await selectSingleFile(['json', 'risup'])).toBe(file)
-        expect(nativeData).toHaveBeenLastCalledWith({ accept: '.json,.risup' })
-        expect(await selectMultipleFile(['risup'])).toEqual([file])
-        expect(nativeData).toHaveBeenLastCalledWith({ accept: '.risup', multiple: true })
+        expect(await selectSingleFile(['json', 'risup'])).toEqual({ name: 'first.risup', data: bytes, mimeType: '' })
+        expect(await selectMultipleFile(['json', 'risup'])).toEqual([
+            { name: 'first.risup', data: bytes, mimeType: '' },
+            { name: 'second.json', data: bytes, mimeType: '' },
+        ])
         expect(HTMLInputElement.prototype.click).not.toHaveBeenCalled()
         expect(read).not.toHaveBeenCalled()
         expect(isLibraryFileOperationReserved()).toBe(false)
     })
 
-    it('preserves cancellation and native failures in the single-file wrapper', async () => {
-        settings.mobile = true
-        nativeData.mockResolvedValueOnce([]).mockRejectedValueOnce(new Error('IOException: provider unavailable'))
+    it('returns null from the single-file wrapper when the picker is cancelled', async () => {
+        native.platform = { runtime: 'tauri', os: 'ios' }
+        native.invoke.mockResolvedValue({ cancelled: true })
         expect(await selectSingleFile(['risup'])).toBeNull()
-        await expect(selectSingleFile(['risup'])).rejects.toThrow('IOException: provider unavailable')
         expect(isLibraryFileOperationReserved()).toBe(false)
+    })
+
+    it('refuses a file outside the listed extensions before reading it', async () => {
+        native.platform = { runtime: 'tauri', os: 'android' }
+        const discard = vi.fn(async () => {})
+        window.RisuNativeFileSelection = {
+            pick: vi.fn(async () => ({ cancelled: false, files: [picked('card.png')] })),
+            discard,
+        }
+        try {
+            await expect(selectSingleFile(['json', 'risup'])).rejects.toThrow(language.risuNest.importDialog.reasonUnsupportedFormat)
+        } finally {
+            delete window.RisuNativeFileSelection
+        }
+        expect(native.open).not.toHaveBeenCalled()
+        expect(discard).toHaveBeenCalledExactlyOnceWith('/owned/card.png/source')
     })
 })
 afterEach(() => {
@@ -111,7 +141,7 @@ describe('DOM file picker', () => {
 
     it.each(['setting', 'ios', 'wildcard'] as const)('keeps the %s accept-all path', async (mode) => {
         settings.allowAllExtentionFiles = mode === 'setting'
-        settings.ios = mode === 'ios'
+        if (mode === 'ios') native.platform = { runtime: 'web', os: 'ios' }
         const pending = selectFileByDom(mode === 'wildcard' ? ['*'] : ['png'])
         const element = input()
         const file = new File(['synthetic'], 'file.without-known-extension')

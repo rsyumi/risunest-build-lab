@@ -3,6 +3,7 @@ import { DBState, selectedCharID } from '../stores.svelte'
 import { parseKeyValue } from '../util'
 import { getCurrentChat } from '../storage/database.svelte'
 import type { Chat, Database } from '../storage/database.svelte'
+import { noteChatVariableRead, noteUntrackedVariableRead } from '../process/scriptVariableReads'
 
 export function getChatVarFromConversation(
     database: Database,
@@ -10,6 +11,7 @@ export function getChatVarFromConversation(
     chat: Chat,
     key: string,
 ): string {
+    noteChatVariableRead(key)
     const char = database.characters.find((candidate) => candidate.chaId === characterId)
     if (!char) return 'null'
     // Display reads must not dirty a fresh or metadata-only conversation.
@@ -68,6 +70,7 @@ export function setGLChatVar(key:string, value:string) {
 }
 
 export function getGlobalChatVar(key:string): string {
+    noteUntrackedVariableRead()
     const vt = getGLChatVar(key)
     if(vt !== 'null' && vt){
         return vt

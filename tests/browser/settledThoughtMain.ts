@@ -1,3 +1,4 @@
+import '../../src/styles.css'
 import { mount, unmount } from 'svelte'
 import Harness from './SettledThoughtHarness.svelte'
 import { ParseMarkdown } from '../../src/ts/parser/parser.svelte'
@@ -5,13 +6,11 @@ import { repeatedKoreanEmojiThought } from '../../src/ts/parser/largeThoughtFixt
 
 export type SettledThoughtShape = 'no-newline' | 'periodic-break' | 'paragraph'
 
-// Match the existing expansion fixture's mobile chat column and thought styles.
+// The same chat column as the expansion fixture; the font size and line height are the defaults Chat.svelte sets inline.
 const style = document.createElement('style')
 style.textContent = `
-.thought-column { width: 100%; max-width: 393px; padding: 0 0.5rem; box-sizing: border-box; font-family: Arial, sans-serif, serif; }
-.thought-column .chattext { font-size: 0.875rem; line-height: 1.25rem; max-width: calc(100% - 0.5rem); word-break: normal; overflow-wrap: anywhere; }
-.whitespace-pre-wrap { white-space: pre-wrap; }
-.x-risu-streaming-thought-preview { display: block; margin: 0.5em 0; padding: 0.5em 0.75em; border: 1px solid #444; border-radius: 0.5rem; }
+.thought-column { width: 100%; max-width: 393px; padding: 0 0.5rem; box-sizing: border-box; }
+.thought-column .chattext { font-size: 0.875rem; line-height: 1.25rem; }
 `
 document.head.append(style)
 const root = document.querySelector<HTMLElement>('#thought')!

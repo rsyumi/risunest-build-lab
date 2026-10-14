@@ -11,11 +11,8 @@ const remotes = vi.hoisted(() => ({ readLocalDataRemoteState: vi.fn() }))
 
 vi.mock('src/ts/storage/localDataSections', () => sections)
 vi.mock('src/ts/storage/localDataRemotes', () => remotes)
-vi.mock('src/ts/platform', () => ({ isTauri: false }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn(), alertError: vi.fn() }))
-vi.mock('src/lang', async () => ({
-    language: (await import('src/lang/en')).languageEnglish,
-}))
 
 import RisuNestLocalData from './RisuNestLocalData.svelte'
 import { languageEnglish } from 'src/lang/en'

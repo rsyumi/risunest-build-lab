@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SyncBindingState } from './bindingFlow'
+import { language } from 'src/lang'
 
 const f = vi.hoisted(() => ({
     invoke: vi.fn(), offline: true, repairError: undefined as unknown, activationError: undefined as unknown, fenceError: undefined as unknown,
@@ -11,7 +12,7 @@ const f = vi.hoisted(() => ({
 }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: f.invoke }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: async () => () => {} }))
-vi.mock('src/ts/platform', () => ({ isTauri: true }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'tauri', os: 'windows' }))
 vi.mock('src/ts/stores.svelte', () => ({ selectedCharID: { subscribe: (run: (value: number) => void) => { run(-1); return () => {} } } }))
 vi.mock('../database.svelte', () => ({ getDatabase: () => ({ characters: [] }) }))
 vi.mock('./bindingDialog', () => ({ confirmSyncBindingReplacement: async () => true, confirmPreviousStorageFiles: async () => 'connect', downloadPreviousStorageFiles: async () => {} }))
@@ -32,8 +33,10 @@ vi.mock('src/ts/alert', () => ({ alertConfirm: async () => false, alertActionCon
 vi.mock('@lucide/svelte', () => ({ CheckIcon: () => {}, CloudDownloadIcon: () => {}, HardDriveIcon: () => {}, LoaderCircleIcon: () => {}, TriangleAlertIcon: () => {} }))
 vi.mock('./serverSyncRegistrationInbox', () => ({ serverRegistrationInbox: { changed: { subscribe: () => () => {} }, releaseConsumed() {}, take: () => undefined } }))
 vi.mock('./serverSyncQr', () => ({ canScanServerRegistration: false, createServerQrScanner: () => ({ cancel() {} }) }))
-vi.mock('./serverAssetResidency', () => ({ getAssetResidencyStatus: async () => undefined, setAssetResidencyPolicy: vi.fn(), evictLocalAssets: vi.fn(), cancelAssetResidencyOperation: vi.fn() }))
-vi.mock('src/lang', () => ({ language: { loading: 'Loading', lwwSync: { concurrentEditNotice: 'Concurrent edits', clockBlocked: 'Clock blocked', writerCollision: 'Writer blocked', bindingIncomplete: 'Binding incomplete', registrationRevoked: 'Registration revoked', registrationUsed: 'Registration used', registrationUsedOnboarding: 'Registration used in onboarding', newDeviceAction: 'Connect as new device' }, risuNest: { serverSync: { title: 'Sync', description: 'Sync library', connect: 'Connect and sync', syncNow: 'Sync now', disconnect: 'Disconnect', disconnected: 'Stopped', ready: 'Ready', errorHelp: 'Connection failed', credentialUnavailable: 'Credential unavailable', registrationCode: 'Registration code', readRegistration: 'Read', pendingChanges: 'Changes to upload', count: '{0}', lastSuccess: 'Last sync', management: {}, residency: {} } } } }))
+vi.mock('./serverAssetResidency', async () => {
+    const { assetResidencyStatus } = await import('./serverAssetResidency.testSupport')
+    return { getAssetResidencyStatus: vi.fn(async () => assetResidencyStatus()), setAssetResidencyPolicy: vi.fn(), evictLocalAssets: vi.fn(), cancelAssetResidencyOperation: vi.fn() }
+})
 
 let production: typeof import('./serverSyncProduction')
 let ui: typeof import('svelte')
@@ -41,6 +44,8 @@ let component: ReturnType<(typeof import('svelte'))['mount']> | undefined
 const settle = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); await ui.tick() }
 const commands = () => f.invoke.mock.calls.map(([command]) => command)
 const button = (text: string) => [...document.querySelectorAll('button')].find(value => value.textContent?.trim() === text)
+// The first import compiles the settings page, which can outlast a test's time limit in a full run.
+beforeAll(async () => { await import('src/lib/Setting/Pages/ServerSyncSettings.svelte') }, 60_000)
 beforeEach(async () => {
     vi.resetModules(); f.invoke.mockReset(); f.offline = true; f.repairError = undefined; f.activationError = undefined; f.fenceError = undefined
     f.configured = true; f.pending = null; f.inspectError = undefined; f.pushError = undefined
@@ -95,21 +100,22 @@ describe('persisted server offline startup', () => {
     it('keeps real retry and disconnect settings actions after the actual installer fences a failed activation', async () => {
         await offlineStartup(); await settings()
         expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: true, error: 'server-unreachable' })
-        expect(button('Sync now')).toBeDefined(); expect(button('Disconnect')).toBeDefined()
+        expect(button(language.risuNest.serverSync.syncNow)).toBeDefined(); expect(button(language.risuNest.serverSync.disconnect)).toBeDefined()
         f.offline = false
-        button('Sync now')!.click(); await settle()
+        button(language.risuNest.serverSync.syncNow)!.click(); await settle()
         expect(commands().filter(command => command === 'server_sync_lww_activate')).toHaveLength(2)
         expect(f.invoke).toHaveBeenCalledWith('server_sync_lww_retry', { request: { bindingAuthority: '4', requestId: expect.any(String) } })
         expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: false, error: '' })
     })
     it('disconnects the actual persisted binding while activation remains offline, without starting services', async () => {
         await offlineStartup(); await settings()
-        button('Disconnect')!.click(); await settle()
+        vi.mocked((await import('./serverAssetResidency')).getAssetResidencyStatus).mockRejectedValueOnce(new Error('server-unreachable'))
+        button(language.risuNest.serverSync.disconnect)!.click(); await settle()
         // The file check cannot answer here, so the disconnect is confirmed before it unbinds.
         expect((await import('src/ts/alert')).alertCheckboxConfirm).toHaveBeenCalledOnce()
         expect(f.binding.target).toEqual({ kind: 'none' })
         expect(production.getServerSyncController().snapshot().status.bound).toBe(false)
-        expect(button('Sync now')).toBeUndefined(); expect(button('Disconnect')).toBeUndefined()
+        expect(button(language.risuNest.serverSync.syncNow)).toBeUndefined(); expect(button(language.risuNest.serverSync.disconnect)).toBeUndefined()
         expect(commands()).not.toContain('server_sync_lww_retry'); expect(commands()).not.toContain('server_sync_notify_start')
     })
     it('rejects a different current target before retry can send the old server header', async () => {
@@ -171,10 +177,10 @@ describe('persisted server offline startup', () => {
         expect(f.binding).toEqual(before)
     })
     it.each([
-        [{ code: 'unauthorized', status: 401, retryable: false }, 'Registration revoked'],
-        [{ code: 'invalid-device-token', status: 401, retryable: false }, 'Registration revoked'],
-        [{ code: 'server-epoch-changed', status: 409, retryable: false }, 'Registration revoked'],
-        [{ code: 'device-credential-unavailable', status: 409, retryable: false }, 'Credential unavailable'],
+        [{ code: 'unauthorized', status: 401, retryable: false }, language.lwwSync.registrationRevoked],
+        [{ code: 'invalid-device-token', status: 401, retryable: false }, language.lwwSync.registrationRevoked],
+        [{ code: 'server-epoch-changed', status: 409, retryable: false }, language.lwwSync.registrationRevoked],
+        [{ code: 'device-credential-unavailable', status: 409, retryable: false }, language.risuNest.serverSync.credentialUnavailable],
     ])('opens the library and asks for a registration in settings when startup activation fails with %j', async (failure, text) => {
         f.activationError = failure
         await expect(production.installServerSyncProduction()).resolves.toBeUndefined()
@@ -184,7 +190,7 @@ describe('persisted server offline startup', () => {
         await settings()
         expect(document.body.textContent).toContain(text)
         expect(document.querySelector('#server-registration')).not.toBeNull()
-        expect(button('Disconnect')).toBeDefined()
+        expect(button(language.risuNest.serverSync.disconnect)).toBeDefined()
     })
     it.each([
         { code: 'binding-authority-stale', retryable: false },
@@ -213,7 +219,7 @@ describe('first binding stopped after its target switch', () => {
         expect(commands()).not.toContain('server_sync_configure'); expect(commands()).not.toContain('pds_lww_switch_target')
         expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { configured: true, bound: true }, bindingIncomplete: false })
         await settings()
-        expect(document.body.textContent).not.toContain('Binding incomplete')
+        expect(document.body.textContent).not.toContain(language.lwwSync.bindingIncomplete)
     })
     it('waits for Connect when the server may no longer be the empty one it inspected, and Connect finishes it', async () => {
         f.pending = pending(false)
@@ -222,14 +228,14 @@ describe('first binding stopped after its target switch', () => {
         expect(commands()).not.toContain('server_sync_lww_inspect'); expect(commands()).not.toContain('server_sync_lww_activate')
         expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { configured: false }, bindingIncomplete: true })
         await settings()
-        expect(document.body.textContent).toContain('Binding incomplete')
-        expect(button('Sync now')).toBeUndefined()
-        button('Connect and sync')!.click()
-        await vi.waitFor(() => expect(document.body.textContent).not.toContain('Binding incomplete'))
+        expect(document.body.textContent).toContain(language.lwwSync.bindingIncomplete)
+        expect(button(language.risuNest.serverSync.syncNow)).toBeUndefined()
+        button(language.risuNest.serverSync.connect)!.click()
+        await vi.waitFor(() => expect(document.body.textContent).not.toContain(language.lwwSync.bindingIncomplete))
         expect(commands()).toContain('server_sync_lww_inspect'); expect(commands()).toContain('server_sync_lww_activate')
         expect(commands()).not.toContain('server_sync_configure'); expect(commands()).not.toContain('pds_lww_switch_target')
         expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { configured: true }, bindingIncomplete: false })
-        expect(document.body.textContent).not.toContain('Binding incomplete')
+        expect(document.body.textContent).not.toContain(language.lwwSync.bindingIncomplete)
     })
     it('keeps startup going and waits for Connect when finishing on its own fails', async () => {
         f.pending = pending(true); f.inspectError = { code: 'server-unreachable', status: 503, retryable: true }
@@ -284,12 +290,12 @@ describe('initial publication owed by a first binding that stopped after its swi
     })
 })
 
-async function readCode(deviceId: string) {
+async function readCode(deviceId: string, text = language) {
     const { encodeServerRegistration } = await import('./serverSyncRegistration')
     const input = document.querySelector('textarea')!
     input.value = encodeServerRegistration({ endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId, token: 'ab'.repeat(32) })
     input.dispatchEvent(new Event('input', { bubbles: true })); await settle()
-    button('Read')!.click(); await settle()
+    button(text.risuNest.serverSync.readRegistration)!.click(); await settle()
 }
 
 describe('a duplicate device connecting again with a registration code', () => {
@@ -299,23 +305,23 @@ describe('a duplicate device connecting again with a registration code', () => {
         await production.installServerSyncProduction()
         await vi.waitFor(() => expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: true, error: 'writer-collision', blockedCode: 'writer-collision' }))
         await settings()
-        expect(document.body.textContent).toContain('Writer blocked')
+        expect(document.body.textContent).toContain(language.lwwSync.writerCollision)
         await readCode('reused')
         f.invoke.mockClear(); f.inspectError = { code: 'registration-integrity', status: 409, retryable: false }
-        button('Connect as new device')!.click()
-        await vi.waitFor(() => expect(document.querySelector('[role="alert"]')?.textContent).toBe('Registration used'))
+        button(language.lwwSync.newDeviceAction)!.click()
+        await vi.waitFor(() => expect(document.querySelector('[role="alert"]')?.textContent).toBe(language.lwwSync.registrationUsed))
         expect(f.invoke).toHaveBeenCalledWith('server_sync_lww_inspect', { request: { bindingAuthority: '4', requestId: expect.any(String) }, newDevice: true })
         for (const command of ['server_sync_lww_stage_target', 'server_sync_lww_fence', 'server_sync_lww_prepare_new_device', 'pds_lww_switch_target']) expect(commands()).not.toContain(command)
         expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: true, error: 'registration-integrity', blockedCode: 'writer-collision' })
         expect(document.querySelector('textarea')).not.toBeNull()
         await readCode('reused')
-        expect(button('Connect as new device')).toBeDefined()
+        expect(button(language.lwwSync.newDeviceAction)).toBeDefined()
         f.invoke.mockClear(); f.inspectError = { code: 'registration-used', status: 409, retryable: false }
-        button('Connect and sync')!.click()
+        button(language.risuNest.serverSync.connect)!.click()
         await vi.waitFor(() => expect(document.querySelector('textarea')).not.toBeNull())
         expect(f.invoke).toHaveBeenCalledWith('server_sync_lww_inspect', { request: { bindingAuthority: '4', requestId: expect.any(String) }, newDevice: false })
         expect(commands()).not.toContain('server_sync_lww_stage_target')
-        expect(document.querySelector('[role="alert"]')?.textContent).toBe('Registration used')
+        expect(document.querySelector('[role="alert"]')?.textContent).toBe(language.lwwSync.registrationUsed)
     })
 })
 
@@ -323,18 +329,23 @@ describe('a new installation connecting with a registration code another install
     it.each(['settings', 'onboarding'] as const)('is refused before the library is read and asks for a new code in %s', async tone => {
         f.binding = { target: { kind: 'none' }, targetAuthority: '0', selectionEpoch: 'none', libraryId: null, progress: null }
         f.configured = false; f.offline = false
+        // English words both tones the same, so the page runs in Korean, where they differ.
+        const lang = await import('src/lang')
+        lang.changeLanguage('ko')
+        const text = lang.language
+        expect(text.lwwSync.registrationUsedOnboarding).not.toBe(text.lwwSync.registrationUsed)
         await production.installServerSyncProduction()
         const Settings = (await import('src/lib/Setting/Pages/ServerSyncSettings.svelte')).default
         component = ui.mount(Settings, { target: document.body, props: { tone } }); await settle()
-        await readCode('used')
+        await readCode('used', text)
         f.invoke.mockClear(); f.inspectError = { code: 'registration-used', status: 409, retryable: false }
-        button('Connect and sync')!.click()
-        await vi.waitFor(() => expect(document.querySelector('[role="alert"]')?.textContent).toBe(tone === 'onboarding' ? 'Registration used in onboarding' : 'Registration used'))
+        button(text.risuNest.serverSync.connect)!.click()
+        await vi.waitFor(() => expect(document.querySelector('[role="alert"]')?.textContent).toBe(tone === 'onboarding' ? text.lwwSync.registrationUsedOnboarding : text.lwwSync.registrationUsed))
         expect(f.invoke).toHaveBeenCalledWith('server_sync_lww_inspect', { request: { bindingAuthority: '0', requestId: expect.any(String) }, newDevice: false })
         for (const command of ['server_sync_lww_stage_target', 'server_sync_lww_fence', 'pds_lww_switch_target', 'server_sync_lww_activate']) expect(commands()).not.toContain(command)
         expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: false }, error: 'registration-used' })
         expect(document.querySelector('textarea')).not.toBeNull()
-        expect(button('Connect and sync')).toBeUndefined()
-        expect(button('Connect as new device')).toBeUndefined()
+        expect(button(text.risuNest.serverSync.connect)).toBeUndefined()
+        expect(button(text.lwwSync.newDeviceAction)).toBeUndefined()
     })
 })

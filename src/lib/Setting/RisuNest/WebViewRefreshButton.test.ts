@@ -1,11 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
-import { languageKorean } from 'src/lang/ko'
+import { language } from 'src/lang'
 
 const mocks = vi.hoisted(() => ({ refresh: vi.fn(), alertError: vi.fn() }))
 vi.mock('src/ts/storage/webViewRefresh', () => ({ refreshWebView: mocks.refresh }))
 vi.mock('src/ts/alert', () => ({ alertError: mocks.alertError }))
-vi.mock('src/lang', () => ({ language: languageKorean }))
 
 import WebViewRefreshButton from './WebViewRefreshButton.svelte'
 
@@ -23,7 +22,7 @@ describe('WebView refresh button', () => {
         component = mount(WebViewRefreshButton, { target: document.body })
         const buttons = document.querySelectorAll('button')
         expect(buttons).toHaveLength(1)
-        expect(buttons[0].textContent?.trim()).toBe('화면 새로고침')
+        expect(buttons[0].textContent?.trim()).toBe(language.risuNest.platform.refreshScreen)
         return buttons[0]
     }
 
@@ -49,7 +48,7 @@ describe('WebView refresh button', () => {
         mocks.refresh.mockRejectedValueOnce(new Error('save failed'))
         const button = render()
         button.click()
-        await vi.waitFor(() => expect(mocks.alertError).toHaveBeenCalledWith(languageKorean.risuNest.platform.refreshFailed))
+        await vi.waitFor(() => expect(mocks.alertError).toHaveBeenCalledWith(language.risuNest.platform.refreshFailed))
         await tick()
         expect(button.disabled).toBe(false)
         button.click()
@@ -60,7 +59,7 @@ describe('WebView refresh button', () => {
         mocks.refresh.mockRejectedValueOnce(new Error('webview-refresh-busy'))
         const button = render()
         button.click()
-        await vi.waitFor(() => expect(mocks.alertError).toHaveBeenCalledWith(languageKorean.risuNest.platform.refreshBusy))
+        await vi.waitFor(() => expect(mocks.alertError).toHaveBeenCalledWith(language.risuNest.platform.refreshBusy))
         await tick()
         expect(button.disabled).toBe(false)
     })

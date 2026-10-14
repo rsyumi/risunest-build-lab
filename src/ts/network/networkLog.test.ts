@@ -1,13 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-const native = vi.hoisted(() => ({ invoke: vi.fn(), save: vi.fn(), android: vi.fn(), ios: vi.fn(), platform: { isTauriAndroid: false, isTauriIOS: false } }))
+import type { PlatformShape } from '../platform.testSupport'
+const native = vi.hoisted(() => ({ invoke: vi.fn(), save: vi.fn(), android: vi.fn(), ios: vi.fn(), platform: { runtime: 'tauri', os: 'windows' } as PlatformShape }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }))
 vi.mock('@tauri-apps/plugin-dialog', () => ({ save: native.save }))
-vi.mock('../platform', () => native.platform)
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule(() => native.platform))
 vi.mock('../storage/androidSafBridge', () => ({ copyNativeExportToAndroidSaf: native.android }))
 vi.mock('../storage/iosFiles', () => ({ exportIOSFile: native.ios }))
 import { downloadNetworkLog, parseSsePreview, prettyLogJson } from './networkLog'
 
-beforeEach(() => { vi.clearAllMocks(); native.platform.isTauriAndroid = false; native.platform.isTauriIOS = false })
+beforeEach(() => { vi.clearAllMocks(); native.platform = { runtime: 'tauri', os: 'windows' } })
 describe('network log viewer', () => {
     it('bounds JSON formatting work and leaves malformed bodies in raw view', () => {
         expect(prettyLogJson('{"value":"[\\\"{}]"}')).not.toBeNull()
@@ -40,7 +41,7 @@ describe('network log viewer', () => {
     })
     for (const platform of ['android', 'ios'] as const) {
         it(`uses the ${platform} native file handoff and always cleans it`, async () => {
-            native.platform.isTauriAndroid = platform === 'android'; native.platform.isTauriIOS = platform === 'ios'
+            native.platform = { runtime: 'tauri', os: platform }
             native.invoke.mockResolvedValueOnce({ path: 'synthetic-handoff', bytes: 123 }).mockResolvedValueOnce(undefined)
             native[platform].mockResolvedValueOnce({ bytes: 123 })
             expect(await downloadNetworkLog('synthetic')).toBe(true)
@@ -49,7 +50,7 @@ describe('network log viewer', () => {
         })
     }
     it('cleans a cancelled mobile export', async () => {
-        native.platform.isTauriAndroid = true
+        native.platform = { runtime: 'tauri', os: 'android' }
         native.invoke.mockResolvedValueOnce({ path: 'synthetic-handoff', bytes: 123 }).mockResolvedValueOnce(undefined)
         native.android.mockRejectedValueOnce(Object.assign(new Error('cancelled'), { name: 'AbortError' }))
         expect(await downloadNetworkLog('synthetic')).toBe(false)

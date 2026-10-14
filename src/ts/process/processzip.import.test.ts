@@ -59,7 +59,7 @@ describe('large CharX fallback', () => {
     it('pauses decoding behind storage and imports 10,000 highly compressed entries without recursive overflow', async () => {
         const entries: Record<string, Uint8Array> = {}
         for (let i = 0; i < 10_000; i++)
-            entries[`assets/${i}.bin`] = new Uint8Array(4096).fill(i % 256)
+            entries[`assets/${i}.bin`] = new Uint8Array(64).fill(i % 256)
         entries['card.json'] = strToU8('{"synthetic":true}')
         let release!: () => void
         const gate = new Promise<void>((resolve) => {

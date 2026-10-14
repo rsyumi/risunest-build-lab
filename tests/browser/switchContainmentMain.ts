@@ -1,3 +1,4 @@
+import '../../src/styles.css'
 import { mount } from 'svelte'
 import SwitchContainment from './SwitchContainment.svelte'
 

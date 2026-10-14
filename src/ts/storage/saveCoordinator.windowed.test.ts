@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from 'vitest'
 import type { Chat, character } from './database.svelte'
 import type {
     CharacterDetail,
-    PersistentDataStore,
     WorkingSetCommit,
 } from './persistentDataStore'
 import { MAX_NATIVE_REQUEST_BYTES, PayloadTooLargeError } from './nativePersistenceValue'
@@ -81,7 +80,7 @@ describe('SaveCoordinator', () => {
                 value: {
                     characterId: 'char-a',
                     conversationId: 'two',
-                    messages: [{ role: 'user', data: 'first persisted message' }],
+                    messages: [{ role: 'user' as const, data: 'first persisted message' }],
                     startIndex: 0,
                     endIndex: 1,
                     totalMessages: options.totalMessages ?? 10_000,
@@ -89,10 +88,7 @@ describe('SaveCoordinator', () => {
                     hasMoreAfter: true,
                 },
             }))
-            const store = {
-                ...makeStore(commit),
-                readConversationWindow,
-            } as unknown as PersistentDataStore
+            const store = makeStore(commit, { readConversationWindow })
             const onPersisted = vi.fn((event) => {
                 if (authority?.sessionToken !== event.sessionToken) return
                 authority = {
@@ -533,14 +529,13 @@ describe('SaveCoordinator', () => {
             const commit = vi.fn(async ({ expectedRevision }) => ({
                 revision: expectedRevision + 1,
             }))
-            const store = {
-                ...makeStore(commit),
+            const store = makeStore(commit, {
                 readConversationWindow: vi.fn(async () => ({
                     revision: 2,
                     value: {
                         characterId: 'char-a',
                         conversationId: 'two',
-                        messages: [{ role: 'user', data: 'persisted first' }],
+                        messages: [{ role: 'user' as const, data: 'persisted first' }],
                         startIndex: 0,
                         endIndex: 1,
                         totalMessages: 10_000,
@@ -548,7 +543,7 @@ describe('SaveCoordinator', () => {
                         hasMoreAfter: true,
                     },
                 })),
-            } as unknown as PersistentDataStore
+            })
             const coordinator = new SaveCoordinator({
                 store,
                 captureRoot: () => captureRoot(database),
@@ -934,15 +929,14 @@ describe('SaveCoordinator', () => {
             let authority: TestWindowedAuthority | null = null
             const committed = deferred<{ revision: number }>()
             const commit = vi.fn(() => committed.promise)
-            const store = {
-                ...makeStore(commit),
+            const store = makeStore(commit, {
                 readRoot: vi.fn(async () => ({ revision: 10, value: captureRoot(database) })),
                 readCharacter: vi.fn(async () => ({
                     revision: 10,
-                    value: { type: 'character', chaId: 'char-a', name: 'Alpha' },
+                    value: { type: 'character', chaId: 'char-a', name: 'Alpha' } as CharacterDetail,
                 })),
                 queryConversations: vi.fn(async () => ({ revision: 10, items: [] })),
-            } as unknown as PersistentDataStore
+            })
             const coordinator = new SaveCoordinator({
                 store,
                 captureRoot: () => captureRoot(database),

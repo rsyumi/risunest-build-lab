@@ -1,5 +1,6 @@
 import { expect, it, vi } from 'vitest'
-import type { CharacterDetail, PersistentDataStore } from './persistentDataStore'
+import type { CharacterDetail, PersistentRoot } from './persistentDataStore'
+import { createLeaseStub, createStoreStub } from './persistentDataStore.testSupport'
 import {
     PersistentConversationReadCancelledError,
     PersistentConversationReadStaleError,
@@ -47,7 +48,7 @@ function createHarness(messages: Message[]) {
         type: 'character',
         chatPage: 0,
     } as CharacterDetail
-    const lease = {
+    const lease = createLeaseStub({
         revision,
         readCharacter: vi.fn(async () => ({ revision, value: character })),
         queryConversations: vi.fn(async () => ({
@@ -63,14 +64,14 @@ function createHarness(messages: Message[]) {
         })),
         readConversationWindow,
         release,
-    }
-    const store = {
+    })
+    const store = createStoreStub({
         open: vi.fn(async () => undefined),
-        readRoot: vi.fn(async () => ({ revision, value: {} })),
+        readRoot: vi.fn(async () => ({ revision, value: {} as PersistentRoot })),
         acquireRevision: vi.fn(async () => lease),
         readConversation: vi.fn(),
         materializeDatabase: vi.fn(),
-    } as unknown as PersistentDataStore
+    })
     const flushPendingData = vi.fn(async () => undefined)
     const read = (signal?: AbortSignal, count = 3, offset = 2) =>
         readPinnedSelectedConversationWindow({
@@ -217,9 +218,7 @@ it('releases a lease acquired after cancellation', async () => {
     const reading = harness.read(controller.signal)
     await vi.waitFor(() => expect(harness.store.acquireRevision).toHaveBeenCalledOnce())
     controller.abort()
-    pendingLease.resolve(
-        harness.lease as unknown as Awaited<ReturnType<typeof harness.store.acquireRevision>>,
-    )
+    pendingLease.resolve(harness.lease)
 
     await expect(reading).rejects.toBeInstanceOf(PersistentConversationReadCancelledError)
     expect(harness.release).toHaveBeenCalledOnce()
@@ -237,9 +236,7 @@ it('preserves cancellation when releasing the just-acquired lease fails', async 
     const reading = harness.read(controller.signal)
     await vi.waitFor(() => expect(harness.store.acquireRevision).toHaveBeenCalledOnce())
     controller.abort()
-    pendingLease.resolve(
-        harness.lease as unknown as Awaited<ReturnType<typeof harness.store.acquireRevision>>,
-    )
+    pendingLease.resolve(harness.lease)
 
     await expect(reading).rejects.toBeInstanceOf(PersistentConversationReadCancelledError)
     expect(harness.release).toHaveBeenCalledTimes(2)

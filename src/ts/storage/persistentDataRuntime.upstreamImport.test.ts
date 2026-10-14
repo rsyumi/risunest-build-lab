@@ -1,13 +1,16 @@
 import {beforeEach,describe,expect,it,vi} from 'vitest'
-vi.mock('../platform',()=>({isTauri:true}))
+vi.mock('../platform',async()=>(await import('../platform.testSupport')).platformModule({runtime:'tauri',os:'windows'}))
 const plugins=vi.hoisted(()=>({fencePluginExecutionForAuthorityReplacement:vi.fn(async()=>{}),invalidatePluginCachesAfterAuthorityReplacement:vi.fn(async()=>{}),restartPluginsAfterAuthorityReplacement:vi.fn(async()=>{})}))
 const binding=vi.hoisted(()=>({bound:true,state:{targetAuthority:'9007199254740993'},fence:vi.fn(async()=>{}),assertAuthority:vi.fn(async()=>{}),resume:vi.fn(async()=>{})}))
 vi.mock('./sync/bindingRegistry',()=>({prepareBoundLibraryReplacement:async()=>binding}))
 const alerts=vi.hoisted(()=>({checkbox:vi.fn(async()=>({confirmed:true,checked:true}))}))
 vi.mock('../alert',()=>({alertCheckboxConfirm:alerts.checkbox}))
 vi.mock('../plugins/apiV3/v3.svelte',()=>plugins)
+const library=vi.hoisted(()=>({hasCharacters:vi.fn<()=>Promise<boolean>>()}))
+vi.mock('./libraryCharacters',()=>({hasLibraryCharacters:library.hasCharacters}) satisfies typeof import('./libraryCharacters'))
 import type {Database} from './database.svelte'
-import type {PersistentDataStore,PersistentRevisionLease} from './persistentDataStore'
+import type {PersistentRevisionLease} from './persistentDataStore'
+import {createLeaseStub,createStoreStub} from './persistentDataStore.testSupport'
 import {capturePersistentPluginStorage,capturePersistentPresets,capturePersistentRoot,createPersistentDataRuntime} from './persistentDataRuntime'
 import type {OfficialRevisionPublisher} from './saveCoordinator'
 import {makeDatabase} from './saveCoordinator.testSupport'
@@ -23,7 +26,7 @@ async function createHarness(officialPublisher?: OfficialRevisionPublisher, capt
     const onWorkingSetRefreshRequired = vi.fn()
     const onBackgroundError = vi.fn()
     const publishPresetWorkingSet = vi.fn()
-    const store = {
+    const store = createStoreStub({
         commitWorkingSetChangeCursor:vi.fn(async()=>{}),
         open: vi.fn(async () => undefined),
         readRoot: vi.fn(async () => ({ revision, value: capturePersistentRoot(durable) })),
@@ -36,7 +39,7 @@ async function createHarness(officialPublisher?: OfficialRevisionPublisher, capt
         acquireRevision: vi.fn(async (expected: number) => {
             expect(expected).toBe(revision)
             const snapshot = structuredClone(durable)
-            const lease = {
+            const lease = createLeaseStub({
                 revision: expected,
                 readRoot: vi.fn(async () => ({ revision: expected, value: capturePersistentRoot(snapshot) })),
                 queryPresets: vi.fn(async () => ({ revision: expected, items: [] })),
@@ -71,12 +74,12 @@ async function createHarness(officialPublisher?: OfficialRevisionPublisher, capt
                 queryConversations: vi.fn(async () => ({ revision: expected, items: [] })),
                 queryPluginStorage: vi.fn(async () => ({ revision: expected, items: [] })),
                 release: vi.fn(async () => undefined),
-            } as unknown as PersistentRevisionLease
+            })
             leases.push(lease)
             return lease
         }),
         materializeDatabase: vi.fn(async () => { throw new Error('Unexpected complete materialization') }),
-    } as unknown as PersistentDataStore
+    })
     const runtime = createPersistentDataRuntime({
         store,
         state: {
@@ -114,7 +117,7 @@ async function createHarness(officialPublisher?: OfficialRevisionPublisher, capt
     }
 }
 
-beforeEach(()=>{vi.clearAllMocks();plugins.restartPluginsAfterAuthorityReplacement.mockImplementation(async()=>{});binding.bound=true;binding.fence.mockClear();binding.assertAuthority.mockClear();binding.resume.mockReset();binding.resume.mockImplementation(async()=>{})})
+beforeEach(()=>{vi.clearAllMocks();library.hasCharacters.mockReset().mockResolvedValue(true);plugins.restartPluginsAfterAuthorityReplacement.mockImplementation(async()=>{});binding.bound=true;binding.fence.mockClear();binding.assertAuthority.mockClear();binding.resume.mockReset();binding.resume.mockImplementation(async()=>{})})
 describe('direct native upstream import publication',()=>{
     it('keeps first-run consent through the compatibility replacement runtime',async()=>{
         binding.bound=false
@@ -167,6 +170,15 @@ describe('direct native upstream import publication',()=>{
         expect(binding.fence).not.toHaveBeenCalled()
         expect(h.store.replaceFromDatabase).not.toHaveBeenCalled()
         expect(h.database.username).not.toBe('Declined')
+    })
+    it.each([true,false])('replaces a library that holds no character without asking, bound=%s',async bound=>{
+        binding.bound=bound
+        library.hasCharacters.mockResolvedValue(false)
+        const h=await createHarness()
+        await expect(h.runtime.replacePersistentDatabase({...makeDatabase(),username:'Imported'},'empty-library',{upstreamImport:true})).resolves.toEqual({kind:'committed',revision:2,projection:'applied'})
+        expect(alerts.checkbox).not.toHaveBeenCalled()
+        expect(binding.fence).toHaveBeenCalledOnce()
+        expect(h.database.username).toBe('Imported')
     })
 
     it('emits the operation restart receipt only after the required native restart succeeds',async()=>{

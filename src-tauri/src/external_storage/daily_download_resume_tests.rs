@@ -8,7 +8,7 @@ use super::{
     journal::{JobIdentity, TransferJournal},
     packaging::{self, CompletedSnapshot, PackageLimits, SnapshotMetadata},
     quota::AccountKey,
-    quota_profiles::{MyboxCharge, MyboxCounter, MyboxPlan},
+    quota_profiles::{set_daily_downloads_for_test, MyboxCharge, MyboxCounter, MyboxPlan},
     snapshot_restore,
 };
 use crate::persistent_store::{
@@ -30,8 +30,11 @@ use std::{
 
 const ACCOUNT: &str = "synthetic-account";
 const FIRST_RESET_MS: u64 = 54_000_000;
-const PACKS: usize = 520;
-const INTERRUPT_AFTER: u64 = 300;
+/// Stands in for the plan's daily download allowance, so `PACKS` exceeds it
+/// without hundreds of packs.
+const DAILY_DOWNLOADS: u64 = 20;
+const PACKS: usize = 26;
+const INTERRUPT_AFTER: u64 = 12;
 
 struct QuotaProvider {
     inner: Arc<FakeProvider>,
@@ -399,6 +402,7 @@ async fn published(temp: &Path) -> Published {
 
 #[test]
 fn daily_download_resume_preserves_placed_packs_and_durable_budget() {
+    set_daily_downloads_for_test(DAILY_DOWNLOADS);
     runtime().block_on(async {
         let temp = tempfile::tempdir().unwrap();
         let staging_root = temp.path().join("restore-stage");
@@ -436,10 +440,10 @@ fn daily_download_resume_preserves_placed_packs_and_durable_budget() {
         .unwrap_err();
         assert_eq!(error.kind, ErrorKind::Cancelled);
         assert_eq!(first.pack_reads(), INTERRUPT_AFTER);
-        assert_eq!(placed_packs(&staging_root), 300);
+        assert_eq!(placed_packs(&staging_root), INTERRUPT_AFTER as usize);
         assert_eq!(
             used(&quota_path, 1),
-            300
+            INTERRUPT_AFTER
         );
 
         let second_cancel = Cancellation::default();
@@ -463,11 +467,11 @@ fn daily_download_resume_preserves_placed_packs_and_durable_budget() {
         .await
         .unwrap_err();
         assert_eq!(error.kind, ErrorKind::DailyQuotaExhausted);
-        assert_eq!(second.pack_reads(), 200);
-        assert_eq!(placed_packs(&staging_root), 500);
+        assert_eq!(second.pack_reads(), DAILY_DOWNLOADS - INTERRUPT_AFTER);
+        assert_eq!(placed_packs(&staging_root), DAILY_DOWNLOADS as usize);
         assert_eq!(
             used(&quota_path, 2),
-            500
+            DAILY_DOWNLOADS
         );
 
         let third_cancel = Cancellation::default();
@@ -490,7 +494,7 @@ fn daily_download_resume_preserves_placed_packs_and_durable_budget() {
         )
         .await
         .unwrap();
-        assert_eq!(third.pack_reads(), 20);
+        assert_eq!(third.pack_reads(), PACKS as u64 - DAILY_DOWNLOADS);
         // Nothing is left to resume from, and no pack was ever held beside
         // another one.
         assert_eq!(placed_packs(&staging_root), 0);
@@ -510,7 +514,7 @@ fn daily_download_resume_preserves_placed_packs_and_durable_budget() {
         );
         assert_eq!(
             used(&quota_path, FIRST_RESET_MS),
-            20
+            PACKS as u64 - DAILY_DOWNLOADS
         );
     });
 }

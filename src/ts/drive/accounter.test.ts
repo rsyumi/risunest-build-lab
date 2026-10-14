@@ -1,18 +1,14 @@
 import { beforeEach, expect, it, vi } from 'vitest'
+import type { Database } from '../storage/database.svelte'
 const f = vi.hoisted(() => ({ fetch: vi.fn(), confirm: vi.fn(), select: vi.fn(), characters: vi.fn() }))
-vi.mock('../sionyw', () => ({ fetchProtectedResource: f.fetch }))
-vi.mock('../alert', () => ({
-    alertCheckboxConfirm: f.confirm, alertConfirm: vi.fn(), alertError: vi.fn(), alertMd: vi.fn(),
-    alertNormal: vi.fn(), alertSelect: f.select, alertWait: vi.fn(),
-}))
-vi.mock('../platform', () => ({ isTauri: false }))
-vi.mock('../storage/database.svelte', () => ({ getDatabase: () => ({ account: { id: 'account' } }) }))
-vi.mock('../storage/libraryCharacters', () => ({ hasLibraryCharacters: f.characters }))
-vi.mock('../storage/upstreamImport', () => ({ prepareExternalDatabaseImport: vi.fn() }))
-vi.mock('../storage/persistentDataRuntime.svelte', () => ({ replacePersistentDatabase: vi.fn() }))
-vi.mock('../storage/databaseRestore', () => ({ installAccountBackup: vi.fn() }))
+vi.mock('../sionyw', () => ({ fetchProtectedResource: f.fetch }) satisfies Partial<typeof import('../sionyw')>)
+vi.mock('../alert', async () => (await import('./backupRestore.testSupport')).alertModule({ alertCheckboxConfirm: f.confirm, alertSelect: f.select }))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
+vi.mock('../storage/database.svelte', async () => (await import('./backupRestore.testSupport')).databaseModule(() => ({ account: { id: 'account' } }) as Database))
+vi.mock('../storage/libraryCharacters', async () => (await import('./backupRestore.testSupport')).libraryCharactersModule(f.characters))
+vi.mock('../storage/persistentDataRuntime.svelte', async () => (await import('./backupRestore.testSupport')).persistentRuntimeModule())
 vi.mock('../globalApi.svelte', () => ({ AppendableBuffer: class {} }))
-vi.mock('../characterCards', () => ({ hubURL: 'https://hub.test' }))
+vi.mock('../characterCards', async () => (await import('./backupRestore.testSupport')).characterCardsModule())
 import { loadRisuAccountBackup } from './accounter'
 
 beforeEach(() => {

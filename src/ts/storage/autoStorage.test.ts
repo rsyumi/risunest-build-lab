@@ -40,7 +40,7 @@ vi.mock('../globalApi.svelte', () => ({
     replaceDbResources: (value: unknown) => value,
 }))
 
-vi.mock('src/ts/platform', () => ({ isTauri: false }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 vi.mock('./opfsStorage', () => ({ OpfsStorage: class {} }))
 
 vi.mock('../alert', () => ({
@@ -68,13 +68,6 @@ vi.mock('./accountStorage', () => ({
 vi.mock('./risuSave', () => ({
     encodeRisuSaveLegacy: () => new Uint8Array([7, 8, 9]),
     decodeRisuSave: async () => ({ formatversion: 4, characters: [] }),
-}))
-
-vi.mock('src/lang', () => ({
-    language: {
-        loadDataFromAccount: 'load',
-        saveCurrentDataToAccount: 'save',
-    },
 }))
 
 vi.mock('../process/coldstorage.svelte', () => ({

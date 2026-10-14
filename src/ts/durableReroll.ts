@@ -5,7 +5,7 @@ import type { WindowedConversationMutationController } from './storage/activeWor
 import { cloneConversationMetadata } from './storage/selectedConversationLifecycle'
 import type { Chat, Message } from './storage/database.svelte'
 import { PersistentMutationFencedError } from './storage/saveCoordinator'
-import { safeStructuredClone } from './polyfill'
+import { safeStructuredClone } from './safeStructuredClone'
 import { toAbsoluteIndex, toWindowIndex } from './process/historyWindowIndex'
 import {
     captureResponseVariants,

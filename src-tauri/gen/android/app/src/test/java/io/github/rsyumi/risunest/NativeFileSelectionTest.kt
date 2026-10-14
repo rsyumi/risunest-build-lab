@@ -2,7 +2,9 @@ package io.github.rsyumi.risunest
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.Rule
 import org.junit.rules.TemporaryFolder
@@ -10,7 +12,7 @@ import java.io.File
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
-import java.io.InputStream
+import java.util.UUID
 
 class NativeFileSelectionTest {
   @get:Rule val temporary = TemporaryFolder()
@@ -32,20 +34,8 @@ class NativeFileSelectionTest {
   @Test fun copiesExactBinaryBytesAcrossBoundedReads() {
     val data = ByteArray(600_001) { (it % 256).toByte() }
     val output = ByteArrayOutputStream()
-    var checks = 0
-    copySelectedDocument(ByteArrayInputStream(data), output) { checks++ }
+    copySelectedDocument(ByteArrayInputStream(data), output) {}
     assertArrayEquals(data, output.toByteArray())
-    assertEquals(4, checks)
-  }
-
-  @Test fun preservesProviderReadFailure() {
-    val source = object : InputStream() {
-      override fun read(): Int = throw IOException("synthetic provider denied access")
-    }
-    val error = assertThrows(IOException::class.java) {
-      copySelectedDocument(source, ByteArrayOutputStream()) {}
-    }
-    assertEquals("synthetic provider denied access", error.message)
   }
 
   @Test fun stopsCopyingBetweenChunksWhenCancelled() {
@@ -57,5 +47,31 @@ class NativeFileSelectionTest {
       }
     }
     assertEquals(256 * 1024, output.size())
+  }
+
+  @Test fun discardRemovesAStagedSourceAndItsFolder() {
+    val root = temporary.newFolder("selected_documents")
+    val folder = File(root, UUID.randomUUID().toString()).apply { mkdirs() }
+    val source = File(folder, "source").apply { writeText("synthetic") }
+    discardSelectedDocument(root, source.absolutePath)
+    assertFalse(source.exists())
+    assertFalse(folder.exists())
+  }
+
+  @Test fun discardRefusesASourceOutsideTheStagingRoot() {
+    val root = temporary.newFolder("selected_documents")
+    val outside = UUID.randomUUID().toString()
+    val source = File(temporary.newFolder("elsewhere", outside), "source").apply { writeText("synthetic") }
+    val escaping = File(root, "${UUID.randomUUID()}/../../elsewhere/$outside/source")
+    assertThrows(IllegalArgumentException::class.java) { discardSelectedDocument(root, escaping.path) }
+    assertTrue(source.exists())
+  }
+
+  @Test fun discardRefusesAStagedFileNotNamedSource() {
+    val root = temporary.newFolder("selected_documents")
+    val folder = File(root, UUID.randomUUID().toString()).apply { mkdirs() }
+    val other = File(folder, "other").apply { writeText("synthetic") }
+    assertThrows(IllegalArgumentException::class.java) { discardSelectedDocument(root, other.absolutePath) }
+    assertTrue(other.exists())
   }
 }

@@ -26,9 +26,7 @@ vi.mock('./storage/database.svelte', () => ({
 }))
 
 vi.mock('./process/files/inlays', () => ({ supportsInlayImage: () => false }))
-vi.mock('./parser/parser.svelte', () => ({
-    risuChatParser: (text: string) => text,
-}))
+vi.mock('./parser/parser.svelte', async () => (await import('./parser/parser.testSupport')).parserStubModule())
 vi.mock('./process/transformers', () => ({
     tokenizeTransformers: harness.transformersTokenizer,
 }))

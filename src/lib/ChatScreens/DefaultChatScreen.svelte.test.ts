@@ -1,22 +1,22 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 import { get, writable } from 'svelte/store'
-import { languageEnglish } from 'src/lang/en'
+import { language } from 'src/lang'
 import { DBState } from 'src/ts/stores.svelte'
 import DefaultChatScreen from './DefaultChatScreen.svelte'
 import { chatScreenState } from '../../ts/ui/chatScreenState.svelte'
 import { doingChat } from 'src/ts/process/index.svelte'
 import { updateDeviceSettings } from 'src/ts/storage/deviceSettings'
 import { noteGenerationMessage, noteGenerationStarted, subscribeGenerationEnd, type GenerationEndRecord } from 'src/ts/process/generationEnd'
+import { ActiveConversationSession } from 'src/ts/storage/activeConversationSession'
 
 const mocks = vi.hoisted(() => ({ trigger: vi.fn(), generate: vi.fn(), process: vi.fn(), error: vi.fn(), postFile: vi.fn(),
     bounded: false, appended: [] as any[], acquireComplete: vi.fn(), flush: vi.fn(async () => {}),
     historyLimit: false, targetCaptures: 0, openWindow: vi.fn(), notify: vi.fn(async () => {}), scope: { finish: vi.fn(), release: vi.fn() }, createScope: vi.fn(),
-    translate: vi.fn(), chatsProps: null as any, confirm: vi.fn(async () => false),
+    translate: vi.fn(), chatsProps: null as any, confirm: vi.fn(async () => false), session: null as ActiveConversationSession | null,
     viewport: { jumpTo: async () => true, jumpToTop: vi.fn(async () => true), jumpToBottom: vi.fn(async () => true), navigateMessage: vi.fn(async () => true) },
     target: { characterId: 'character', conversationId: 'chat', navigationGeneration: 1, storeRevision: 1, sessionToken: 'windowed' },
 }))
-vi.mock('src/lang', () => ({ language: languageEnglish }))
 vi.mock('src/ts/stores.svelte', () => {
     const DBState = $state({ db: {} })
     return { DBState, selectedCharID: writable(0), PlaygroundStore: writable(0), hypaV3ModalOpen: writable(false),
@@ -35,9 +35,9 @@ vi.mock('src/ts/process/command', () => ({}))
 vi.mock('src/ts/process/files/multisend', () => ({ postChatFile: mocks.postFile }))
 vi.mock('src/ts/globalApi.svelte', () => ({ aiLawApplies: false, chatFoldedState: writable(false), chatFoldedStateMessageIndex: writable(0) }))
 vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({
-    getActiveConversationSession: () => null,
+    getActiveConversationSession: () => mocks.session,
     getPersistentDataRuntime: () => ({
-        captureSelectedConversationTarget: () => mocks.bounded || mocks.historyLimit || mocks.targetCaptures-- > 0 ? mocks.target : null, getActiveConversationSession: () => null,
+        captureSelectedConversationTarget: () => mocks.bounded || mocks.historyLimit || mocks.targetCaptures-- > 0 ? mocks.target : null, getActiveConversationSession: () => mocks.session,
         acknowledgeGenerationCompletion: async () => {},
         captureSelectedConversationAuthority: () => ({ totalMessages: 1500 }),
         acquireCompleteConversation: mocks.acquireComplete,
@@ -58,7 +58,7 @@ vi.mock('src/ts/storage/androidSafBridge', () => ({}))
 vi.mock('src/ts/process/modules', () => ({ getModuleRegexScripts: () => [] }))
 vi.mock('src/ts/gui/colorscheme', () => ({ ColorSchemeTypeStore: writable('dark') }))
 vi.mock('src/ts/plugins/plugins.svelte', () => ({ pluginV2: { editdisplay: new Set() } }))
-vi.mock('src/ts/parser/parser.svelte', () => ({}))
+vi.mock('src/ts/parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
 vi.mock('./Suggestion.svelte', () => ({ default: () => {} }))
 vi.mock('./Chats.svelte', () => ({ default: (_anchor: unknown, props: unknown) => {
     mocks.chatsProps = props
@@ -90,6 +90,7 @@ beforeEach(async () => {
     mocks.bounded = false
     mocks.historyLimit = false
     mocks.targetCaptures = 0
+    mocks.session = null
     mocks.target = { characterId: 'character', conversationId: 'chat', navigationGeneration: 1, storeRevision: 1, sessionToken: 'windowed' }
     mocks.createScope.mockReturnValue(mocks.scope)
     mocks.appended = []
@@ -209,7 +210,7 @@ it('holds the reroll shortcut until the submitted input has finished', async () 
 it('retains attachments on input failure and preserves files added for the next send', async () => {
     async function attach(id: string) {
         mocks.postFile.mockResolvedValueOnce([{ type: 'asset', data: id }])
-        const fileItem = () => [...document.querySelectorAll('span')].find(span => span.textContent === languageEnglish.postFile)
+        const fileItem = () => [...document.querySelectorAll('span')].find(span => span.textContent === language.postFile)
         if (!fileItem()) {
             const menu = document.querySelector('.button-icon-send')!.nextElementSibling as HTMLButtonElement
             menu.click()
@@ -329,7 +330,7 @@ it('tells the user when no history window opens for the input step', async () =>
     mocks.openWindow.mockResolvedValue(null)
     const input = type('Hello')
     send()
-    await vi.waitFor(() => expect(mocks.error).toHaveBeenCalledWith(languageEnglish.chatConversationActionFailed))
+    await vi.waitFor(() => expect(mocks.error).toHaveBeenCalledWith(language.chatConversationActionFailed))
     expect(mocks.error).toHaveBeenCalledOnce()
     expect(mocks.generate).not.toHaveBeenCalled()
     expect(input.value).toBe('Hello')
@@ -339,7 +340,7 @@ it('tells the user when no tail window opens for a reroll', async () => {
     mocks.historyLimit = true
     mocks.openWindow.mockResolvedValue(null)
     type('').dispatchEvent(new KeyboardEvent('keydown', { key: 'm', ctrlKey: true, bubbles: true }))
-    await vi.waitFor(() => expect(mocks.error).toHaveBeenCalledWith(languageEnglish.chatConversationActionFailed))
+    await vi.waitFor(() => expect(mocks.error).toHaveBeenCalledWith(language.chatConversationActionFailed))
     expect(mocks.error).toHaveBeenCalledOnce()
     expect(mocks.generate).not.toHaveBeenCalled()
 })
@@ -351,9 +352,28 @@ it.each([
     mocks.historyLimit = true
     mocks.openWindow.mockResolvedValue(null)
     await mocks.chatsProps[prop]()
-    expect(mocks.error).toHaveBeenCalledWith(languageEnglish.chatConversationActionFailed)
+    expect(mocks.error).toHaveBeenCalledWith(language.chatConversationActionFailed)
     expect(mocks.error).toHaveBeenCalledOnce()
     expect(mocks.confirm).not.toHaveBeenCalled()
+})
+
+it('creates the next response candidate when a chat variable commits while the user confirms', async () => {
+    const conversation = DBState.db.characters[0].chats[0]
+    conversation.message = [
+        { role: 'user', data: 'question', chatId: 'question' },
+        { role: 'char', data: 'answer', chatId: 'answer' },
+    ]
+    const session = new ActiveConversationSession({
+        characterId: 'character', conversationId: 'chat', conversation, storeRevision: 1,
+    })
+    mocks.session = session
+    mocks.confirm.mockImplementationOnce(async () => {
+        session.updateChatVariables(new Map([['scratch', 'display']]), { origin: 'display' })
+        return true
+    })
+    await mocks.chatsProps.onNextReroll()
+    expect(mocks.confirm).toHaveBeenCalledWith(language.confirmNewResponseCandidate)
+    expect(mocks.generate).toHaveBeenCalledOnce()
 })
 
 it('tells the user when the tail cannot be reopened after a reroll generated a reply', async () => {
@@ -366,7 +386,7 @@ it('tells the user when the tail cannot be reopened after a reroll generated a r
         return true
     })
     type('').dispatchEvent(new KeyboardEvent('keydown', { key: 'm', ctrlKey: true, bubbles: true }))
-    await vi.waitFor(() => expect(mocks.error).toHaveBeenCalledWith(languageEnglish.generationConversationChanged))
+    await vi.waitFor(() => expect(mocks.error).toHaveBeenCalledWith(language.generationConversationChanged))
     expect(mocks.error).toHaveBeenCalledOnce()
     expect(mocks.notify).not.toHaveBeenCalled()
     // The recovery stays stored, so opening the conversation restores the original response.
@@ -466,7 +486,7 @@ it.each(['send', 'continue', 'reroll'] as const)('stops a pending %s after the c
         const menu = document.querySelector('.button-icon-send')!.nextElementSibling as HTMLButtonElement
         menu.click()
         await tick()
-        const continueAction = [...document.querySelectorAll('span')].find(span => span.textContent === languageEnglish.continueResponse)!.parentElement!
+        const continueAction = [...document.querySelectorAll('span')].find(span => span.textContent === language.continueResponse)!.parentElement!
         continueAction.click()
     } else {
         type('Pending response')
@@ -546,54 +566,35 @@ it('does not send or reroll from composing keyboard events', async () => {
     expect(input.value).toBe('Composition draft')
 })
 
-const sendKeyCases: Array<{ name: string; keys: KeyboardEventInit; sends: string[] }> = [
-    { name: 'Enter', keys: {}, sends: ['enter'] },
-    { name: 'Shift+Enter', keys: { shiftKey: true }, sends: ['ctrl-shift-enter'] },
-    { name: 'Ctrl+Enter', keys: { ctrlKey: true }, sends: ['ctrl-shift-enter'] },
-    { name: 'Command+Enter', keys: { metaKey: true }, sends: ['ctrl-shift-enter'] },
-    { name: 'Alt+Enter', keys: { altKey: true }, sends: [] },
-    { name: 'Ctrl+Shift+Enter', keys: { ctrlKey: true, shiftKey: true }, sends: [] },
-    { name: 'Command+Shift+Enter', keys: { metaKey: true, shiftKey: true }, sends: [] },
-    { name: 'Ctrl+Command+Enter', keys: { ctrlKey: true, metaKey: true }, sends: [] },
-    { name: 'Ctrl+Alt+Enter', keys: { ctrlKey: true, altKey: true }, sends: [] },
-    { name: 'composing Enter', keys: { isComposing: true }, sends: [] },
-    { name: 'composing Shift+Enter', keys: { isComposing: true, shiftKey: true }, sends: [] },
-    { name: 'WebKit IME confirmation', keys: { keyCode: 229, ctrlKey: true }, sends: [] },
-]
+// messageSendKey.test.ts covers each key in each mode; this proves both inputs follow the device setting.
+it.each(['textarea.input-text', '#messageInputTranslate'])('%s sends with the key the device setting selects', async (selector) => {
+    mocks.bounded = true
+    DBState.db.sendWithEnter = false
+    DBState.db.useAutoTranslateInput = true
+    await tick()
+    const draft = type('Synthetic send-key draft')
+    updateDeviceSettings({ messageSendKey: 'ctrl-shift-enter' })
+    const input = document.querySelector<HTMLTextAreaElement>(selector)!
+    const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+    input.dispatchEvent(enter)
+    await tick()
+    expect(enter.defaultPrevented).toBe(false)
+    expect(mocks.generate).not.toHaveBeenCalled()
+    expect(draft.value).toBe('Synthetic send-key draft')
+    const ctrlEnter = new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true, cancelable: true })
+    input.dispatchEvent(ctrlEnter)
+    expect(ctrlEnter.defaultPrevented).toBe(true)
+    await vi.waitFor(() => expect(mocks.generate).toHaveBeenCalledOnce())
+})
 
-for (const mode of ['enter', 'ctrl-shift-enter', 'button'] as const) {
-    for (const selector of ['textarea.input-text', '#messageInputTranslate']) {
-        it.each(sendKeyCases)(`${mode}, ${selector}: $name sends only when selected`, async ({ keys, sends }) => {
-            mocks.bounded = true
-            DBState.db.sendWithEnter = false
-            DBState.db.useAutoTranslateInput = true
-            await tick()
-            const draft = type('Synthetic send-key draft')
-            updateDeviceSettings({ messageSendKey: mode })
-            const input = document.querySelector<HTMLTextAreaElement>(selector)!
-            const event = new KeyboardEvent('keydown', { key: 'Enter', ...keys, bubbles: true, cancelable: true })
-            input.dispatchEvent(event)
-            if (sends.includes(mode)) {
-                expect(event.defaultPrevented).toBe(true)
-                await vi.waitFor(() => expect(mocks.generate).toHaveBeenCalledOnce())
-            } else {
-                await tick()
-                expect(event.defaultPrevented).toBe(false)
-                expect(mocks.generate).not.toHaveBeenCalled()
-                expect(draft.value).toBe('Synthetic send-key draft')
-            }
-        })
-    }
-
-    it(`keeps the send button available in ${mode} mode`, async () => {
-        mocks.bounded = true
-        updateDeviceSettings({ messageSendKey: mode })
-        type('Synthetic button draft')
-        document.querySelector<HTMLButtonElement>('.button-icon-send')!.click()
-        await vi.waitFor(() => expect(mocks.generate).toHaveBeenCalledOnce())
-        expect(mocks.appended).toEqual([expect.objectContaining({ data: 'Synthetic button draft' })])
-    })
-}
+it.each(['enter', 'ctrl-shift-enter', 'button'] as const)('keeps the send button available in %s mode', async (mode) => {
+    mocks.bounded = true
+    updateDeviceSettings({ messageSendKey: mode })
+    type('Synthetic button draft')
+    document.querySelector<HTMLButtonElement>('.button-icon-send')!.click()
+    await vi.waitFor(() => expect(mocks.generate).toHaveBeenCalledOnce())
+    expect(mocks.appended).toEqual([expect.objectContaining({ data: 'Synthetic button draft' })])
+})
 
 const stopListening: Array<() => void> = []
 function listenGenerationEnd() {
@@ -748,5 +749,5 @@ it('reports a reroll whose tail could not be reopened as failed', async () => {
     }))
     type('').dispatchEvent(new KeyboardEvent('keydown', { key: 'm', ctrlKey: true, bubbles: true }))
     await vi.waitFor(() => expect(records).toEqual([endOf('failed', true)]))
-    expect(mocks.error).toHaveBeenCalledWith(languageEnglish.generationConversationChanged)
+    expect(mocks.error).toHaveBeenCalledWith(language.generationConversationChanged)
 })

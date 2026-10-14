@@ -10,13 +10,7 @@ const state = vi.hoisted(() => ({
     cleanup: [] as (() => void | Promise<void>)[],
 }))
 
-vi.mock('./parser/parser.svelte', () => ({
-    assetRegex: /$^/,
-    hasher: vi.fn(async () => 'hash'),
-    parseMarkdownSafe: (value: string) => value,
-    ParseMarkdown: vi.fn(async (value: string) => value),
-    risuChatParser: (value: string) => value,
-}))
+vi.mock('./parser/parser.svelte', async () => (await import('./parser/parser.testSupport')).parserStubModule())
 vi.mock('./gui/receivedDisplaySettings', () => ({ applyReceivedDisplaySettings: vi.fn(async () => undefined) }))
 vi.mock('./storage/persistentDataStoreFactory', async (importOriginal) => ({
     ...await importOriginal<typeof import('./storage/persistentDataStoreFactory')>(),

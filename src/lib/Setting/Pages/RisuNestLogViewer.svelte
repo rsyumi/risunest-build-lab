@@ -1,7 +1,8 @@
 <script lang="ts">
     import { onDestroy, onMount } from 'svelte'
     import { language } from 'src/lang'
-    import { alertMd } from 'src/ts/alert'
+    import { alertMd } from 'src/ts/alertQueue'
+    import { consoleLog, type ConsoleLogEntry } from 'src/ts/consoleLog'
     import SettingGroup from '../RisuNest/SettingGroup.svelte'
     import SettingRow from '../RisuNest/SettingRow.svelte'
     import SettingToggle from '../RisuNest/SettingToggle.svelte'
@@ -24,16 +25,19 @@
     let fileLogEnabled = $state(getDeviceSettings().nativeFileLogEnabled)
     let fileLogPath = $state('')
     let fileLogUpdatePending = $state(false)
-    let pending = $state<'view' | 'copy' | null>(null)
+    type LogKind = 'native' | 'console'
+    let pending = $state<'view' | 'copy' | 'consoleView' | 'consoleCopy' | null>(null)
+    let consoleRevision = 0
     let viewRequest = 0
     let copyRequest = 0
     let clipboardWriteQueue = Promise.resolve()
 
-    function formatLog(logEntries: NativeLogEntry[]) {
+    function formatLog(logEntries: (NativeLogEntry | ConsoleLogEntry)[]) {
         return logEntries
         .slice()
         .reverse()
-        .map((entry) => `[${new Date(entry.tsMs).toISOString()}] [${entry.level}] ${entry.message}`)
+        .sort((left, right) => right.tsMs - left.tsMs)
+        .map((entry) => `[${new Date(entry.tsMs).toISOString()}] [${entry.level}] ${'source' in entry ? `[${entry.source}] ` : ''}${entry.message}`)
         .join('\n')
     }
 
@@ -43,9 +47,8 @@
      * any tilde run inside the log itself, so log content can never close it.
      */
     function fenceLog(text: string) {
-        const tildeRuns: string[] = text.match(/~+/g) ?? []
-        const longestTildeRun = tildeRuns
-            .reduce((longest, run) => Math.max(longest, run.length), 0)
+        let longestTildeRun = 0
+        for (const match of text.matchAll(/~+/g)) longestTildeRun = Math.max(longestTildeRun, match[0].length)
         const fence = '~'.repeat(Math.max(4, longestTildeRun + 1))
         return `${fence}\n${text}\n${fence}`
     }
@@ -73,17 +76,35 @@
         }
     }
 
-    async function viewLog() {
+    function readLog(kind: LogKind) {
+        if (kind === 'console') return consoleLog.snapshot()
+        return getNativeLogTail()
+    }
+
+    function emptyLog(kind: LogKind) {
+        return kind === 'console' ? language.risuNest.diag.consoleEmpty : language.risuNest.diag.logEmpty
+    }
+
+    function clearConsole() {
+        consoleLog.clear()
+        consoleRevision++
+        if (pending === 'consoleView' || pending === 'consoleCopy') pending = null
+    }
+
+    async function viewLog(kind: LogKind = 'native') {
         const request = ++viewRequest
-        pending = 'view'
+        const revision = consoleRevision
+        pending = kind === 'console' ? 'consoleView' : 'view'
         try {
-            const freshEntries = await getNativeLogTail()
-            if (request !== viewRequest) return
-            entries = freshEntries
-            logLoaded = true
+            const freshEntries = await readLog(kind)
+            if (request !== viewRequest || (kind === 'console' && revision !== consoleRevision)) return
+            if (kind === 'native') {
+                entries = freshEntries as NativeLogEntry[]
+                logLoaded = true
+            }
             errorMessage = ''
             const text = formatLog(freshEntries)
-            alertMd(text ? fenceLog(text) : language.risuNest.diag.logEmpty)
+            alertMd(text ? fenceLog(text) : emptyLog(kind))
         } catch {
             if (request === viewRequest) errorMessage = language.risuNest.diag.actionFailed
         } finally {
@@ -91,25 +112,28 @@
         }
     }
 
-    async function copyLog() {
+    async function copyLog(kind: LogKind = 'native') {
         const request = ++copyRequest
-        pending = 'copy'
+        const revision = consoleRevision
+        pending = kind === 'console' ? 'consoleCopy' : 'copy'
         try {
-            const freshEntries = await getNativeLogTail()
-            if (request !== copyRequest) return
-            entries = freshEntries
-            logLoaded = true
+            const freshEntries = await readLog(kind)
+            if (request !== copyRequest || (kind === 'console' && revision !== consoleRevision)) return
+            if (kind === 'native') {
+                entries = freshEntries as NativeLogEntry[]
+                logLoaded = true
+            }
             errorMessage = ''
-            const text = formatLog(freshEntries) || language.risuNest.diag.logEmpty
+            const text = formatLog(freshEntries) || emptyLog(kind)
             // The button is free again once the log is read; a slow clipboard
             // write is serialized below, so a repeat request cannot reorder it.
             pending = null
             const pendingWrite = clipboardWriteQueue.then(async () => {
-                if (request !== copyRequest) return
+                if (request !== copyRequest || (kind === 'console' && revision !== consoleRevision)) return
                 try {
                     await navigator.clipboard.writeText(text)
                 } catch {
-                    if (request !== copyRequest) return
+                    if (request !== copyRequest || (kind === 'console' && revision !== consoleRevision)) return
                     const textarea = document.createElement('textarea')
                     textarea.value = text
                     document.body.appendChild(textarea)
@@ -157,11 +181,22 @@
                 <p class="mt-1 text-sm text-textcolor2" role="status" aria-live="polite">{language.risuNest.diag.logEmpty}</p>
             {/if}
         {/snippet}
-        <SettingButton data-view-log busy={pending === 'view'} onclick={viewLog}>
+        <SettingButton data-view-log busy={pending === 'view'} onclick={() => void viewLog()}>
             {language.risuNest.diag.viewLog}
         </SettingButton>
         <SettingButton data-copy-log variant="secondary" busy={pending === 'copy'} onclick={() => void copyLog()}>
             {language.risuNest.diag.copyLog}
+        </SettingButton>
+    </SettingRow>
+    <SettingRow label={language.risuNest.diag.consoleTitle} help={language.risuNest.diag.consoleHelp}>
+        <SettingButton data-view-console-log busy={pending === 'consoleView'} onclick={() => void viewLog('console')}>
+            {language.risuNest.diag.viewLog}
+        </SettingButton>
+        <SettingButton data-copy-console-log variant="secondary" busy={pending === 'consoleCopy'} onclick={() => void copyLog('console')}>
+            {language.risuNest.diag.copyLog}
+        </SettingButton>
+        <SettingButton data-clear-console-log variant="secondary" onclick={clearConsole}>
+            {language.risuNest.diag.clearLog}
         </SettingButton>
     </SettingRow>
     <SettingRow inline label={language.risuNest.diag.fileLog} help={language.risuNest.diag.fileLogHelp}>

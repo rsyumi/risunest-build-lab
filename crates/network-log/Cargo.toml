@@ -18,6 +18,8 @@ bytes = { version = "1", optional = true }
 reqwest = ["dep:reqwest", "dep:futures-util", "dep:http-body", "dep:bytes"]
 
 [dev-dependencies]
+bytes = "1"
+http-body = "1"
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "time"] }

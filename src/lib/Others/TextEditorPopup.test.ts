@@ -5,7 +5,7 @@ import { mount, tick, unmount } from 'svelte'
 import { get } from 'svelte/store'
 
 const platform = vi.hoisted(() => ({ isMobile: true }))
-vi.mock('src/ts/platform', () => ({ get isMobile() { return platform.isMobile } }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule(() => ({ runtime: 'web', os: platform.isMobile ? 'android' : 'windows' })))
 vi.mock('src/ts/stores.svelte', async () => {
     const { createAlertQueue } = await import('src/ts/alertQueue')
     return { alertStore: createAlertQueue({ type: 'none', msg: '' }, { gapMs: 0 }) }

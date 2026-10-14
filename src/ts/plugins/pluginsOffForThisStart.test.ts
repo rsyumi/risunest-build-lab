@@ -8,13 +8,7 @@ vi.mock('../storage/persistentDataRuntime.svelte', async (original) => ({
 vi.mock('../storage/persistentDataStoreFactory', () => ({
     getPersistentDataStore: () => undefined,
 }))
-vi.mock('../parser/parser.svelte', () => ({
-    assetRegex: /$^/,
-    hasher: vi.fn(async () => 'hash'),
-    parseMarkdownSafe: (value: string) => value,
-    ParseMarkdown: vi.fn(async (value: string) => value),
-    risuChatParser: (value: string) => value,
-}))
+vi.mock('../parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
 vi.mock('./apiV3/v3.svelte', () => ({
     loadV3Plugins: vi.fn(async () => undefined),
     customV3ProviderMetaStore: [],

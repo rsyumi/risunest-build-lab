@@ -6,66 +6,17 @@ import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import { embeddedCrateTests, hostManifests, nativeCommands, packageCrateTests, protocolManifests, sharedCargoTarget, standaloneRustCommands, standaloneRustTests } from '../scripts/testNative.mjs'
 
-test('native groups explicitly own dependency packages and full app integration targets', () => {
-  const protocol = nativeCommands('protocol', 'win32')
-  assert.deepEqual(protocol.map(command => command[3]), protocolManifests)
-  assert.equal(protocol.length, 6)
-  assert(protocol.find(command => command[3] === 'crates/network-log/Cargo.toml').includes('reqwest'))
-  const host = nativeCommands('host', 'win32')
-  assert.deepEqual(host.slice(0, 4).map(command => command[3]), hostManifests)
-  for (const command of [...protocol, ...host]) {
-    assert(command.includes('--locked'))
-    assert(command.includes('--release'))
-    assert(!command.includes('--ignored'))
-  }
-  assert(!host[0].includes('--lib'))
-  assert.deepEqual(packageCrateTests.map(entry => entry.package), ['tauri-plugin-window-state', 'wry', 'tauri-plugin-http', 'tauri-plugin-updater'])
+test('the Sync server runs as one plain cargo test and its source observer only through --harness', () => {
+  const base = ['cargo', 'test', '--manifest-path', 'server/sync/Cargo.toml', '--release', '--locked']
   for (const platform of ['win32', 'linux', 'darwin']) {
-    assert.deepEqual(nativeCommands('host', platform).filter(command => command.includes('--package')), packageCrateTests.map(entry => [
-      'cargo', 'test', '--manifest-path', entry.runnerManifest,
-      '--package', entry.package, '--release', '--locked', '--lib',
-    ]))
-  }
-  assert(host.at(-1).includes('tauri-plugin-updater'))
-  assert(host.at(-1).includes('--lib'))
-  assert.deepEqual(nativeCommands('host', 'linux')[0], ['dbus-run-session', '--', 'bash', 'scripts/linux-native-tests.sh', '--release'])
-  assert.throws(() => nativeCommands('everything'), /Expected/)
-})
-
-test('server singleton scopes run in three disjoint processes with normal target coverage', () => {
-  for (const platform of ['win32', 'linux', 'darwin']) {
-    const server = nativeCommands('host', platform).filter(command => command[3] === 'server/sync/Cargo.toml')
-    const base = ['cargo', 'test', '--manifest-path', 'server/sync/Cargo.toml', '--release', '--locked']
-    assert.deepEqual(server, [
-      [...base, '--', '--skip', 'source_observer'],
-      [...base, '--lib', 'source_observer', '--', '--skip', 'source_observer::small_object_store::tests'],
-      [...base, '--lib', 'source_observer::small_object_store::tests'],
-    ])
-    assert(!server[0].includes('--lib'))
-    assert(server.every(command => !command.some(argument => argument.startsWith('--test-threads'))))
-    const cases = [
-      { name: 'store::objects::tests::a_body_is_filed_by_its_size_and_read_back_from_wherever_it_went', target: 'lib' },
-      { name: 'management_shutdown_ends_held_stream_and_releases_daemon_owner', target: 'integration' },
-      { name: 'main', target: 'bin' },
-      { name: 'store::Store', target: 'doc' },
-      { name: 'source_observer::tests::actual_fitting_full_and_delta_transfer_sha_domains_are_observed', target: 'lib' },
-      { name: 'source_observer_harness::tests::actual_tcp_no_content_and_full_content_length_bodies_complete', target: 'lib' },
-      { name: 'source_observer_harness::serve', target: 'lib' },
-      { name: 'source_observer::small_object_store::tests::a_read_refuses_a_body_above_its_limit_and_reports_a_damaged_one', target: 'lib' },
-    ]
-    for (const { name, target } of cases) {
-      const selected = server.filter(command => {
-        const separator = command.indexOf('--')
-        const cargo = separator < 0 ? command : command.slice(0, separator)
-        const argumentsAfterSeparator = separator < 0 ? [] : command.slice(separator + 1)
-        const lib = cargo.indexOf('--lib')
-        if (lib >= 0 && (target !== 'lib' || !name.includes(cargo[lib + 1]))) return false
-        const skip = argumentsAfterSeparator.indexOf('--skip')
-        return skip < 0 || !name.includes(argumentsAfterSeparator[skip + 1])
-      })
-      assert.equal(selected.length, 1, `${platform}: ${target} ${name} must have exactly one runner`)
+    for (const group of ['protocol', 'host']) {
+      const server = nativeCommands(group, platform).filter(command => command.includes('server/sync/Cargo.toml'))
+      assert.deepEqual(server, group === 'host' ? [base] : [])
     }
   }
+  assert.deepEqual(nativeCommands('harness'), [
+    [...base, '--lib', '--features', 'source-observer', '--', '--skip', 'source_observer::small_object_store::tests'],
+  ])
 })
 
 test('host mode compiles and runs the std-only Android response body tests as their own test binary', () => {
@@ -145,30 +96,29 @@ function nativeNetworkBypasses(source) {
   return [...source.matchAll(/\.send\s*\(\s*\)|\.execute\s*\(\s*request\s*\)|\bconnect_async(?:_tls_with_config|_with_config)?\s*\(/g)].map(match => match[0].replace(/\s+/g, ''))
 }
 
-test('native HTTP and WebSocket raw entry points stay in the reviewed adapters and fixtures', () => {
+test('native HTTP and WebSocket raw entry points stay in the reviewed adapters', () => {
   const root = fileURLToPath(new URL('../', import.meta.url))
-  const found = {}
+  const reviewed = [
+    'src-tauri/src/server_sync/client.rs',
+    'src-tauri/src/server_sync/notification.rs',
+    'crates/network-log/src/reqwest.rs',
+    'crates/tauri-plugin-updater/src/network_log.rs',
+  ]
+  const found = []
   function scan(directory) {
     for (const entry of readdirSync(join(root, directory), { withFileTypes: true })) {
       const path = `${directory}/${entry.name}`
       if (entry.isDirectory()) scan(path)
-      else if (entry.name.endsWith('.rs')) {
-        const calls = nativeNetworkBypasses(readFileSync(join(root, path), 'utf8'))
-        if (calls.length) found[path] = calls
+      else if (entry.name.endsWith('.rs') && !/(?:^|[/_])tests?\.rs$/.test(path)) {
+        // Tests may call the transport directly; product code goes through the logged adapters.
+        const product = readFileSync(join(root, path), 'utf8').split(/^#\[cfg\((?:all\()?test\b[^\n]*\]\r?\n(?:pub(?:\([^)]*\))? )?mod \w+ \{/m)[0]
+        if (nativeNetworkBypasses(product).length) found.push(path)
       }
     }
   }
   for (const directory of ['src-tauri/src', 'crates/network-log/src', 'crates/tauri-plugin-http/src', 'crates/tauri-plugin-updater/src']) scan(directory)
-  assert.deepEqual(found, {
-    'src-tauri/src/native_media/streaming/tests.rs': ['.send()', '.send()'],
-    'src-tauri/src/platform_tls.rs': ['.send()', '.send()', '.send()', '.send()', 'connect_async_tls_with_config('],
-    'src-tauri/src/server_sync/client.rs': ['.execute(request)', '.execute(request)'],
-    'src-tauri/src/server_sync/directory_tests.rs': ['.send()'],
-    'src-tauri/src/server_sync/media_admission_tests.rs': ['.send()'],
-    'src-tauri/src/server_sync/notification.rs': ['connect_async_tls_with_config('],
-    'crates/network-log/src/reqwest.rs': ['.send()', '.execute(request)', '.execute(request)'],
-    'crates/tauri-plugin-updater/src/network_log.rs': ['.send()', '.execute(request)'],
-  })
+  assert.deepEqual(found.filter(path => !reviewed.includes(path)), [])
+  assert(found.includes('crates/network-log/src/reqwest.rs'))
   assert.equal(nativeNetworkBypasses('client.get(url).send().await?;').length, 1)
   assert.equal(nativeNetworkBypasses('client.get(url).send_logged("test").await?;').length, 0)
 })

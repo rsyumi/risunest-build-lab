@@ -4,17 +4,17 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: f.invoke }))
 vi.mock('src/ts/alert', () => ({ alertCheckboxConfirm: f.dialog }))
 vi.mock('../libraryCharacters', () => ({ hasLibraryCharacters: f.characters }))
 vi.mock('src/ts/process/modules', () => ({ moduleUpdate: vi.fn(), getModules: () => [] }))
-vi.mock('src/ts/parser/parser.svelte', () => ({ risuChatParser: (text: string) => text }))
+vi.mock('src/ts/parser/parser.svelte', async () => (await import('../../parser/parser.testSupport')).parserStubModule())
 import { language } from 'src/lang'
-import { DBState } from 'src/ts/stores.svelte'
 import { normalizeDatabaseDefaults, type Database } from '../database.svelte'
 import type { InspectedSyncTarget, SyncBindingDependencies, SyncBindingState } from './bindingFlow'
 import { installSyncBindingFlow } from './bindingProduction'
 import { bindSyncTarget, registerSyncBindingTransport } from './bindingRegistry'
+import { assetResidencyStatus } from './serverAssetResidency.testSupport'
 
 // The binding table composed through the real character check wiring, native content check and dialogs.
 const target = { kind: 'server', connectionId: 'server' } as const
-const residency = { policy: 'remote', localBytes: 0, remoteBytes: 0, remoteObjects: 0, serverBytes: 0, serverObjects: 0, externalObjects: [], unavailableObjects: 0, previousStorageObjects: 0, evictedBytes: 0 }
+const residency = assetResidencyStatus()
 const factory = () => structuredClone(normalizeDatabaseDefaults({} as Database))
 let state: SyncBindingState
 let cleanup: (() => void)[] = []
@@ -55,7 +55,6 @@ function install(native: Omit<ReturnType<typeof content>, 'library'> & { library
 
 beforeEach(() => {
     f.invoke.mockReset(); f.dialog.mockReset(); f.characters.mockReset().mockResolvedValue(false)
-    DBState.db = factory()
     state = { target: { kind: 'none' }, targetAuthority: '0', selectionEpoch: 'none', libraryId: null, progress: null }
 })
 afterEach(() => { for (const dispose of cleanup.reverse()) dispose(); cleanup = [] })
@@ -83,28 +82,4 @@ it.each([false, true])('publishes plugin-local values to an empty target only wh
     expect(switchTarget).toHaveBeenCalledOnce()
     expect(switchTarget.mock.calls[0][4]).toBe(participating)
     expect(transport.publishInitialSharedState).toHaveBeenCalledTimes(participating ? 1 : 0)
-})
-
-describe('a restored server', () => {
-    const bound = () => { state = { target, targetAuthority: '1', selectionEpoch: 'bound', libraryId: 'library', progress: null } }
-    it('replaces a bound device without characters without asking', async () => {
-        bound()
-        const { transport } = install(content('0', false), false, target, { previouslyBoundLibrary: true, serverRestored: true })
-        transport.replaceAsNewDevice.mockImplementation(async () => {
-            state = { ...state, targetAuthority: '2' }
-            return { revision: 1, writerId: 'writer', bindingAuthority: '2' }
-        })
-        expect(await bindSyncTarget(target)).toMatchObject({ kind: 'bound', action: 'new-device' })
-        expect(f.dialog).not.toHaveBeenCalled()
-        expect(transport.replaceAsNewDevice).toHaveBeenCalledOnce()
-    })
-    it('asks before it replaces a bound device that holds a character, and declining keeps it', async () => {
-        bound()
-        f.characters.mockResolvedValue(true)
-        const { transport } = install(content('0', false), false, target, { previouslyBoundLibrary: true, serverRestored: true })
-        f.dialog.mockResolvedValue({ confirmed: false, checked: false })
-        expect(await bindSyncTarget(target)).toEqual({ kind: 'cancelled' })
-        expect(f.dialog).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ title: language.lwwSync.replaceTitle, description: language.lwwSync.serverRestoredDescription, requireChecked: true }))
-        expect(transport.prepareNewDeviceBinding).not.toHaveBeenCalled(); expect(transport.replaceAsNewDevice).not.toHaveBeenCalled()
-    })
 })

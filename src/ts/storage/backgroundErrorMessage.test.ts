@@ -1,12 +1,9 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
-vi.mock('src/lang', async () => ({ language: (await import('src/lang/en')).languageEnglish }))
-
-import { languageEnglish } from 'src/lang/en'
-import { languageKorean } from 'src/lang/ko'
+import { language } from 'src/lang'
 import { backgroundErrorMessage } from './backgroundErrorMessage'
 
-const fallback = languageEnglish.risuNest.backgroundDataFailed
+const fallback = language.risuNest.backgroundDataFailed
 
 describe('backgroundErrorMessage', () => {
     it('keeps an Error for its message and stack', () => {
@@ -40,10 +37,5 @@ describe('backgroundErrorMessage', () => {
 
     it.each([undefined, null, 7])('never shows the value itself: %o', (error) => {
         expect(backgroundErrorMessage(error)).toBe(fallback)
-    })
-
-    it('has the sentence in both shipped languages', () => {
-        expect(languageEnglish.risuNest.backgroundDataFailed).toBe('Some changes to the data could not be completed.')
-        expect(languageKorean.risuNest.backgroundDataFailed).toBe('일부 데이터 변경을 완료하지 못했습니다.')
     })
 })

@@ -1915,6 +1915,7 @@ export const languageEnglish = {
     applyAdditionalParamsToAll: "Apply Additional Parameters to All Models",
     risuNest: {
         backgroundDataFailed: 'Some changes to the data could not be completed.',
+        scriptTimeout: 'A Lua script took too long and was stopped.',
         localSaveFailure: {
             failed: 'Changes could not be saved. Retry saving before closing the app.',
             invalid: '{0} could not be saved. Check this data, then retry saving.',
@@ -2928,6 +2929,10 @@ export const languageEnglish = {
             logHelp: 'Recent errors. Attach them when reporting a problem.',
             viewLog: 'View',
             copyLog: 'Copy',
+            consoleTitle: 'Console log',
+            consoleHelp: 'View recent app and plugin logs. Logs are cleared when the app restarts.',
+            consoleEmpty: 'No console logs recorded.',
+            clearLog: 'Clear',
             fileLog: 'Save error log to a file',
             fileLogHelp:
                 'Secrets such as API keys are masked before being written.',

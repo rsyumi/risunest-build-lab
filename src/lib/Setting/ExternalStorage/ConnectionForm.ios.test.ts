@@ -13,10 +13,7 @@ const state = vi.hoisted(() => ({
     openUrl: vi.fn(),
 }))
 
-vi.mock('src/ts/platform', () => ({
-    isTauriAndroid: false,
-    isTauriIOS: true,
-}))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'tauri', os: 'ios' }))
 vi.mock('@tauri-apps/plugin-os', () => ({ type: () => 'ios' }))
 vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: state.openUrl }))
 vi.mock('src/ts/storage/sync/external/bridge', () => ({

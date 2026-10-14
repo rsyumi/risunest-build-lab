@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
 import type { Chat, Message } from '../storage/database.svelte'
-import type { PersistentRevisionLease } from '../storage/persistentDataStore'
+import type {
+    ConversationMessageMetadataWindow,
+    ConversationWindow,
+    ConversationWindowQuery,
+} from '../storage/persistentDataStore'
+import { createLeaseStub } from '../storage/persistentDataStore.testSupport'
 import type { WindowedConversationPersistenceAuthority } from '../storage/saveCoordinator'
 import {
     admitHistoryWindow,
@@ -63,9 +68,9 @@ function leaseOver(all: Message[], options: { metadata?: boolean } = {}) {
     const bodyReads: Array<[number, number]> = []
     const metadataQueries: unknown[] = []
     let metadataPages = 0
-    const lease = {
+    const lease = createLeaseStub({
         revision: 7,
-        async readConversationWindow({ startIndex, limit }: { startIndex: number, limit: number }) {
+        async readConversationWindow({ startIndex, limit }: ConversationWindowQuery) {
             bodyReads.push([startIndex, limit])
             const slice = all.slice(startIndex, startIndex + limit)
             return {
@@ -77,11 +82,11 @@ function leaseOver(all: Message[], options: { metadata?: boolean } = {}) {
                     startIndex,
                     endIndex: startIndex + slice.length,
                     totalMessages: all.length,
-                },
+                } as ConversationWindow,
             }
         },
         ...(options.metadata === false ? {} : {
-            async readConversationMessageMetadataWindow(query: { startIndex: number, limit: number }) {
+            async readConversationMessageMetadataWindow(query: ConversationWindowQuery) {
                 const { startIndex, limit } = query
                 metadataQueries.push(query)
                 metadataPages += 1
@@ -100,11 +105,11 @@ function leaseOver(all: Message[], options: { metadata?: boolean } = {}) {
                         startIndex,
                         endIndex: startIndex + slice.length,
                         totalMessages: all.length,
-                    },
+                    } as ConversationMessageMetadataWindow,
                 }
             },
         }),
-    } as unknown as PersistentRevisionLease
+    })
     return { lease, bodyReads, metadataQueries, metadataPages: () => metadataPages }
 }
 

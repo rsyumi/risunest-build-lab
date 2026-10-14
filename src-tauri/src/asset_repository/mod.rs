@@ -10,6 +10,8 @@ pub(crate) mod migration_gc;
 pub(crate) mod owner_manifest_codec;
 mod payload_cas;
 #[cfg(test)]
+mod payload_cas_tests;
+#[cfg(test)]
 pub(crate) mod body_io;
 
 pub(crate) use payload_cas::{exact_file_identity, ExactFileIdentity};

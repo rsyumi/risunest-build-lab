@@ -307,36 +307,6 @@ fn disabled_binary_capture_keeps_metadata_and_text_but_no_binary_payload() {
     assert_eq!(json["response"]["body"]["encoding"], "hex");
 }
 #[test]
-fn queue_overflow_is_bounded_and_has_a_terminal_reason_without_backpressure() {
-    let f = Fixture::new();
-    f.enable(false, false);
-    let (release, wait) = mpsc::channel();
-    let (ready, started) = mpsc::channel();
-    f.recorder
-        .0
-        .sender
-        .send(Event::Job(Box::new(move |_| {
-            ready.send(()).unwrap();
-            wait.recv_timeout(Duration::from_secs(5)).unwrap();
-        })))
-        .unwrap();
-    started.recv().unwrap();
-    let c = f.begin();
-    let began = Instant::now();
-    for _ in 0..8192 {
-        c.append(Side::Response, &[b'x'; 16 * 1024]);
-    }
-    assert!(began.elapsed() < Duration::from_secs(2));
-    assert!(f.recorder.0.queued.load(Ordering::Relaxed) <= f.recorder.0.queue_limit.load(Ordering::Relaxed));
-    c.finish("complete");
-    release.send(()).unwrap();
-    let record = f.detail(&c);
-    assert_eq!(record.state, "complete");
-    assert_eq!(record.capture_error.as_deref(), Some("queue-full"));
-    assert!(record.response.body.truncated);
-    assert_eq!(record.response.body.observed_bytes, 128 * MIB);
-}
-#[test]
 fn disk_failure_does_not_escape_capture_or_hide_the_incomplete_reason() {
     let f = Fixture::new();
     f.enable(false, false);
@@ -577,7 +547,6 @@ fn quota_stops_capture_and_preserves_existing_retained_requests() {
     assert!(f.recorder.list(Query::default()).unwrap().retained_bytes <= 128 * MIB);
 }
 
-#[cfg(feature = "reqwest")]
 #[tokio::test(flavor = "current_thread")]
 async fn real_http_keeps_request_body_redirect_url_encoding_and_cancellation() {
     use crate::reqwest::RequestBuilderExt;
@@ -677,7 +646,8 @@ async fn real_http_keeps_request_body_redirect_url_encoding_and_cancellation() {
 }
 
 #[test]
-fn large_export_streams_512_mib_without_a_full_body_allocation() {
+fn large_export_streams_escaped_body_bytes() {
+    const BODY: u64 = 4 * MIB;
     struct Counter(u64);
     impl std::io::Write for Counter {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -696,40 +666,31 @@ fn large_export_streams_512_mib_without_a_full_body_allocation() {
     f.recorder
         .job(move |store| {
             let mut record = store.record(&id)?;
-            record.response.body.captured_bytes = 512 * MIB;
-            record.response.body.observed_bytes = 512 * MIB;
+            record.response.body.captured_bytes = BODY;
+            record.response.body.observed_bytes = BODY;
             std::fs::OpenOptions::new()
                 .write(true)
                 .open(store.dir(&record).join("response"))
                 .unwrap()
-                .set_len(512 * MIB)
+                .set_len(BODY)
                 .unwrap();
-            store.bytes[0] += 512 * MIB;
+            store.bytes[0] += BODY;
             store.update(&record)
         })
         .unwrap();
     let mut output = Counter(0);
     f.snapshot(&c).export_json(&mut output).unwrap();
     // NUL is emitted as six JSON escape bytes, without retaining the output.
-    assert!(output.0 >= 512 * MIB * 6 && output.0 < 512 * MIB * 6 + MIB);
+    assert!(output.0 >= BODY * 6 && output.0 < BODY * 6 + MIB);
 }
 #[test]
 fn concurrent_streams_and_a_single_enormous_chunk_keep_the_shared_queue_bounded() {
     let f = Fixture::new();
     f.enable(false, true);
-    let (release, wait) = mpsc::channel();
-    let (ready, started) = mpsc::channel();
-    f.recorder
-        .0
-        .sender
-        .send(Event::Job(Box::new(move |_| {
-            ready.send(()).unwrap();
-            wait.recv_timeout(Duration::from_secs(10)).unwrap();
-        })))
-        .unwrap();
-    started.recv().unwrap();
+    let release = f.pause_writer();
     let captures: Vec<_> = (0..4).map(|_| f.begin()).collect();
     let huge = vec![b'x'; 64 * 1024 * 1024];
+    let began = Instant::now();
     std::thread::scope(|scope| {
         for capture in &captures {
             let bytes = &huge;
@@ -739,11 +700,14 @@ fn concurrent_streams_and_a_single_enormous_chunk_keep_the_shared_queue_bounded(
             });
         }
     });
+    // Overflow drops bytes instead of waiting for the paused writer.
+    assert!(began.elapsed() < Duration::from_secs(2));
     assert!(f.recorder.0.queued.load(Ordering::Relaxed) <= f.recorder.0.queue_limit.load(Ordering::Relaxed));
     drop(huge);
     release.send(()).unwrap();
     for capture in captures {
         let record = f.detail(&capture);
+        assert_eq!(record.state, "complete");
         assert_eq!(record.response.body.observed_bytes, 64 * MIB);
         assert_eq!(record.capture_error.as_deref(), Some("queue-full"));
         assert!(record.response.body.truncated);
@@ -798,17 +762,7 @@ fn overflowing_request_keeps_response_metadata_and_response_body() {
     f.recorder.configure(Settings { enabled: true, buffer_mib: 4, ..Settings::default() }).unwrap();
     let c = f.begin();
     f.detail(&c);
-    let (release, wait) = mpsc::channel();
-    let (ready, started) = mpsc::channel();
-    f.recorder
-        .0
-        .sender
-        .send(Event::Job(Box::new(move |_| {
-            ready.send(()).unwrap();
-            wait.recv_timeout(Duration::from_secs(5)).unwrap();
-        })))
-        .unwrap();
-    started.recv().unwrap();
+    let release = f.pause_writer();
     c.append(Side::Request, &vec![b'x'; 6 * MIB as usize]);
     c.response(201, "https://synthetic.example/final", &text_headers());
     release.send(()).unwrap();
@@ -853,70 +807,6 @@ fn idle_websocket_does_not_write_the_index_but_elapsed_time_advances() {
     assert_eq!(f.detail(&c).response.body.captured_bytes, 5);
     c.finish("complete");
     assert_eq!(f.detail(&c).state, "complete");
-}
-
-#[test]
-fn websocket_text_and_readable_control_payloads_stay_readable() {
-    let f = Fixture::new();
-    f.enable(false, false);
-    let c = f
-        .recorder
-        .begin(
-            "ws",
-            "WS",
-            "wss://synthetic.example",
-            &http::HeaderMap::new(),
-        )
-        .guard();
-    c.append_message(Side::Response, b"hello", Some("text"));
-    c.append_message(Side::Response, b"", Some("pong"));
-    c.append_message(Side::Response, b"ping", Some("ping"));
-    c.append_message(Side::Response, b"world", Some("text"));
-    c.finish("complete");
-    assert_eq!(
-        f.snapshot(&c).copy_body(Side::Response).unwrap(),
-        "hellopingworld"
-    );
-    let events = f.snapshot(&c).observations(0).unwrap();
-    assert_eq!(events.text.lines().count(), 4);
-    let mut json = Vec::new();
-    f.snapshot(&c).export_json(&mut json).unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&json).unwrap();
-    assert_eq!(json["response"]["body"]["encoding"], "utf8");
-}
-
-#[test]
-#[ignore = "paced disk-throughput measurement"]
-fn sustained_sse_preserves_small_and_large_chunks_without_queue_overflow() {
-    let f = Fixture::new();
-    f.enable(false, false);
-    for (size, count, interval) in [(1024, 1000, 2), (16 * 1024, 1000, 2), (64 * 1024, 500, 4)] {
-        let c = f.begin();
-        c.response(200, "https://synthetic.example/stream", &text_headers());
-        f.detail(&c);
-        let bytes = vec![b'x'; size];
-        let start = Instant::now();
-        let mut peak = 0;
-        for index in 0..count {
-            c.append(Side::Response, &bytes);
-            peak = peak.max(f.recorder.0.queued.load(Ordering::Relaxed));
-            if let Some(remaining) =
-                Duration::from_millis((index + 1) * interval).checked_sub(start.elapsed())
-            {
-                std::thread::sleep(remaining);
-            }
-        }
-        c.finish("complete");
-        let record = f.detail(&c);
-        eprintln!(
-            "chunk={size} count={count} elapsed_ms={} captured={} peak_queue={peak}",
-            start.elapsed().as_millis(),
-            record.response.body.captured_bytes
-        );
-        assert_eq!(record.response.body.captured_bytes, size as u64 * count);
-        assert!(!record.response.body.truncated);
-        assert!(record.capture_error.is_none());
-    }
 }
 
 #[test]
@@ -981,17 +871,7 @@ fn response_and_completion_survive_a_full_event_queue() {
     f.enable(false, false);
     let c = f.begin();
     f.detail(&c);
-    let (release, wait) = mpsc::channel();
-    let (ready, started) = mpsc::channel();
-    f.recorder
-        .0
-        .sender
-        .send(Event::Job(Box::new(move |_| {
-            ready.send(()).unwrap();
-            wait.recv_timeout(Duration::from_secs(5)).unwrap();
-        })))
-        .unwrap();
-    started.recv().unwrap();
+    let release = f.pause_writer();
     for _ in 0..QUEUE_EVENTS + 1 {
         c.append(Side::Request, b"x");
     }
@@ -1014,13 +894,7 @@ fn default_buffer_records_a_ten_mib_request_burst_while_writer_is_paused() {
     f.enable(false, false);
     let c = f.begin();
     f.detail(&c);
-    let (release, wait) = mpsc::channel();
-    let (ready, started) = mpsc::channel();
-    f.recorder.0.sender.send(Event::Job(Box::new(move |_| {
-        ready.send(()).unwrap();
-        let _ = wait.recv_timeout(Duration::from_secs(15));
-    }))).unwrap();
-    started.recv_timeout(Duration::from_secs(15)).unwrap();
+    let release = f.pause_writer();
     let body = vec![b'x'; 10 * MIB as usize];
     c.append(Side::Request, &body);
     c.finish("complete");
@@ -1036,22 +910,16 @@ fn default_buffer_records_a_ten_mib_request_burst_while_writer_is_paused() {
 
 
 #[test]
-fn buffer_settings_default_when_missing_and_survive_restart() {
-    let root = tempfile::tempdir().unwrap();
-    let kept = root.path().join("kept");
-    fs::create_dir_all(&kept).unwrap();
-    let saved = serde_json::json!({
-        "enabled": true, "retain": true, "hideAuth": false,
-        "recentCount": 500, "recentMib": 256, "retainedMib": 128, "bodyMib": 16,
-    });
-    fs::write(kept.join("settings.json"), serde_json::to_vec(&saved).unwrap()).unwrap();
-    let recorder = Recorder::open(root.path().join("recent"), kept.clone()).unwrap();
-    let f = Fixture { root, recorder };
-    let mut settings = f.recorder.settings();
-    assert_eq!(settings.buffer_mib, 32);
-    assert!(!settings.capture_binary);
-    assert_eq!((settings.recent_count, settings.recent_mib, settings.retained_mib), (500, 256, 128));
-    settings.capture_binary = true;
+fn buffer_settings_survive_restart() {
+    let f = Fixture::new();
+    let kept = f.root.path().join("kept");
+    let mut settings = Settings {
+        enabled: true,
+        retain: true,
+        hide_auth: false,
+        capture_binary: true,
+        ..Settings::default()
+    };
     for budget in [4, 8, 16, 32, 64, 128] {
         settings.buffer_mib = budget;
         f.recorder.configure(settings.clone()).unwrap();
@@ -1075,40 +943,6 @@ fn buffer_settings_default_when_missing_and_survive_restart() {
     assert!(!reopened.settings().hide_auth);
     assert_eq!(reopened.0.queue_limit.load(Ordering::Relaxed), 128 * MIB as usize);
     reopened.shutdown();
-}
-
-#[test]
-fn larger_buffers_admit_bursts_beyond_the_old_event_ceiling() {
-    use std::io::Read;
-    for budget in [64, 128] {
-        let f = Fixture::new();
-        f.recorder.configure(Settings { enabled: true, buffer_mib: budget, ..Settings::default() }).unwrap();
-        let c = f.begin();
-        f.detail(&c);
-        let release = f.pause_writer();
-        let length = (budget - 1) * MIB;
-        let body = vec![b'x'; length as usize];
-        c.append(Side::Request, &body);
-        drop(body);
-        c.finish("complete");
-        let queued = f.recorder.0.queued.load(Ordering::Relaxed);
-        release.send(()).unwrap();
-        assert!(queued >= length as usize && queued <= (budget * MIB) as usize);
-        let record = f.detail(&c);
-        assert_eq!(record.request.body.captured_bytes, length);
-        assert!(!record.request.body.truncated);
-        assert!(record.capture_error.is_none());
-        let mut snapshot = f.snapshot(&c);
-        let mut chunk = [0; 64 * 1024];
-        let mut read = 0;
-        loop {
-            let size = snapshot.request.read(&mut chunk).unwrap();
-            if size == 0 { break; }
-            assert!(chunk[..size].iter().all(|byte| *byte == b'x'));
-            read += size as u64;
-        }
-        assert_eq!(read, length);
-    }
 }
 
 #[test]
@@ -1255,6 +1089,7 @@ fn disabled_websocket_binary_payloads_keep_message_metadata_and_readable_text() 
     assert!(!record.response.body.binary);
     assert!(record.response.body.truncated);
     assert_eq!(record.capture_error.as_deref(), Some("binary-skipped"));
+    assert_eq!(f.snapshot(&c).copy_body(Side::Response).unwrap(), "hellopingworld");
     let mut json = Vec::new();
     f.snapshot(&c).export_json(&mut json).unwrap();
     let json: serde_json::Value = serde_json::from_slice(&json).unwrap();

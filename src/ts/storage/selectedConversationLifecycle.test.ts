@@ -6,6 +6,7 @@ import type {
     ConversationWindowQuery,
     PersistentDataStore,
 } from './persistentDataStore'
+import { createStoreStub } from './persistentDataStore.testSupport'
 import {
     PersistentConversationViewportSource,
 } from '../conversationViewportSource'
@@ -80,16 +81,18 @@ function makeHarness(messageCount = 10_000) {
                 startIndex,
                 endIndex,
                 totalMessages: messageCount,
+                hasMoreBefore: startIndex > 0,
+                hasMoreAfter: endIndex < messageCount,
                 messages: structuredClone(
                     persistedConversation.message.slice(startIndex, endIndex),
                 ),
             },
         }
     })
-    const store = {
+    const store = createStoreStub({
         readConversation,
         readConversationWindow,
-    } as unknown as PersistentDataStore
+    })
     const coordinator = {
         revision: storeRevision,
         mutationGeneration: 0,

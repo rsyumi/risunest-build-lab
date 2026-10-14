@@ -13,7 +13,6 @@ const mocks = vi.hoisted(() => ({
     genTime: 1,
   },
 }));
-vi.mock("src/lang", () => ({ language: {} }));
 vi.mock("src/ts/globalApi.svelte", () => ({
   fetchNative: mocks.fetch,
   globalFetch: vi.fn(),
@@ -32,7 +31,7 @@ vi.mock("src/ts/model/modellist", async () => ({
     internalID: "synthetic-model",
   }),
 }));
-vi.mock("src/ts/parser/parser.svelte", () => ({
+vi.mock("src/ts/parser/parser.svelte", async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule({
   risuChatParser: vi.fn(),
   risuEscape: vi.fn(),
   risuUnescape: vi.fn(),
