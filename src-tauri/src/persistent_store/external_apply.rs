@@ -3,7 +3,9 @@
 //! The transport owns download and decryption. This boundary accepts only local
 //! regular files, revalidates their identities, and never performs network I/O.
 use super::{
-    active_generation, current_revision, record_apply as rows,
+    active_generation, current_revision,
+    lww::{StagingObserver, StagingProgress},
+    record_apply as rows,
     server_sync_projection::{preserve_local_view, ServerPayload},
     PersistentStore,
     PreparedReplaceCommit, StoreError, StoreResult,
@@ -76,6 +78,22 @@ impl PersistentStore {
         R: IntoIterator<Item = StoreResult<ExternalSnapshotRecord>>,
         O: IntoIterator<Item = StoreResult<ExternalSnapshotObject>>,
     {
+        self.prepare_external_snapshot_application_observed(application, records, objects, &mut |_| Ok(()))
+    }
+
+    /// Reports `validate` once per object and then `project` once per record,
+    /// each against the count its input declares exactly.
+    pub(crate) fn prepare_external_snapshot_application_observed<R, O>(
+        &mut self,
+        application: &ExternalSnapshotApplication<'_>,
+        records: R,
+        objects: O,
+        emit: &mut dyn FnMut(StagingProgress) -> StoreResult<()>,
+    ) -> StoreResult<PreparedReplaceCommit>
+    where
+        R: IntoIterator<Item = StoreResult<ExternalSnapshotRecord>>,
+        O: IntoIterator<Item = StoreResult<ExternalSnapshotObject>>,
+    {
         validate_application(application)?;
         let actual_revision = self.revision()?;
         if application.expected_revision != actual_revision {
@@ -92,6 +110,7 @@ impl PersistentStore {
         let content = ContentStore::open_existing(&root.join("external-storage"))?;
         let stage = self.replace_begin()?;
         let mut remote = RemoteBodies::deferred(&self.repository_root);
+        let mut progress = StagingObserver::new(emit);
         let staged = (|| {
             let object_sizes = stage_objects(
                 &self.repository_root,
@@ -100,6 +119,7 @@ impl PersistentStore {
                 content.as_ref(),
                 objects,
                 application.probe,
+                &mut progress,
             )?;
             let record_hashes = stage_records(
                 &mut self.connection,
@@ -112,6 +132,7 @@ impl PersistentStore {
                 &object_sizes,
                 records,
                 application.probe,
+                &mut progress,
             )?;
             if fingerprint(application.scope_id, &record_hashes) != *application.fingerprint {
                 return invalid("External snapshot logical fingerprint differs from its catalog");
@@ -256,6 +277,7 @@ fn stage_objects<O>(
     content: Option<&ContentStore>,
     objects: O,
     probe: &dyn CancellationProbe,
+    progress: &mut StagingObserver<'_>,
 ) -> StoreResult<BTreeMap<String, u64>>
 where
     O: IntoIterator<Item = StoreResult<ExternalSnapshotObject>>,
@@ -263,6 +285,8 @@ where
     let cas = PayloadCas::new(repository_root)?;
     let cancelled = || probe.is_cancelled();
     let mut sizes = BTreeMap::new();
+    let objects = objects.into_iter();
+    progress.begin("validate", exact_len(&objects))?;
     for object in objects {
         check(probe)?;
         let object = object?;
@@ -287,6 +311,7 @@ where
             if size != Some(object.byte_length) {
                 return invalid("External snapshot input size differs from its catalog");
             }
+            progress.advance()?;
             continue;
         }
         let mut source = CancellableRead::new(
@@ -299,8 +324,17 @@ where
         {
             return invalid("External snapshot object identity changed while staging");
         }
+        progress.advance()?;
     }
     Ok(sizes)
+}
+
+/// The count an input declares exactly; any other input is reported without a total.
+fn exact_len(input: &impl Iterator) -> Option<u64> {
+    match input.size_hint() {
+        (lower, Some(upper)) if lower == upper => Some(lower as u64),
+        _ => None,
+    }
 }
 
 /// A stage is written a batch at a time, each batch its own transaction, so a
@@ -532,6 +566,7 @@ fn stage_records<R>(
     objects: &BTreeMap<String, u64>,
     records: R,
     probe: &dyn CancellationProbe,
+    progress: &mut StagingObserver<'_>,
 ) -> StoreResult<BTreeMap<String, [u8; 32]>>
 where
     R: IntoIterator<Item = StoreResult<ExternalSnapshotRecord>>,
@@ -548,6 +583,8 @@ where
     // was read at.
     let active = active_generation(connection)?;
     let local_root = local_root(connection, &active)?;
+    let records = records.into_iter();
+    progress.begin("project", exact_len(&records))?;
 
     let mut hashes = BTreeMap::new();
     let mut deferred_conversations = Vec::new();
@@ -601,7 +638,8 @@ where
             prepared,
             record.byte_length.saturating_add(bytes),
             probe,
-        )
+        )?;
+        progress.advance()
     };
     for record in records {
         check(probe)?;

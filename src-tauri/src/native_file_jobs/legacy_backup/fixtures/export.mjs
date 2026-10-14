@@ -52,6 +52,7 @@ export async function capturePocketExport(
       },
     },
     checkAuth: async () => true,
+    checkBackupDownloadAuth: async () => true,
     flushPendingDb: async () => {},
     buildFullExportDbValue: async () => database,
     kvGet: (key) => kv.get(key),

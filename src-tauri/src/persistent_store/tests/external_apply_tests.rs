@@ -536,14 +536,22 @@ fn library_bodies_are_confirmed_through_at_most_one_registry_connection() {
         let scope_id = library_fingerprint_domain();
         let fingerprint = fingerprint(&scope_id, &hashes);
         forget_registry_opens(directory.path());
+        let mut validated = None;
         let prepared = store
-            .prepare_external_snapshot_application(
+            .prepare_external_snapshot_application_observed(
                 &application(&staging, &scope_id, &fingerprint, 1),
                 records.into_iter().map(Ok),
                 objects.map(Ok),
+                &mut |progress| {
+                    if progress.phase == "validate" { validated = Some((progress.done, progress.total)); }
+                    Ok(())
+                },
             )
             .unwrap();
         assert_eq!(registry_opens(directory.path()), usize::from(remote_bodies > 0), "{remote_bodies} remote bodies");
+        // A body the library already holds is confirmed, not copied, and still counts toward the share.
+        let count = bodies.len() as u64;
+        assert_eq!(validated, Some((count, Some(count))), "{remote_bodies} remote bodies");
         store.finish_prepared_replace(prepared).unwrap();
     }
 }

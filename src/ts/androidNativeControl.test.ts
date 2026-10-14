@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createAndroidControlClient, type AndroidControlMessagePort } from './androidNativeControl'
+import progressGolden from './storage/tests/fixtures/androidBackupCopyProgressV1Golden.json'
 
 function fixture() {
     const sent: { id?: string; method: string; args: string[] }[] = []
@@ -13,6 +14,7 @@ function fixture() {
 
 afterEach(() => {
     vi.useRealTimers()
+    vi.restoreAllMocks()
     delete window.RisuNestControl
     delete window.RisuNestSafControl
     delete window.RisuLifecycleBridge
@@ -105,45 +107,43 @@ describe('scoped Android control transport', () => {
         expect(vi.getTimerCount()).toBe(0)
     })
 
-    it('keeps a large backup copy alive while copied bytes advance', async () => {
+    it('waits for a backup copy reply however long it stalls, as on iOS', async () => {
         vi.useFakeTimers()
         const { client, sent, reply } = fixture()
-        const outcome = client.request<string>('saf.materializeBackupSource', 'source')
-            .then(value => value, (error: Error) => error.message)
-        const totalBytes = 8 * 1024 ** 3
-        for (let copiedBytes = 1024 ** 3; copiedBytes <= totalBytes; copiedBytes += 1024 ** 3) {
-            await vi.advanceTimersByTimeAsync(60_000)
-            reply({ id: sent[0].id, progress: { copiedBytes, totalBytes } })
-        }
-        reply({ id: sent[0].id, result: 'copied-source' })
-        expect(await outcome).toBe('copied-source')
+        const onProgress = vi.fn()
+        let settled = false
+        const outcome = client.requestWithProgress<string>('saf.materializeBackupSource', onProgress, 'source')
+            .finally(() => { settled = true })
         expect(vi.getTimerCount()).toBe(0)
+        await vi.advanceTimersByTimeAsync(10 * 60_000)
+        reply({ id: sent[0].id, progress: { copiedBytes: 200, totalBytes: 200 } })
+        // Verifying and publishing the finished copy reports nothing more.
+        await vi.advanceTimersByTimeAsync(10 * 60_000)
+        expect(settled).toBe(false)
+        reply({ id: sent[0].id, result: 'copied-source' })
+        await expect(outcome).resolves.toBe('copied-source')
+        expect(onProgress.mock.calls).toEqual([[{ copiedBytes: 200, totalBytes: 200 }]])
     })
 
-    it('times out a stalled backup copy despite repeated, backwards, or unrelated progress', async () => {
-        vi.useFakeTimers()
+    it('reports backup copy progress only when copied bytes advance within the total', () => {
         const { client, sent, reply } = fixture()
-        const outcome = client.request('saf.materializeBackupSource', 'source')
-            .then(() => 'success', (error: Error) => error.message)
-        let settled = false
-        void outcome.then(() => { settled = true })
-        await vi.advanceTimersByTimeAsync(60_000)
-        reply({ id: sent[0].id, progress: { copiedBytes: 100, totalBytes: 200 } })
-        await vi.advanceTimersByTimeAsync(60_000)
+        const onProgress = vi.fn()
+        void client.requestWithProgress('saf.materializeBackupSource', onProgress, 'source')
         for (const progress of [
+            { copiedBytes: 100, totalBytes: 200 },
             { copiedBytes: 100, totalBytes: 200 },
             { copiedBytes: 50, totalBytes: 200 },
             { copiedBytes: 201, totalBytes: 200 },
             { copiedBytes: '150', totalBytes: 200 },
+            { copiedBytes: 150, totalBytes: '200' },
+            null,
         ]) reply({ id: sent[0].id, progress })
         reply({ id: 'another-request', progress: { copiedBytes: 150, totalBytes: 200 } })
-        await vi.advanceTimersByTimeAsync(59_999)
-        expect(settled).toBe(false)
-        await vi.advanceTimersByTimeAsync(1)
-        expect(await outcome).toBe('android-control-timeout')
-        reply({ id: sent[0].id, result: 'too-late' })
-        expect(await outcome).toBe('android-control-timeout')
-        expect(vi.getTimerCount()).toBe(0)
+        reply({ id: sent[0].id, progress: { copiedBytes: 150, totalBytes: null } })
+        expect(onProgress.mock.calls).toEqual([
+            [{ copiedBytes: 100, totalBytes: 200 }],
+            [{ copiedBytes: 150, totalBytes: null }],
+        ])
     })
 
     it('routes the installed file selection bridge to the native file commands', async () => {
@@ -164,8 +164,10 @@ describe('scoped Android control transport', () => {
         await discarded
     })
 
-    it('delivers correlated copy progress through the installed SAF bridge', async () => {
+    it('delivers the native copy progress wire format through the installed SAF bridge', async () => {
         vi.resetModules()
+        // AndroidControlBridgeTest checks that native writes these exact messages.
+        vi.spyOn(crypto, 'randomUUID').mockReturnValue(progressGolden.id as ReturnType<Crypto['randomUUID']>)
         const sent: { id?: string; method: string; args: string[] }[] = []
         const port: AndroidControlMessagePort = { postMessage: text => sent.push(JSON.parse(text)) }
         window.RisuNestControl = { postMessage() {} }
@@ -173,11 +175,14 @@ describe('scoped Android control transport', () => {
         await import('./androidNativeControl')
         const onProgress = vi.fn()
         const copied = window.RisuSafBridge!.materializeBackupSource!('source', onProgress)
-        const request = sent.find(item => item.method === 'saf.materializeBackupSource')!
-        const progress = { copiedBytes: 4 * 1024 ** 3, totalBytes: 8 * 1024 ** 3 }
-        port.onmessage?.({ data: JSON.stringify({ id: request.id, progress }) })
-        expect(onProgress).toHaveBeenCalledWith(progress)
-        port.onmessage?.({ data: JSON.stringify({ id: request.id, result: 'copy-result' }) })
+        expect(sent.find(item => item.id === progressGolden.id)).toEqual({
+            id: progressGolden.id, method: progressGolden.method, args: ['source'],
+        })
+        for (const { wire } of progressGolden.messages) port.onmessage?.({ data: wire })
+        expect(onProgress.mock.calls).toEqual(progressGolden.messages.map(({ copiedBytes, totalBytes }) => [
+            { copiedBytes, totalBytes },
+        ]))
+        port.onmessage?.({ data: JSON.stringify({ id: progressGolden.id, result: 'copy-result' }) })
         await expect(copied).resolves.toBe('copy-result')
     })
 

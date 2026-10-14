@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { untrack } from 'svelte'
     import { getModuleToggles } from "src/ts/process/modules";
     import { DBState, selectedCharID } from "src/ts/stores.svelte";
     import { parseToggleSyntax, type sidebarToggle, type sidebarToggleGroup } from "src/ts/util";
@@ -105,16 +106,54 @@
         return character?.chats[character.chatPage]?.savedToggleValues
     })
     let savingToggles = $state(false)
-    let toggleEditor = $derived.by(() => {
+    // Unapplied input for a bound chat: edited keys (null removes one) and local overrides to remove.
+    // A binding, selection or local-mode change discards it; replacing the underlying objects does not.
+    let toggleDraftScope = $derived.by(() => {
         const character = DBState.db.characters[$selectedCharID]
         const chat = character?.chats[character.chatPage]
-        // An underlying binding, selection or local-mode change discards unapplied input.
-        void chat?.id
-        void chat?.useLocallySetGlobalVariables
-        snapshotToggleValues(chat?.GLGlobalVariables ?? {})
-        snapshotToggleValues(savedToggles ?? {})
-        return { values: snapshotToggleValues(DBState.db.globalChatVariables), unpinKeys: [] as string[] }
+        return JSON.stringify([
+            character?.chaId, chat?.id ?? character?.chatPage, savedToggles !== undefined, !!chat?.useLocallySetGlobalVariables,
+        ])
     })
+    let toggleDraft = $derived.by(() => {
+        void toggleDraftScope
+        return { edits: {} as Record<string, string | null>, unpinKeys: [] as string[] }
+    })
+    let toggleEditor = $derived.by(() => {
+        const values = snapshotToggleValues(DBState.db.globalChatVariables)
+        for (const [key, value] of Object.entries(toggleDraft.edits)) {
+            if (value === null) delete values[key]
+            else values[key] = value
+        }
+        return { values, unpinKeys: toggleDraft.unpinKeys }
+    })
+    // Input that the applied values already hold, such as after saving, is no longer an edit.
+    $effect.pre(() => {
+        const applied = snapshotToggleValues(DBState.db.globalChatVariables)
+        const character = DBState.db.characters[$selectedCharID]
+        const overrides = { ...character?.chats[character.chatPage]?.GLGlobalVariables }
+        untrack(() => {
+            const edits = Object.entries(toggleDraft.edits).filter(([key, value]) => value !== (applied[key] ?? null))
+            const unpinKeys = toggleDraft.unpinKeys.filter((key) => overrides[key] !== undefined)
+            if (edits.length !== Object.keys(toggleDraft.edits).length || unpinKeys.length !== toggleDraft.unpinKeys.length) {
+                toggleDraft = { edits: Object.fromEntries(edits), unpinKeys }
+            }
+        })
+    })
+    const stageToggleValues = (values: ToggleValues, keys: readonly string[]) => {
+        const applied = snapshotToggleValues(DBState.db.globalChatVariables)
+        const chat = getCurrentChat()
+        // Outside local mode a new value replaces the chat's local override, as setToggleValue does.
+        const overrides = chat?.useLocallySetGlobalVariables ? undefined : chat?.GLGlobalVariables
+        const edits = { ...toggleDraft.edits }
+        const unpinKeys = new Set(toggleDraft.unpinKeys)
+        for (const key of keys) {
+            if ((values[key] ?? null) === (applied[key] ?? null)) delete edits[key]
+            else edits[key] = values[key] ?? null
+            if (overrides?.[key] !== undefined) unpinKeys.add(key)
+        }
+        toggleDraft = { edits, unpinKeys: [...unpinKeys] }
+    }
     const editToggle = (key: string, value: string) => {
         if (savingToggles) return
         const chat = getCurrentChat()
@@ -122,9 +161,7 @@
             void setToggleValue(key, value)
             return
         }
-        const unpinKeys = new Set(toggleEditor.unpinKeys)
-        if (chat?.GLGlobalVariables?.[key] !== undefined) unpinKeys.add(key)
-        toggleEditor = { values: { ...toggleEditor.values, [key]: value }, unpinKeys: [...unpinKeys] }
+        stageToggleValues({ [key]: value }, [key])
     }
     const applyTogglePreset = (values: ToggleValues, keys: readonly string[]) => {
         if (savingToggles) return
@@ -134,7 +171,7 @@
         }
         const next = { ...toggleEditor.values }
         applyToggleValues(next, values, keys)
-        toggleEditor = { ...toggleEditor, values: next }
+        stageToggleValues(next, [...keys, ...Object.keys(values)].filter((key) => key.startsWith('toggle_')))
     }
     const isToggleDirty = (key: string | undefined) =>
         savedToggles !== undefined &&

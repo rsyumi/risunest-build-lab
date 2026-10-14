@@ -4,8 +4,13 @@ import { writable } from 'svelte/store'
 import { DBState } from 'src/ts/stores.svelte'
 import Toggles from './Toggles.svelte'
 import { doingChat } from 'src/ts/process/generationState'
+import { replaceConversationMetadata } from 'src/ts/storage/activeConversationSession'
+import type { ToggleValues } from 'src/ts/toggleBindings'
 
 const syntax = vi.hoisted(() => ({ type: 'toggle' }))
+const toggleBind = vi.hoisted(() => ({
+    props: {} as { unpinKeys?: string[], onApplyPreset?: (values: ToggleValues, keys: readonly string[]) => void },
+}))
 
 vi.mock('src/ts/stores.svelte', () => {
     const DBState = $state({ db: {} })
@@ -35,7 +40,8 @@ vi.mock('src/ts/util', () => ({
 }))
 vi.mock('./ModelBind.svelte', () => ({ default: () => {} }))
 vi.mock('./PersonaBind.svelte', () => ({ default: () => {} }))
-vi.mock('./ToggleBind.svelte', () => ({ default: () => {} }))
+// The binding controls are covered by Chat.windowedInteractions.test.ts; here they expose what they receive.
+vi.mock('./ToggleBind.svelte', () => ({ default: (_anchor: unknown, props: typeof toggleBind.props) => { toggleBind.props = props } }))
 vi.mock('./CustomSidebar.svelte', () => ({ default: () => {} }))
 vi.mock('../UI/Accordion.svelte', () => ({ default: () => {} }))
 vi.mock('../UI/GUI/TextAreaInput.svelte', () => ({ default: () => {} }))
@@ -169,6 +175,58 @@ it('discards unapplied input when leaving and returning to the bound conversatio
     DBState.db.characters[0].chatPage = 0
     await tick()
     expect(customSwitch().checked).toBe(false)
+    expect(chat().savedToggleValues).toEqual({ toggle_example: '0' })
+})
+
+it('keeps unapplied input when the conversation metadata and global variables are replaced', async () => {
+    chat().savedToggleValues = { toggle_example: '0' }
+    await tick()
+    customSwitch().click()
+    await tick()
+    expect(customSwitch().checked).toBe(true)
+    // A metadata-changing session commit replaces every metadata object of the live chat.
+    replaceConversationMetadata(chat(), { ...$state.snapshot(chat()), name: 'Renamed' })
+    DBState.db.globalChatVariables = { ...DBState.db.globalChatVariables, synthetic_plugin_value: '1' }
+    await tick()
+    expect(customSwitch().checked).toBe(true)
+    expect(chat().savedToggleValues).toEqual({ toggle_example: '0' })
+    expect(DBState.db.globalChatVariables.toggle_example).toBe('0')
+})
+
+it('follows the applied values once they hold the saved input', async () => {
+    const row = () => customSwitch().closest('div.w-full')!
+    chat().savedToggleValues = { toggle_example: '0' }
+    chat().GLGlobalVariables = { toggle_example: '0' }
+    await tick()
+    customSwitch().click()
+    await tick()
+    expect(row().classList.contains('bg-draculared/15')).toBe(true)
+    // Saving writes the binding, removes the replaced override and applies the bound values.
+    chat().savedToggleValues = { toggle_example: '1' }
+    chat().GLGlobalVariables = {}
+    DBState.db.globalChatVariables.toggle_example = '1'
+    await tick()
+    expect(row().classList.contains('bg-draculared/15')).toBe(false)
+    DBState.db.globalChatVariables.toggle_example = '0'
+    await tick()
+    expect(customSwitch().checked).toBe(false)
+    chat().GLGlobalVariables = { toggle_example: '1' }
+    await tick()
+    expect(customSwitch().checked).toBe(true)
+})
+
+it('replaces local overrides with the values of an applied preset', async () => {
+    const row = () => customSwitch().closest('div.w-full')!
+    chat().savedToggleValues = { toggle_example: '0' }
+    chat().GLGlobalVariables = { toggle_example: '1' }
+    await tick()
+    expect(customSwitch().checked).toBe(true)
+    toggleBind.props.onApplyPreset!({ toggle_example: '0' }, ['toggle_example'])
+    await tick()
+    expect(customSwitch().checked).toBe(false)
+    expect(row().classList.contains('bg-draculared/15')).toBe(true)
+    expect(toggleBind.props.unpinKeys).toEqual(['toggle_example'])
+    expect(chat().GLGlobalVariables).toEqual({ toggle_example: '1' })
     expect(chat().savedToggleValues).toEqual({ toggle_example: '0' })
 })
 

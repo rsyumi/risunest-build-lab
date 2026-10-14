@@ -1,15 +1,22 @@
 import 'fake-indexeddb/auto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createCipheriv, createHash, webcrypto } from 'node:crypto'
 import type { BlobMetadata, BlobWriteMetadata } from 'src/ts/storage/blobStore'
 import type { Database } from 'src/ts/storage/database.svelte'
 import type { CommittedApplyOutcome, PersistentDataRuntime } from 'src/ts/storage/persistentDataRuntime'
 import { File } from 'node:buffer'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { gzipSync } from 'fflate'
+import { pack } from 'msgpackr'
 import { encodeRisuSaveLegacy } from 'src/ts/storage/risuSave'
 import { risuSaveFixtureDatabase } from 'src/ts/storage/tests/risuSaveFixtures'
 import { encodeBackupInlayEntry, getBackupInlayName } from 'src/ts/drive/backupAssets'
 import { backupArchive, backupEntry } from 'src/ts/drive/backupRestore.testSupport'
 
 const state = vi.hoisted(() => ({
+    native: false,
+    nativeFetch: vi.fn<typeof fetch>(),
     blobs: new Map<string, Uint8Array>(),
     metadata: new Map<string, BlobMetadata>(),
     afterPut: vi.fn(),
@@ -43,13 +50,26 @@ vi.mock('src/ts/storage/persistentDataRuntime.svelte', async () => (await import
     replacePersistentDatabase: (database: Database) => state.replace(database),
 }))
 vi.mock('src/ts/process/coldstorage.svelte', async () => (await import('src/ts/drive/backupRestore.testSupport')).coldStorageModule())
-vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule(() => ({ runtime: state.native ? 'tauri' : 'web', os: 'windows' })))
+vi.mock('@tauri-apps/plugin-http', () => ({ fetch: state.nativeFetch } satisfies Partial<typeof import('@tauri-apps/plugin-http')>))
 vi.mock('../desktopRelaunch', async () => (await import('src/ts/drive/backupRestore.testSupport')).relaunchModule())
 vi.mock('src/ts/util', async () => (await import('src/ts/drive/backupRestore.testSupport')).utilModule())
 vi.mock('src/ts/characterCards', async () => (await import('src/ts/drive/backupRestore.testSupport')).characterCardsModule())
 
 function databaseEntry() {
     return backupEntry('database.risudat', encodeRisuSaveLegacy(structuredClone(risuSaveFixtureDatabase), 'compression'))
+}
+
+function encryptedArchive(metadata: unknown = { type: 'account', time: 123 }, key = 'synthetic-key') {
+    vi.stubGlobal('crypto', webcrypto)
+    const encoded = encodeRisuSaveLegacy(structuredClone(risuSaveFixtureDatabase), 'compression')
+    const cipher = createCipheriv('aes-256-gcm', createHash('sha256').update(key).digest(), Buffer.alloc(12))
+    const encrypted = Buffer.concat([cipher.update(encoded), cipher.final(), cipher.getAuthTag()])
+    return backupArchive(
+        backupEntry('synthetic.png', new Uint8Array([1, 2, 3])),
+        backupEntry('encryption.risudat', new TextEncoder().encode(JSON.stringify(metadata))),
+        backupEntry('database.risudat', encrypted),
+    )
 }
 
 async function restore(bytes: Uint8Array, controller = new AbortController(), lifecycle: { beforeActivation?(): Promise<void>; onCommitted?(): void } = {}) {
@@ -72,12 +92,25 @@ afterEach(() => {
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
     state.blobs.clear()
+    state.native = false
+    state.nativeFetch.mockReset()
     state.metadata.clear()
     state.afterPut.mockReset()
     state.replace.mockReset().mockResolvedValue({ kind: 'committed', revision: 2, projection: 'applied' })
 })
 
 describe('legacy WebView restore integrity', () => {
+    it.each(['v1.10.0', 'v1.12.0', 'v1.14.0'])('preserves Voyage Context 4 settings from a PocketRisu %s backup', async (version) => {
+        const archive = readFileSync(resolve(`src-tauri/src/native_file_jobs/legacy_backup/fixtures/pocket-risu-${version}.bin`))
+        let restored: Database | undefined
+        state.replace.mockImplementationOnce(async (database) => {
+            restored = database
+            return { kind: 'committed', revision: 2, projection: 'applied' }
+        })
+        await restore(archive)
+        expect(restored).toMatchObject({ hypaModel: 'voyageContext4', voyageApiKey: 'synthetic-voyage-key' })
+    })
+
     it('restores an extensionless PocketRisu JSON inlay after the replacement handshake', async () => {
         const payload = new TextEncoder().encode(JSON.stringify({
             name: 'old.png', data: 'data:image/png;base64,CQgH', ext: 'png', type: 'image', width: 3, height: 1,
@@ -95,19 +128,111 @@ describe('legacy WebView restore integrity', () => {
         expect(state.blobs.get('legacy-image')).toEqual(new Uint8Array([9, 8, 7]))
     })
 
-    it('decrypts a synthetic account-encrypted backup through the compatibility importer', async () => {
-        const { decryptBuffer } = await import('src/ts/util')
-        const encoded = encodeRisuSaveLegacy(structuredClone(risuSaveFixtureDatabase), 'compression')
-        vi.mocked(decryptBuffer).mockResolvedValueOnce(Uint8Array.from(encoded).buffer)
-        const fetchKey = vi.fn(async () => new Response(JSON.stringify({ key: 'synthetic-key' })))
-        vi.stubGlobal('fetch', fetchKey)
+    it.each([false, true])('decrypts an account backup through the correct transport, native=%s', async native => {
+        state.native = native
+        const serveKey: typeof fetch = async (url, init) => {
+            expect(url).toBe('https://sv.risuai.xyz/cryptokey?key=123')
+            expect(new Headers(init?.headers).get('Sec-Fetch-Site')).toBe(native ? 'same-site' : null)
+            return new Response(JSON.stringify({ key: 'synthetic-key' }))
+        }
+        vi.stubGlobal('fetch', native ? vi.fn(() => { throw new Error('Unexpected browser request') }) : serveKey)
+        state.nativeFetch.mockImplementation(serveKey)
+        await restore(encryptedArchive())
+        expect(state.replace.mock.calls[0][0].characters).toEqual(risuSaveFixtureDatabase.characters)
+        expect(state.blobs.get('assets/synthetic.png')).toEqual(new Uint8Array([1, 2, 3]))
+    })
+
+    it.each([
+        ['network', 'backup-key-request-failed', /DNS lookup failed/],
+        ['plugin', 'backup-key-request-failed', /Synthetic HTTP plugin failure/],
+        ['json', 'backup-key-invalid', /JSON/],
+        ['missing-key', 'backup-key-invalid', /no valid backup key/],
+        ['empty-key', 'backup-key-invalid', /no valid backup key/],
+        ['wrong-key', 'backup-decryption-failed', /operation-specific reason/],
+    ] as const)('classifies %s failures and preserves their details without replacing the library or publishing attachments', async (failure, code, detail) => {
+        state.native = failure === 'plugin'
+        const failRequest: typeof fetch = async () => {
+            if (failure === 'network') throw new TypeError('DNS lookup failed')
+            if (failure === 'plugin') throw 'Synthetic HTTP plugin failure'
+            if (failure === 'json') return new Response('not JSON')
+            return new Response(JSON.stringify(failure === 'missing-key' ? {} : { key: failure === 'empty-key' ? '' : 'wrong-key' }))
+        }
+        vi.stubGlobal('fetch', failRequest)
+        state.nativeFetch.mockImplementation(failRequest)
+        await expect(restore(encryptedArchive())).rejects.toMatchObject({ code, message: expect.stringMatching(detail) })
+        expect(state.replace).not.toHaveBeenCalled()
+        expect(state.blobs.size).toBe(0)
+    })
+
+    it.each([
+        [false, 403], [true, 403], [false, 503], [true, 503],
+    ] as const)('distinguishes HTTP rejection from connectivity failure, native=%s status=%s', async (native, status) => {
+        state.native = native
+        const rejectRequest: typeof fetch = async () => new Response('Request rejected', { status })
+        vi.stubGlobal('fetch', rejectRequest)
+        state.nativeFetch.mockImplementation(rejectRequest)
+        await expect(restore(encryptedArchive())).rejects.toMatchObject({
+            code: 'backup-key-http-error', message: expect.stringContaining(`HTTP ${status}`),
+        })
+        expect(state.replace).not.toHaveBeenCalled()
+        expect(state.blobs.size).toBe(0)
+    })
+
+    it.each([{ type: 'account' }, { type: 'account', time: '123' }, { type: 'account', time: -1 }])('rejects invalid account encryption metadata %j before decoding', async metadata => {
+        vi.stubGlobal('fetch', async () => { throw new Error('Unexpected key request') })
+        await expect(restore(encryptedArchive(metadata))).rejects.toMatchObject({ code: 'backup-encryption-invalid' })
+        expect(state.replace).not.toHaveBeenCalled()
+        expect(state.blobs.size).toBe(0)
+    })
+
+    it.each([false, true])('preserves cancellation while requesting an account backup key, native=%s', async native => {
+        state.native = native
+        const controller = new AbortController()
+        const cancelRequest: typeof fetch = async (_url, init) => {
+            controller.abort()
+            init?.signal?.throwIfAborted()
+            throw new TypeError('Failed to fetch')
+        }
+        vi.stubGlobal('fetch', cancelRequest)
+        state.nativeFetch.mockImplementation(cancelRequest)
+        await expect(restore(encryptedArchive(), controller)).rejects.toMatchObject({ name: 'AbortError' })
+        expect(state.replace).not.toHaveBeenCalled()
+    })
+
+    // The native importer treats every readable metadata except the account type as unencrypted.
+    it.each(['{"type":"none"}', '{}', 'null', '{"type":"synthetic"}'])('restores a backup with non-account encryption metadata %s unencrypted', async metadata => {
+        vi.stubGlobal('fetch', async () => { throw new Error('Unexpected key request') })
         await restore(backupArchive(
-            backupEntry('encryption.risudat', new TextEncoder().encode(JSON.stringify({ type: 'account', time: 123 }))),
-            backupEntry('database.risudat', new Uint8Array([1, 2, 3])),
+            backupEntry('encryption.risudat', new TextEncoder().encode(metadata)),
+            databaseEntry(),
         ))
-        expect(fetchKey).toHaveBeenCalledWith('https://sv.risuai.xyz/cryptokey?key=123')
-        expect(decryptBuffer).toHaveBeenCalledWith(new Uint8Array([1, 2, 3]), 'synthetic-key')
-        expect(state.replace).toHaveBeenCalledOnce()
+        expect(state.replace.mock.calls[0][0].characters).toEqual(risuSaveFixtureDatabase.characters)
+    })
+
+    it('classifies an undecodable database separately from account decryption', async () => {
+        await expect(restore(backupEntry('database.risudat', Uint8Array.of(7, 7, 7, 7))))
+            .rejects.toMatchObject({ code: 'backup-database-invalid', message: expect.stringContaining('invalid block type') })
+        expect(state.replace).not.toHaveBeenCalled()
+    })
+
+    it('keeps decoded content of a corrupted database out of the error detail', async () => {
+        const decoded = pack({ note: 'Synthetic private note' })
+        const corrupted = gzipSync(Uint8Array.of(...decoded, 0xc0), { mtime: 0 })
+        await expect(restore(backupEntry('database.risudat', corrupted))).rejects.toMatchObject({
+            code: 'backup-database-invalid',
+            message: 'Could not decode the backup database: Data read, but end of buffer not reached',
+        })
+        expect(state.replace).not.toHaveBeenCalled()
+    })
+
+    it('preserves the parse error for malformed encryption metadata', async () => {
+        const invalid = '{"type":'
+        let detail = ''
+        try { JSON.parse(invalid) } catch (error) { detail = (error as Error).message }
+        await expect(restore(backupArchive(
+            backupEntry('encryption.risudat', new TextEncoder().encode(invalid)), databaseEntry(),
+        ))).rejects.toMatchObject({ code: 'backup-encryption-invalid', message: expect.stringContaining(detail) })
+        expect(state.replace).not.toHaveBeenCalled()
     })
 
     it('does not activate attachments or replace the library when the replacement handshake rejects', async () => {

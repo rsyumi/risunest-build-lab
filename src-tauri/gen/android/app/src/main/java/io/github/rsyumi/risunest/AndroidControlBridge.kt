@@ -51,6 +51,12 @@ internal fun androidControlArgumentCount(method: String): Int? = when (method) {
   else -> null
 }
 
+/** Only a backup source copy reports progress before its reply. */
+internal fun androidControlProgressMessage(id: String, method: String, progress: SafSpoolProgress): String? =
+  if (method != "saf.materializeBackupSource") null
+  else "{\"id\":${jsonString(id)},\"progress\":{\"copiedBytes\":${progress.copiedBytes}," +
+    "\"totalBytes\":${progress.totalBytes ?: "null"}}}"
+
 internal class AndroidControlCopyProgress(
   private val nowMillis: () -> Long = SystemClock::elapsedRealtime,
   private val emit: (SafSpoolProgress) -> Unit,
@@ -105,12 +111,9 @@ internal class AndroidControlBridge private constructor(
       scope.launch {
         try {
           val progress = AndroidControlCopyProgress { copied ->
-            if (id != null && method == "saf.materializeBackupSource") scope.launch {
-              if (!closed) runCatching {
-                reply.postMessage(JSONObject().put("id", id).put("progress", JSONObject()
-                  .put("copiedBytes", copied.copiedBytes)
-                  .put("totalBytes", copied.totalBytes ?: JSONObject.NULL)).toString())
-              }
+            val message = id?.let { androidControlProgressMessage(it, method, copied) }
+            if (message != null) scope.launch {
+              if (!closed) runCatching { reply.postMessage(message) }
             }
           }
           val result = runCatching { dispatch(method, args, progress::report) }

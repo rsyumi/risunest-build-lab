@@ -477,6 +477,59 @@ class SafFileBridgeTest {
   }
 
   @Test
+  fun `a backup copy handed to its request is published already received and never replayed as a restore`() {
+    val root = temporaryDirectory()
+    val token = "77777777-7777-4777-8777-777777777777"
+    val publishedMarked = mutableListOf<Boolean>()
+    val store = SafSpoolStore(
+      root = root,
+      atomicPublisher = SafAtomicPublisher { temporary, target ->
+        if (target.name == token) publishedMarked += temporary.resolve("delivered").isFile
+        testAtomicPublisher.publish(temporary, target)
+      },
+      tokenFactory = { UUID.fromString(token) },
+    )
+
+    val copied = store.spool(
+      listOf(TestSafSource("backup.risudat", 2) { ByteArrayInputStream(byteArrayOf(1, 2)) }),
+      delivered = true,
+    )
+
+    // Process death right after publication must not leave an unreceived spool.
+    assertEquals(listOf(true), publishedMarked)
+    assertEquals(listOf(token), copied.ready.map(SafSpoolReady::token))
+    val replay = replayReadySpoolBatch(SafSpoolStore(root, atomicPublisher = testAtomicPublisher), emptySet())
+    assertEquals(SafSpoolBatch(emptyList(), listOf(SafSpoolFailure("backup.risudat", SPOOL_INTERRUPTED_CODE))), replay)
+    assertFalse(root.resolve(token).exists())
+  }
+
+  @Test
+  fun `a backup copy cancelled or changed after its last byte never reaches the page`() {
+    val root = temporaryDirectory()
+    val store = SafSpoolStore(root, atomicPublisher = testAtomicPublisher)
+    fun copy() = store.spool(listOf(TestSafSource("backup.risudat", 1) { ByteArrayInputStream(byteArrayOf(1)) }), delivered = true)
+
+    val kept = copy()
+    assertEquals(kept, settlePortableSourceCopy(store, kept, verified = { true }, cancelled = { false }))
+    val cancelled = copy()
+    assertEquals(
+      portableSourceCopyFailure("backup.risudat", "cancelled"),
+      settlePortableSourceCopy(store, cancelled, verified = { error("A cancelled copy needs no verification") }, cancelled = { true }),
+    )
+    val changed = copy()
+    assertEquals(
+      portableSourceCopyFailure("backup.risudat", "source-changed"),
+      settlePortableSourceCopy(store, changed, verified = { false }, cancelled = { false }),
+    )
+    assertEquals(listOf(kept.ready.single().token), store.listReady().map(SafSpoolReady::token))
+    // A copy whose spool is already gone reports the cleanup failure instead of a token the page cannot use.
+    assertEquals(
+      portableSourceCopyFailure("backup.risudat", "cleanup-failed"),
+      withdrawPortableSourceCopy(store, cancelled, "cancelled"),
+    )
+  }
+
+  @Test
   fun `replay leaves a spool the current WebView already received`() {
     val root = temporaryDirectory()
     val token = "33333333-3333-4333-8333-333333333333"

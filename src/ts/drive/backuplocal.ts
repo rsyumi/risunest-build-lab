@@ -3,6 +3,7 @@ import type { SelectedFileSlices } from '../storage/nativeFileSelection'
 import { prepareExternalDatabaseImport } from '../storage/upstreamImport'
 import { runWithMobileBackgroundTask } from '../mobileBackgroundTask'
 import { BaseDirectory, open, writeFile } from "@tauri-apps/plugin-fs";
+import { fetch as nativeFetch } from "@tauri-apps/plugin-http";
 import localforage from "localforage";
 import { alertError, alertNormal, alertWait, alertMd, alertCheckboxConfirm, alertActionConfirm } from "../alert";
 import { hasLibraryCharacters } from "../storage/libraryCharacters";
@@ -45,6 +46,48 @@ type LegacyLocalBackupFallbackContext = Pick<SharedNativeFileOperationContext,
     'signal' | 'onStatus' | 'setSource' | 'setPartialWritesPossible'>;
 
 const NATIVE_BACKUP_READ_BYTES = 1024 * 1024
+
+// msgpackr appends up to 100 characters of the decoded data to this message.
+const MSGPACK_TRAILING_DATA_ERROR = 'Data read, but end of buffer not reached'
+
+function backupFailure(code: string, message: string, error: unknown): NativeFileJobError {
+    let detail = error instanceof Error ? error.message : String(error)
+    // The detail reaches the error dialog and the native log, so it never carries backup content.
+    if (detail.startsWith(MSGPACK_TRAILING_DATA_ERROR)) detail = MSGPACK_TRAILING_DATA_ERROR
+    return new NativeFileJobError(code, detail ? `${message}: ${detail}` : message)
+}
+
+async function getAccountBackupKey(time: number, signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted()
+    let response: Response
+    try {
+        const url = `https://sv.risuai.xyz/cryptokey?key=${time}`
+        // The account server requires same-site fetch metadata, which WebViews cannot set.
+        response = isTauri
+            ? await nativeFetch(url, { headers: { 'Sec-Fetch-Site': 'same-site' }, signal })
+            : await fetch(url, { signal })
+    } catch (error) {
+        signal?.throwIfAborted()
+        throw backupFailure('backup-key-request-failed', 'Could not request the account backup key', error)
+    }
+    if (!response.ok) {
+        await response.body?.cancel().catch(() => {})
+        signal?.throwIfAborted()
+        throw new NativeFileJobError('backup-key-http-error', `Account backup key request failed (HTTP ${response.status})`)
+    }
+    let data: unknown
+    try {
+        data = await response.json()
+    } catch (error) {
+        signal?.throwIfAborted()
+        throw backupFailure('backup-key-invalid', 'The account server returned an invalid backup key response', error)
+    }
+    signal?.throwIfAborted()
+    if (!data || typeof data !== 'object' || !('key' in data) || typeof data.key !== 'string' || data.key.trim().length === 0) {
+        throw new NativeFileJobError('backup-key-invalid', 'The account server returned no valid backup key')
+    }
+    return data.key
+}
 
 export async function* streamNativeBackupFile(
     path: string,
@@ -208,7 +251,7 @@ async function saveLocalBackupSnapshot(blobStore: BlobStore, pinned: PinnedRisuS
     if(forageStorage.isAccount && location.origin.endsWith('risuai.xyz')){
         const dbData = await pinned.collectBytes({ omitAccount: true })
         const time = Date.now()
-        const key = (await (await fetch(`https://sv.risuai.xyz/cryptokey?key=${time}`)).json()).key
+        const key = await getAccountBackupKey(time)
         const encrypted = await encryptBuffer(dbData, key)
         await writer.writeBackup('encryption.risudat', new TextEncoder().encode(JSON.stringify({ time, type: 'account' })))
         await writer.writeBackup('database.risudat', new Uint8Array(encrypted))
@@ -542,16 +585,15 @@ async function importLegacyBackupFile(
                     if (sawEncryption) throw new NativeFileJobError('invalid-source', 'Duplicate encryption entry')
                     sawEncryption = true
                     try {
-                        const meta = JSON.parse(new TextDecoder().decode(data)) as typeof encryptionMeta
-                        if (meta.type === 'account' && meta.time) {
+                        const meta = JSON.parse(new TextDecoder().decode(data))
+                        // Only account metadata marks an encrypted database, as in the native importer.
+                        if (meta?.type === 'account') {
+                            if (!Number.isSafeInteger(meta.time) || meta.time <= 0) throw new Error('Invalid account encryption time')
                             encryptionMeta.type = 'account'
                             encryptionMeta.time = meta.time
-                        } else {
-                            alertError('Invalid encryption metadata, will attempt to load database backup without decryption.')
                         }
-                    } catch (e) {
-                        console.error('Failed to parse encryption metadata:', e)
-                        alertError('Failed to parse encryption metadata, will attempt to load database backup without decryption.')
+                    } catch (error) {
+                        throw backupFailure('backup-encryption-invalid', 'The backup has invalid encryption metadata', error)
                     }
                 } else if (name === 'database.risudat') {
                     if (pendingDatabase) throw new NativeFileJobError('invalid-source', 'Duplicate database entry')
@@ -579,17 +621,25 @@ async function importLegacyBackupFile(
 
         let db = pendingDatabase
         if (encryptionMeta.type === 'account' && encryptionMeta.time) {
+            const key = await getAccountBackupKey(encryptionMeta.time, context.signal)
             try {
-                const key = (await (await fetch(`https://sv.risuai.xyz/cryptokey?key=${encryptionMeta.time}`)).json()).key
                 const decrypted = await decryptBuffer(db, key)
                 db = new Uint8Array(decrypted)
             }
-            catch (e) {
-                console.error('Failed to decrypt database backup:', e)
-                alertError('Failed to decrypt database backup, will attempt to load it without decryption.')
+            catch (error) {
+                checkCancelled()
+                throw backupFailure('backup-decryption-failed', 'Could not decrypt the account backup database', error)
             }
         }
-        const dbData = prepareExternalDatabaseImport(await decodeRisuSave(db))
+        checkCancelled()
+        let decoded: Awaited<ReturnType<typeof decodeRisuSave>>
+        try {
+            decoded = await decodeRisuSave(db)
+        } catch (error) {
+            checkCancelled()
+            throw backupFailure('backup-database-invalid', 'Could not decode the backup database', error)
+        }
+        const dbData = prepareExternalDatabaseImport(decoded)
         counts.characters = dbData.characters?.length ?? 0
         counts.charactersTotal = counts.characters
         counts.presets = dbData.botPresets?.length ?? 0

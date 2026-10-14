@@ -3,6 +3,7 @@ vi.mock('./platform', async () => (await import('./platform.testSupport')).platf
 vi.mock('./androidNativeControl', () => ({}))
 import { beginMobileBackgroundTask, hasMobileBackgroundTasks, measuredTaskPercent, runWithMobileBackgroundTask } from './mobileBackgroundTask'
 import { runSharedNativeFileOperation, cancelActiveNativeFileOperation } from './storage/nativeFileJobManager'
+import { syntheticNativeFileJobStatus } from './storage/nativeFileJobs'
 import { createExternalStorageController } from './storage/sync/external/controller'
 import type { ExternalJobSummary, ExternalStorageState } from './storage/sync/external/types'
 
@@ -107,6 +108,27 @@ describe('mobile background task lifetime', () => {
         finish.resolve()
         await operation
         expect(bridge.end).toHaveBeenCalledExactlyOnceWith('task-1')
+    })
+
+    it('reports backup source copy bytes until the restore job measures its own', async () => {
+        const copying = (stageCompleted: number, stageTotal?: number) => syntheticNativeFileJobStatus(
+            { jobId: 'source', kind: 'restore-legacy-local-backup' }, 'copying-source',
+            { stageUnit: 'bytes', stageCompleted, ...(stageTotal === undefined ? {} : { stageTotal }) },
+        )
+        await runSharedNativeFileOperation('import', 'synthetic-restore', async ({ onStatus }) => {
+            onStatus(copying(2 * 1024 ** 3, 8 * 1024 ** 3))
+            onStatus(copying(4 * 1024 ** 3))
+            // Another stage's bytes would restart the notification from zero, so it stays indeterminate.
+            onStatus(syntheticNativeFileJobStatus({ kind: 'restore-legacy-local-backup' }, 'reading-database', {
+                stageUnit: 'bytes', stageCompleted: 1024, stageTotal: 2048,
+            }))
+            onStatus({
+                jobId: 'restore', kind: 'restore-legacy-local-backup', state: 'running', phase: 'reading-source',
+                progress: { completedBytes: 75, totalBytes: 100, completedItems: 0 },
+            })
+        }, { format: 'library-backup' })
+        expect(bridge.begin).toHaveBeenCalledWith('restore')
+        expect(bridge.progress.mock.calls).toEqual([['task-1', 25], ['task-1', -1], ['task-1', 75]])
     })
 
     it('protects external native polling and releases a blocked job', async () => {

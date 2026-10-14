@@ -137,6 +137,13 @@ function mergeWarningCodes(...groups: string[][]): string[] {
     return [...new Set(groups.flat())]
 }
 
+// A backup source copy reports its bytes only as stage detail, before the restore job measures any.
+function backgroundTaskPercent({ progress, detail }: NativeFileJobStatus): number | null {
+    const percent = measuredTaskPercent(progress.completedBytes, progress.totalBytes)
+    return percent === null && detail?.stage === 'copying-source' && detail.stageUnit === 'bytes'
+        ? measuredTaskPercent(detail.stageCompleted, detail.stageTotal) : percent
+}
+
 function outcomeError(kind: NativeFileOperationKind, error: unknown): NativeFileOperationError {
     if (error instanceof NativeFileJobActivationCommittedError) {
         const cause = error.cause
@@ -354,7 +361,7 @@ function runSharedNativeFileOperationWithAdmission<T>(
             signal: task.signal ?? context.signal,
             onStatus: status => {
                 recordStatus(status)
-                task.progress(measuredTaskPercent(status.progress.completedBytes, status.progress.totalBytes))
+                task.progress(backgroundTaskPercent(status))
             },
             })
         }, controller.signal, options.userInitiated ?? true).then(

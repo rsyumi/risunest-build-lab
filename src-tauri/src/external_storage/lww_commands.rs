@@ -385,13 +385,13 @@ pub(crate) async fn external_lww_stage_binding(
         {
             return Err(lww_segment::corrupt());
         }
-        let stage = engine
+        let stage = session.progress.scope(engine
             .stage_binding(
                 &mut store,
                 &request.request.header,
                 &request.inspection_id,
                 &session.cancel,
-            )
+            ))
             .await?;
         Ok(Staged {
             target_id: request.target_id,

@@ -2,6 +2,7 @@ import { Channel, invoke } from '@tauri-apps/api/core'
 import type { ExternalJobSummary, ExternalSnapshotExportProgress } from './types'
 import { externalJobIsActive, externalJobProgress } from './connection'
 import type { TransferRateSample } from '../transferRate'
+import type { StagingProgress } from '../stagingProgress'
 
 export type ExternalStage = 'checking' | 'preparing' | 'uploading' | 'downloading' | 'applying' | 'finalizing' | 'waiting'
 export interface ExternalTransferSnapshot {
@@ -13,6 +14,7 @@ export interface ExternalTransferSnapshot {
     uploadedObjects: string
     downloadedObjects: string
     network?: TransferRateSample
+    staging?: StagingProgress | null
 }
 export interface ExternalOperationProgress {
     id: string
@@ -22,8 +24,9 @@ export interface ExternalOperationProgress {
     stage: ExternalStage
     state: 'running' | 'complete' | 'failed' | 'cancelled'
     visible: boolean
-    amounts: Omit<ExternalTransferSnapshot, 'sequence' | 'stage' | 'network'>
+    amounts: Omit<ExternalTransferSnapshot, 'sequence' | 'stage' | 'network' | 'staging'>
     network?: TransferRateSample
+    staging?: StagingProgress | null
     completedItems?: number
     totalItems?: number
     exported?: ExternalSnapshotExportProgress
@@ -80,7 +83,7 @@ export function beginExternalProgress(connectionId: string, kind: ExternalOperat
     operations.set(slot, value)
     emit()
     return {
-        stage(stage: ExternalStage, authority?: string) { if (current()) { phase++; update({ stage, ...(authority ? { authority } : {}) }) } },
+        stage(stage: ExternalStage, authority?: string) { if (current()) { phase++; update({ stage, staging: undefined, ...(authority ? { authority } : {}) }) } },
         items(completedItems: number, totalItems: number) { if (current()) update({ stage: 'downloading', completedItems, totalItems }) },
         exported(exported: ExternalSnapshotExportProgress) { if (current()) update({ stage: 'downloading', exported }) },
         networkChannel() {
@@ -94,7 +97,7 @@ export function beginExternalProgress(connectionId: string, kind: ExternalOperat
             return channel
         },
         async invoke<T>(command: string, args: Record<string, unknown>, authority?: string): Promise<T> {
-            if (current()) update({ ...(authority ? { authority } : {}) })
+            if (current()) update({ staging: undefined, ...(authority ? { authority } : {}) })
             const samplePhase = ++phase
             const sampleAuthority = value.authority
             let accepted = emptyAmounts()
@@ -116,7 +119,7 @@ export function beginExternalProgress(connectionId: string, kind: ExternalOperat
                 uploading ||= reading.stage === 'uploading'
                 // Replies and channel messages can arrive separately. Late counts must not rewind a local phase.
                 const stage = reading.stage === 'preparing' && uploading ? 'uploading' : reading.stage
-                update({ amounts, ...(!ended && samplePhase === phase ? { stage, ...(validTransferRateSample(reading.network) ? { network: reading.network } : {}) } : {}) })
+                update({ amounts, ...(!ended && samplePhase === phase ? { stage, staging: stage === 'applying' ? reading.staging : undefined, ...(validTransferRateSample(reading.network) ? { network: reading.network } : {}) } : {}) })
             }
             return invoke<T>(command, { ...args, progress })
         },

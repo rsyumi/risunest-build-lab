@@ -4,6 +4,7 @@ import { join } from '@tauri-apps/api/path'
 import { iosStagingPath } from './nativePaths'
 import { mkdir, remove, writeFile } from '@tauri-apps/plugin-fs'
 import { isTauriIOS } from '../platform'
+import { backupSourceCopyFailure } from './backupSourceCopyFailure'
 
 export interface IOSPickedFile {
     path: string
@@ -77,27 +78,30 @@ export async function materializeIOSBackupSource(
         copiedBytes = progress.copiedBytes
         options.onProgress?.(progress)
     }) : undefined
-    let cancellation: Promise<void> | undefined
+    let stopWaiting!: (error: DOMException) => void
+    const aborted = new Promise<never>((_resolve, reject) => { stopWaiting = reject })
     const onAbort = () => {
-        cancellation = discardIOSBackupSource(token).then(() => {}, () => {})
+        // Releasing custody cancels the native copy, and the page stops waiting for its reply.
+        void discardIOSBackupSource(token).catch(() => {})
+        stopWaiting(cancelled())
     }
     options.signal?.addEventListener('abort', onAbort, { once: true })
+    let copy: Promise<IOSPickedFile | undefined> = Promise.resolve(undefined)
     try {
-        const result = await invoke<IOSPickedFile>('plugin:ios-native|materialize_backup_source', {
+        copy = invoke<IOSPickedFile>('plugin:ios-native|materialize_backup_source', {
             token, ...(onProgress ? { onProgress } : {}),
         })
-        if (options.signal?.aborted) {
-            await discardIOSFile(result.path)
-            throw cancelled()
-        }
+        const result = await Promise.race([copy, aborted])
+        if (options.signal?.aborted) throw cancelled()
         return result
     } catch (error) {
-        if (options.signal?.aborted) throw cancelled()
-        throw error
+        if (!options.signal?.aborted) throw backupSourceCopyFailure(error)
+        // A copy that still finishes after cancellation is removed whenever its reply arrives.
+        void copy.then(result => result && discardIOSFile(result.path)).catch(() => {})
+        throw cancelled()
     } finally {
         options.signal?.removeEventListener('abort', onAbort)
         if (onProgress) onProgress.onmessage = () => {}
-        await cancellation
     }
 }
 const cancelled = () =>

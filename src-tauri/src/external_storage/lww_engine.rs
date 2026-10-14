@@ -2000,8 +2000,10 @@ impl ExternalLwwEngine {
         self.stage_published_objects(store,&mut published,directory.path(),cancel).await?;
         self.provider.progress_stage("applying");
         let mut source_failure = None;
+        let mut cancellation_failure = None;
+        let report_staging = super::progress::staging_reporter();
         let stage = store
-            .lww_stage_binding_units_stream(
+            .lww_stage_binding_units_stream_observed(
                 header,
                 inspection,
                 DecimalU64(
@@ -2016,8 +2018,16 @@ impl ExternalLwwEngine {
                     source_failure = Some(error);
                     crate::persistent_store::StoreError::Validation { message: "Published binding source is unavailable".into() }
                 }),
+                |progress| {
+                    if let Err(error) = cancel.check() {
+                        cancellation_failure = Some(error);
+                        return Err(crate::persistent_store::StoreError::Validation { message: "Binding staging cancelled".into() });
+                    }
+                    report_staging(Some(progress));
+                    Ok(())
+                },
             )
-            .map_err(|error| source_failure.unwrap_or_else(|| store_error(error)))?;
+            .map_err(|error| cancellation_failure.or(source_failure).unwrap_or_else(|| store_error(error)))?;
         store
             .external_lww_record_stage(&self.target_scope(), header, &published.catalog.coverage, &published.covered())
             .map_err(store_error)?;

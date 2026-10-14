@@ -1,7 +1,25 @@
 import Foundation
 import Darwin
 
-enum PortableSourceError: Error { case busy, unavailable, notSeekable, ownership, changed }
+enum PortableSourceError: Error {
+    case busy, unavailable, notSeekable, ownership, changed, cancelled, readFailed, writeFailed
+
+    /// The code a failed backup source copy reports to JavaScript. Android reports the same codes.
+    var copyFailureCode: String {
+        switch self {
+        case .busy: return "source-busy"
+        case .changed: return "source-changed"
+        case .cancelled: return "cancelled"
+        case .readFailed: return "source-read-failed"
+        case .writeFailed: return "spool-write-failed"
+        case .unavailable, .notSeekable, .ownership: return "source-reselect-required"
+        }
+    }
+}
+
+private func copyStep<T>(_ failure: PortableSourceError, _ step: () throws -> T) throws -> T {
+    do { return try step() } catch { throw failure }
+}
 
 struct PortableSourceCopyProgress: Encodable {
     let copiedBytes: UInt64
@@ -61,6 +79,10 @@ final class PortableSourceCustody {
         }
     }
     private let lock = NSLock()
+    private let synchronizeCopy: (FileHandle) throws -> Void
+    init(synchronizeCopy: @escaping (FileHandle) throws -> Void = { try $0.synchronize() }) {
+        self.synchronizeCopy = synchronizeCopy
+    }
     private let coordinatorQueue: OperationQueue = {
         let queue = OperationQueue()
         queue.maxConcurrentOperationCount = 1
@@ -197,15 +219,17 @@ final class PortableSourceCustody {
 
     private func checkCopyCancellation(_ source: Source) throws {
         lock.lock(); defer { lock.unlock() }
-        guard !source.releasing, !source.copyCancelled else { throw PortableSourceError.ownership }
+        guard !source.releasing, !source.copyCancelled else { throw PortableSourceError.cancelled }
     }
 
+    /// Throws a `PortableSourceError`, whose `copyFailureCode` JavaScript receives.
     func materialize(token: String, staging: URL, onProgress: @escaping (PortableSourceCopyProgress) -> Void = { _ in }) throws -> [String: Any] {
         lock.lock()
-        guard let source = active[token], source.jobId == nil, source.claimRequest == nil, !retiredOwners.contains(source.owner), !source.releasing, !source.copying, !source.copyCancelled, source.probeId == nil,
+        guard let source = active[token], source.jobId == nil, source.claimRequest == nil, !retiredOwners.contains(source.owner), !source.releasing, !source.copyCancelled, source.probeId == nil,
               source.format == "block-risu-save" || source.format == "local-backup" else {
             lock.unlock(); throw PortableSourceError.ownership
         }
+        guard !source.copying else { lock.unlock(); throw PortableSourceError.busy }
         source.copying = true
         lock.unlock()
         let folder = staging.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -214,27 +238,27 @@ final class PortableSourceCustody {
             if !success { try? FileManager.default.removeItem(at: folder) }
             source.copied.signal()
         }
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try copyStep(.writeFailed) { try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true) }
         let destination = folder.appendingPathComponent("source.risudat")
-        guard FileManager.default.createFile(atPath: destination.path, contents: nil) else { throw PortableSourceError.unavailable }
-        let output = try FileHandle(forWritingTo: destination)
+        guard FileManager.default.createFile(atPath: destination.path, contents: nil) else { throw PortableSourceError.writeFailed }
+        let output = try copyStep(.writeFailed) { try FileHandle(forWritingTo: destination) }
         defer { output.closeFile() }
         var info = stat()
         guard fstat(source.handle.fileDescriptor, &info) == 0, Identity(info) == source.identity else { throw PortableSourceError.changed }
-        try source.handle.seek(toOffset: 0)
+        try copyStep(.readFailed) { try source.handle.seek(toOffset: 0) }
         var copied: UInt64 = 0
         let progress = PortableSourceCopyProgressReporter(emit: onProgress)
         while copied < source.bytes {
             try checkCopyCancellation(source)
-            let bytes = try source.handle.read(upToCount: Int(min(65536, source.bytes - copied))) ?? Data()
+            let bytes = try copyStep(.readFailed) { try source.handle.read(upToCount: Int(min(65536, source.bytes - copied))) } ?? Data()
             guard !bytes.isEmpty else { throw PortableSourceError.changed }
-            try output.write(contentsOf: bytes)
+            try copyStep(.writeFailed) { try output.write(contentsOf: bytes) }
             copied += UInt64(bytes.count)
             progress.report(copied: copied, total: source.bytes)
         }
         try checkCopyCancellation(source)
         guard fstat(source.handle.fileDescriptor, &info) == 0, Identity(info) == source.identity else { throw PortableSourceError.changed }
-        try output.synchronize()
+        try copyStep(.writeFailed) { try synchronizeCopy(output) }
         try checkCopyCancellation(source)
         success = true
         return ["cancelled": false, "path": destination.path, "name": source.name, "bytes": copied]
