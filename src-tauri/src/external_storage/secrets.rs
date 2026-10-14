@@ -124,23 +124,8 @@ impl SecretVault for NativeSecretVault {
 mod tests {
     use super::*;
 
-    #[test]
-    fn empty_provider_password_roundtrips_and_can_replace_an_existing_password() {
-        let root = tempfile::tempdir().unwrap();
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime.block_on(async {
-            let vault = provider_vault(root.path());
-            let empty = SecretBytes(zeroize::Zeroizing::new(Vec::new()));
-            let reference = vault.store(&empty).await.unwrap();
-            let _cleanup = RemoveSyntheticSecret { root: root.path().to_owned(), purpose: Purpose::Provider,
-                id: reference.0.strip_prefix("provider-v1:").unwrap().to_owned() };
-            assert!(vault.read(&reference).await.unwrap().0.is_empty());
-            vault.replace(&reference, &SecretBytes(zeroize::Zeroizing::new(b"synthetic".to_vec()))).await.unwrap();
-            vault.replace(&reference, &empty).await.unwrap();
-            assert!(vault.read(&reference).await.unwrap().0.is_empty());
-            assert!(repository_key_vault(root.path()).store(&empty).await.is_err());
-            vault.remove(&reference).await.unwrap();
-        });
+    fn secret(bytes: &[u8]) -> SecretBytes {
+        SecretBytes(zeroize::Zeroizing::new(bytes.to_vec()))
     }
 
     struct RemoveSyntheticSecret { root: PathBuf, purpose: Purpose, id: String }
@@ -148,108 +133,83 @@ mod tests {
         fn drop(&mut self) { let _ = device::remove(&self.root, self.purpose, &self.id); }
     }
 
+    /// The one test that reaches this platform's credential store. Each
+    /// purpose stores, replaces and removes its own secret, an empty provider
+    /// password survives, and no purpose reads what another one stored.
     #[test]
-    fn purpose_bound_vault_roundtrips_replaces_and_removes() {
+    fn platform_store_keeps_each_purpose_in_its_own_namespace() {
         let root = tempfile::tempdir().unwrap();
         let provider = provider_vault(root.path());
         let keys = repository_key_vault(root.path());
-        let original = SecretBytes(zeroize::Zeroizing::new(
-            b"synthetic-provider-token".to_vec(),
-        ));
-        let replacement = SecretBytes(zeroize::Zeroizing::new(b"rotated-provider-token".to_vec()));
+        let slot = account_credential_slot(root.path());
+        let _account = RemoveSyntheticSecret { root: root.path().to_owned(), purpose: Purpose::AccountCredential, id: slot.name.clone() };
+        let empty = secret(b"");
+        let replacement = secret(b"rotated-provider-token");
+        let token = secret(br#"{"id":"synthetic","token":"synthetic-account-token"}"#);
+        let rotated = secret(br#"{"id":"synthetic","token":"rotated-account-token"}"#);
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let reference = provider.store(&original).await.unwrap();
-            let _cleanup = RemoveSyntheticSecret { root: root.path().to_owned(), purpose: Purpose::Provider, id: reference.0.strip_prefix("provider-v1:").unwrap().to_owned() };
-            assert_eq!(
-                provider.read(&reference).await.unwrap().0.as_slice(),
-                original.0.as_slice()
-            );
-            assert!(keys.read(&reference).await.is_err());
+            let reference = provider.store(&empty).await.unwrap();
+            let _provider = RemoveSyntheticSecret { root: root.path().to_owned(), purpose: Purpose::Provider,
+                id: reference.0.strip_prefix("provider-v1:").unwrap().to_owned() };
+            assert!(provider.read(&reference).await.unwrap().0.is_empty());
             provider.replace(&reference, &replacement).await.unwrap();
-            assert_eq!(
-                provider.read(&reference).await.unwrap().0.as_slice(),
-                replacement.0.as_slice()
-            );
-
+            assert_eq!(provider.read(&reference).await.unwrap().0.as_slice(), replacement.0.as_slice());
             #[cfg(windows)]
             {
-            let path = root
-                .path()
-                .join("external-storage-secrets")
-                .join(reference.0.strip_prefix("provider-v1:").unwrap());
-            let sealed = std::fs::read(path).unwrap();
-            assert!(!sealed
-                .windows(replacement.0.len())
-                .any(|part| part == replacement.0.as_slice()));
+            let sealed = std::fs::read(root.path().join("external-storage-secrets")
+                .join(reference.0.strip_prefix("provider-v1:").unwrap())).unwrap();
+            assert!(!sealed.windows(replacement.0.len()).any(|part| part == replacement.0.as_slice()));
             }
+            provider.replace(&reference, &empty).await.unwrap();
+            assert!(provider.read(&reference).await.unwrap().0.is_empty());
+
+            let key = keys.store(&secret(&[7; 32])).await.unwrap();
+            let _key = RemoveSyntheticSecret { root: root.path().to_owned(), purpose: Purpose::RepositoryKey,
+                id: key.0.strip_prefix("repository-key-v1:").unwrap().to_owned() };
+            assert_eq!(keys.read(&key).await.unwrap().0.as_slice(), &[7; 32]);
+            assert!(keys.read(&reference).await.is_err());
+            assert!(provider.read(&key).await.is_err());
+
+            assert!(slot.read().is_none());
+            slot.write(&token).unwrap();
+            assert_eq!(slot.read().unwrap().0.as_slice(), token.0.as_slice());
+            slot.write(&rotated).unwrap();
+            assert_eq!(slot.read().unwrap().0.as_slice(), rotated.0.as_slice());
+            #[cfg(windows)]
+            {
+            let sealed = std::fs::read(root.path().join("account-credentials").join(&slot.name)).unwrap();
+            assert!(!sealed.windows(rotated.0.len()).any(|part| part == rotated.0.as_slice()));
+            }
+            assert!(provider.read(&SecretRef(format!("provider-v1:{}", slot.name))).await.is_err());
 
             provider.remove(&reference).await.unwrap();
             assert!(provider.read(&reference).await.is_err());
+            keys.remove(&key).await.unwrap();
+            assert!(keys.read(&key).await.is_err());
+            slot.remove().unwrap();
+            assert!(slot.read().is_none());
+            slot.remove().unwrap();
         });
     }
 
+    /// What the vault refuses before it asks the platform store, so these
+    /// outcomes hold whether or not a store is reachable.
     #[test]
-    fn the_account_slot_keeps_one_named_secret_in_its_own_namespace() {
-        let root = tempfile::tempdir().unwrap();
-        let slot = account_credential_slot(root.path());
-        let _cleanup = RemoveSyntheticSecret { root: root.path().to_owned(), purpose: Purpose::AccountCredential, id: slot.name.clone() };
-        let token = SecretBytes(zeroize::Zeroizing::new(
-            br#"{"id":"synthetic","token":"synthetic-account-token"}"#.to_vec(),
-        ));
-        let rotated = SecretBytes(zeroize::Zeroizing::new(
-            br#"{"id":"synthetic","token":"rotated-account-token"}"#.to_vec(),
-        ));
-
-        assert!(slot.read().is_none());
-        slot.write(&token).unwrap();
-        assert_eq!(slot.read().unwrap().0.as_slice(), token.0.as_slice());
-        slot.write(&rotated).unwrap();
-        assert_eq!(slot.read().unwrap().0.as_slice(), rotated.0.as_slice());
-
-        #[cfg(windows)]
-        {
-        let sealed =
-            std::fs::read(root.path().join("account-credentials").join(&slot.name)).unwrap();
-        assert!(!sealed
-            .windows(rotated.0.len())
-            .any(|part| part == rotated.0.as_slice()));
-        }
-
-        // The provider vault namespace cannot reach the account slot.
-        let provider = provider_vault(root.path());
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime.block_on(async {
-            assert!(provider
-                .read(&SecretRef("provider-v1:official-account".into()))
-                .await
-                .is_err());
-        });
-
-        slot.remove().unwrap();
-        assert!(slot.read().is_none());
-        slot.remove().unwrap();
-    }
-
-    #[test]
-    fn corrupt_cross_purpose_and_oversized_values_are_rejected() {
+    fn oversized_empty_and_malformed_inputs_are_refused_before_the_store() {
         let root = tempfile::tempdir().unwrap();
         let provider = provider_vault(root.path());
         let keys = repository_key_vault(root.path());
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let key = SecretBytes(zeroize::Zeroizing::new(vec![7; 32]));
-            let reference = keys.store(&key).await.unwrap();
-            let _cleanup = RemoveSyntheticSecret { root: root.path().to_owned(), purpose: Purpose::RepositoryKey, id: reference.0.strip_prefix("repository-key-v1:").unwrap().to_owned() };
-            assert!(provider.read(&reference).await.is_err());
+            let too_large = secret(&vec![0; MAX_PLAINTEXT_BYTES + 1]);
+            assert_eq!(provider.store(&too_large).await.err().unwrap().kind, ErrorKind::Corrupt);
+            assert_eq!(keys.store(&secret(b"")).await.err().unwrap().kind, ErrorKind::Corrupt);
             assert!(provider
                 .read(&SecretRef("provider-v1:../outside".into()))
                 .await
                 .is_err());
-            let too_large = SecretBytes(zeroize::Zeroizing::new(vec![0; MAX_PLAINTEXT_BYTES + 1]));
-            assert!(provider.store(&too_large).await.is_err());
-            keys.remove(&reference).await.unwrap();
         });
     }
 }

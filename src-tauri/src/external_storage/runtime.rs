@@ -1321,6 +1321,8 @@ pub(crate) async fn run_connected_cleanup(
             provider:selected_connection.provider,repository:selected_connection.handle,
             library:connected.stored.descriptor.repository_id.clone(),root_key:connected.root_key.clone(),
             admission:None,connection_id:connection_id.into(),connection_root:root.clone(),
+            #[cfg(test)]
+            test_lease_clock: None,
             capabilities:connected.stored.capabilities.clone(),descriptor:connected.stored.descriptor.clone(),
         };
         selected.admit(&sample)?;opened=Some(selected);

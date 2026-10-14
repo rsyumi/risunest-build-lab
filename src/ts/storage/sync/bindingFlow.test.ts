@@ -4,7 +4,7 @@ import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
 import { IndexedDbPersistentDataStore } from '../indexedDbPersistentDataStore'
 import { createMutationGatedPersistentDataStore } from '../mutationGatedPersistentDataStore'
 
-function setup(options: Partial<InspectedSyncTarget> & { nonDefault?: boolean; confirm?: boolean } = {}) {
+function setup(options: Partial<InspectedSyncTarget> & { characters?: boolean; sharedData?: boolean; confirm?: boolean } = {}) {
     const events: string[] = []
     const initialPublications: boolean[] = []
     let state: SyncBindingState = { target: { kind: 'none' }, targetAuthority: '0', selectionEpoch: 'old', libraryId: null, progress: null }
@@ -21,8 +21,8 @@ function setup(options: Partial<InspectedSyncTarget> & { nonDefault?: boolean; c
         },
         gate: { runTransition: async f => { events.push('gate'); return f() }, runWrite: f => f(), runKeyedWrite: (_key, f) => f() },
         plugins: { fenceExecution: record('plugin-fence'), invalidateCaches: record('invalidate'), restart: record('restart') },
-        withPausedWrites: async operation => { events.push('pause-flush'); return operation() }, hasNonDefaultData: async () => options.nonDefault ?? true,
-        hasNonDefaultSharedData: async () => options.nonDefault ?? true,
+        withPausedWrites: async operation => { events.push('pause-flush'); return operation() }, hasLocalCharacters: async () => options.characters ?? true,
+        hasNonDefaultSharedData: async () => options.sharedData ?? true,
         confirmReplacement: async reason => { events.push(reason ? `confirm:${reason}` : 'confirm'); return options.confirm ?? true },
         refreshActivatedLibrary: record('refresh'),
         beginActivatedLibraryGuard: () => ({ complete() {}, async abortUnchanged() {} }),
@@ -46,7 +46,7 @@ it.each(['replacement', 'previous-files', 'late-replacement'] as const)('reports
     const question = async () => { await pending; return false }
     if (route === 'previous-files') s.deps.confirmPreviousStorageFiles = async () => { await pending; return 'cancel' }
     else s.deps.confirmReplacement = question
-    if (route === 'late-replacement') s.deps.hasNonDefaultData = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true)
+    if (route === 'late-replacement') s.deps.hasLocalCharacters = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true)
     const result = s.flow.bind(target, s.transport)
     await vi.waitFor(() => expect(waiting).toHaveBeenCalledExactlyOnceWith(true))
     answer()
@@ -151,11 +151,16 @@ describe('new registration to a previously bound library', () => {
 
 describe('restored server', () => {
     it('replaces as a new device and describes the restore in the confirmation', async () => {
-        const s = setup({ serverRestored: true, registrationChanged: true, nonDefault: false }); newDeviceTransport(s)
+        const s = setup({ serverRestored: true, registrationChanged: true }); newDeviceTransport(s)
         const fence = vi.spyOn(s.transport, 'fenceOldJobs')
         expect(await s.flow.bind(target, s.transport)).toMatchObject({ kind: 'bound', action: 'new-device' })
         expect(s.events).toEqual(['inspect', 'confirm:server-restored', 'stage', 'jobs-fence', 'reserve-register-settle', 'plugin-fence', 'pause-flush', 'gate', 'activate-new-device', 'invalidate', 'refresh', 'restart', 'resume-new-device'])
         expect(fence.mock.calls[0][0]).toHaveProperty('mode', 'new-device')
+    })
+    it('replaces a device without characters as a new device without asking', async () => {
+        const s = setup({ serverRestored: true, registrationChanged: true, characters: false }); newDeviceTransport(s)
+        expect(await s.flow.bind(target, s.transport)).toMatchObject({ kind: 'bound', action: 'new-device' })
+        expect(s.events).toEqual(['inspect', 'stage', 'jobs-fence', 'reserve-register-settle', 'plugin-fence', 'pause-flush', 'gate', 'activate-new-device', 'invalidate', 'refresh', 'restart', 'resume-new-device'])
     })
     it('stops at the restore confirmation when it is cancelled', async () => {
         const s = setup({ serverRestored: true, confirm: false }); newDeviceTransport(s)
@@ -221,11 +226,17 @@ it('new-device context mode does not leak into later ordinary binding or unbind'
 })
 
 it.each([{ empty: true }, { previouslyBoundLibrary: true }])('explicit new device stages and replaces even when %s', async inspected => {
-    const s = setup({ ...inspected, nonDefault: false })
+    const s = setup(inspected)
     newDeviceTransport(s)
     const result = await s.flow.bind(target, s.transport, { mode: 'new-device' })
     expect(result).toMatchObject({ kind: 'bound', action: 'new-device', newDevice: { writerId: 'reserved-writer', bindingAuthority: '1' } })
     expect(s.events).toEqual(['inspect', 'confirm', 'stage', 'jobs-fence', 'reserve-register-settle', 'plugin-fence', 'pause-flush', 'gate', 'activate-new-device', 'invalidate', 'refresh', 'restart', 'resume-new-device'])
+})
+it('explicit new device replaces a device without characters without asking', async () => {
+    const s = setup({ characters: false })
+    newDeviceTransport(s)
+    expect(await s.flow.bind(target, s.transport, { mode: 'new-device' })).toMatchObject({ kind: 'bound', action: 'new-device' })
+    expect(s.events).toEqual(['inspect', 'stage', 'jobs-fence', 'reserve-register-settle', 'plugin-fence', 'pause-flush', 'gate', 'activate-new-device', 'invalidate', 'refresh', 'restart', 'resume-new-device'])
 })
 it('cancelled new device consent never reserves, stages, changes writer or clears content', async () => {
     const s = setup({ confirm: false }); newDeviceTransport(s)
@@ -413,7 +424,7 @@ describe('transport-neutral first binding', () => {
         expect(s.events).toEqual(['inspect', 'confirm'])
     })
     it('default-only first binding replaces without a dialog', async () => {
-        const s = setup({ nonDefault: false }); await s.flow.bind(target, s.transport)
+        const s = setup({ characters: false }); await s.flow.bind(target, s.transport)
         expect(s.events).not.toContain('confirm'); expect(s.events).toContain('activate-database')
     })
     it('failed staging never fences or clears any values', async () => {
@@ -505,7 +516,7 @@ describe('transport-neutral first binding', () => {
         expect(other.fenceOldJobs).not.toHaveBeenCalled()
     })
     it.each(['server', 'external'] as const)('fences the persisted %s adapter before a cross-transport switch without a prior flow bind', async kind => {
-        const s = setup({ empty: true, nonDefault: false })
+        const s = setup({ empty: true, sharedData: false })
         const persisted: SyncBindingState = { target: { kind, connectionId: 'persisted' }, targetAuthority: '4', selectionEpoch: 'persisted', libraryId: 'library', progress: null }
         s.setState(persisted)
         const old = { ...s.transport, fenceOldJobs: vi.fn(async () => { s.events.push('persisted-fence') }) }
@@ -561,7 +572,7 @@ it('flushes actual gated commits before transition and refreshes after exclusive
 })
 it('cancellation and activation failure release the real pause and storage gate', async () => {
     for (const fail of [false, true]) {
-        const s = setup({ nonDefault: false })
+        const s = setup({ characters: false })
         const gate = createStorageMutationGate({ locks: createInRealmStorageLockManager() })
         s.deps.gate = gate
         let paused = false
@@ -572,7 +583,7 @@ it('cancellation and activation failure release the real pause and storage gate'
         if (fail) s.transport.replaceFromTarget = async () => { throw Error('activation failed') }
         else {
             let read = 0
-            s.deps.hasNonDefaultData = async () => ++read > 1
+            s.deps.hasLocalCharacters = async () => ++read > 1
             s.deps.confirmReplacement = async () => false
         }
         if (fail) await expect(s.flow.bind(target, s.transport)).rejects.toThrow('activation failed')
@@ -583,9 +594,9 @@ it('cancellation and activation failure release the real pause and storage gate'
 })
 
 it('acknowledges plugin-local writes that finish while plugin execution is draining', async () => {
-    const s = setup({ nonDefault: false })
+    const s = setup()
     let data = false
-    s.deps.hasNonDefaultData = async () => data
+    s.deps.hasLocalCharacters = async () => data
     s.deps.plugins.fenceExecution = async () => { s.events.push('plugin-fence'); data = true }
     s.deps.confirmReplacement = async () => { s.events.push('confirm'); return false }
     expect(await s.flow.bind(target, s.transport)).toEqual({ kind: 'cancelled' })
@@ -596,7 +607,7 @@ it('acknowledges plugin-local writes that finish while plugin execution is drain
 })
 
 it('drains a plugin mutation using the same gate before entering exclusive activation', async () => {
-    const s = setup({ nonDefault: false })
+    const s = setup({ characters: false })
     const gate = createStorageMutationGate({ locks: createInRealmStorageLockManager() })
     s.deps.gate = gate
     let release!: () => void
@@ -611,11 +622,11 @@ it('drains a plugin mutation using the same gate before entering exclusive activ
     expect(s.events.indexOf('plugin-mutation')).toBeLessThan(s.events.indexOf('activate-database'))
 })
 it('late cancellation restarts plugins through the same gate after draining without clearing data', async () => {
-    const s = setup({ nonDefault: false })
+    const s = setup()
     const gate = createStorageMutationGate({ locks: createInRealmStorageLockManager() })
     s.deps.gate = gate
     let changed = false
-    s.deps.hasNonDefaultData = async () => changed
+    s.deps.hasLocalCharacters = async () => changed
     s.deps.plugins.fenceExecution = async () => { changed = true }
     s.deps.plugins.restart = () => gate.runWrite(async () => { s.events.push('gated-restart') })
     s.deps.confirmReplacement = async () => false
@@ -635,9 +646,9 @@ it('resume and initial publish callbacks may use the same renderer gate', async 
 })
 
 it.each([
-    { empty: true, nonDefault: false, action: 'initialized', publishes: false },
-    { empty: true, nonDefault: true, action: 'initialized', publishes: true },
-    { empty: false, nonDefault: true, action: 'replaced', publishes: false },
+    { empty: true, characters: true, sharedData: false, action: 'initialized', publishes: false },
+    { empty: true, characters: false, sharedData: true, action: 'initialized', publishes: true },
+    { empty: false, characters: true, sharedData: false, action: 'replaced', publishes: false },
     { previouslyBoundLibrary: true, action: 'resumed', publishes: false },
 ])('activates the ordinary adapter after pause release and delivers the first edit for %s', async options => {
     const s = setup(options)
@@ -705,7 +716,7 @@ it('does not publish or resume after replacement refresh fails', async () => {
 })
 
 it('drains coordinator-queued plugin mutations before acquiring pause', async () => {
-    const s = setup({ nonDefault: false })
+    const s = setup({ characters: false })
     let paused = false
     const queuedSetter = Promise.resolve().then(() => { if (paused) throw Error('setter blocked behind pause') })
     s.deps.plugins.fenceExecution = async () => { await queuedSetter; expect(paused).toBe(false) }

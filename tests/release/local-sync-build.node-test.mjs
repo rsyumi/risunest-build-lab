@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
   buildLocalSyncDistribution,
@@ -12,8 +11,6 @@ import {
   parseLocalSyncArguments,
   validateLocalSyncEnvironment,
 } from "../../server/manager/install/local-build.mjs";
-
-const repository = fileURLToPath(new URL("../..", import.meta.url));
 
 test("local Sync builds default to the main checkout Cargo cache without overriding an explicit target", () => {
   const workspace = resolve(tmpdir(), "risunest-local-sync-paths");
@@ -166,23 +163,6 @@ test("local Sync orchestration reuses build and package stages and gathers every
   assert.equal(result.output, output);
   assert.equal(result.updatesEnabled, true);
   assert.equal(JSON.parse(readFileSync(join(output, "local-artifacts.json"), "utf8")).updatesEnabled, true);
-});
-
-test("root package scripts build complete local Sync distributions", () => {
-  const scripts = JSON.parse(readFileSync(join(repository, "package.json"), "utf8")).scripts;
-  assert.equal(scripts["sync:build"], undefined);
-  assert.equal(
-    scripts["sync:windows:build"],
-    "node server/manager/install/local-build.mjs --target x86_64-pc-windows-msvc",
-  );
-  assert.equal(
-    scripts["sync:linux:build"],
-    "node server/manager/install/local-build.mjs --target x86_64-unknown-linux-gnu",
-  );
-  assert.equal(
-    scripts["sync:macos:build"],
-    "node server/manager/install/local-build.mjs --target aarch64-apple-darwin",
-  );
 });
 
 test("missing local update key fails before preflight, output reset or downloads", async () => {

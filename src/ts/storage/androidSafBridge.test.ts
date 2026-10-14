@@ -8,6 +8,7 @@ import {
     getAndroidSafExportSourceId,
     isAndroidSafFileJobsEnabled,
     listenAndroidSpoolBatches,
+    materializeAndroidBackupSource,
     pickAndroidLegacyBackupSource,
     pickAndroidContentSource,
     pickAndroidBackupSource,
@@ -16,6 +17,53 @@ import {
 } from './androidSafBridge'
 
 describe('Android SAF bridge', () => {
+    it('cancels native materialization and discards a copy completed during cancellation', async () => {
+        const controller = new AbortController()
+        const onProgress = vi.fn()
+        let complete!: (value: string) => void
+        const nativeCopy = new Promise<string>(resolve => { complete = resolve })
+        const released: string[] = []
+        const discarded: string[] = []
+        const result = materializeAndroidBackupSource('selected-source', { signal: controller.signal, onProgress }, {
+            copyExport() {},
+            materializeBackupSource(_token, report) {
+                report?.({ copiedBytes: 1024, totalBytes: 2048 })
+                return nativeCopy
+            },
+            discardPortableSource(token) {
+                released.push(token)
+                complete(JSON.stringify({ ready: [{ token: 'completed-spool' }], failures: [] }))
+                return true
+            },
+            discardSource(token) { discarded.push(token); return true },
+        })
+        const rejected = expect(result).rejects.toMatchObject({ name: 'AbortError' })
+        expect(onProgress).toHaveBeenCalledWith({ requestId: 'selected-source', token: 'selected-source', operation: 'source-copy', copiedBytes: 1024, totalBytes: 2048 })
+        controller.abort()
+        await rejected
+        expect(released).toEqual(['selected-source'])
+        expect(discarded).toEqual(['completed-spool'])
+    })
+
+    it('does not begin a copy after cancellation or retain its abort listener after success', async () => {
+        const controller = new AbortController()
+        const commands: string[] = []
+        const bridge = {
+            copyExport() {},
+            materializeBackupSource() {
+                commands.push('copy')
+                return JSON.stringify({ ready: [{ token: 'copied-source' }], failures: [] })
+            },
+            discardPortableSource() { commands.push('cancel'); return true },
+        }
+        await expect(materializeAndroidBackupSource('source', { signal: controller.signal }, bridge))
+            .resolves.toEqual({ type: 'androidSpool', token: 'copied-source' })
+        controller.abort()
+        await expect(materializeAndroidBackupSource('source', { signal: controller.signal }, bridge))
+            .rejects.toMatchObject({ name: 'AbortError' })
+        expect(commands).toEqual(['copy'])
+    })
+
     it('keeps the source picker reserved until its correlated native result', async () => {
         const listeners = new Map<string, (event: Event) => void>()
         const pending = pickAndroidContentSource({ destination: 'module' }, {

@@ -1,4 +1,5 @@
-import { getChatVar, setChatVar } from "src/ts/parser/chatVar.svelte";
+import { getChatVar } from "src/ts/parser/chatVar.svelte";
+import { setSelectedChatVariable } from "../selectedChatVariables";
 import { MCPClientLike } from "./internalmcp";
 import type { MCPTool, RPCToolCallContent } from "./mcplib";
 import { HypaProcesser } from "../memory/hypamemory";
@@ -104,7 +105,7 @@ export class GraphMemClient extends MCPClientLike {
 
         graph.push({ name, summary, connections });
 
-        setChatVar("graphmem_graph", JSON.stringify(graph));
+        setSelectedChatVariable("graphmem_graph", JSON.stringify(graph));
         return [{ type: 'text', text: `Memory entry "${name}" written successfully.` }];
     }
 

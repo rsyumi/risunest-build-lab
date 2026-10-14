@@ -5,7 +5,7 @@ import {
     type PersistentDataStore,
     type PersistentRoot,
 } from './persistentDataStore'
-import { safeStructuredClone } from '../polyfill'
+import { safeStructuredClone } from '../safeStructuredClone'
 import { v4 } from 'uuid'
 import { presetMirrorMap, protectedPresetGroups, type ProtectedPresetField } from './effectiveIdentityState'
 

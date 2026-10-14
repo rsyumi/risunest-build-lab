@@ -1,7 +1,7 @@
 import { stableSelectionRoot, projectSelectionIndexes } from './persistentSelectionBoundary'
 import { jsonByteLength, prepareNativePersistenceValue, type PayloadTooLargeKind } from './nativePersistenceValue'
 import { invoke } from '@tauri-apps/api/core'
-import { nativeCommitTransport, STAGED_REQUEST_BYTES } from './nativeCommitTransport'
+import { nativeCommitTransport, STAGED_REQUEST_BYTES, type NativeCommitTransport } from './nativeCommitTransport'
 
 import type { Chat, Database, botPreset } from './database.svelte'
 import {
@@ -261,6 +261,8 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
     /** Latest native revision; every open still reaches the store. */
     lastOpenResult: PersistentStoreOpenResult | null = null
 
+    constructor(private readonly transport: NativeCommitTransport = nativeCommitTransport) {}
+
     async open(): Promise<void> {
         const result = await invokeStore<PersistentStoreOpenResult>('pds_open')
         this.lastOpenResult = result
@@ -385,7 +387,7 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
 
     commit(input: WorkingSetCommit): Promise<{ revision: DataRevision }> {
         const { assetAliases = [], ...commit } = input
-        return nativeCommitTransport.commit({ commit, assetAliases }).catch((error) => {
+        return this.transport.commit({ commit, assetAliases }).catch((error) => {
             throw restoreStoreError(error)
         })
     }
@@ -459,7 +461,7 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
         try {
             const { characters, botPresets } = database
             const stage: StageRequest = async (command, kind, args) => {
-                try { await nativeCommitTransport.stage(command, kind, { stagingId, ...args }) }
+                try { await this.transport.stage(command, kind, { stagingId, ...args }) }
                 catch (error) { throw restoreStoreError(error) }
             }
             await stageRoot(stage, stableSelectionRoot(database) as Record<string, unknown>, pluginStorageValues)

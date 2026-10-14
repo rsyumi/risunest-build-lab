@@ -66,8 +66,8 @@ export async function receiveAndPush(driver: SyncDriver, input: { seed: Seed; re
   await driver.step("sync-result", "mount", () => driver.mountProduct());
   await markerAbsent(driver, input.expect);
   const local = await driver.step("sync-result", "local-library", async () => {
-    const { hasLocalBindingData } = await import("../../src/ts/storage/sync/bindingLocalData");
-    return { nonDefault: await hasLocalBindingData() };
+    const { hasLocalSharedBindingData } = await import("../../src/ts/storage/sync/bindingLocalData");
+    return { nonDefault: await hasLocalSharedBindingData() };
   });
   await driver.step("sync-result", "settings-open", () => driver.openSyncSettings());
   await driver.step("sync-result", "registration", () => driver.readRegistration(input.registration));

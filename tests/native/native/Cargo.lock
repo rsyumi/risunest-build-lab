@@ -4238,7 +4238,7 @@ dependencies = [
 
 [[package]]
 name = "risunest"
-version = "0.0.0"
+version = "1.0.4"
 dependencies = [
  "async-trait",
  "axum",
@@ -4269,6 +4269,7 @@ dependencies = [
  "regex",
  "reqwest 0.12.28",
  "risunest-external-storage-format",
+ "risunest-network-log",
  "risunest-release-update",
  "risunest-small-object-store",
  "risunest-sync-connect",
@@ -4334,6 +4335,21 @@ dependencies = [
  "sha2 0.11.0",
  "zeroize",
  "zstd 0.13.3",
+]
+
+[[package]]
+name = "risunest-network-log"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http",
+ "http-body",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -5576,6 +5592,7 @@ dependencies = [
  "http",
  "regex",
  "reqwest 0.12.28",
+ "risunest-network-log",
  "schemars 0.8.22",
  "serde",
  "serde_json",
@@ -5719,6 +5736,7 @@ dependencies = [
  "osakit",
  "percent-encoding",
  "reqwest 0.13.5",
+ "risunest-network-log",
  "rustls",
  "semver",
  "serde",

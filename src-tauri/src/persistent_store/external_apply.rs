@@ -314,6 +314,17 @@ const STAGE_BATCH_BYTES: u64 = 8 * 1024 * 1024;
 
 #[cfg(test)]
 thread_local! {
+    static TEST_STAGE_BATCH_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(STAGE_BATCH_WORK) };
+}
+fn stage_batch_work() -> u64 {
+    #[cfg(test)]
+    return TEST_STAGE_BATCH_WORK.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    STAGE_BATCH_WORK
+}
+
+#[cfg(test)]
+thread_local! {
     /// Runs after each stage batch commits, with the number of batches so far
     /// and how long that batch held the writer.
     static AFTER_STAGE_BATCH: std::cell::RefCell<Option<Box<dyn FnMut(usize, std::time::Duration)>>> =
@@ -413,7 +424,7 @@ impl StageBatch {
 
     fn full(&self) -> bool {
         self.records >= STAGE_BATCH_RECORDS
-            || self.work >= STAGE_BATCH_WORK
+            || self.work >= stage_batch_work()
             || self.bytes >= STAGE_BATCH_BYTES
     }
 

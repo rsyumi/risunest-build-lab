@@ -38,6 +38,7 @@ mod lossless_f0;
 mod macos_lifecycle;
 pub mod native_file_jobs;
 pub(crate) mod native_log;
+mod network_log;
 mod native_media;
 mod native_tokenizer;
 #[cfg(desktop)]
@@ -74,6 +75,7 @@ mod windows_appearance;
 #[cfg(windows)]
 mod windows_webview;
 
+use risunest_network_log::reqwest::RequestBuilderExt;
 use base64::{engine::general_purpose, Engine as _};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{json, Value};
@@ -246,14 +248,14 @@ async fn native_request(url: String, body: String, header: String, method: Strin
             .headers(headers)
             .timeout(Duration::from_secs(120))
             .body(body)
-            .send()
+            .send_logged("native-http")
             .await;
     } else {
         response = client
             .get(&url)
             .headers(headers)
             .timeout(Duration::from_secs(120))
-            .send()
+            .send_logged("native-http")
             .await;
     }
 
@@ -569,6 +571,10 @@ fn builder_with_main_window(
                 app.manage(app_paths::AppPaths::desktop(app.config())?.prepared()?);
             }
             let app_data_dir = app_paths::data_root(app)?;
+            let _ = native_log::logged_without_detail(
+                "network_log_initialize",
+                network_log::initialize(&app.state::<app_paths::AppPaths>()),
+            );
             setup_native_log_state.configure_file_path(&app_data_dir);
             app.manage(setup_native_log_state.clone());
             app.manage(app_cleanup::CleanupState::initialize(app.handle())?);
@@ -841,6 +847,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::data_health::pds_data_health_complete_intent,
         persistent_store::commands::data_health::pds_data_health_journals,
         persistent_store::commands::data_health::pds_data_health_undo,
+        network_log::network_log_command,
         native_log::native_log_tail,
         native_log::native_log_error,
         native_log::native_log_file_path,
@@ -1060,6 +1067,9 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
 }
 
 pub fn handle_run_event(_app: &tauri::AppHandle, _event: tauri::RunEvent) {
+    if matches!(&_event, tauri::RunEvent::Exit) {
+        if let Some(recorder) = risunest_network_log::global() { recorder.shutdown(); }
+    }
     if app_cleanup::closing(_app) { return; }
     #[cfg(desktop)]
     if matches!(&_event, tauri::RunEvent::Exit) { opened_files::restart_on_exit(_app); }

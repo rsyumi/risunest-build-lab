@@ -180,10 +180,10 @@ pub fn initialize(root: &Path, executable: &Path) -> Result<()> {
             .arg(root)
             .stdin(Stdio::null())
             .output()
-            .map_err(|_| "server-init-failed")?;
+            .map_err(|error| format!("server-init-launch-failed: {} ({error})", executable.display()))?;
         if !output.status.success() {
             return Err(startup_error_code(&String::from_utf8_lossy(&output.stderr))
-                .unwrap_or_else(|| "server-init-failed".into()));
+                .unwrap_or_else(|| format!("server-init-failed: exit={}", output.status)));
         }
     }
     crate::removal::register(root, executable)?;

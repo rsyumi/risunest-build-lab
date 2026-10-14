@@ -77,6 +77,49 @@ describe('DefaultChatScreen input append helper', () => {
             expect(conversation.message.map((message) => message.data)).toEqual(['before', 'input'])
         },
     )
+    it.each(['input trigger', 'input processing'] as const)(
+        'appends the input when a chat variable commits during the %s',
+        async (stage) => {
+            const conversation = createConversation([{ role: 'char', data: 'before' }])
+            const character = createCharacter(conversation)
+            const session = new ActiveConversationSession({
+                characterId: character.chaId,
+                conversationId: conversation.id,
+                conversation,
+                storeRevision: 1,
+            })
+            const target = captureConversationMutationTarget(character, conversation, session)
+            const held = deferred<void>()
+            const started = deferred<void>()
+            const hold = async () => {
+                started.resolve()
+                await held.promise
+            }
+
+            const pending = appendDefaultChatInput({
+                target,
+                runInputTrigger: async () => {
+                    if (stage === 'input trigger') await hold()
+                    return null
+                },
+                processInput: async () => {
+                    if (stage === 'input processing') await hold()
+                    return 'input'
+                },
+                isTargetCurrent: (current) =>
+                    isConversationMutationTargetCurrent(current, character, conversation, session),
+                createMessage: (data) => ({ role: 'user', data }),
+            })
+            await started.promise
+            session.updateChatVariables(new Map([['scratch', 'written']]))
+            held.resolve()
+
+            await expect(pending).resolves.toBe(true)
+            expect(conversation.message.map((message) => message.data)).toEqual(['before', 'input'])
+            expect(conversation.scriptstate).toEqual({ $scratch: 'written' })
+        },
+    )
+
     it('does not restore a stale trigger tail after the same session changes', async () => {
         const conversation = createConversation([{ role: 'char', data: 'before' }])
         const character = createCharacter(conversation)

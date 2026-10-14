@@ -1,23 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, unmount } from 'svelte'
+import type { PlatformShape } from 'src/ts/platform.testSupport'
 const mocked = vi.hoisted(() => ({
     db: { notification: false }, error: vi.fn(), request: vi.fn(), iosRequest: vi.fn(), desktopRequest: vi.fn(),
-    platform: { isTauriAndroid: true, isTauriIOS: false, isTauriDesktop: false },
+    platform: { runtime: 'tauri', os: 'android' } as PlatformShape,
 }))
-vi.mock('src/lang', () => ({ language: { notification: 'Notification', permissionDenied: 'Permission denied' } }))
-vi.mock('src/ts/platform', () => mocked.platform)
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule(() => mocked.platform))
 vi.mock('src/ts/iosNative', () => ({ requestIOSNotifications: mocked.iosRequest }))
 vi.mock('src/ts/androidGenerationKeepAlive', () => ({ requestAndroidGenerationNotifications: mocked.request }))
 vi.mock('src/ts/desktopNotifications', () => ({ requestDesktopNotifications: mocked.desktopRequest }))
 vi.mock('src/ts/alert', () => ({ alertError: mocked.error }))
 vi.mock('src/ts/stores.svelte', () => ({ DBState: { db: mocked.db } }))
+import { language } from 'src/lang'
 import NotificationToggle from './NotificationToggle.svelte'
 let component: ReturnType<typeof mount> | undefined
 beforeEach(() => {
     vi.clearAllMocks()
     mocked.db.notification = false
-    mocked.platform.isTauriAndroid = true
-    mocked.platform.isTauriDesktop = false
+    mocked.platform = { runtime: 'tauri', os: 'android' }
     vi.stubGlobal('Notification', undefined)
 })
 afterEach(async () => {
@@ -43,14 +43,13 @@ describe('notification enablement', () => {
         expect(mocked.error).toHaveBeenCalledTimes(granted ? 0 : 1)
     })
     it('reverts unavailable browser notifications without throwing', async () => {
-        mocked.platform.isTauriAndroid = false
+        mocked.platform = { runtime: 'web', os: 'windows' }
         enable()
-        await vi.waitFor(() => expect(mocked.error).toHaveBeenCalledWith('Permission denied'))
+        await vi.waitFor(() => expect(mocked.error).toHaveBeenCalledWith(language.permissionDenied))
         expect(mocked.db.notification).toBe(false)
     })
     it.each([true, false])('uses the native desktop plugin instead of the browser API, granted=%s', async granted => {
-        mocked.platform.isTauriAndroid = false
-        mocked.platform.isTauriDesktop = true
+        mocked.platform = { runtime: 'tauri', os: 'windows' }
         const requestPermission = vi.fn(async () => 'denied')
         vi.stubGlobal('Notification', { permission: 'default', requestPermission })
         mocked.desktopRequest.mockResolvedValue(granted)
@@ -61,7 +60,7 @@ describe('notification enablement', () => {
         expect(mocked.error).toHaveBeenCalledTimes(granted ? 0 : 1)
     })
     it('requests permission in the browser prompt state', async () => {
-        mocked.platform.isTauriAndroid = false
+        mocked.platform = { runtime: 'web', os: 'windows' }
         const requestPermission = vi.fn(async () => 'granted')
         vi.stubGlobal('Notification', { permission: 'default', requestPermission })
         enable()

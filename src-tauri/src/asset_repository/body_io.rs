@@ -298,6 +298,10 @@ pub(super) struct OwnedIdentity {
     owner: ThreadId,
 }
 impl OwnedIdentity {
+    pub(super) fn transfer_to(&mut self, owner: ThreadId) {
+        self.check_scope();
+        self.owner = owner;
+    }
     pub(super) fn new(hash: &str) -> Self {
         let scope = current_scope();
         record(&mut scope.lock().unwrap(), "owned", Some(hash), |work| work.outstanding_readers += 1);

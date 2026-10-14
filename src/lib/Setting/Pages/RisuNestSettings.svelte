@@ -22,6 +22,7 @@
     import RisuNestAppImage from './RisuNestAppImage.svelte'
     import RisuNestIOSPlatform from './RisuNestIOSPlatform.svelte'
     import RisuNestAndroidPlatform from './RisuNestAndroidPlatform.svelte'
+    import RisuNestNetworkLog from './RisuNestNetworkLog.svelte'
     import RisuNestLogViewer from './RisuNestLogViewer.svelte'
     import RisuNestUpdateSettings from './RisuNestUpdateSettings.svelte'
     import ExternalStorageSettings from '../ExternalStorage/ExternalStorageSettings.svelte'
@@ -33,7 +34,10 @@
         storage: language.risuNest.tabs.storage,
         sync: language.risuNest.tabs.sync,
         'plugin-data': language.risuNest.tabs.pluginData,
+        'network-logs': language.risuNest.tabs.networkLogs,
     }
+
+    const visibleTabs = RISUNEST_SETTINGS_TABS.filter(tab => isTauri || tab !== 'network-logs')
 
     // A screen that sends the reader here names the tab; otherwise the page opens on the first one.
     let activeTab: RisuNestSettingsTab = $state(get(risuNestSettingsTabRequest) ?? 'settings')
@@ -42,7 +46,7 @@
     $effect(() => {
         const requested = $risuNestSettingsTabRequest
         if (!requested) return
-        activeTab = requested
+        activeTab = visibleTabs.includes(requested) ? requested : 'settings'
         risuNestSettingsTabRequest.set(null)
     })
 
@@ -51,7 +55,7 @@
     }
 
     function moveTab(event: KeyboardEvent, index: number): void {
-        const last = RISUNEST_SETTINGS_TABS.length - 1
+        const last = visibleTabs.length - 1
         let next: number
         if (event.key === 'ArrowRight') next = index === last ? 0 : index + 1
         else if (event.key === 'ArrowLeft') next = index === 0 ? last : index - 1
@@ -59,7 +63,7 @@
         else if (event.key === 'End') next = last
         else return
         event.preventDefault()
-        activeTab = RISUNEST_SETTINGS_TABS[next]
+        activeTab = visibleTabs[next]
         tabButtons[next]?.focus()
     }
 </script>
@@ -72,7 +76,7 @@
         aria-label={language.risuNest.tabList}
         class="-mx-4 mt-3 flex overflow-x-auto border-b border-darkborderc px-4 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden @xl:mx-0 @xl:px-0"
     >
-        {#each RISUNEST_SETTINGS_TABS as tab, index (tab)}
+        {#each visibleTabs as tab, index (tab)}
             {@const active = activeTab === tab}
             <button
                 bind:this={tabButtons[index]}
@@ -130,6 +134,8 @@
             {#if isTauri}
                 <RisuNestLocalData />
             {/if}
+        {:else if activeTab === 'network-logs' && isTauri}
+            <RisuNestNetworkLog />
         {:else}
             <RisuNestPluginData />
         {/if}

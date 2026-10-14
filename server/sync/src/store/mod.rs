@@ -189,7 +189,7 @@ impl Store {
             uploads: count("uploads")?,
         })
     }
-    #[cfg(test)]
+    #[cfg(all(test, feature = "source-observer"))]
     pub(crate) fn source_observer_body_work(
         &self,
     ) -> Result<crate::source_observer::PendingBodyWork> {

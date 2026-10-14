@@ -17,7 +17,7 @@ function makeMessage(index: number, duplicatePositions: readonly number[]): Mess
     }
 }
 
-export function makeConversation(messageCount = 10_000, duplicatePositions: readonly number[] = [100, 9_000]): Chat {
+export function makeConversation(messageCount: number, duplicatePositions: readonly number[]): Chat {
     return {
         id: 'chat-a',
         name: 'Corpus conversation',
@@ -63,7 +63,7 @@ export function makeDatabase(conversation: Chat): Database {
     } as unknown as Database
 }
 
-export async function createEvictionFixture(initialConversation = makeConversation()) {
+export async function createEvictionFixture(initialConversation: Chat) {
     let workingCopy = structuredClone(makeDatabase(initialConversation))
     workingCopy.characters.push({
         type: 'character',

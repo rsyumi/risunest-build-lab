@@ -3,10 +3,10 @@ use super::{
     objects::{check_path, sync_directory},
     Store,
 };
-#[cfg(test)]
+#[cfg(all(test, feature = "source-observer"))]
 use crate::source_observer::small_object_store;
 use crate::{Error, Result};
-#[cfg(not(test))]
+#[cfg(not(all(test, feature = "source-observer")))]
 use risunest_small_object_store as small_object_store;
 use risunest_sync_wire::{canonical, RemoteHead, Sequence};
 use rusqlite::{Connection, OpenFlags};
@@ -126,7 +126,7 @@ fn verify_inline(db: &Connection) -> Result<()> {
 }
 impl Store {
     pub fn backup(&self, destination: &Path) -> Result<BackupManifest> {
-        #[cfg(test)]
+        #[cfg(all(test, feature = "source-observer"))]
         crate::source_observer::unsupported(&self.root, "administration-backup");
         if !destination.is_absolute() {
             return Err(Error::new("absolute-backup-dir-required", 400));
@@ -181,7 +181,7 @@ impl Store {
         Ok(manifest)
     }
     pub fn restore_backup(source: &Path, destination: &Path) -> Result<Self> {
-        #[cfg(test)]
+        #[cfg(all(test, feature = "source-observer"))]
         crate::source_observer::unsupported(source, "administration-restore");
         if !source.is_absolute() || !destination.is_absolute() {
             return Err(Error::new("absolute-backup-dir-required", 400));

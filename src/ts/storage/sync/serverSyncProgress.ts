@@ -8,14 +8,14 @@ export { createRateMeter } from './transferRate'
 
 export type ServerSyncLaneName = 'send' | 'receive' | 'hydrate' | 'binding' | 'assets'
 export type ServerSyncNativeStep = 'idle' | 'preparing' | 'checking' | 'uploading' | 'confirming' | 'listing' | 'downloading' | 'staging'
-/** One native transport lane. Every count only grows; a view subtracts what it read first. */
+/** One native transport lane, with cumulative counters and current finite work. */
 export interface ServerSyncLane {
     lane: ServerSyncLaneName
     active: boolean
     step: ServerSyncNativeStep
     listed: number
-    /** Units a state read will list, as its pin reported them. */
-    listedTotal: number
+    /** The current state pin's listing. A restarted read replaces the abandoned work. */
+    listing?: { done: number; total: number } | null
     itemsDone: number
     itemsTotal: number
     filesDone: number
@@ -36,7 +36,7 @@ export interface ServerSyncLane {
 }
 export const readServerSyncLanes = () => invoke<ServerSyncLane[]>('server_sync_progress')
 
-const COUNTS = ['listed', 'listedTotal', 'itemsDone', 'itemsTotal', 'filesDone', 'filesTotal', 'bytesDone', 'bytesTotal', 'sentBytes', 'receivedBytes', 'backlogDone'] as const
+const COUNTS = ['listed', 'itemsDone', 'itemsTotal', 'filesDone', 'filesTotal', 'bytesDone', 'bytesTotal', 'sentBytes', 'receivedBytes', 'backlogDone'] as const
 
 /** What each lane did after `baseline` was read. */
 export function laneDeltas(current: ServerSyncLane[], baseline: ServerSyncLane[]): ServerSyncLane[] {
@@ -142,7 +142,7 @@ function stageWork(attempt: ServerSyncAttempt, lane: ServerSyncLane): Work | und
     if (lane.assetScope) return lane.assetScope.total ? capped(lane.assetScope.done, lane.assetScope.total) : undefined
     if (lane.lane === 'send' || lane.lane === 'receive') return itemWork(attempt, lane.lane)
     if (lane.lane !== 'binding') return undefined
-    if (lane.step === 'listing') return lane.listedTotal > 0 ? capped(lane.listed, lane.listedTotal) : undefined
+    if (lane.step === 'listing') return lane.listing?.total ? capped(lane.listing.done, lane.listing.total) : undefined
     // A binding counts the changes it reads; the bodies it downloads after the last one and what it stages are not counted.
     const items = lane.step === 'downloading' ? itemWork(attempt, 'binding') : undefined
     return items && items.done < items.total ? items : undefined
@@ -159,7 +159,7 @@ export function bytePhase(attempt: ServerSyncAttempt): { key: string; done: numb
 function laneDetail(attempt: ServerSyncAttempt, lane: ServerSyncLane, text: Text): string {
     const work = stageWork(attempt, lane)
     if (work) return ratio(work.done, work.total)
-    return lane.step === 'listing' && lane.listed > 0 ? text.itemsCount.replace('{0}', count(lane.listed)) : ''
+    return lane.step === 'listing' && !lane.listing && lane.listed > 0 ? text.itemsCount.replace('{0}', count(lane.listed)) : ''
 }
 
 /** Everything the progress panel shows for a running attempt. Only totals fixed before their work ran are shown. */

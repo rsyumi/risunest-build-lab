@@ -110,7 +110,7 @@ internal object PortableSourceNative {
 
   fun retireUnclaimed(owner: PortableSourceOwner) { owner.retire { discard(it) } }
 
-  fun materialize(token: String, store: SafSpoolStore): SafSpoolBatch {
+  fun materialize(token: String, store: SafSpoolStore, onProgress: (SafSpoolProgress) -> Unit): SafSpoolBatch {
     val source = selected[token] ?: throw IOException("source-reselect-required")
     if (!source.copying.compareAndSet(false, true)) throw IOException("source-busy")
     var batch: SafSpoolBatch? = null
@@ -123,7 +123,7 @@ internal object PortableSourceNative {
         override val totalBytes = source.bytes
         override fun open(): InputStream = input
       }
-      input.use { batch = store.spool(listOf(wrapped), isCancelled = { source.cancelled.get() }) }
+      input.use { batch = store.spool(listOf(wrapped), isCancelled = { source.cancelled.get() }, onProgress = onProgress) }
       if (!verifyCopy(token)) {
         batch!!.ready.forEach { store.discardReady(it.token) }
         throw IOException("source-changed")

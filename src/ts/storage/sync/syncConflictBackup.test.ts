@@ -43,9 +43,7 @@ const platformMocks = vi.hoisted(() => {
 })
 
 vi.mock('localforage', () => ({ default: platformMocks.localforage }))
-vi.mock('../../platform', () => ({
-    get isTauri() { return platformMocks.isTauri },
-}))
+vi.mock('../../platform', async () => (await import('../../platform.testSupport')).platformModule(() => ({ runtime: platformMocks.isTauri ? 'tauri' : 'web', os: 'windows' })))
 vi.mock('../nativeDeviceSettings', () => ({
     createNativeDeviceSettings: () => platformMocks.deviceSettings,
 }))

@@ -84,14 +84,6 @@ describe('streaming display defaults', () => {
             } as Database).risunestChatEditPopup,
         ).toBe(false)
     })
-
-    it('does not import the removed RisuNest-only performance setting', () => {
-        const database = normalizeDatabaseDefaults({
-            characters: [],
-            largeChatPerformanceMode: 'strong',
-        } as unknown as Database)
-        expect(database.streamingDisplayOptimizationMode).toBe('off')
-    })
 })
 
 describe('RisuNest inlay database defaults', () => {

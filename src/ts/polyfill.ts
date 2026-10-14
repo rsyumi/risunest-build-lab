@@ -2,23 +2,10 @@ import { ReadableStream, WritableStream, TransformStream } from "web-streams-pol
 import { Buffer as BufferPolyfill } from 'buffer'
 import { polyfill as dragPolyfill} from "mobile-drag-drop"
 import {scrollBehaviourDragImageTranslateOverride} from 'mobile-drag-drop/scroll-behaviour'
-import rfdc from 'rfdc'
 import { isIOS } from "./platform";
-/**
- * Polyfill for structuredClone.
- * Falls back to rfdc (Really Fast Deep Clone) if structuredClone throws an error.
- */
+import { safeStructuredClone } from './safeStructuredClone'
 
-const rfdcClone = rfdc({
-  circles:false,
-})
-export function safeStructuredClone<T>(data:T):T{
-  try {
-      return structuredClone(data)
-  } catch (error) {
-      return rfdcClone(data)
-  }
-}
+export { safeStructuredClone }
 
 try {
     const testDom = document.createElement('div');

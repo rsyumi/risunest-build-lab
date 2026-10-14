@@ -29,7 +29,7 @@ vi.mock('src/ts/storage/database.svelte', () => ({
     getCurrentChat: () => scriptingState.database.characters[0]?.chats[0],
     setDatabase: vi.fn(),
 }))
-vi.mock('src/ts/parser/parser.svelte', () => ({
+vi.mock('src/ts/parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule({
     hasher: vi.fn(),
     risuChatParser: (value: string) => value,
     ParseMarkdown: async (value: string, character: character) => {
@@ -49,7 +49,7 @@ vi.mock('src/ts/alert', () => ({
     alertNormal: vi.fn(),
     alertSelect: vi.fn(),
 }))
-vi.mock('src/ts/platform', () => ({ isTauriMobile: true }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'tauri', os: 'android' }))
 vi.mock('src/ts/tokenizer', () => ({ tokenize: vi.fn() }))
 vi.mock('src/ts/util', () => ({
     asBuffer: vi.fn(),
@@ -125,6 +125,7 @@ vi.mock('src/ts/stores.svelte', async () => {
         moduleBackgroundEmbedding: writable(''),
         ReloadChatPointer: writable({}),
         ReloadGUIPointer: writable(0),
+        ScriptDisplayRefreshPointer: writable(0),
         createSimpleCharacter: (char: character) => ({
             type: 'simple',
             chaId: char.chaId,

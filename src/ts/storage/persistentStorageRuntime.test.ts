@@ -153,7 +153,7 @@ const mocks = vi.hoisted(() => {
 
 let configuredAssetStore: BlobStore | null = null
 
-vi.mock('../platform', () => ({ isTauri: true }))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule({ runtime: 'tauri', os: 'windows' }))
 vi.mock('./persistentDataRuntime.svelte', () => ({
     getPersistentDataRuntime: () => ({
         flushPendingData: mocks.flushPendingData,

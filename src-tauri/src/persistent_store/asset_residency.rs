@@ -749,6 +749,16 @@ impl PersistentStore {
         cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
         check: impl Fn() -> Result<()>,
     ) -> Result<ResidencyStatus> {
+        self.asset_residency_evict_observed(cancellation, check, &mut crate::server_sync::asset_cleanup_progress::Progress::new(|_| {}))
+    }
+    pub(crate) fn asset_residency_evict_observed(
+        &self,
+        cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        check: impl Fn() -> Result<()>,
+        progress: &mut crate::server_sync::asset_cleanup_progress::Progress,
+    ) -> Result<ResidencyStatus> {
+        use crate::server_sync::asset_cleanup_progress::Stage;
+        progress.stage(Stage::Preparing, 0, None);
         check()?;
         let mut residency = Residency::open(&self.repository_root)?;
         if self.device_store()?.asset_residency_policy()? != AssetPolicy::Remote {
@@ -770,93 +780,71 @@ impl PersistentStore {
             .collect::<Vec<_>>();
         let cas = PayloadCas::new(&self.repository_root)?;
         let mut evicted = 0;
-        let mut retained = std::collections::BTreeMap::new();
-        let directory = tempfile::Builder::new().prefix("asset-offload-").tempdir_in(&self.repository_root)?;
-        let cache = crate::server_sync::cache::Cache::open(directory.path())?.with_library(&self.repository_root)?;
-        for page in candidates.chunks(128) {
+        let mut objects = Vec::new();
+        for page in candidates.chunks(1024) {
             check()?;
-            let mut objects = std::collections::BTreeMap::new();
             for (hash, size) in page.iter().zip(cas.stat_objects(page.iter().map(String::as_str))?) {
-                if let Some(size) = size {
-                    objects.insert(hash.clone(), size);
-                }
+                if let Some(size) = size { objects.push((hash.clone(), size)); }
             }
-            if objects.is_empty() {
-                continue;
-            }
-            let identities = objects
-                .iter()
-                .map(|(hash, size)| serde_json::json!({"hash":hash,"size":size.to_string()}))
-                .collect::<Vec<_>>();
-            #[derive(serde::Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct Missing {
-                missing: Vec<String>,
-            }
-            let (_, missing): (_, Missing) = client.json(
-                reqwest::Method::POST,
-                "objects/missing",
-                &[],
-                Some(&identities),
-                &[],
-            )?;
-            for hash in missing.missing {
-                check()?;
-                let size = *objects
-                    .get(&hash)
-                    .ok_or_else(|| SyncError::new("invalid-missing-response", 502))?;
-                // A snapshot-only object may never have been published.
-                if cache.stat_object(&hash)? != Some(size) {
-                    return Err(SyncError::new("asset-changed", 409));
-                }
-                cache.verify(&hash, &check)?;
-                crate::server_sync::transfer::Transfer::new(&client, &cache)?
-                    .with_check(&check)
-                    .upload_with_hints(&[hash], &[], false, &Default::default())?;
-            }
-            check()?;
-            residency.retain(
-                &client,
-                &config,
-                &head,
-                &objects
-                    .iter()
-                    .map(|(hash, size)| (hash.clone(), Some(*size)))
-                    .collect::<Vec<_>>(),
-            )?;
-            retained.extend(objects);
         }
-        if !retained.is_empty() {
+        let total = objects.len();
+        progress.stage(Stage::Checking, 0, Some(total));
+        for (index, page) in objects.chunks(1024).enumerate() {
             check()?;
+            let requested = page.iter().map(|(hash, size)| (hash.clone(), Some(*size))).collect::<Vec<_>>();
+            // Retention checks current server presence and size in the same
+            // transaction as the custody grant. Most pages need only this call.
+            if let Err(error) = residency.retain(&client, &config, &head, &requested) {
+                // A missing body can also surface as storage-io while its
+                // catalog row still exists. Probe once, then verify any repair.
+                if !matches!(error.code.as_str(), "object-not-found" | "corrupt-object" | "storage-io") { return Err(error); }
+                let identities = page.iter().map(|(hash, size)| serde_json::json!({"hash":hash,"size":size.to_string()})).collect::<Vec<_>>();
+                #[derive(serde::Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Missing { missing: Vec<String> }
+                let (_, missing): (_, Missing) = client.json(reqwest::Method::POST, "objects/missing", &[], Some(&identities), &[])?;
+                let directory = tempfile::Builder::new().prefix("asset-offload-").tempdir_in(&self.repository_root)?;
+                let cache = crate::server_sync::cache::Cache::open(directory.path())?.with_library(&self.repository_root)?;
+                progress.stage(Stage::Uploading, 0, Some(missing.missing.len()));
+                let mut expected = page.iter().cloned().collect::<std::collections::BTreeMap<_, _>>();
+                for hash in missing.missing {
+                    check()?;
+                    let size = expected.remove(&hash).ok_or_else(|| SyncError::new("invalid-missing-response", 502))?;
+                    // A snapshot-only object may never have been published.
+                    if cache.stat_object(&hash)? != Some(size) { return Err(SyncError::new("asset-changed", 409)); }
+                    cache.verify(&hash, &check)?;
+                    crate::server_sync::transfer::Transfer::new(&client, &cache)?
+                        .with_check(&check).upload_with_hints(&[hash], &[], false, &Default::default())?;
+                    progress.completed(None);
+                }
+                check()?;
+                residency.retain(&client, &config, &head, &requested)?;
+            }
+            progress.stage(Stage::Checking, index * 1024 + page.len(), Some(total));
+        }
+        if !objects.is_empty() {
+            check()?;
+            progress.stage(Stage::Preparing, 0, None);
             let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
             let fresh = self.residency_inventory(true)?;
-            let sync_cache_root =
-                self.repository_root
-                    .join("server-sync")
-                    .join(risunest_sync_wire::hash(
-                        format!("{}:{}", config.library_id, config.device_id).as_bytes(),
-                    ));
-            for (hash, size) in retained {
+            progress.stage(Stage::Deleting, 0, Some(total));
+            for (hash, size) in objects {
                 check()?;
                 if fresh.local.contains(&hash) {
+                    progress.completed(None);
                     continue;
                 }
                 // Keep aliases and their object catalog row. Offloading is
                 // neither a logical deletion nor an asset GC tombstone.
                 if let crate::asset_repository::ExactObjectUnlink::Removed { .. } =
-                    cas.unlink_exact_object(&hash, size, &object_physical_key(&hash))?
+                    cas.unlink_retained_object(&hash, size, &object_physical_key(&hash))?
                 {
                     evicted += size;
-                }
-                if sync_cache_root.is_dir() {
-                    PayloadCas::new(&sync_cache_root)?.unlink_exact_object(
-                        &hash,
-                        size,
-                        &object_physical_key(&hash),
-                    )?;
-                }
+                    progress.completed(Some(size));
+                } else { progress.completed(None); }
             }
         }
+        progress.stage(Stage::Finalizing, total, None);
         self.asset_residency_release_unused_cancelled(cancellation, &check)?;
         let mut status = self.asset_residency_status()?;
         check()?;

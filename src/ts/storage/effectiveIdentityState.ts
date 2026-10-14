@@ -1,5 +1,5 @@
 import type { Database, botPreset } from './database.svelte'
-import { safeStructuredClone } from '../polyfill'
+import { safeStructuredClone } from '../safeStructuredClone'
 import { v4 } from 'uuid'
 import { canonicalJson } from './saveCoordinatorHelpers'
 import { defineOwnEnumerableProperty } from './ownEnumerableProperty'

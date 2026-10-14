@@ -77,6 +77,10 @@ pub(super) async fn prepare(app: &AppHandle) -> Result<(), String> {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    if let Some(recorder) = risunest_network_log::global() {
+        tauri::async_runtime::spawn_blocking(move || { recorder.shutdown(); if recorder.is_stopped() { Ok(()) } else { Err("cleanup-network-log-busy".to_owned()) } })
+            .await.map_err(|_| "cleanup-network-log-busy")??;
+    }
     jobs.close_lease_ledger_for_cleanup()
         .map_err(|error| refused("cleanup-background-work-busy", &error))?;
     crate::server_sync::residency::release_anchor();
@@ -165,6 +169,11 @@ pub(super) fn rebuild(app: &AppHandle) -> Result<(), String> {
     }
     app.state::<crate::NativeStartupState>().finish_cleanup()?;
     crate::native_log::global_state().configure_file_path(&state.paths.data);
+    // Recording stays unavailable if the recorder cannot reopen; cleanup itself succeeded.
+    let _ = crate::native_log::logged_without_detail(
+        "network_log_initialize",
+        crate::network_log::initialize(&app.state::<crate::app_paths::AppPaths>()),
+    );
     Ok(())
 }
 

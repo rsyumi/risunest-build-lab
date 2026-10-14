@@ -2,6 +2,9 @@ pub(crate) mod cache;
 pub(crate) mod client;
 pub(crate) mod commands;
 pub(crate) mod asset_download_progress;
+pub(crate) mod asset_cleanup_progress;
+#[cfg(test)]
+mod asset_cleanup_tests;
 pub(crate) mod credentials;
 pub(crate) mod events;
 pub(crate) mod management;

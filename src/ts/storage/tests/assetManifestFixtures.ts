@@ -16,8 +16,8 @@ export interface AssetManifestFixtureMeasurement {
     stringifyDurationMs: number
 }
 
-function makeAssetTuples(ownerId: string): [string, string, string][] {
-    return Array.from({ length: ASSET_TUPLES_PER_OWNER }, (_, index) => {
+function makeAssetTuples(ownerId: string, count: number): [string, string, string][] {
+    return Array.from({ length: count }, (_, index) => {
         const suffix = index.toString().padStart(6, '0')
         return [
             `${ownerId}-asset-${suffix}`,
@@ -27,13 +27,13 @@ function makeAssetTuples(ownerId: string): [string, string, string][] {
     })
 }
 
-export function makeAssetManifestFixture(): Database {
+export function makeAssetManifestFixture(tuplesPerOwner = ASSET_TUPLES_PER_OWNER): Database {
     const database = structuredClone(fixtureDatabase)
     database.modules = [{
         id: 'module-owner',
         name: 'Module owner',
         description: 'Deterministic large module asset owner',
-        assets: makeAssetTuples('module-owner'),
+        assets: makeAssetTuples('module-owner', tuplesPerOwner),
     }]
     database.personas = [{
         id: 'persona-owner',
@@ -44,10 +44,10 @@ export function makeAssetManifestFixture(): Database {
             id: 'persona-module-owner',
             name: 'Persona module owner',
             description: 'Deterministic embedded module asset owner',
-            assets: makeAssetTuples('persona-owner'),
+            assets: makeAssetTuples('persona-owner', tuplesPerOwner),
         },
     }]
-    database.characters[0].additionalAssets = makeAssetTuples('character-owner')
+    database.characters[0].additionalAssets = makeAssetTuples('character-owner', tuplesPerOwner)
     return database
 }
 

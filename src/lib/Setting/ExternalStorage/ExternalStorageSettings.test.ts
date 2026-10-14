@@ -33,9 +33,11 @@ const state = vi.hoisted(() => ({
     connectionOnly: vi.fn(),
     downloadRemote: vi.fn(),
     binding: { target: { kind: 'none' } } as { target: { kind: string; connectionId?: string } },
+    prepareReplacement: vi.fn(async () => ({ bound: false })),
+    characters: vi.fn(async () => true),
 }))
 
-vi.mock('src/ts/platform', () => ({ isTauri: true, isTauriAndroid: false, isTauriIOS: false }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'tauri', os: 'windows' }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(), Channel: class { onmessage = (_value: unknown) => {} } }))
 vi.mock('@tauri-apps/plugin-os', () => ({ type: () => 'windows' }))
 vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn() }))
@@ -45,11 +47,11 @@ vi.mock('qrcode', async importOriginal => {
 })
 vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn(), alertNormal: vi.fn(), alertCheckboxConfirm: vi.fn(), alertActionConfirm: state.actionConfirm }))
 vi.mock('src/ts/storage/sync/external/lwwProduction', () => ({ requestExternalLwwNow: state.syncNow, isExternalLwwRunning: (id: string) => !state.stopped.has(id), supportsExternalLwwNewDevice: () => state.remedy, subscribeExternalLwwFailures(callback: (value: ReadonlyMap<string, unknown>) => void) { callback(new Map(state.failures)); return () => {} } }))
-vi.mock('src/ts/storage/sync/bindingRegistry', () => ({ bindSyncTarget: state.bind, unbindSyncTarget: state.unbind, resumeCurrentSyncBinding: state.resume }))
+vi.mock('src/ts/storage/sync/bindingRegistry', () => ({ bindSyncTarget: state.bind, unbindSyncTarget: state.unbind, resumeCurrentSyncBinding: state.resume, prepareBoundLibraryReplacement: state.prepareReplacement }))
+vi.mock('src/ts/storage/libraryCharacters', () => ({ hasLibraryCharacters: state.characters }))
 // The form's own steps are covered by its tests; here it only reports a finished connection.
 vi.mock('./ConnectionForm.svelte', () => ({ default: (_anchor: unknown, props: { onconnected: (result: unknown) => Promise<void> }) => { state.form = props } }))
 vi.mock('src/ts/storage/sync/bindingNative', () => ({ createNativeSyncBindingBridge: () => ({ state: async () => state.binding }) }))
-vi.mock('src/lang', () => ({ language: { risuNest: { serverSync: { lastSuccess: 'Last sync' } }, lwwSync: { newDeviceAction: 'Connect as new device', clockBlocked: 'Correct the device clock and retry.', previousStorageUnavailable: 'The previous storage could not be reached.', downloadFailedNotConnected: 'The files could not be downloaded, so the connection was not made.' } } }))
 vi.mock('src/ts/storage/sync/serverAssetResidency', () => ({ countConnectionOnlyAssets: state.connectionOnly, downloadRemoteAssets: state.downloadRemote }))
 vi.mock('src/ts/stores.svelte' , () => ({ DBState: { db: { language: 'en' } } }))
 vi.mock('src/ts/storage/sync/external/production', () => ({
@@ -89,6 +91,7 @@ vi.mock('src/ts/storage/sync/external/bridge', () => ({
 }))
 
 import { alertConfirm, alertCheckboxConfirm } from 'src/ts/alert'
+import { language } from 'src/lang'
 import ExternalStorageSettings from './ExternalStorageSettings.svelte'
 import { requestExternalStorageNow, resumeExternalStorageJob, requestExternalStorageDeleteHistory, requestExternalStorageRestore, stopExternalStorageRestore } from 'src/ts/storage/sync/external/production'
 import { externalErrorMessage, externalStorageStrings } from './strings'
@@ -476,6 +479,59 @@ describe('the storage usage tab', () => {
         expect([...target.querySelectorAll('[role="alert"]')].map(item => item.textContent?.trim())).toEqual([])
     })
 
+    describe('confirming a snapshot restore', () => {
+        async function restoreSnapshot() {
+            state.listHistory.mockResolvedValue({ items: [{ id: 'point', snapshotId: 'snapshot', kind: 'backup-point',
+                createdAtMs: '1', logicalRevision: '1', complete: true, verified: true, pinned: false,
+                includedSections: ['hypa', 'local-plugins', 'local-settings'], sameDevice: true }] })
+            const tab = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.history)!
+            tab.click()
+            await settle()
+            const restore = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.restore)!
+            restore.click()
+            await settle()
+            await settle()
+        }
+        afterEach(() => {
+            state.prepareReplacement.mockReset().mockResolvedValue({ bound: false })
+            state.characters.mockReset().mockResolvedValue(true)
+        })
+
+        it('restores over a library without characters without asking', async () => {
+            state.characters.mockResolvedValue(false)
+            await restoreSnapshot()
+            expect(alertCheckboxConfirm).not.toHaveBeenCalled()
+            expect(requestExternalStorageRestore).toHaveBeenCalledWith('connection-1', 'snapshot', expect.any(Array))
+        })
+        it('counts the characters of a synced library after receiving its latest changes', async () => {
+            const order: string[] = []
+            state.prepareReplacement.mockImplementation(async () => { order.push('receive'); return { bound: true } })
+            state.characters.mockImplementation(async () => { order.push('count'); return false })
+            await restoreSnapshot()
+            expect(order).toEqual(['receive', 'count'])
+            expect(alertCheckboxConfirm).not.toHaveBeenCalled()
+            expect(requestExternalStorageRestore).toHaveBeenCalledOnce()
+        })
+        it('asks before restoring over a synced library that holds a character, and declining keeps it', async () => {
+            state.prepareReplacement.mockResolvedValue({ bound: true })
+            vi.mocked(alertCheckboxConfirm).mockResolvedValue({ confirmed: false, checked: false })
+            await restoreSnapshot()
+            expect(alertCheckboxConfirm).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+                title: language.lwwSync.restoreTitle, description: language.lwwSync.restoreDescriptionBound, requireChecked: true,
+            }))
+            expect(requestExternalStorageRestore).not.toHaveBeenCalled()
+        })
+        it('asks without counting when the latest changes cannot be received', async () => {
+            state.binding = { target: { kind: 'server', connectionId: 'server' } }
+            state.prepareReplacement.mockRejectedValue(new Error('unreachable'))
+            vi.mocked(alertCheckboxConfirm).mockResolvedValue({ confirmed: true, checked: true })
+            await restoreSnapshot()
+            expect(state.characters).not.toHaveBeenCalled()
+            expect(alertCheckboxConfirm).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ description: language.lwwSync.restoreDescriptionBound }))
+            expect(requestExternalStorageRestore).toHaveBeenCalledOnce()
+        })
+    })
+
     it('owns one snapshot export, reports progress and cancels that export ID', async () => {
         state.listHistory.mockResolvedValue({ items: [{ id: 'point', snapshotId: 'snapshot', kind: 'backup-point',
             createdAtMs: '1', logicalRevision: '1', complete: true, verified: true, pinned: false,
@@ -613,7 +669,7 @@ describe('the storage usage tab', () => {
         state.failures.set('connection-1', { kind: 'corrupt' }); state.bind.mockResolvedValue({ kind: 'cancelled' })
         state.getState.mockResolvedValue({ supported: true, selection: { kind: 'external', connectionId: 'connection-1', selectionEpoch: '0', paused: false }, connections: [{ ...connection(10, 30), purpose: 'sync', strategy: 'sequential' }], jobs: [] })
         component = mount(ExternalStorageSettings, { target }); await settle()
-        const recovery = [...target.querySelectorAll('button')].find(item => item.textContent?.trim() === 'Connect as new device')!
+        const recovery = [...target.querySelectorAll('button')].find(item => item.textContent?.trim() === language.lwwSync.newDeviceAction)!
         expect(recovery).toBeDefined(); recovery.click(); await settle()
         expect(state.bind).toHaveBeenCalledWith({ kind: 'external', connectionId: 'connection-1' }, { mode: 'new-device' })
         expect(alertConfirm).not.toHaveBeenCalled(); expect(alertCheckboxConfirm).not.toHaveBeenCalled()
@@ -1050,7 +1106,9 @@ describe('a running job', () => {
 describe('removing a connection', () => {
     const held = (entries: { connectionId: string, objects: number }[]) => async (connectionId: string) =>
         entries.find(entry => entry.connectionId === connectionId)?.objects ?? 0
-    const removeButton = () => [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.remove)!
+    // A busy button also carries a screen-reader loading note after its label.
+    const label = (button: Element) => [...button.childNodes].filter(node => !(node instanceof HTMLElement && node.classList.contains('sr-only'))).map(node => node.textContent).join('').trim()
+    const removeButton = () => [...target.querySelectorAll('button')].find(button => label(button) === strings.remove)!
     const name = `${strings.providers.webdav.name}
 https://synthetic.invalid · RisuNest`
     beforeEach(async () => {
@@ -1250,7 +1308,7 @@ it('explains a sync stopped because the previous storage could not be reached', 
     target = document.createElement('div')
     document.body.append(target)
     component = mount(ExternalStorageSettings, { target }); await settle()
-    expect(target.textContent).toContain('The previous storage could not be reached.')
+    expect(target.textContent).toContain(language.lwwSync.previousStorageUnavailable)
     expect(target.textContent).not.toContain(strings.errorGeneric)
     unmount(component); component = undefined; target.remove()
 })
@@ -1267,7 +1325,7 @@ it('explains a connection not made because the files could not be downloaded fir
     expect(toggle).toBeDefined()
     toggle!.click(); await settle()
     expect(state.bind).toHaveBeenCalledWith({ kind: 'external', connectionId: 'connection-1' })
-    expect(target.querySelector('[role="alert"]')?.textContent).toBe('The files could not be downloaded, so the connection was not made.')
+    expect(target.querySelector('[role="alert"]')?.textContent).toBe(language.lwwSync.downloadFailedNotConnected)
     unmount(component); component = undefined; target.remove()
 })
 
@@ -1656,19 +1714,19 @@ describe('the connection card text', () => {
     it('shows when a sync connection last synced, formatted like the last backup', async () => {
         await show([{ ...connection(10, 30), purpose: 'sync', strategy: 'sequential', lastSyncAtMs: '1000' }])
         const terms = [...target.querySelectorAll('dt')]
-        const row = terms.find(term => term.textContent === 'Last sync')
+        const row = terms.find(term => term.textContent === language.risuNest.serverSync.lastSuccess)
         expect(row?.nextElementSibling?.textContent).toBe(new Date(1000).toLocaleString())
         expect(occurrences(strings.lastBackup)).toBe(0)
     })
 
     it('shows no last sync on a sync connection that has not synced', async () => {
         await show([{ ...connection(10, 30), purpose: 'sync', strategy: 'sequential' }])
-        expect(target.textContent).not.toContain('Last sync')
+        expect(target.textContent).not.toContain(language.risuNest.serverSync.lastSuccess)
     })
 
     it('shows both times on a sync connection that also made a backup', async () => {
         await show([{ ...connection(10, 30), purpose: 'sync', strategy: 'sequential', lastSyncAtMs: '2000', lastBackupAtMs: '1000' }])
-        expect([...target.querySelectorAll('dt')].map(term => term.textContent)).toEqual(['Last sync', strings.lastBackup])
+        expect([...target.querySelectorAll('dt')].map(term => term.textContent)).toEqual([language.risuNest.serverSync.lastSuccess, strings.lastBackup])
     })
 
     it('keeps the last backup on a backup connection', async () => {

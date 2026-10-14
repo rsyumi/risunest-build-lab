@@ -11,7 +11,6 @@ import { SaveCoordinator } from 'src/ts/storage/saveCoordinator'
 import { capturePersistentRoot } from 'src/ts/storage/persistentDataRuntime'
 import { alertConfirm } from 'src/ts/alert'
 
-vi.mock('src/lang', () => ({ language: languageEnglish }))
 vi.mock('src/ts/stores.svelte', () => {
     const DBState = $state({ db: {} })
     return { DBState, disableHighlight: writable(false), popUpEditorStore: {} }

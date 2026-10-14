@@ -1,8 +1,6 @@
 // @vitest-environment happy-dom
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { readFileSync } from 'node:fs'
-import ts from 'typescript'
 
 const { checkpointNativePersistentStore } = vi.hoisted(() => ({
     checkpointNativePersistentStore: vi.fn(async () => undefined),
@@ -12,9 +10,10 @@ vi.mock('./persistentDataRuntime.svelte', () => ({
     flushPendingData: vi.fn(async () => undefined),
 }))
 vi.mock('./nativePersistentMaintenance', () => ({ checkpointNativePersistentStore }))
-vi.mock('../platform', () => ({ isTauri: false }))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 
 import { registerLifecycleCommitListeners } from './lifecycleCommit'
+import { createLifecycleFlush } from './lifecycleFlush'
 import {
     captureRoot,
     deferred,
@@ -23,40 +22,19 @@ import {
     SaveCoordinator,
 } from './saveCoordinator.testSupport'
 
-type LifecycleFlush = NonNullable<Parameters<typeof registerLifecycleCommitListeners>[0]>
-
-function bootstrapLifecycleFlush(
+function platformLifecycleFlush(
     runtime: Pick<SaveCoordinator, 'flushPendingData' | 'flushPendingDataLocally'>,
     desktop: boolean,
     platform: string,
-): LifecycleFlush {
-    const source = readFileSync('src/ts/bootstrap.ts', 'utf8')
-    const ast = ts.createSourceFile('bootstrap.ts', source, ts.ScriptTarget.Latest, true)
-    let lifecycleInitializer: ts.Expression | undefined
-    let flushArgument: ts.Expression | undefined
-    const visit = (node: ts.Node): void => {
-        if (ts.isVariableDeclaration(node) && node.name.getText(ast) === 'flushLifecycle') {
-            lifecycleInitializer = node.initializer
-        }
-        if (ts.isCallExpression(node) && node.expression.getText(ast) === 'registerLifecycleCommitListeners') {
-            flushArgument = node.arguments[0]
-        }
-        ts.forEachChild(node, visit)
-    }
-    visit(ast)
-    if (!lifecycleInitializer || !flushArgument) throw new Error('Missing bootstrap lifecycle flush injection')
-    const body = ts.transpileModule(
-        `const flushLifecycle = ${lifecycleInitializer.getText(ast)}; const flush = ${flushArgument.getText(ast)};`,
-        { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } },
-    ).outputText
-    return new Function(
-        'runtime', 'isTauriDesktop', 'isTauriAndroid', 'nativePlatform',
-        'forgetInlayProviderImages', 'releaseIdleTransformerModels',
-        `${body}\nreturn flush;`,
-    )(
-        runtime, desktop, !desktop && platform === 'android', () => platform,
-        vi.fn(), vi.fn(async () => undefined),
-    ) as LifecycleFlush
+) {
+    return createLifecycleFlush({
+        runtime,
+        isTauriAndroid: !desktop && platform === 'android',
+        isTauriDesktop: desktop,
+        nativePlatform: () => platform,
+        forgetInlayProviderImages: vi.fn(),
+        releaseIdleTransformerModels: vi.fn(async () => undefined),
+    }).flushForLifecycle
 }
 
 const originalVisibilityState = Object.getOwnPropertyDescriptor(document, 'visibilityState')
@@ -94,14 +72,14 @@ describe('registerLifecycleCommitListeners', () => {
         [false, 'android', 'visibility-hidden', false],
         [false, 'ios', 'stop', false],
         [false, 'windows', 'stop', false],
-    ] as const)('uses bootstrap lifecycle persistence policy (desktop=%s, platform=%s, reason=%s)', async (
+    ] as const)('uses the platform lifecycle persistence policy (desktop=%s, platform=%s, reason=%s)', async (
         desktop, platform, reason, locally,
     ) => {
         const runtime = {
             flushPendingData: vi.fn(async () => undefined),
             flushPendingDataLocally: vi.fn(async () => undefined),
         }
-        await bootstrapLifecycleFlush(runtime, desktop, platform)(reason)
+        await platformLifecycleFlush(runtime, desktop, platform)(reason)
         expect(runtime.flushPendingData.mock.calls).toEqual(locally ? [] : [[reason]])
         expect(runtime.flushPendingDataLocally.mock.calls).toEqual(locally ? [[reason]] : [])
     })
@@ -140,7 +118,7 @@ describe('registerLifecycleCommitListeners', () => {
             return checkpointDone.promise
         })
         const dispose = registerLifecycleCommitListeners(
-            bootstrapLifecycleFlush(coordinator, true, 'windows'),
+            platformLifecycleFlush(coordinator, true, 'windows'),
             exitCoordinator,
             checkpoint,
         )
@@ -200,7 +178,7 @@ describe('registerLifecycleCommitListeners', () => {
             coordinator.markPersistentDataDirty(1)
             const checkpoint = vi.fn(async () => { order.push('checkpoint') })
             const dispose = registerLifecycleCommitListeners(
-                bootstrapLifecycleFlush(coordinator, false, 'android'),
+                platformLifecycleFlush(coordinator, false, 'android'),
                 undefined,
                 checkpoint,
             )
@@ -399,7 +377,7 @@ describe('registerLifecycleCommitListeners', () => {
     it('checkpoints through the native store on the Tauri production path', async () => {
         checkpointNativePersistentStore.mockClear()
         vi.resetModules()
-        vi.doMock('../platform', () => ({ isTauri: true }))
+        vi.doMock('../platform', async () => (await import('../platform.testSupport')).platformModule({ runtime: 'tauri', os: 'windows' }))
         const { registerLifecycleCommitListeners: registerTauri } = await import('./lifecycleCommit')
         const onFlushComplete = vi.fn()
         ;(window as any).RisuLifecycleBridge = { onFlushComplete }

@@ -32,7 +32,7 @@ const mocks = vi.hoisted(() => {
 });
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
-vi.mock("../../platform", () => ({ isTauriIOS: false }));
+vi.mock("../../platform", async () => (await import("../../platform.testSupport")).platformModule({ runtime: "tauri", os: "android" }));
 vi.mock("../../alert", () => ({
   alertSelect: mocks.alertSelect,
   alertNormal: mocks.alertNormal,

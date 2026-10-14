@@ -16,8 +16,7 @@ vi.mock('./stores.svelte', async () => {
     return { alertStore: createAlertQueue({ type: 'none', msg: '' }, { gapMs: 0 }) }
 })
 vi.mock('./storage/database.svelte', () => ({ getDatabase: vi.fn(() => ({})) }))
-vi.mock('src/ts/platform', () => ({ isTauri: false }))
-vi.mock('../lang', () => ({ language: {} }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 
 import { alertStore } from './stores.svelte'
 import { alertLogin, openRisuAccountLogin } from './alert'

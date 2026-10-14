@@ -14,7 +14,7 @@ mod archive;
 mod transaction;
 pub use archive::{
     extract_package, managed_bundle_version, validate_installed_marker, validate_removal_inventory,
-    ExtractedBundle,
+    ExtractedBundle, previous_owned_files,
 };
 mod engine;
 pub use engine::{run, run_helper, run_recovery_helper, run_while_locked, RunMode, RunOutcome};
@@ -740,12 +740,12 @@ pub fn begin_installer_guard(root: &Path, server: &Path, owner: Option<u32>) -> 
             return Ok(nonce);
         }
         if error.is_file() {
-            if read_json::<serde_json::Value>(&error, "installer-guard-prepare-failed")
-                .ok()
-                .and_then(|value| value["restartFailed"].as_bool())
-                == Some(true)
-            {
-                return Err("installer-guard-restart-failed".into());
+            if let Ok(value) = read_json::<serde_json::Value>(&error, "installer-guard-prepare-failed") {
+                let cause = value["error"].as_str().unwrap_or("installer-guard-prepare-failed");
+                if value["restartFailed"].as_bool() == Some(true) {
+                    return Err(format!("installer-guard-restart-failed: {cause}"));
+                }
+                return Err(cause.to_owned());
             }
             return Err("installer-guard-prepare-failed".into());
         }
@@ -888,12 +888,14 @@ pub async fn run_installer_guard(
         .await)
     }
     .await;
-    if result.is_err() && !ready.exists() && !error_path.exists() {
-        let _ = write_json(
-            &error_path,
-            &serde_json::json!({"error":"installer-guard-prepare-failed"}),
-            "installer-guard-write-failed",
-        );
+    if let Err(error) = &result {
+        if !ready.exists() && !error_path.exists() {
+            let _ = write_json(
+                &error_path,
+                &serde_json::json!({"error":error}),
+                "installer-guard-write-failed",
+            );
+        }
     }
     result
 }

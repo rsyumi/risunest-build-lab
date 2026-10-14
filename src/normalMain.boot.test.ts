@@ -8,14 +8,16 @@ vi.mock('katex/dist/katex.min.css', () => ({}))
 vi.mock('./ts/storage/deviceSettingsStartup', () => ({}))
 vi.mock('./ts/storage/database.svelte', () => ({}))
 vi.mock('./App.svelte', () => ({ default: {} }))
-vi.mock('./ts/bootstrap', () => ({ loadData: vi.fn() }))
+vi.mock('./ts/bootstrap', async () => (await import('./ts/bootstrap.testSupport')).bootstrapModule())
 vi.mock('./ts/hotkey', () => ({ initHotkey: vi.fn() }))
 vi.mock('./preload', () => ({ preLoadCheck: vi.fn() }))
-vi.mock('svelte', () => ({ mount: vi.fn(() => ({})) }))
+vi.mock('svelte', async (importOriginal) => ({
+    ...await importOriginal<typeof import('svelte')>(),
+    mount: vi.fn(() => ({})),
+}))
 vi.mock('./ts/storage/deviceBackup/jobRecovery', () => ({
     resumePortableExportsAfterBootstrap: vi.fn(async () => {}),
 }))
-vi.mock('./lang', () => ({ changeLanguage: vi.fn() }))
 vi.mock('./ts/storage/recoveryMode.svelte', () => ({
     decideBoot: vi.fn(async () => 'recovery'),
 }))
@@ -48,8 +50,9 @@ describe('the recovery shell holds the ordinary start', () => {
             const start = get(recoveryStart)
             expect(start).toBeTypeOf('function')
             // The shell shows before the library's language loads, so it follows the device's.
-            const { changeLanguage } = await import('./lang')
-            expect(changeLanguage).toHaveBeenCalledExactlyOnceWith('ko')
+            const { language } = await import('./lang')
+            const { languageKorean } = await import('./lang/ko')
+            expect(language.risuNest.recovery.title).toBe(languageKorean.risuNest.recovery.title)
 
             start?.()
             // The ordinary start yields to the UI first, so give that a few turns to land.

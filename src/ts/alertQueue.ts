@@ -118,3 +118,9 @@ export function createAlertQueue(initial: alertData, options: { gapMs?: number }
         hasDialogs: () => dialogs.length > 0,
     }
 }
+
+export const alertStore = createAlertQueue({ type: 'none', msg: 'n' })
+
+export function alertMd(msg: string) {
+    alertStore.set({ type: 'markdown', msg })
+}

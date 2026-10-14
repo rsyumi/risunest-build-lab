@@ -1191,12 +1191,13 @@ fn foreign_handles_locators_and_intents_are_refused_without_a_request() {
 
 #[test]
 fn cancellation_during_a_download_body_stops_the_transfer() {
+    use crate::external_storage::provider_contract::{a_read_cancelled_during_its_body_stops, held_body};
     runtime().block_on(async {
         let open_cancel = Cancellation::default();
-        let directory = tempfile::tempdir().unwrap();
         let deps = fixture();
         let provider = create(deps.dependencies.clone()).unwrap();
-        let storage = WireServer::start(vec![Reply::DelayedBody]);
+        let (held, _release) = held_body();
+        let storage = WireServer::start(vec![held]);
         let mut replies = open_replies(1024, 4096, 0);
         replies.extend([
             json(
@@ -1210,30 +1211,8 @@ fn cancellation_during_a_download_body_stops_the_transfer() {
             .await
             .unwrap();
         let locator = config::locator(&handle.connection_identity, config::SNAPSHOTS, "snap-a.bin");
-        let mut sink = SpoolSink::create(&directory.path().join("partial"), 100).unwrap();
-        let cancel = Cancellation::default();
-        let read = async {
-            assert!(provider
-                .read_object(&handle, &locator, None, &mut sink, &cancel)
-                .await
-                .is_err());
-        };
-        let trigger = async {
-            while storage.requests.lock().unwrap().is_empty() {
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            cancel.cancel();
-        };
-        // A guard against a transfer that never stops, not a latency budget: a loaded test run
-        // can take far longer than the cancellation itself does.
-        tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            futures::future::join(read, trigger),
-        )
-        .await
-        .unwrap();
-        assert!(!sink.is_verified());
+        a_read_cancelled_during_its_body_stops(provider.as_ref(), &handle, &locator, &Cancellation::default())
+            .await;
     });
 }
 

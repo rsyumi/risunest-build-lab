@@ -238,7 +238,7 @@ fn server_sync_asset_policy_operation<R: tauri::Runtime>(app: &AppHandle<R>, pol
 }
 #[tauri::command]
 pub(crate) fn asset_residency_prepare_download(app: AppHandle, operation_id: String) -> Result<()> {
-    recorded("asset-download", app.state::<ServerSyncCommandState>().prepare_asset_operation(operation_id))
+    recorded("asset-prepare", app.state::<ServerSyncCommandState>().prepare_asset_operation(operation_id))
 }
 #[tauri::command]
 pub(crate) async fn asset_residency_download_remote(
@@ -278,21 +278,34 @@ pub(crate) async fn asset_residency_download_remote(
 #[tauri::command]
 pub(crate) async fn server_sync_asset_evict(
     app: AppHandle,
+    operation_id: String,
+    webview: tauri::Webview,
+    progress: Option<tauri::ipc::JavaScriptChannelId>,
 ) -> Result<crate::persistent_store::asset_residency::ResidencyStatus> {
-    logged_blocking("asset-evict", move || within(&LANES.assets, || server_sync_asset_evict_operation(&app))).await
+    let operation = recorded("asset-evict", app.state::<ServerSyncCommandState>().claim_asset_operation(operation_id))?;
+    let channel = progress.map(|channel| channel.channel_on(webview));
+    logged_blocking("asset-evict", move || within(&LANES.assets, || {
+        let mut progress = super::asset_cleanup_progress::Progress::new(move |snapshot| {
+            if let Some(channel) = &channel { let _ = channel.send(snapshot); }
+        });
+        server_sync_asset_evict_operation(&app, operation, &mut progress)
+    })).await
 }
 
-fn server_sync_asset_evict_operation<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<crate::persistent_store::asset_residency::ResidencyStatus> {
+fn server_sync_asset_evict_operation<R: tauri::Runtime>(app: &AppHandle<R>, operation: AssetOperation, progress: &mut super::asset_cleanup_progress::Progress) -> Result<crate::persistent_store::asset_residency::ResidencyStatus> {
+    let _operation = operation;
     let _admission = claim_library(&app)?;
     let state = app.state::<ServerSyncCommandState>();
-    let (_running, cancelled) = state.claim_preparation()?;
-    job_store(&app)?.asset_residency_evict_cancelled(Some(cancelled.clone()), || {
+    let _running = state.claim()?;
+    let cancelled = _operation.cancelled.clone();
+    *state.cancelled.lock().map_err(|_| SyncError::new("server-sync-state-unavailable", 503))? = cancelled.clone();
+    job_store(&app)?.asset_residency_evict_observed(Some(cancelled.clone()), || {
         if cancelled.load(Ordering::Acquire) {
             Err(SyncError::new("cancelled", 409))
         } else {
             Ok(())
         }
-    })
+    }, progress)
 }
 #[tauri::command]
 pub(crate) async fn server_sync_cache_usage(
@@ -631,8 +644,13 @@ mod tests {
     fn an_unavailable_job_store_returns_a_retryable_fault_and_releases_admission() {
         let root = tempfile::tempdir().unwrap();
         let app = mock_app_with(PersistentStoreState::default(), root.path());
-        let error = server_sync_asset_evict_operation(app.handle()).err().expect("eviction without a local store must fail");
+        let state = app.state::<ServerSyncCommandState>();
+        let id = uuid::Uuid::new_v4().to_string();
+        state.prepare_asset_operation(id.clone()).unwrap();
+        let operation = state.claim_asset_operation(id).unwrap();
+        let error = server_sync_asset_evict_operation(app.handle(), operation, &mut super::super::asset_cleanup_progress::Progress::new(|_| {})).err().expect("eviction without a local store must fail");
         assert_eq!((error.code.as_str(), error.status, error.retryable), ("local-store-unavailable", 503, true));
+        assert!(state.asset_operation.lock().unwrap().is_none());
         assert_released(&app);
         let error = server_sync_asset_policy_operation(app.handle(), AssetPolicy::Full, None).err().expect("a policy change without a local store must fail");
         assert_eq!((error.code.as_str(), error.status, error.retryable), ("local-store-unavailable", 503, true));

@@ -1,7 +1,8 @@
 import 'fake-indexeddb/auto'
 import { describe, expect, it, vi } from 'vitest'
 import type { Database } from 'src/ts/storage/database.svelte'
-import type { PersistentDataStore, PluginStorageCatalog, PluginStorageMutation } from 'src/ts/storage/persistentDataStore'
+import type { PluginStorageCatalog, PluginStorageMutation } from 'src/ts/storage/persistentDataStore'
+import { createStoreStub } from 'src/ts/storage/persistentDataStore.testSupport'
 import { IndexedDbPersistentDataStore } from 'src/ts/storage/indexedDbPersistentDataStore'
 import { createMutationGatedPersistentDataStore } from 'src/ts/storage/mutationGatedPersistentDataStore'
 import { createStorageMutationGate, createInRealmStorageLockManager } from 'src/ts/storage/storageMutationGate'
@@ -25,7 +26,7 @@ vi.mock('src/ts/storage/database.svelte', () => ({
     presetTemplate: {},
 }))
 vi.mock('src/ts/globalApi.svelte', () => ({ forageStorage: {} }))
-vi.mock('src/ts/platform', () => ({ isTauri: false }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 
 function database(username = 'Initial'): Database {
     return {
@@ -101,12 +102,12 @@ describe('persistence boundary regressions', () => {
         })
         const root = { username: 'Initial' }
         const coordinator = new SaveCoordinator({
-            store: {
+            store: createStoreStub({
                 commit: (commit: CommitEnvelope['commit']) => {
                     input = { commit, assetAliases: [] }
                     return transport.commit(input)
                 },
-            } as unknown as PersistentDataStore,
+            }),
             captureRoot: () => root as never,
             captureSelectedCharacter: () => null,
             captureCharacter: () => null,

@@ -34,10 +34,7 @@ vi.mock('../index.svelte', async () => {
     }
 })
 vi.mock('src/ts/globalApi.svelte', () => ({ downloadFile: mocks.downloadFile }))
-vi.mock('src/lang', () => ({
-    language: { risuNest: { inlay: { tooLarge: 'too large' } } },
-}))
-vi.mock('src/ts/platform', () => ({ isTauri: false }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 vi.mock('../memory/hypamemory', () => ({
     HypaProcesser: class {
         addText() {}
@@ -64,6 +61,7 @@ vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({
 import { postChatFile } from './multisend'
 import { InlayInputTooLargeError } from './inlays'
 import { doingChat, reserveGeneration } from '../generationState'
+import { language } from 'src/lang'
 
 function createDatabase(): Database {
     const conversation = {
@@ -256,7 +254,7 @@ describe('postChatFile attachment errors', () => {
 
         await expect(postChatFile({ name: `huge.${extension}`, data: new Uint8Array([1]) })).resolves.toEqual([])
 
-        expect(mocks.alertError).toHaveBeenCalledWith('too large')
+        expect(mocks.alertError).toHaveBeenCalledWith(language.risuNest.inlay.tooLarge)
         expect(conversation.message).toEqual([{ role: 'char', data: 'before' }])
         expect(mocks.sendChat).not.toHaveBeenCalled()
     })

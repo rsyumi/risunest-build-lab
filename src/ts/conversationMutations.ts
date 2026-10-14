@@ -250,8 +250,9 @@ function isConversationMutationTargetStateCurrent(target: ConversationMutationTa
     if (target.conversation.message !== target.messages) return false
     if (target.conversation.message.length !== target.messageCount) return false
     if (!target.session) return target.sessionVersion === null && target.startPosition === null
-    return target.session.isActive &&
-        target.session.version === target.sessionVersion &&
+    // Variable-only commits keep the messages and the start position this target holds.
+    return target.sessionVersion !== null &&
+        target.session.isContentUnchangedSince(target.sessionVersion) &&
         target.session.materializeCompatibilityArray() === target.messages
 }
 

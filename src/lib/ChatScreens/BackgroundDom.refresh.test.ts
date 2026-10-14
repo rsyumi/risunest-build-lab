@@ -20,6 +20,7 @@ vi.mock('src/ts/stores.svelte', async () => {
         selIdState: { selId: 0 },
         moduleBackgroundEmbedding: writable(''),
         ReloadGUIPointer: writable(0),
+        ScriptDisplayRefreshPointer: writable(0),
     }
 })
 vi.mock('src/ts/storage/database.svelte', () => ({
@@ -39,7 +40,7 @@ vi.mock('src/ts/liveDisplayParserLease', () => ({
     },
     acquireLiveDisplayParserLease: state.acquire,
 }))
-vi.mock('src/ts/parser/parser.svelte', () => ({
+vi.mock('src/ts/parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule({
     risuChatParser: (value: string) => value,
     ParseMarkdown: state.parse,
 }))
@@ -51,7 +52,7 @@ vi.mock('src/ts/process/files/inlayRenderSource', () => ({
 }))
 
 import BackgroundDom from './BackgroundDom.svelte'
-import { ReloadGUIPointer } from 'src/ts/stores.svelte'
+import { ReloadGUIPointer, ScriptDisplayRefreshPointer } from 'src/ts/stores.svelte'
 
 function deferred<T>() {
     let resolve!: (value: T) => void
@@ -70,6 +71,7 @@ afterEach(async () => {
     document.body.replaceChildren()
     vi.resetAllMocks()
     ReloadGUIPointer.set(0)
+    ScriptDisplayRefreshPointer.set(0)
     state.selection = 'conversation-one'
 })
 
@@ -130,7 +132,7 @@ test('keeps shared CSS through delayed admission, repeated reloads and stale par
     expect(host.querySelector('style')).toBeNull()
 })
 
-test('retains the last stylesheet on a failed refresh and recovers on the next reload', async () => {
+test('retains the last stylesheet on a failed refresh and recovers on a script variable refresh', async () => {
     state.acquire.mockResolvedValue({ release: vi.fn() })
     state.parse.mockResolvedValue(
         '<style>.panel { color: red }</style><div>first</div>',
@@ -151,7 +153,7 @@ test('retains the last stylesheet on a failed refresh and recovers on the next r
         state.parse.mockResolvedValue(
             '<style>.panel { color: blue }</style><div>recovered</div>',
         )
-        ReloadGUIPointer.update((value) => value + 1)
+        ScriptDisplayRefreshPointer.update((value) => value + 1)
         await vi.waitFor(() => expect(host.textContent).toContain('recovered'))
         expect(host.querySelector('style')?.textContent).toContain('blue')
         expect(host.querySelector('[role="alert"]')).toBeNull()

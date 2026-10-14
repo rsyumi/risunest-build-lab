@@ -23,7 +23,10 @@ const mocks = vi.hoisted(() => {
     }
 })
 
-vi.mock('src/ts/platform', () => ({ getDetailedOSLabel: mocks.getDetailedOSLabel }))
+vi.mock('src/ts/platform', async () => ({
+    ...(await import('src/ts/platform.testSupport')).platformModule({ runtime: 'tauri', os: 'android' }),
+    getDetailedOSLabel: mocks.getDetailedOSLabel,
+}))
 vi.mock('src/ts/storage/deviceSettings', () => ({
     getDeviceSettings: mocks.getDeviceSettings,
     updateDeviceSettings: mocks.updateDeviceSettings,

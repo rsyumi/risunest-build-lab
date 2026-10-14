@@ -1,7 +1,7 @@
 import isEqual from 'lodash/isEqual'
 
 import { replaceArrayRange } from '../arrayRange'
-import { safeStructuredClone } from '../polyfill'
+import { safeStructuredClone } from '../safeStructuredClone'
 import {
     cloneConversationMetadata,
     type ActiveConversationSession,

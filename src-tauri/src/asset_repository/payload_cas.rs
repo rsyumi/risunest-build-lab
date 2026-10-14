@@ -58,6 +58,20 @@ pub(crate) struct StagedPayload {
     pub(super) content_hash: String,
     pub(super) byte_size: u64,
     directory_entries_synced: bool,
+    move_on_publish: bool,
+    verified_existing: Option<VerifiedExistingObject>,
+}
+
+struct VerifiedExistingObject {
+    file: File,
+    identity: ExactFileIdentity,
+}
+
+#[cfg(test)]
+impl StagedPayload {
+    pub(super) fn transfer_observation_to(&mut self, owner: std::thread::ThreadId) {
+        self.body_identity.transfer_to(owner);
+    }
 }
 
 #[derive(Debug)]
@@ -300,6 +314,87 @@ impl PayloadCas {
         self.publish_staged(staged)
     }
 
+    /// Takes custody of a verified private import file without copying its body.
+    pub(crate) fn stage_import_payload(
+        &self,
+        path: &Path,
+        expected_hash: &str,
+        expected_size: u64,
+        sync_required: bool,
+        cancelled: &impl Fn() -> bool,
+        progress: &impl Fn(u64),
+    ) -> io::Result<StagedPayload> {
+        validate_content_hash(expected_hash)?;
+        self.ensure_repository_root()?;
+        reject_link_components(path)?;
+        let canonical = fs::canonicalize(path)?;
+        let jobs = self.repository_root.join("native-file-jobs").join("jobs");
+        if !canonical.starts_with(&jobs)
+            || !matches!(path.extension().and_then(|s| s.to_str()), Some("payload" | "stage" | "entry"))
+        {
+            return invalid_owned_path(path, "only private import payloads may be staged");
+        }
+        #[cfg(test)]
+        let mut observed_identity = super::body_io::PendingOwnedIdentity::new();
+        let file = self.open_exact_owned_file_with_access(&canonical, sync_required)?;
+        let identity = exact_file_identity(&file)?;
+        #[cfg(any(unix, windows))]
+        if identity.links != 1 {
+            return invalid_owned_path(path, "import staging must have exactly one link");
+        }
+        if identity.byte_size() != expected_size {
+            return collision_or_corruption(expected_hash);
+        }
+        if cancelled() { return Err(io::Error::other("import cancelled")); }
+        let mut file = if sync_required {
+            file.sync_all()?;
+            drop(file);
+            self.open_exact_owned_file(&canonical)?
+        } else { file };
+        if exact_file_identity(&file)? != identity { return exact_object_changed(); }
+        let mut hash = Sha256::new();
+        #[cfg(test)]
+        super::body_io::body_sha_begin("owned", "cas_import_adopt");
+        let mut buffer = [0_u8; COPY_BUFFER_BYTES];
+        loop {
+            if cancelled() { return Err(io::Error::other("import cancelled")); }
+            let read = file.read(&mut buffer);
+            #[cfg(test)]
+            super::body_io::read_result("owned", &read);
+            let length = read?;
+            if length == 0 { break; }
+            hash.update(&buffer[..length]);
+            #[cfg(test)]
+            super::body_io::body_sha_update("owned", "cas_import_adopt", length);
+            progress(length as u64);
+        }
+        let content_hash = hex::encode(hash.finalize());
+        if content_hash != expected_hash || exact_file_identity(&file)? != identity {
+            return collision_or_corruption(expected_hash);
+        }
+        if cancelled() { return Err(io::Error::other("import cancelled")); }
+        #[cfg(test)]
+        observed_identity.verified(&content_hash);
+        let verified_existing = self.verify_import_destination(&content_hash, expected_size, cancelled)?;
+        Ok(StagedPayload {
+            #[cfg(test)]
+            body_identity: super::body_io::OwnedIdentity::new(&content_hash),
+            verified_file: file,
+            staging: StagingFile {
+                parent: canonical.parent().expect("import parent").to_path_buf(),
+                path: canonical,
+                owned: true,
+            },
+            repository_root: self.repository_root.clone(),
+            identity,
+            content_hash,
+            byte_size: expected_size,
+            directory_entries_synced: true,
+            move_on_publish: cfg!(any(windows, target_os = "android")),
+            verified_existing,
+        })
+    }
+
     pub(crate) fn stage_reader_expected(
         &self,
         reader: &mut impl Read,
@@ -393,6 +488,8 @@ impl PayloadCas {
             content_hash,
             byte_size,
             directory_entries_synced,
+            move_on_publish: false,
+            verified_existing: None,
         })
     }
 
@@ -401,7 +498,7 @@ impl PayloadCas {
         staged.body_identity.check_scope();
         self.check_staged_repository(&staged)?;
         self.ensure_repository_root()?;
-        let (mut prepared, mut staging) = self.link_staged(staged, &mut sync_directory)?;
+        let (mut prepared, mut staging) = self.link_staged(staged, &mut sync_directory, None)?;
         prepared.directory_entries_synced &= staging.remove_and_sync()?;
         Ok(prepared)
     }
@@ -412,6 +509,24 @@ impl PayloadCas {
     pub(crate) fn publish_staged_batch(
         &self,
         staged: Vec<StagedPayload>,
+    ) -> io::Result<Vec<PreparedPayload>> {
+        self.publish_staged_batch_inner(staged, None)
+    }
+
+    pub(crate) fn publish_verified_import_batch(&self, mut staged: Vec<StagedPayload>) -> io::Result<Vec<PreparedPayload>> {
+        let mut verified = HashMap::new();
+        for payload in &mut staged {
+            if let Some(existing) = payload.verified_existing.take() {
+                verified.insert(payload.content_hash.clone(), existing);
+            }
+        }
+        self.publish_staged_batch_inner(staged, Some(&mut verified))
+    }
+
+    fn publish_staged_batch_inner(
+        &self,
+        staged: Vec<StagedPayload>,
+        mut verified: Option<&mut HashMap<String, VerifiedExistingObject>>,
     ) -> io::Result<Vec<PreparedPayload>> {
         for payload in &staged {
             #[cfg(test)]
@@ -428,7 +543,7 @@ impl PayloadCas {
             linked.push(self.link_staged(payload, &mut |directory: &Path| {
                 changed.insert(directory.to_path_buf());
                 Ok(true)
-            })?);
+            }, verified.as_deref_mut())?);
         }
         let mut synced = true;
         for directory in &changed {
@@ -468,6 +583,7 @@ impl PayloadCas {
         &self,
         staged: StagedPayload,
         sync_parent: &mut dyn FnMut(&Path) -> io::Result<bool>,
+        mut verified: Option<&mut HashMap<String, VerifiedExistingObject>>,
     ) -> io::Result<(PreparedPayload, StagingFile)> {
         let StagedPayload {
             #[cfg(test)]
@@ -478,6 +594,7 @@ impl PayloadCas {
             content_hash,
             byte_size,
             mut directory_entries_synced,
+            move_on_publish,
             ..
         } = staged;
         #[cfg(test)]
@@ -515,22 +632,32 @@ impl PayloadCas {
         )?;
         let object_path = object_directory.join(&content_hash[2..]);
 
-        #[cfg(target_os = "android")]
-        let publication =
-            crate::trust_boundary::rename_without_replace(&staging_path, &object_path);
-        #[cfg(not(target_os = "android"))]
+        #[cfg(any(target_os = "android", windows))]
+        let publication = if move_on_publish || cfg!(target_os = "android") {
+            crate::trust_boundary::rename_without_replace(&staging_path, &object_path)
+        } else {
+            fs::hard_link(&staging_path, &object_path)
+        };
+        #[cfg(not(any(target_os = "android", windows)))]
         let publication = fs::hard_link(&staging_path, &object_path);
         #[cfg(all(test, target_os = "android"))]
         super::body_io::publication_result("rename", &publication, byte_size);
         #[cfg(all(test, not(target_os = "android")))]
-        super::body_io::publication_result("hard-link", &publication, byte_size);
+        super::body_io::publication_result(if move_on_publish { "rename" } else { "hard-link" }, &publication, byte_size);
         let deduplicated = match publication {
             Ok(()) => {
                 directory_entries_synced &= sync_parent(&object_directory)?;
                 false
             }
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                self.verify_existing_object(&object_path, &content_hash, byte_size, &physical_key)?;
+                if let Some(verified) = &verified {
+                    let existing = verified.get(&content_hash).ok_or_else(|| io::Error::other("CAS destination changed before publication"))?;
+                    if !self.existing_verification_matches(&object_path, existing)? {
+                        return exact_object_changed();
+                    }
+                } else {
+                    self.verify_existing_object(&object_path, &content_hash, byte_size, &physical_key)?;
+                }
                 directory_entries_synced &= sync_parent(&object_directory)?;
                 true
             }
@@ -541,6 +668,17 @@ impl PayloadCas {
                 ));
             }
         };
+
+        if !deduplicated {
+            if let Some(verified) = verified.as_mut() {
+                let file = self.open_exact_owned_file(&object_path)?;
+                let published_identity = exact_file_identity(&file)?;
+                if published_identity != exact_file_identity(&verified_file)? {
+                    return exact_object_changed();
+                }
+                verified.insert(content_hash.clone(), VerifiedExistingObject { file, identity: published_identity });
+            }
+        }
 
         drop(path_file);
         drop(verified_file);
@@ -812,8 +950,21 @@ impl PayloadCas {
             content_hash,
             expected_byte_size,
             expected_physical_key,
+            true,
             |_| Ok(()),
         )
+    }
+
+    /// Requires positively acknowledged, persisted server custody for this exact
+    /// hash and size. Offloading discards a local copy of that retained content.
+    /// All path, size, open-handle identity and replacement checks still apply.
+    pub(crate) fn unlink_retained_object(
+        &self,
+        content_hash: &str,
+        expected_byte_size: u64,
+        expected_physical_key: &str,
+    ) -> io::Result<ExactObjectUnlink> {
+        self.unlink_exact_object_inner(content_hash, expected_byte_size, expected_physical_key, false, |_| Ok(()))
     }
 
     #[cfg(test)]
@@ -828,6 +979,7 @@ impl PayloadCas {
             content_hash,
             expected_byte_size,
             expected_physical_key,
+            true,
             after_hash,
         )
     }
@@ -837,6 +989,7 @@ impl PayloadCas {
         content_hash: &str,
         expected_byte_size: u64,
         expected_physical_key: &str,
+        verify_content: bool,
         after_hash: impl FnOnce(&Path) -> io::Result<()>,
     ) -> io::Result<ExactObjectUnlink> {
         #[cfg(test)]
@@ -860,14 +1013,17 @@ impl PayloadCas {
                 "deletion tombstone size does not match the exact canonical object",
             ));
         }
-        let actual_hash = hash_open_file(&mut file, &|| false)?;
+        let actual_hash = if verify_content { Some(hash_open_file(&mut file, &|| false)?) } else { None };
         if exact_file_identity(&file)? != identity {
             return exact_object_changed();
         }
-        if actual_hash != content_hash {
+        if actual_hash.as_deref().is_some_and(|hash| hash != content_hash) {
             return collision_or_corruption(expected_physical_key);
         }
         after_hash(&path)?;
+        if exact_file_identity(&file)? != identity {
+            return exact_object_changed();
+        }
         let metadata = fs::symlink_metadata(&path)?;
         self.validate_owned_file(&path, &metadata)?;
         let final_file = self.open_exact_owned_file(&path)?;
@@ -991,6 +1147,10 @@ impl PayloadCas {
     }
 
     fn open_exact_owned_file(&self, path: &Path) -> io::Result<File> {
+        self.open_exact_owned_file_with_access(path, false)
+    }
+
+    fn open_exact_owned_file_with_access(&self, path: &Path, writable: bool) -> io::Result<File> {
         #[cfg(test)]
         let _body_scope = {
             let hash = path.parent().and_then(Path::file_name).and_then(|name| name.to_str())
@@ -1001,7 +1161,7 @@ impl PayloadCas {
             hash.as_deref().map(super::body_io::object_scope)
         };
         let mut options = OpenOptions::new();
-        options.read(true);
+        options.read(true).write(writable);
         #[cfg(unix)]
         options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
         #[cfg(windows)]
@@ -1054,6 +1214,74 @@ impl PayloadCas {
         }
         if hash_open_file(&mut file, &|| false)? != expected_hash {
             return collision_or_corruption(physical_key);
+        }
+        Ok(())
+    }
+
+    fn verify_existing_object_checked(
+        &self,
+        path: &Path,
+        expected_hash: &str,
+        expected_size: u64,
+        physical_key: &str,
+        cancelled: &dyn Fn() -> bool,
+    ) -> io::Result<VerifiedExistingObject> {
+        #[cfg(test)]
+        let _body_scope = super::body_io::object_scope(expected_hash);
+        for _ in 0..3 {
+            let mut file = self.open_exact_owned_file(path)?;
+            let identity = exact_file_identity(&file)?;
+            if identity.byte_size() != expected_size {
+                return collision_or_corruption(physical_key);
+            }
+            if hash_open_file(&mut file, cancelled)? != expected_hash {
+                return collision_or_corruption(physical_key);
+            }
+            if exact_file_identity(&file)? == identity {
+                return Ok(VerifiedExistingObject { file, identity });
+            }
+            // A concurrent publisher may unlink its staging hard link after hashing starts.
+            // Acquire a new stable verification instead of accepting changed metadata.
+        }
+        exact_object_changed()
+    }
+
+    fn verify_import_destination(&self, hash: &str, size: u64, cancelled: &dyn Fn() -> bool) -> io::Result<Option<VerifiedExistingObject>> {
+        let Some(path) = self.existing_object_path(hash)? else { return Ok(None); };
+        match self.verify_existing_object_checked(&path, hash, size, &object_physical_key(hash), cancelled) {
+            Ok(verified) => Ok(Some(verified)),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn existing_verification_matches(&self, path: &Path, verified: &VerifiedExistingObject) -> io::Result<bool> {
+        let file = match self.open_exact_owned_file(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        Ok(exact_file_identity(&file)? == verified.identity && exact_file_identity(&verified.file)? == verified.identity)
+    }
+
+    pub(crate) fn import_destinations_unchanged(&self, staged: &[StagedPayload]) -> io::Result<bool> {
+        let existing = self.stat_objects(staged.iter().map(|payload| payload.content_hash.as_str()))?;
+        for (payload, size) in staged.iter().zip(existing) {
+            self.check_staged_repository(payload)?;
+            match (size, &payload.verified_existing) {
+                (None, None) => {},
+                (Some(_), Some(verified)) if self.existing_verification_matches(
+                    &self.repository_root.join(object_physical_key(&payload.content_hash)), verified)? => {},
+                _ => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn refresh_import_destinations(&self, staged: &mut [StagedPayload], cancelled: &dyn Fn() -> bool) -> io::Result<()> {
+        for payload in staged {
+            if cancelled() { return Err(io::Error::other("import cancelled")); }
+            payload.verified_existing = self.verify_import_destination(&payload.content_hash, payload.byte_size, cancelled)?;
         }
         Ok(())
     }
@@ -1660,6 +1888,31 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn import_destination_verification_retries_after_staging_link_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let bytes = b"synthetic concurrent import";
+        let object = cas.prepare_bytes(bytes).unwrap();
+        let path = cas.object_path(&object.content_hash).unwrap().unwrap();
+        let staging_link = directory.path().join("publisher-staging");
+        std::fs::hard_link(&path, &staging_link).unwrap();
+        let removed = std::cell::Cell::new(false);
+        crate::persistent_store::hash_work::reset_hash_work();
+        let verified = cas.verify_existing_object_checked(&path, &object.content_hash, bytes.len() as u64,
+            &object.physical_key, &|| {
+                if !removed.replace(true) { std::fs::remove_file(&staging_link).unwrap(); }
+                false
+            }).unwrap();
+        let hashes = crate::persistent_store::hash_work::take_hash_work();
+        let work = &hashes.domains["cas_existing_verify"];
+        assert_eq!(work.calls, 2);
+        assert_eq!(work.bytes, 2 * bytes.len() as u64);
+        assert!(cas.existing_verification_matches(&path, &verified).unwrap());
+        assert_eq!(cas.read_object(&object.content_hash).unwrap().unwrap(), bytes);
+    }
+
     #[test]
     fn existing_directory_from_a_crash_window_resyncs_its_parent_before_acceptance() {
         let directory = tempfile::tempdir().expect("temporary repository");
@@ -1904,6 +2157,33 @@ mod tests {
         assert!(cas
             .holds_exact_object(&prepared.content_hash, prepared.byte_size, &|| false)
             .unwrap());
+    }
+
+    #[test]
+    fn retained_unlink_keeps_size_path_and_replacement_checks_without_reading_body() {
+        use std::fs;
+        for verify_content in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let cas = PayloadCas::new(directory.path()).unwrap();
+            let payload = cas.prepare_bytes(b"synthetic retained body").unwrap();
+            assert!(cas.unlink_retained_object(&payload.content_hash, payload.byte_size + 1, &payload.physical_key).is_err());
+            assert!(cas.unlink_retained_object(&payload.content_hash, payload.byte_size, "assets/elsewhere").is_err());
+            let path = directory.path().join(&payload.physical_key);
+            let replacement = vec![42; payload.byte_size as usize];
+            let result = cas.unlink_exact_object_inner(&payload.content_hash, payload.byte_size, &payload.physical_key, verify_content, |_| {
+                fs::remove_file(&path)?;
+                fs::write(&path, &replacement)
+            });
+            assert!(result.is_err());
+            assert_eq!(fs::read(&path).unwrap(), replacement);
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let payload = cas.prepare_bytes(b"synthetic retained body").unwrap();
+        crate::persistent_store::hash_work::reset_hash_work();
+        assert!(matches!(cas.unlink_retained_object(&payload.content_hash, payload.byte_size, &payload.physical_key).unwrap(), ExactObjectUnlink::Removed { .. }));
+        assert!(crate::persistent_store::hash_work::take_hash_work().domains.is_empty());
+        assert_eq!(cas.stat_object(&payload.content_hash).unwrap(), None);
     }
 }
 

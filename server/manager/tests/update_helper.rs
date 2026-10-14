@@ -69,21 +69,20 @@ fn prepared_file_transaction(was_running: bool) -> Fixture {
 
 #[cfg(windows)]
 fn sleeping_parent() -> Child {
-    platform::process("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-WindowStyle",
-            "Hidden",
-            "-Command",
-            "Start-Sleep -Seconds 2",
-        ])
+    platform::process(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "sleeping_parent_process"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .unwrap()
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "internal subprocess that stands in for the parent process"]
+fn sleeping_parent_process() {
+    std::thread::sleep(Duration::from_secs(2));
 }
 
 #[cfg(unix)]
@@ -141,8 +140,8 @@ fn stopped_helper_rolls_back_when_the_replacement_cannot_be_started() {
 
     assert!(result.recv_timeout(Duration::from_millis(250)).is_err());
     assert_old_install(&fixture.install);
-    // The parent and both Task Scheduler calls each start Windows PowerShell,
-    // which takes about 22 s per start on Windows ARM runners.
+    // Both Task Scheduler calls start Windows PowerShell, which takes about
+    // 22 s per start on Windows ARM runners.
     let error = result
         .recv_timeout(Duration::from_secs(120))
         .unwrap()

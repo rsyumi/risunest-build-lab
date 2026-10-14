@@ -2,9 +2,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 import { languageEnglish } from 'src/lang/en'
+import type { PlatformShape } from 'src/ts/platform.testSupport'
 const f = vi.hoisted(() => ({ pending: vi.fn(async (): Promise<number | undefined> => undefined), ensure: vi.fn(), connect: vi.fn(), dismiss: vi.fn(), complete: vi.fn(), configure: vi.fn(), bind: vi.fn(), disconnect: vi.fn(), hold: vi.fn(), release: vi.fn(), status: vi.fn(), policy: vi.fn(), evict: vi.fn(), cancel: vi.fn(), checkbox: vi.fn(), action: vi.fn(), native: true, scan: false, scanner: { scan: vi.fn(), cancel: vi.fn() }, os: 'windows', listeners: new Set<(value: Record<string, unknown>) => void>(), bindingState: vi.fn(), preset: vi.fn(), state: { db: {} as Record<string, unknown> }, view: { status: { configured: false }, paused: false } as Record<string, unknown> }))
-vi.mock('src/lang', async () => ({ language: (await import('src/lang/en')).languageEnglish, changeLanguage: vi.fn() }))
-vi.mock('src/ts/platform', () => ({ get isTauri() { return f.native } }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule(() => ({ runtime: f.native ? 'tauri' : 'web', os: f.os as PlatformShape['os'] })))
 vi.mock('@tauri-apps/plugin-os', () => ({ platform: () => f.os }))
 vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn(), alertCheckboxConfirm: f.checkbox, alertActionConfirm: f.action, alertError: vi.fn(), alertNormal: vi.fn(), openRisuAccountLogin: vi.fn() }))
 vi.mock('src/ts/storage/sync/serverSyncProduction', () => ({
@@ -12,7 +12,7 @@ vi.mock('src/ts/storage/sync/serverSyncProduction', () => ({
     getServerSyncCacheUsage: vi.fn(), cleanupServerSyncCache: vi.fn(),
     getServerSyncController: () => ({ snapshot: () => f.view, subscribe: (listener: (value: Record<string, unknown>) => void) => { f.listeners.add(listener); listener(f.view); return () => { f.listeners.delete(listener) } }, ensureStatus: f.ensure, watchProgress: () => () => {}, pendingChanges: f.pending, track: (_stage: string, operation: () => Promise<unknown>) => operation() }),
 }))
-vi.mock('src/ts/storage/sync/serverAssetResidency', () => ({ getAssetResidencyStatus: f.status, setAssetResidencyPolicy: f.policy, evictLocalAssets: f.evict, cancelAssetResidencyOperation: f.cancel }))
+vi.mock('src/ts/storage/sync/serverAssetResidency', () => ({ getAssetResidencyStatus: f.status, setAssetResidencyPolicy: f.policy, evictLocalAssets: f.evict, cancelLocalAssetCleanup: f.cancel, cancelAssetResidencyOperation: f.cancel }))
 vi.mock('src/ts/storage/sync/serverSyncRegistration', () => ({ parseServerRegistration: () => ({ endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' }) }))
 vi.mock('src/ts/storage/sync/serverSyncRegistrationInbox', () => ({ serverRegistrationInbox: { changed: { subscribe: () => () => {} }, releaseConsumed: vi.fn() } }))
 vi.mock('src/ts/storage/sync/serverSyncQr', () => ({ get canScanServerRegistration() { return f.scan }, createServerQrScanner: () => f.scanner }))
@@ -37,11 +37,16 @@ vi.mock('src/lib/Setting/ExternalStorage/ConnectionForm.svelte', () => ({ defaul
 vi.mock('src/lib/Others/Onboarding/onboardingWeave', () => ({ observeOnboardingWeave: () => () => {} }))
 vi.mock('src/ts/stores.svelte', () => ({ DBState: f.state }))
 import ServerSyncSettings from './ServerSyncSettings.svelte'
+import { assetCleanupProgress, type AssetCleanupState } from 'src/ts/storage/sync/serverAssetCleanupProgress'
+import type { AssetResidencyStatus } from 'src/ts/storage/sync/serverAssetResidency'
+import { assetResidencyStatus } from 'src/ts/storage/sync/serverAssetResidency.testSupport'
+import { serverSyncLane as lane } from 'src/ts/storage/sync/serverSyncProgress.testSupport'
 import { QrScanError } from 'src/ts/ui/qrScanner'
 import Onboarding from 'src/lib/Others/Onboarding/Onboarding.svelte'
 let component: ReturnType<typeof mount> | undefined
 let host: HTMLDivElement
 beforeEach(() => {
+    assetCleanupProgress.set(undefined)
     vi.clearAllMocks(); f.native = true; f.scan = false; f.os = 'windows'; f.listeners.clear(); f.view = { status: { configured: false }, paused: false }; host = document.createElement('div'); document.body.append(host)
     for (const mock of [f.disconnect, f.hold, f.release, f.status, f.policy, f.evict, f.cancel, f.checkbox, f.action, f.complete, f.ensure]) mock.mockReset()
     f.hold.mockResolvedValue(f.release)
@@ -56,6 +61,76 @@ function click(text: string) { const button = [...host.querySelectorAll('button'
 async function registration() { await tick(); const input = host.querySelector('textarea')!; input.value = 'synthetic-registration'; input.dispatchEvent(new Event('input', { bubbles: true })); await tick(); click(languageEnglish.risuNest.serverSync.readRegistration); await tick() }
 function publish(view: Record<string, unknown>) { f.view = view; for (const listener of f.listeners) listener(view) }
 const findButton = (text: string) => [...host.querySelectorAll('button')].find(button => button.textContent?.trim() === text)
+it('shows cleanup phases immediately, survives remount, and refreshes after cancellation', async () => {
+    const copy = languageEnglish.risuNest.serverSync
+    f.view = { status: { configured: true, bound: true, assetPolicy: 'remote' }, running: false, paused: false }
+    const status = assetResidencyStatus({ policy: 'remote', localBytes: 8192 })
+    f.status.mockResolvedValue(status)
+    const reading: AssetCleanupState = { operationId: 'synthetic', state: 'running', sequence: 0, stage: 'preparing', completedItems: 0, totalItems: null, evictedItems: 0, evictedBytes: 0 }
+    let finish!: () => void
+    f.evict.mockImplementation(() => { assetCleanupProgress.set(reading); return new Promise<void>(resolve => { finish = resolve }) })
+    component = mount(ServerSyncSettings, { target: host }); await settle()
+    click(copy.residency.clean); await settle()
+    const panel = () => host.querySelector('[data-asset-cleanup-progress]')!
+    expect(panel().textContent).toContain(copy.residency.cleanup.preparing)
+    expect(panel().querySelector('[role="progressbar"]')!.hasAttribute('aria-valuenow')).toBe(false)
+    expect(findButton(copy.residency.clean)?.disabled).toBe(true)
+    assetCleanupProgress.set({ ...reading, stage: 'checking', completedItems: 2, totalItems: 4 }); await settle()
+    expect(panel().textContent).toContain(copy.residency.cleanup.checking)
+    expect(panel().querySelector('[role="progressbar"]')!.getAttribute('aria-valuenow')).toBe('50')
+    assetCleanupProgress.set({ ...reading, stage: 'deleting', completedItems: 1, totalItems: 4, evictedItems: 1, evictedBytes: 4096 }); await settle()
+    expect(panel().querySelector('details')?.open).toBe(false)
+    await unmount(component); component = mount(ServerSyncSettings, { target: host }); await settle()
+    expect(panel().textContent).toContain(copy.residency.cleanup.deleting)
+    expect(findButton(copy.residency.clean)?.disabled).toBe(true)
+    f.cancel.mockImplementation(() => assetCleanupProgress.update(value => value && { ...value, state: 'cancelling' }))
+    click(copy.residency.cancel); await settle()
+    expect(panel().textContent).toContain(copy.residency.cleanup.cancelling)
+    expect(findButton(copy.residency.cancel)?.disabled).toBe(true)
+    f.status.mockClear()
+    assetCleanupProgress.update(value => value && { ...value, state: 'cancelled' }); await settle()
+    expect(panel().textContent).toContain(copy.residency.cleanup.cancelled)
+    expect(panel().querySelector('.lucide-loader-circle')).toBeNull()
+    expect(f.status).toHaveBeenCalledOnce()
+    expect(findButton(copy.residency.clean)?.disabled).toBe(false)
+    finish(); await settle()
+})
+it.each([false, true])('refreshes capacity after a partial cleanup failure and preserves its error (refresh fails: %s)', async refreshFails => {
+    const copy = languageEnglish.risuNest.serverSync
+    f.view = { status: { configured: true, bound: true, assetPolicy: 'remote' }, running: false, paused: false }
+    const status = assetResidencyStatus({ policy: 'remote', localBytes: 8192 })
+    f.status.mockResolvedValue(status)
+    component = mount(ServerSyncSettings, { target: host }); await settle()
+    f.status.mockClear()
+    f.evict.mockImplementation(async () => {
+        assetCleanupProgress.set({ operationId: 'synthetic', state: 'failed', stage: 'deleting', sequence: 2, completedItems: 1, totalItems: 2, evictedItems: 1, evictedBytes: 4096 })
+        if (refreshFails) f.status.mockRejectedValue({ code: 'writer-collision' })
+        else f.status.mockResolvedValue({ ...status, localBytes: 4096, remoteBytes: 4096, remoteObjects: 1, serverBytes: 4096, serverObjects: 1 })
+        throw { code: 'storage-io' }
+    })
+    click(copy.residency.clean); await settle()
+    expect(f.status).toHaveBeenCalledOnce()
+    expect(host.textContent).toContain(copy.residency.cleanup.failed)
+    expect(host.textContent).toContain(copy.errorHelp)
+    expect(host.textContent).not.toContain(languageEnglish.lwwSync.writerCollision)
+    if (!refreshFails) {
+        expect(host.textContent).not.toContain('8.0 KiB')
+        expect(host.textContent).toContain('4.0 KiB')
+    }
+    expect(findButton(copy.residency.clean)?.disabled).toBe(false)
+})
+it.each(['finalizing', 'complete', 'failed'] as const)('renders cleanup %s without confusing processed files with removed files', async state => {
+    const copy = languageEnglish.risuNest.serverSync
+    f.view = { status: { configured: true, bound: true, assetPolicy: 'remote' }, running: false, paused: false }
+    assetCleanupProgress.set({ operationId: 'synthetic', state: state === 'finalizing' ? 'running' : state, stage: 'finalizing', sequence: 2, completedItems: 4, totalItems: null, evictedItems: 3, evictedBytes: 4096 })
+    component = mount(ServerSyncSettings, { target: host }); await settle()
+    const panel = host.querySelector('[data-asset-cleanup-progress]')!
+    expect(panel.textContent).toContain(copy.residency.cleanup[state])
+    expect(panel.querySelector('[role="progressbar"]')!.getAttribute('aria-valuenow')).toBe(state === 'complete' ? '100' : null)
+    if (state === 'complete') expect(panel.textContent).toContain(copy.count.replace('{0}', '3'))
+    expect(findButton(copy.residency.clean)?.disabled).toBe(state === 'finalizing')
+    expect(!!findButton(copy.residency.cancel)).toBe(state === 'finalizing')
+})
 it.each([
     { error: '', newDevice: false },
     { error: 'writer-collision', newDevice: false },
@@ -330,9 +405,9 @@ it('hides the native server connection UI on web', async () => {
 })
 
 const sync = languageEnglish.risuNest.serverSync
-const residencyStatus = (overrides: Record<string, unknown> = {}) => ({ policy: 'remote', localBytes: 0, remoteBytes: 4096, remoteObjects: 2, serverBytes: 4096, serverObjects: 2, externalObjects: [], unavailableObjects: 0, evictedBytes: 0, ...overrides })
+const residencyStatus = (overrides: Partial<AssetResidencyStatus> = {}) => assetResidencyStatus({ policy: 'remote', remoteBytes: 4096, remoteObjects: 2, serverBytes: 4096, serverObjects: 2, ...overrides })
 const externalOnly = { serverObjects: 0, serverBytes: 0, externalObjects: [{ connectionId: 'external', objects: 2 }] }
-async function mountBound(status: Record<string, unknown> = residencyStatus()) {
+async function mountBound(status: AssetResidencyStatus = residencyStatus()) {
     f.view = { status: { configured: true, bound: true }, paused: false, error: '' }
     f.status.mockResolvedValue(status)
     component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
@@ -639,7 +714,7 @@ describe('downloading files kept only on the server', () => {
         { name: 'files only in external storage', policy: 'full', status: { ...externalOnly, remoteBytes: 4096 }, shown: true },
         { name: 'no remote files', policy: 'full', status: { remoteObjects: 0, remoteBytes: 0, serverObjects: 0, serverBytes: 0 }, shown: false },
         { name: 'files only on the server', policy: 'remote', status: {}, shown: false },
-    ])('offers the download for policy $policy with $name: $shown', async ({ policy, status, shown }) => {
+    ] as const)('offers the download for policy $policy with $name: $shown', async ({ policy, status, shown }) => {
         await mountBound(residencyStatus({ policy, ...status }))
         expect(!!findButton(sync.residency.download)).toBe(shown)
     })
@@ -976,7 +1051,6 @@ describe('layout', () => {
     })
 })
 describe('progress', () => {
-    const lane = (name: string, counts: Record<string, unknown> = {}) => ({ lane: name, active: false, sending: false, receiving: false, step: 'idle', listed: 0, listedTotal: 0, itemsDone: 0, itemsTotal: 0, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, sentBytes: 0, receivedBytes: 0, backlogDone: 0, backlogLeft: 0, ...counts })
     const running = (startedAt: number) => ({
         status: { configured: true, bound: true }, paused: false, running: true, error: '',
         progress: { mode: 'full', startedAt, stages: ['downloading', 'publishing'], active: ['publishing'], current: 'publishing', plannedSend: 4, lanes: [lane('send', { active: true, step: 'uploading', itemsDone: 1, itemsTotal: 2, filesDone: 1, filesTotal: 2, bytesDone: 1024, bytesTotal: 4096, sentBytes: 3000 }), lane('receive', { receivedBytes: 500 })] },

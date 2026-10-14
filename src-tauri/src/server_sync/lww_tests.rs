@@ -12,6 +12,8 @@ use risunest_sync_wire::{
 };
 use std::sync::Arc;
 
+mod metadata_restore;
+
 pub(crate) struct LocalServerFixture {
     pub server: Arc<Store>,
     pub endpoint: String,
@@ -685,6 +687,37 @@ fn no_edit_push_does_not_make_a_request() {
             .requests
             .load(std::sync::atomic::Ordering::Relaxed)
     );
+}
+
+#[test]
+fn a_metadata_publication_batches_cache_durability_and_arrives_intact() {
+    let server = LocalServerFixture::new();
+    let (_source_root, mut source) = local();
+    let (_target_root, mut target) = local();
+    let fields = ["additionalPrompt", "NAIImgUrl", "autofillRequestUrl", "language", "ImagenModel"];
+    let values = fields.iter().enumerate().map(|(index, field)| {
+        (*field, serde_json::json!(format!("synthetic body {index} ").repeat(risunest_sync_wire::unit::MAX_INLINE_UNIT_BYTES / 16 + 1)))
+    }).collect::<Vec<_>>();
+    for (key, value) in &values {
+        save(&mut source, &["root", key], value.clone());
+    }
+    let sender = server.client(&source);
+    let pending = source.lww_read_outbox(header(&source).binding_authority, 256).unwrap();
+    assert_eq!(pending.entries.len(), fields.len());
+    assert!(pending.entries.iter().all(|entry| matches!(entry.value, UnitValue::Object { .. })));
+    super::cache::take_batch_commits();
+    super::cache::take_put_calls();
+    let receipt = publish_cycle(&sender, &mut source, &[]).unwrap().unwrap();
+    let commits = super::cache::take_batch_commits();
+    assert!(super::cache::take_put_calls() >= fields.len() as u64);
+    assert_eq!(commits, 1, "small metadata bodies should share one durable cache transaction");
+    assert_eq!(receipt.accepted_keys.len(), fields.len());
+    assert!(source.lww_read_outbox(header(&source).binding_authority, 1).unwrap().entries.is_empty());
+    receive_available(&server.client(&target), &mut target, &[]).unwrap();
+    let root = target.read_root(None).unwrap();
+    for (key, value) in values {
+        assert_eq!(root.value[key], value);
+    }
 }
 
 fn publication(client: &LwwClient, store: &PersistentStore) -> Publication {
@@ -1461,30 +1494,75 @@ fn a_state_read_plans_its_listing_from_the_units_its_pin_holds() {
         router.layer(axum::middleware::from_fn(
             move |request: axum::extract::Request, next: axum::middleware::Next| {
                 if request.uri().path() == "/state" {
-                    totals.lock().unwrap().push(watched.snapshot("binding").listed_total);
+                    totals.lock().unwrap().push(watched.snapshot("binding").listing.unwrap().total);
                 }
                 next.run(request)
             },
         ))
     });
     let writer = ServerWriter::new(&server.server);
-    for index in 0..300 {
-        let key = UnitKey::new(&["exists", "character", &format!("synthetic-{index}")]).unwrap();
-        writer.push(&format!("create-{index}"), &key, 100, UnitValue::inline(br#"{"type":"character"}"#).unwrap());
-    }
+    writer.push_units("first-page", "first", 1024);
+    writer.push_units("second-page", "second", 1024);
+    writer.push_units("last-page", "last", 2);
     let (_root, mut store) = local();
     let changes = super::progress::within(&lane, || {
         let client = server.client(&store);
         let upper = client.admission().unwrap();
         client.state(&mut store, upper).unwrap().1
     });
-    assert_eq!(changes.len(), 300);
+    assert_eq!(changes.len(), 2050);
     let read = lane.snapshot("binding");
-    assert_eq!((read.listed, read.listed_total), (300, 300));
+    assert_eq!(read.listed, 2050);
+    let listing = read.listing.unwrap();
+    assert_eq!((listing.done, listing.total), (2050, 2050));
     // Every state page was requested with the whole total already planned.
     let seen = seen.lock().unwrap();
-    assert!(seen.len() >= 2);
-    assert!(seen.iter().all(|total| *total == 300));
+    assert_eq!(seen.len(), 3);
+    assert!(seen.iter().all(|total| *total == 2050));
+}
+
+#[test]
+fn a_restarted_state_read_does_not_double_its_listing_total() {
+    let lane = Arc::new(super::progress::ProgressLane::default());
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (watched, totals) = (lane.clone(), seen.clone());
+    let server = LocalServerFixture::with_router(move |router| {
+        router.layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let expire = if request.uri().path() == "/state" {
+                    let mut totals = totals.lock().unwrap();
+                    let listing = watched.snapshot("binding").listing.unwrap();
+                    totals.push((listing.done, listing.total));
+                    totals.len() == 2
+                } else { false };
+                async move {
+                    if expire {
+                        return axum::response::IntoResponse::into_response((
+                            axum::http::StatusCode::GONE,
+                            axum::Json(serde_json::json!({"error":"state-pin-expired"})),
+                        ));
+                    }
+                    next.run(request).await
+                }
+            },
+        ))
+    });
+    let writer = ServerWriter::new(&server.server);
+    writer.push_units("first-page", "first", 1024);
+    writer.push_units("last-page", "last", 2);
+    let (_root, mut store) = local();
+    let changes = super::progress::within(&lane, || {
+        let client = server.client(&store);
+        let upper = client.admission().unwrap();
+        client.state(&mut store, upper).unwrap().1
+    });
+    assert_eq!(changes.len(), 1026);
+    let read = lane.snapshot("binding");
+    assert!(read.listed > 1026);
+    assert!(read.received_bytes > 0);
+    let listing = read.listing.unwrap();
+    assert_eq!((listing.done, listing.total), (1026, 1026));
+    assert_eq!(*seen.lock().unwrap(), [(0, 1026), (1024, 1026), (0, 1026), (1024, 1026)]);
 }
 
 fn publication_ids(client: &LwwClient) -> Vec<String> {

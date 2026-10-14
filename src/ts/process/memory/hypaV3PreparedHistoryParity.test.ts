@@ -5,8 +5,7 @@ const requestCalls = vi.hoisted(() => [] as any[][])
 vi.mock('../transformers', () => ({
     runEmbedding: vi.fn(async (texts: string[]) => texts.map(() => new Float32Array([1, 0]))),
 }))
-vi.mock('src/ts/parser/parser.svelte', async () =>
-    (await import('../tests/sendChatTestHarness')).parserModule())
+vi.mock('src/ts/parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
 vi.mock('../modules', async () =>
     (await import('../tests/sendChatTestHarness')).modulesModule())
 vi.mock('../request/request', () => ({

@@ -22,11 +22,6 @@ const alertMocks = vi.hoisted(() => ({
 
 vi.mock(import('katex'), () => ({}))
 vi.mock(import('src/ts/lite'), () => ({}))
-vi.mock('src/lang', () => ({
-  language: {
-    mcpAccessPrompt: '{{tool}} {{action}}',
-  },
-}))
 vi.mock(import('src/ts/alert'), () => ({
   alertConfirm: alertMocks.confirm,
 }))

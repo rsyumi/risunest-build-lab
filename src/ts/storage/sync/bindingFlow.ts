@@ -101,7 +101,8 @@ export interface SyncBindingDependencies {
     gate: StorageMutationGate
     plugins: BindingPluginLifecycle
     withPausedWrites<T>(operation: () => Promise<T>): Promise<T>
-    hasNonDefaultData(): Promise<boolean>
+    // A device without characters is replaced without asking.
+    hasLocalCharacters(): Promise<boolean>
     hasNonDefaultSharedData(): Promise<boolean>
     confirmReplacement(reason?: ReplacementReason): Promise<boolean>
     refreshActivatedLibrary(): Promise<void>
@@ -254,7 +255,7 @@ export function createSyncBindingFlow(dependencies: SyncBindingDependencies) {
                 const replace = newDevice || (!inspected.empty && !inspected.previouslyBoundLibrary)
                 const switchRequired = replace || !sameTarget(state.target, target) || state.libraryId !== inspected.libraryId
                 let acknowledged = false
-                if (newDevice || (replace && await dependencies.hasNonDefaultData())) {
+                if (replace && await dependencies.hasLocalCharacters()) {
                     if (!await confirm(() => dependencies.confirmReplacement(reason))) return { kind: 'cancelled' }
                     acknowledged = true
                 }
@@ -332,7 +333,7 @@ export function createSyncBindingFlow(dependencies: SyncBindingDependencies) {
                 }
                 const result: BindingOutcome = await dependencies.withPausedWrites(async () => {
                     await check(context)
-                    if (replace && !acknowledged && await dependencies.hasNonDefaultData()) {
+                    if (replace && !acknowledged && await dependencies.hasLocalCharacters()) {
                         if (!await confirm(() => dependencies.confirmReplacement(reason))) {
                             pluginsFenced = false
                             await dependencies.plugins.restart()

@@ -41,7 +41,7 @@ pub fn verify<R: Read + Seek>(
     io(source.seek(SeekFrom::Start(0)))?;
     let mut buffer = vec![0; BUFFER];
     let mut digest = Sha256::new();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "source-observer"))]
     let mut observed =
         super::delta::source_test_observer::Scope::new(&expected.hash, "stream-verify-sha256");
     let mut size = 0u64;
@@ -56,18 +56,18 @@ pub fn verify<R: Read + Seek>(
             return Err(WireError("base-size-mismatch"));
         }
         digest.update(&buffer[..n]);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "source-observer"))]
         observed.input(n);
     }
     if size != expected.size || {
         let actual = hex::encode(digest.finalize());
-        #[cfg(test)]
+        #[cfg(any(test, feature = "source-observer"))]
         observed.finalized();
         actual != expected.hash
     } {
         return Err(WireError("base-hash-mismatch"));
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "source-observer"))]
     observed.finish();
     Ok(())
 }
@@ -88,7 +88,7 @@ pub fn apply<R: Read + Seek, W: Write>(
     }
     let mut buffer = vec![0; BUFFER];
     let mut digest = Sha256::new();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "source-observer"))]
     let mut observed = super::delta::source_test_observer::Scope::new(
         &recipe.target_hash,
         "stream-apply-target-sha256",
@@ -99,7 +99,7 @@ pub fn apply<R: Read + Seek, W: Write>(
             Op::Insert(bytes) => {
                 io(output.write_all(bytes))?;
                 digest.update(bytes);
-                #[cfg(test)]
+                #[cfg(any(test, feature = "source-observer"))]
                 observed.input(bytes.len());
             }
             Op::Copy {
@@ -116,7 +116,7 @@ pub fn apply<R: Read + Seek, W: Write>(
                     io(source.read_exact(&mut buffer[..n]))?;
                     io(output.write_all(&buffer[..n]))?;
                     digest.update(&buffer[..n]);
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "source-observer"))]
                     observed.input(n);
                     left -= n;
                 }
@@ -125,14 +125,14 @@ pub fn apply<R: Read + Seek, W: Write>(
     }
     if {
         let actual = hex::encode(digest.finalize());
-        #[cfg(test)]
+        #[cfg(any(test, feature = "source-observer"))]
         observed.finalized();
         actual
     } != recipe.target_hash
     {
         return Err(WireError("target-hash-mismatch"));
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "source-observer"))]
     observed.finish();
     Ok(())
 }
@@ -196,7 +196,7 @@ pub fn create<R: Read + Seek>(
         super::validate_hash(&base.hash)?;
         io(source.seek(SeekFrom::Start(0)))?;
         let mut digest = Sha256::new();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "source-observer"))]
         let mut observed =
             super::delta::source_test_observer::Scope::new(&base.hash, "stream-create-base-sha256");
         let mut position = 0;
@@ -206,7 +206,7 @@ pub fn create<R: Read + Seek>(
             let n = (base.size - position).min(BUFFER as u64) as usize;
             io(source.read_exact(&mut buffer[..n]))?;
             digest.update(&buffer[..n]);
-            #[cfg(test)]
+            #[cfg(any(test, feature = "source-observer"))]
             observed.input(n);
             while next_anchor + ANCHOR as u64 <= position + n as u64 {
                 let start = (next_anchor - position) as usize;
@@ -221,13 +221,13 @@ pub fn create<R: Read + Seek>(
         }
         if io(source.read(&mut buffer[..1]))? != 0 || {
             let actual = hex::encode(digest.finalize());
-            #[cfg(test)]
+            #[cfg(any(test, feature = "source-observer"))]
             observed.finalized();
             actual != base.hash
         } {
             return Err(WireError("base-hash-mismatch"));
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "source-observer"))]
         observed.finish();
     }
     verify(target, &identity, &mut check)?;

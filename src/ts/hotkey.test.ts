@@ -82,7 +82,6 @@ vi.mock('./stores.svelte', async () => ({
     selectedCharID: mocks.selectedCharID,
     settingsOpen: mocks.store(false),
 }))
-vi.mock('src/lang', () => ({ language: { presets: '', persona: '', cancel: '', hotkeyDesc: {} } }))
 vi.mock('./gui/colorscheme', () => ({ updateTextThemeAndCSS: vi.fn() }))
 vi.mock('./defaulthotkeys', () => ({ defaultHotkeys: [] }))
 vi.mock('./process/index.svelte', () => ({

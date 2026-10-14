@@ -1,9 +1,9 @@
 use super::{json, uploads::now, Device, Store, TransferRequest};
-#[cfg(test)]
+#[cfg(all(test, feature = "source-observer"))]
 use crate::source_observer::shared_wire::{delta::Base, stream_delta};
 use crate::{Error, Result};
 use risunest_sync_wire::{canonical, hash, validate_hash, validate_id, WireError};
-#[cfg(not(test))]
+#[cfg(not(all(test, feature = "source-observer")))]
 use risunest_sync_wire::{delta::Base, stream_delta};
 use rusqlite::{params, OptionalExtension};
 use std::time::{Duration, Instant};
@@ -214,7 +214,7 @@ impl Store {
         Ok(())
     }
     pub fn run_pending_download_delta(&self) -> Result<bool> {
-        #[cfg(test)]
+        #[cfg(all(test, feature = "source-observer"))]
         let _observed = crate::source_observer::operation(&self.root);
         let _guard = match self.download_job_gate.try_lock() {
             Ok(guard) => guard,

@@ -3,7 +3,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { writable } from 'svelte/store'
 
-vi.mock('../platform', () => ({ isTauri: false, isNodeServer: false }))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 
 const parserMocks = vi.hoisted(() => ({
     characters: [] as unknown[],

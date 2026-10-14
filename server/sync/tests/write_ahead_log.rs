@@ -1,5 +1,5 @@
 mod common;
-use common::{inline, request, WRITER_A, WRITER_B};
+use common::{inline, request, HANG_BOUND, WRITER_A, WRITER_B};
 use futures_util::StreamExt;
 use reqwest::{Client, RequestBuilder, StatusCode};
 use risunest_sync_connect::media::{MediaAccess, MediaObject, MediaRequest, MediaSigner};
@@ -14,11 +14,8 @@ use risunest_sync_wire::{
     transfer::{self, Frame},
     RemoteHead,
 };
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
-
-/// Turns a lost response into a failure; loopback replies arrive far sooner.
-const BOUND: Duration = Duration::from_secs(60);
 
 struct Library {
     base: String,
@@ -259,7 +256,11 @@ fn a_served_library_folds_its_write_ahead_log_back_after_concurrent_traffic() {
     });
     let library = Library {
         base: format!("http://{origin}"),
-        client: Client::builder().no_proxy().timeout(BOUND).build().unwrap(),
+        client: Client::builder()
+            .no_proxy()
+            .timeout(HANG_BOUND)
+            .build()
+            .unwrap(),
         store: store.clone(),
     };
     let client = tokio::runtime::Builder::new_current_thread()
@@ -278,7 +279,9 @@ fn a_served_library_folds_its_write_ahead_log_back_after_concurrent_traffic() {
             .headers_mut()
             .insert("x-risu-library", b.library_id.parse().unwrap());
         let (mut socket, _) = tokio_tungstenite::connect_async(notify).await.unwrap();
-        let first = tokio::time::timeout(BOUND, socket.next()).await.unwrap();
+        let first = tokio::time::timeout(HANG_BOUND, socket.next())
+            .await
+            .unwrap();
         assert!(matches!(first, Some(Ok(Message::Text(_)))));
 
         use_library(&library, &a, &b).await;

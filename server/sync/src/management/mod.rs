@@ -105,6 +105,7 @@ impl Management {
             .route("/maintenance/shutdown", post(maintenance_shutdown))
             .layer(DefaultBodyLimit::max(16 * 1024))
             .layer(middleware::from_fn_with_state(context.clone(), authorize))
+            .layer(middleware::from_fn(crate::http::close_after_unread_body))
             .with_state(context.clone());
         let mut stopped = context.stop.subscribe();
         let server = tokio::spawn(async move {

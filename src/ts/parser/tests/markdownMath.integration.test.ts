@@ -6,10 +6,7 @@ import { writable } from 'svelte/store'
 import { parseMarkdownSafe } from '../parser.svelte'
 
 vi.unmock('katex')
-vi.mock('../../platform', () => ({
-    isTauri: false, isMobile: false, isTauriMobile: false,
-    isTauriAndroid: false, isTauriIOS: false, isIOS: () => false, isInStandaloneMode: false,
-}))
+vi.mock('../../platform', async () => (await import('../../platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 vi.mock('../../storage/database.svelte', () => ({
     appVer: 'synthetic',
     getCurrentCharacter: () => ({}),

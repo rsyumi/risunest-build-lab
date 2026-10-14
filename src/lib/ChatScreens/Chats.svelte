@@ -257,7 +257,7 @@
         message: Readonly<Message> | null
     } | null = null
     let suppressScroll = false
-    let restoreScrollAnchoring: (() => void) | null = null
+    let finishViewportLayoutChange: (() => void) | null = null
     const identityRegistry = new ChatRenderIdentityRegistry()
     const ownerSessionIds = new WeakMap<object, number>()
     const conversationSessionIds = new WeakMap<object, number>()
@@ -886,22 +886,14 @@
     }
 
     function beginViewportLayoutChange(): void {
-        if (!scrollContainer || initialLatestFollow || currentPendingJump() || restoreScrollAnchoring) return
-        const container = scrollContainer
-        const value = container.style.getPropertyValue('overflow-anchor')
-        const priority = container.style.getPropertyPriority('overflow-anchor')
-        container.style.setProperty('overflow-anchor', 'none', priority)
-        const restore = () => {
-            if (restoreScrollAnchoring !== restore) return
-            restoreScrollAnchoring = null
-            if (container.style.getPropertyValue('overflow-anchor') === 'none') {
-                if (value) container.style.setProperty('overflow-anchor', value, priority)
-                else container.style.removeProperty('overflow-anchor')
-            }
+        if (!scrollContainer || initialLatestFollow || currentPendingJump() || finishViewportLayoutChange) return
+        const finish = () => {
+            if (finishViewportLayoutChange !== finish) return
+            finishViewportLayoutChange = null
         }
-        restoreScrollAnchoring = restore
+        finishViewportLayoutChange = finish
         scheduleFrame(() => {
-            restore()
+            finish()
             // Process input that arrived during the structural change using the final layout.
             handleScroll()
         })
@@ -2325,7 +2317,7 @@
     }
 
     function clearScheduledWork(): void {
-        restoreScrollAnchoring?.()
+        finishViewportLayoutChange?.()
         projectionReconcileGeneration += 1
         projectionReconcileQueued = false
         clearPendingRowMounts()
@@ -2517,7 +2509,7 @@
                 return
         }
         userScrollIntentAt = performance.now()
-        restoreScrollAnchoring?.()
+        finishViewportLayoutChange?.()
         if (event.type === 'pointerdown') scrollPointerHeld = true
         positionGeneration += 1
         initialLatestFollow = false
@@ -2542,7 +2534,7 @@
     }
 
     function handleScroll(): void {
-        if (!scrollContainer || suppressScroll || restoreScrollAnchoring || !viewportResult) return
+        if (!scrollContainer || suppressScroll || finishViewportLayoutChange || !viewportResult) return
         // Layout and browser scroll anchoring also emit scroll events. Only input
         // or an explicit jump transfers initial positioning to a history anchor.
         if (initialLatestFollow) {

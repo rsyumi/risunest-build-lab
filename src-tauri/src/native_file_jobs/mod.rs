@@ -1345,7 +1345,7 @@ impl NativeFileJobState {
         Ok(NativeFileJobStarted {job_id:request.job_id.clone(),warning_codes:status.warning_codes})
     }
 
-    fn admit_cleanup_operation(&self) -> Result<std::sync::RwLockReadGuard<'_, bool>, NativeJobError> {
+    pub(crate) fn admit_cleanup_operation(&self) -> Result<std::sync::RwLockReadGuard<'_, bool>, NativeJobError> {
         let guard = self.cleanup_closed.read().map_err(|_| NativeJobError::new("store-error", "Native cleanup state is unavailable"))?;
         if *guard { return Err(NativeJobError::new("cleanup-pending", "Application cleanup is pending")); }
         Ok(guard)

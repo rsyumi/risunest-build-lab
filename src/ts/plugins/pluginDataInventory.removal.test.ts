@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({ list: vi.fn(), invoke: vi.fn(), mutate: vi.fn(), owner: vi.fn() }))
-vi.mock('../platform', () => ({ isTauri: true }))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule({ runtime: 'tauri', os: 'windows' }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }))
 vi.mock('./plugins.svelte', () => ({ pluginStorageStore: { forOwner: mocks.owner } }))
 vi.mock('../storage/persistentDataStoreFactory', () => ({ getPersistentDataStore: () => ({ listPluginStorage: mocks.list }) }))

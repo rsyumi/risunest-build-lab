@@ -1539,11 +1539,10 @@ fn reconciliation_reports_the_stored_object_or_a_restart() {
 
 #[test]
 fn cancelling_during_the_body_stops_the_read() {
+    use crate::external_storage::provider_contract::{a_read_cancelled_during_its_body_stops, held_body};
     runtime().block_on(async {
-        let server = github_server(vec![
-            repository_reply(true),
-            Reply::DelayedBody,
-        ]);
+        let (held, _release) = held_body();
+        let server = github_server(vec![repository_reply(true), held]);
         let test = dependencies();
         let provider = adapter(test.dependencies.clone());
         let handle = open(provider.as_ref(), &server, OpenMode::Existing)
@@ -1554,25 +1553,8 @@ fn cancelling_during_the_body_stops_the_read() {
             collection: None,
             object: "9/3".into(),
         };
-        let directory = tempfile::tempdir().unwrap();
-        let mut sink = SpoolSink::create(&directory.path().join("body"), 4096).unwrap();
-        let cancel = Cancellation::default();
-        let read = provider.read_object(&handle, &locator, None, &mut sink, &cancel);
-        let trigger = async {
-            while server.requests.lock().unwrap().len() < 2 {
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            cancel.cancel();
-        };
-        let (result, ()) = tokio::time::timeout(
-            std::time::Duration::from_millis(2_000),
-            futures::future::join(read, trigger),
-        )
-        .await
-        .unwrap();
-        assert_eq!(result.err().unwrap().kind, ErrorKind::Cancelled);
-        assert!(!sink.is_verified());
+        a_read_cancelled_during_its_body_stops(provider.as_ref(), &handle, &locator, &Cancellation::default())
+            .await;
     });
 }
 

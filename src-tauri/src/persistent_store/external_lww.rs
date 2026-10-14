@@ -1327,7 +1327,7 @@ mod asset_root_tests {
                 let hash=small_asset(&mut f.a,"synthetic-retired-reference",&bytes);
                 let alias=f.a.list_asset_aliases(None).unwrap().value.remove(0);
                 assert_eq!(f.publish_a().await.segments.0,1);
-                let target=f.sender.target_scope();let now=crate::external_storage::runtime::now_ms();
+                let target=f.sender.target_scope();let now=f.now_ms();
                 let original=f.a.external_lww_reusable_asset(&target,&hash,now).unwrap().unwrap();
                 assert_eq!(original.byte_length,size as u64);
                 let uploads=transfer.attempts.lock().unwrap().len();
@@ -1360,14 +1360,14 @@ mod asset_root_tests {
                     f.provider.delete_object(&f.sender.repository,&locator,&cancel).await.unwrap();
                     assert!(f.provider.contents(&locator.object).is_none());
                 }
-                let aged=crate::external_storage::runtime::now_ms()-crate::external_storage::leases::CACHE_REUSE_LIMIT_MS-1;
+                let aged=f.now_ms()-crate::external_storage::leases::CACHE_REUSE_LIMIT_MS-1;
                 age_asset_proof(&f.a,&target,&hash,aged);
-                assert!(f.a.external_lww_reusable_asset(&target,&hash,crate::external_storage::runtime::now_ms()).unwrap().is_none());
+                assert!(f.a.external_lww_reusable_asset(&target,&hash,f.now_ms()).unwrap().is_none());
                 assert!(f.a.external_lww_object_is_local(&hash).unwrap());
                 let before_readd=transfer.attempts.lock().unwrap().len();
                 f.a.commit_asset_alias(&alias,f.a.revision().unwrap()).unwrap();
                 assert_eq!(f.publish_a().await.segments.0,1);
-                let renewed=f.a.external_lww_reusable_asset(&target,&hash,crate::external_storage::runtime::now_ms()).unwrap().unwrap();
+                let renewed=f.a.external_lww_reusable_asset(&target,&hash,f.now_ms()).unwrap().unwrap();
                 assert_ne!(renewed.reference,original.reference,"retired sources are replaced from the exact local CAS hash");
                 assert!(transfer.attempts.lock().unwrap().len()>before_readd);
                 assert!(f.b.lww_receive_progress(0.into()).unwrap().is_empty());
@@ -1399,7 +1399,7 @@ mod asset_root_tests {
                 assert!(pending.sealed&&!pending.dispatched&&pending.assets.is_empty()&&pending.bodies.is_empty());
                 assert_eq!(pending.reused_assets.len(),1);assert_eq!(pending.reused_assets[0].content_hash,hash);
                 assert_eq!(f.a.external_lww_active_asset_roots().unwrap().object_hashes,std::collections::BTreeSet::from([hash.clone()]));
-                let aged=crate::external_storage::runtime::now_ms()-crate::external_storage::leases::CACHE_REUSE_LIMIT_MS-1;
+                let aged=f.now_ms()-crate::external_storage::leases::CACHE_REUSE_LIMIT_MS-1;
                 pending.reused_assets[0].rooted_at_ms=aged;
                 assert!(f.a.external_lww_persist(&pending,&sealed).is_err());
                 pending.dispatched=dispatched;
@@ -1464,7 +1464,7 @@ mod asset_root_tests {
             assert_eq!(pending.bodies.len(),1);assert!(pending.bodies[0].complete);
             let mut shape=serde_json::to_value(&pending).unwrap();shape.as_object_mut().unwrap().remove("capturedAtMs");
             assert!(serde_json::from_value::<SealedPublication>(shape).is_err());
-            pending.captured_at_ms=missing.map(|_|crate::external_storage::runtime::now_ms()-crate::external_storage::leases::CACHE_REUSE_LIMIT_MS-1);
+            pending.captured_at_ms=missing.map(|_|f.now_ms()-crate::external_storage::leases::CACHE_REUSE_LIMIT_MS-1);
             assert!(f.a.external_lww_persist(&pending,&bytes).is_err(),"capture age cannot be changed during retry");
             pending.dispatched=dispatched;
             // Model an aged or unproven capture without changing its dependency identities or sealed bytes.
@@ -1535,7 +1535,7 @@ mod asset_root_tests {
             let witness=f.a.external_lww_data_catalog_witness(&target,&key).unwrap().unwrap();
             let proof_key=PersistentStore::external_lww_control_catalog_key(&catalog).unwrap();
             let mut proof=f.a.external_lww_control_catalog_proof(&target,&proof_key).unwrap().unwrap();
-            let now=crate::external_storage::runtime::now_ms();
+            let now=f.now_ms();
             let aged=now-crate::external_storage::leases::CACHE_REUSE_LIMIT_MS-1;
             proof.rooted_at_ms=Some(aged);
             f.a.device_store().unwrap().connection().execute("UPDATE external_lww_objects SET body=?1 WHERE target=?2 AND hash=?3",

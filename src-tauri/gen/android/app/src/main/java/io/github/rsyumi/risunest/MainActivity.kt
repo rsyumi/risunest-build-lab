@@ -591,6 +591,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   private val lifecycleCommands = LifecycleFlushBridge()
   private val generationCommands = GenerationKeepAliveBridge()
   private val safCommands = SafBridge()
+  private val fileSelection = NativeFileSelection(this)
   private val lifecycleFlushDispatcher = LifecycleFlushDispatcher(::dispatchLifecycleFlush)
   private val exitFlushGate = ExitFlushGate()
   private var exitListenerReady = false
@@ -1012,11 +1013,13 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     }
   }
 
-  private suspend fun dispatchControl(method: String, args: List<String>): Any? {
+  private suspend fun dispatchControl(method: String, args: List<String>, onProgress: (SafSpoolProgress) -> Unit): Any? {
     if (method.startsWith("saf.") && !BuildConfig.ENABLE_EXPERIMENTAL_SAF_FILE_JOBS) {
       error("android-saf-unavailable")
     }
     return when (method) {
+      "files.pick" -> fileSelection.pick(args[0].toBooleanStrict())
+      "files.discard" -> withContext(Dispatchers.IO) { fileSelection.discard(args[0]) }
       "lifecycle.onFrontendReady" -> onFrontendReady()
       "lifecycle.acknowledgeOpenedFile" -> withContext(Dispatchers.IO) { acknowledgeLegacyOpenedFile(args[0]) }
       "lifecycle.exitListenerReady" -> { exitListenerReady = args[0] == "true" }
@@ -1050,7 +1053,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
           "saf.cancelExport" -> safCommands.cancelExport(args[0])
           "saf.discardSource" -> safCommands.discardSource(args[0])
           "saf.discardPortableSource" -> PortableSourceNative.discard(args[0])
-          "saf.materializeBackupSource" -> portableSourceBatchJson(PortableSourceNative.materialize(args[0], safSpoolStore()), sourceType = "androidSpool")
+          "saf.materializeBackupSource" -> portableSourceBatchJson(PortableSourceNative.materialize(args[0], safSpoolStore(), onProgress), sourceType = "androidSpool")
           "saf.getActiveSourceRequestIds" -> safCommands.getActiveSourceRequestIds()
           "saf.getExportStatus" -> safCommands.getExportStatus()
           "saf.getExportSourceId" -> safCommands.getExportSourceId()

@@ -12,7 +12,8 @@ import { SqlitePersistentDataStore } from './sqlitePersistentDataStore'
 import { nativePersistentRevisionLease } from './nativePersistentExport'
 import { RevisionConflictError, SnapshotReleasedError } from './persistentDataStore'
 import { fixtureDatabase } from './tests/persistentDataFixtures'
-import { MAX_NATIVE_REQUEST_BYTES, PayloadTooLargeError } from './nativePersistenceValue'
+import { PayloadTooLargeError } from './nativePersistenceValue'
+import { encodeNativeCommit, NativeCommitTransport, STAGED_REQUEST_BYTES } from './nativeCommitTransport'
 import type { botPreset, character, Database, Message } from './database.svelte'
 import type { PluginStorageValue } from './persistentDataStore'
 
@@ -681,7 +682,12 @@ describe('SqlitePersistentDataStore staged replacement pieces', () => {
     const MiB = 1024 * 1024
     const stagingId = 'staging-pieces'
     const store = new SqlitePersistentDataStore()
-    const huge = () => 'x'.repeat(MAX_NATIVE_REQUEST_BYTES)
+    // Above the staging budget, so an oversized value is split into its own request as under the native limit.
+    const requestLimit = 2 * STAGED_REQUEST_BYTES
+    const limited = new SqlitePersistentDataStore(new NativeCommitTransport({
+        windows: () => false, invoke: mocks.invoke, encode: encodeNativeCommit, shared: () => undefined, maxRequestBytes: requestLimit,
+    }))
+    const huge = () => 'x'.repeat(requestLimit)
 
     beforeEach(() => {
         mocks.invoke.mockReset()
@@ -791,14 +797,14 @@ describe('SqlitePersistentDataStore staged replacement pieces', () => {
         const database = structuredClone(fixtureDatabase)
         const values = grow(database) as PluginStorageValue[] | undefined
 
-        const error = await store.replaceFromDatabase(database, 4, [], values).catch((caught) => caught)
+        const error = await limited.replaceFromDatabase(database, 4, [], values).catch((caught) => caught)
 
         expect(error).toBeInstanceOf(PayloadTooLargeError)
         expect(error.kind).toBe(kind)
-        expect(error.byteLength).toBeGreaterThan(MAX_NATIVE_REQUEST_BYTES)
+        expect(error.byteLength).toBeGreaterThan(requestLimit)
         const commands = mocks.invoke.mock.calls.map(([sent]) => sent)
         expect(commands).not.toContain(command)
         expect(commands).not.toContain('pds_replace_commit')
         expect(commands.at(-1)).toBe('pds_replace_abort')
-    }, 60_000)
+    })
 })

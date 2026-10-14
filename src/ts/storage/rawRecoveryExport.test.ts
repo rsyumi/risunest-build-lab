@@ -10,11 +10,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({ save: mocks.save }))
 vi.mock('../alert', () => ({ alertConfirm: mocks.confirm }))
-vi.mock('../platform', () => ({
-    isTauri: true,
-    isTauriAndroid: false,
-    isTauriIOS: false,
-}))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule({ runtime: 'tauri', os: 'windows' }))
 vi.mock('./nativeFileJobManager', () => ({
     runSharedNativeFileOperation: mocks.shared,
 }))

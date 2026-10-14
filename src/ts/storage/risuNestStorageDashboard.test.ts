@@ -8,6 +8,7 @@ import {
     storageOffDeviceParts,
 } from './risuNestStorageDashboard'
 import type { AssetResidencyStatus } from './sync/serverAssetResidency'
+import { assetResidencyStatus } from './sync/serverAssetResidency.testSupport'
 
 const stats = {
     snapshotBytes: 2 * 1024 * 1024,
@@ -111,13 +112,9 @@ describe('RisuNest storage dashboard view model', () => {
     })
 
     it('names the server, external storage and unfound files the way the asset residency group does', () => {
-        const residency = (overrides: Partial<AssetResidencyStatus>): AssetResidencyStatus => ({
-            policy: 'remote', localBytes: 0, remoteBytes: 0, remoteObjects: 0, serverBytes: 0, serverObjects: 0,
-            externalObjects: [], unavailableObjects: 0, evictedBytes: 0, ...overrides,
-        })
-        expect(storageOffDeviceParts(residency({ remoteBytes: 900, remoteObjects: 3, serverBytes: 900, serverObjects: 3 })))
+        expect(storageOffDeviceParts(assetResidencyStatus({ remoteBytes: 900, remoteObjects: 3, serverBytes: 900, serverObjects: 3 })))
             .toEqual([{ part: 'server', value: 900 }])
-        expect(storageOffDeviceParts(residency({
+        expect(storageOffDeviceParts(assetResidencyStatus({
             remoteBytes: 1000, remoteObjects: 4, serverBytes: 900, serverObjects: 3, unavailableObjects: 2,
             externalObjects: [{ connectionId: 'synthetic', objects: 1 }],
         }))).toEqual([
@@ -125,7 +122,7 @@ describe('RisuNest storage dashboard view model', () => {
             { part: 'external', value: 100 },
             { part: 'unavailable', value: 2 },
         ])
-        expect(storageOffDeviceParts(residency({ localBytes: 500 }))).toEqual([])
+        expect(storageOffDeviceParts(assetResidencyStatus({ localBytes: 500 }))).toEqual([])
     })
 
     it('prints sizes in the shared file size format', () => {
@@ -518,10 +515,7 @@ describe('RisuNest storage dashboard view model', () => {
 
     describe('files this device does not store', () => {
         const offloaded = { ...stats, missingAssetBodies: { count: 3, bytes: 3 * 1024 } }
-        const residency: AssetResidencyStatus = {
-            policy: 'remote', localBytes: 0, remoteBytes: 3 * 1024, remoteObjects: 3, serverBytes: 3 * 1024, serverObjects: 3,
-            externalObjects: [], unavailableObjects: 0, evictedBytes: 0,
-        }
+        const residency = assetResidencyStatus({ remoteBytes: 3 * 1024, remoteObjects: 3, serverBytes: 3 * 1024, serverObjects: 3 })
         const create = (getStats: () => Promise<typeof stats>, getResidency: () => Promise<AssetResidencyStatus>) =>
             createRisuNestStorageDashboard({
                 getStats,

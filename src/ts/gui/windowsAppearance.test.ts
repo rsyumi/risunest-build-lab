@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
+import type { PlatformShape } from "../platform.testSupport";
 import {
   opaqueHex,
   resolveAppearance,
@@ -14,9 +15,9 @@ const platform = vi.hoisted(() => ({
   currentWindow: vi.fn(),
   setTheme: vi.fn(),
 }));
-vi.mock("../platform", () => ({
-  get isTauriDesktop() { return platform.desktop; },
-}));
+vi.mock("../platform", async () => (await import("../platform.testSupport")).platformModule(() => (
+  platform.desktop ? { runtime: "tauri", os: platform.os as PlatformShape["os"] } : { runtime: "web", os: "windows" }
+)));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: platform.invoke }));
 vi.mock("@tauri-apps/plugin-os", () => ({ type: platform.osType }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: platform.currentWindow }));

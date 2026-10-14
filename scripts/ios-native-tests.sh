@@ -40,14 +40,17 @@ link_args=(
 xcrun --sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min="$IPHONEOS_DEPLOYMENT_TARGET" \
     -framework CoreFoundation -framework Security "${link_args[@]}" \
     tests/ios-rust/keychain-probe.c -o "$profile/keychain-probe"
-xcrun simctl spawn "$device_id" "$profile/keychain-probe"
+xcrun --sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min="$IPHONEOS_DEPLOYMENT_TARGET" \
+    tests/ios-rust/test-runner.c -o "$profile/test-runner"
+xcrun simctl spawn "$device_id" "$profile/test-runner" "$profile/keychain-probe"
 if [[ "${1:-}" == --preflight-only ]]; then exit 0; fi
 cat > "$profile/runner.sh" <<'EOF'
 #!/bin/sh
-exec xcrun simctl spawn "$IOS_SIMULATOR_UDID" "$@"
+exec xcrun simctl spawn "$IOS_SIMULATOR_UDID" "$IOS_RUST_TEST_RUNNER" "$@"
 EOF
 chmod +x "$profile/runner.sh"
 export IOS_SIMULATOR_UDID="$device_id"
+export IOS_RUST_TEST_RUNNER="$profile/test-runner"
 export CARGO_TARGET_AARCH64_APPLE_IOS_SIM_RUNNER="$profile/runner.sh"
 export CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS:-}"
 for argument in "${link_args[@]}"; do

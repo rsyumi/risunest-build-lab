@@ -1,8 +1,8 @@
 //! Counters the settings screen reads to show what server sync is doing.
 //!
-//! Every counter only grows, so a reader subtracts what it saw when its
-//! attempt started. `backlog_left` is the exception: it is what remains of
-//! known work now. Lanes that can run at the same time never share counters.
+//! Transfer counters only grow, so a reader subtracts its initial values.
+//! Listing, backlog and asset scopes describe the current work instead.
+//! Lanes that can run at the same time never share counters.
 use std::cell::RefCell;
 use std::io::{self, Read};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering::Relaxed};
@@ -55,8 +55,7 @@ pub(crate) struct ProgressLane {
     step: AtomicU8,
     /// Units read from the server, before their bodies are fetched.
     listed: AtomicU64,
-    /// Units a state read will list, as its pin reported them.
-    listed_total: AtomicU64,
+    listing: Mutex<Option<ListingProgress>>,
     items_done: AtomicU64,
     items_total: AtomicU64,
     files_done: AtomicU64,
@@ -74,15 +73,26 @@ pub(crate) struct ProgressLane {
     asset_scope: Mutex<Option<AssetScope>>,
     asset_scope_id: AtomicU64,
 }
+
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub(crate) struct ListingProgress {
+    pub done: u64,
+    pub total: u64,
+}
+
 impl ProgressLane {
     pub(crate) fn step(&self, step: Step) {
         self.step.store(step as u8, Relaxed);
     }
     pub(crate) fn listed(&self, count: usize) {
         self.listed.fetch_add(count as u64, Relaxed);
+        let mut listing = self.listing.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(listing) = listing.as_mut() {
+            listing.done = (listing.done + count as u64).min(listing.total);
+        }
     }
     pub(crate) fn plan_listing(&self, count: u64) {
-        self.listed_total.fetch_add(count, Relaxed);
+        *self.listing.lock().unwrap_or_else(|error| error.into_inner()) = Some(ListingProgress { done: 0, total: count });
     }
     pub(crate) fn plan_items(&self, count: usize) {
         self.items_total.fetch_add(count as u64, Relaxed);
@@ -132,7 +142,7 @@ impl ProgressLane {
             active,
             step: if active { Step::name(self.step.load(Relaxed)) } else { "idle" },
             listed: self.listed.load(Relaxed),
-            listed_total: self.listed_total.load(Relaxed),
+            listing: *self.listing.lock().unwrap_or_else(|error| error.into_inner()),
             items_done: self.items_done.load(Relaxed),
             items_total: self.items_total.load(Relaxed),
             files_done: self.files_done.load(Relaxed),
@@ -157,7 +167,7 @@ pub(crate) struct LaneSnapshot {
     pub active: bool,
     pub step: &'static str,
     pub listed: u64,
-    pub listed_total: u64,
+    pub listing: Option<ListingProgress>,
     pub items_done: u64,
     pub items_total: u64,
     pub files_done: u64,

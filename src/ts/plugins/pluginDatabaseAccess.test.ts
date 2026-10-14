@@ -5,11 +5,11 @@ import type {
     CharacterPage,
     ConversationPage,
     ConversationWindow,
-    PersistentDataStore,
     PluginStorageMutation,
     PersistentRevisionLease,
 } from '../storage/persistentDataStore'
 import { RevisionConflictError } from '../storage/persistentDataStore'
+import { createLeaseStub, createStoreStub } from '../storage/persistentDataStore.testSupport'
 import { getPersistentDataStore } from '../storage/persistentDataStoreFactory'
 import {
     createCatalogCharacterStub,
@@ -117,7 +117,7 @@ function createHarness(options: { unitIntent?: boolean; revisionAdmission?: bool
         const pluginStorage = database.pluginCustomStorage ?? {}
         const release = vi.fn(async () => undefined)
         releasedLeases.push(release)
-        return {
+        return createLeaseStub({
             revision,
             readRoot: async () => {
                 const { characters: _characters, botPresets, pluginCustomStorage, ...root } = database
@@ -214,7 +214,7 @@ function createHarness(options: { unitIntent?: boolean; revisionAdmission?: bool
                     endIndex: Math.min(startIndex + limit, chat.message.length),
                     messages: chat.message.slice(startIndex, startIndex + limit),
                     totalMessages: chat.message.length,
-                } }
+                } as ConversationWindow }
             },
             readPluginStorageValues: async ({ owner, afterKey, limit = 256 }) => {
                 const keys = Object.keys(pluginStorage)
@@ -238,9 +238,9 @@ function createHarness(options: { unitIntent?: boolean; revisionAdmission?: bool
                     ? { revision, value: pluginStorage[key] }
                     : null,
             release,
-        } as unknown as PersistentRevisionLease
+        })
     })
-    const store = {
+    const store = createStoreStub({
         open: vi.fn(async () => undefined),
         queryCharacters: vi.fn(async () => characterPage),
         queryConversations: vi.fn(async () => conversationPage),
@@ -252,7 +252,7 @@ function createHarness(options: { unitIntent?: boolean; revisionAdmission?: bool
         commit: vi.fn(),
         replaceFromDatabase: vi.fn(),
         acquireRevision,
-    } as unknown as PersistentDataStore
+    })
     const flushPendingData = vi.fn(async () => undefined)
     const snapshot = vi.fn((value: unknown) => structuredClone(value))
     const applyCompatibilityDatabaseLite = vi.fn((_database: Record<string, unknown>) => undefined)

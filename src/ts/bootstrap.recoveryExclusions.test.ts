@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { BootstrapTestState } from './bootstrap.testSupport'
 
 const startupMocks = vi.hoisted(() => ({ checkNativeStartupStatus: vi.fn() }))
 const defaultPlugins = vi.hoisted(() => ({ startDefaultPluginBootstrap: vi.fn() }))
 vi.mock('./plugins/defaultPluginBootstrap.svelte', () => defaultPlugins)
-const startup = vi.hoisted(() => ({
-    native: true, exclusions: [] as string[], database: {} as any, reachUi: false,
+const startup = vi.hoisted((): BootstrapTestState => ({
+    native: true, exclusions: [], database: {} as any, reachUi: false,
     takeRendererRecovery: vi.fn(async () => false),
     credential: { id: 'synthetic-account', token: 'synthetic-token' },
     readVault: vi.fn(), reconcile: vi.fn(), external: vi.fn(), transports: vi.fn(), stages: vi.fn(),
@@ -17,170 +18,91 @@ vi.mock('svelte/store', async (importOriginal) => ({
     ...await importOriginal<typeof import('svelte/store')>(),
     get: vi.fn(() => false),
 }))
-vi.mock('@tauri-apps/plugin-fs', () => ({
-    BaseDirectory: { AppData: 'app-data' },
-    exists: vi.fn(), mkdir: vi.fn(), readDir: vi.fn(), readFile: vi.fn(),
-    remove: vi.fn(), writeFile: vi.fn(),
-}))
-vi.mock('@tauri-apps/api/webviewWindow', () => ({ getCurrentWebviewWindow: () => ({ maximize: vi.fn() }) }))
-vi.mock('@tauri-apps/api/core', () => ({ convertFileSrc: vi.fn() }))
-vi.mock('@tauri-apps/api/path', () => ({ join: vi.fn() }))
-vi.mock('./util', () => ({ changeFullscreen: vi.fn(), sleep: vi.fn() }))
-vi.mock('./update', () => ({ checkRisuUpdate: vi.fn() }))
-vi.mock('./gui/animation', () => ({ updateAnimationSpeed: vi.fn() }))
-vi.mock('./gui/colorscheme', () => ({
-    updateColorScheme: () => { if (!startup.reachUi) throw startup.stop }, updateTextThemeAndCSS: vi.fn(),
-}))
-vi.mock('./observer.svelte', () => ({ startObserveDom: vi.fn() }))
-vi.mock('./gui/guisize', () => ({ updateGuisize: vi.fn() }))
-vi.mock('./hotkey', () => ({ initMobileGesture: vi.fn() }))
-vi.mock('./process/modules', () => ({ moduleUpdate: vi.fn() }))
-vi.mock('./drive/accounter', () => ({ loadRisuAccountData: vi.fn() }))
-vi.mock('./storage/risuSave', () => ({ decodeRisuSave: vi.fn() }))
-vi.mock('./storage/remoteSaveCleanup', () => ({ getRemoteSaveCleanupAction: vi.fn(), getRemoteSavePayloadName: vi.fn() }))
-vi.mock('./model/modellist', () => ({ registerModelDynamic: vi.fn() }))
-vi.mock('./nativeScreenshotArchiveWriter', () => ({
-    describeScreenshotPublicationError: vi.fn(), listenRecoveredAndroidScreenshotPublications: vi.fn(),
-}))
-vi.mock('./storage/nativePersistentMaintenance', () => ({
-    restartNativeApp: vi.fn(), schedulePeriodicNativeSnapshot: vi.fn(),
-}))
-vi.mock('./storage/nativeFileJobs', () => ({
-    NativeFileJobError: class extends Error {}, runNativeOfficialAccountSnapshotRestore: vi.fn(),
-}))
-vi.mock('./storage/androidRisuSaveRouteProduction.svelte', () => ({ registerAndroidRisuSaveRoute: vi.fn() }))
-vi.mock('./storage/iosFiles', () => ({ reportInterruptedIOSBackupSourcesAtStart: vi.fn() }))
-vi.mock('src/lang', () => ({ changeLanguage: vi.fn(), language: { risuNest: {
-    startup: {
-        storage: 'Storage', account: 'Account', plugins: 'Plugins', ui: 'UI', data: 'Data', serviceWorker: 'Service worker',
-        rendererRecovered: 'Synthetic recovery notice',
-    },
-    backup: { officialAssetsRestoreFailed: 'Synthetic asset restore failed', officialAssetsMissing: 'Synthetic missing assets: {count}' },
-} } }))
-vi.mock('./platform', () => ({ get isTauri() { return startup.native }, isTauriAndroid: false, isTauriDesktop: false }))
-vi.mock('./storage/deviceSettings', () => ({ getStartupExclusions: () => startup.exclusions, loadDeviceSettings: () => ({ nativeFileLogEnabled: false }) }))
-vi.mock('./nativeLog', () => ({ recordNativeLogError: vi.fn(), setNativeLogFileEnabled: vi.fn() }))
-vi.mock('./storage/persistentStorageRuntime', () => ({
-    initializePersistentStorage: vi.fn(), activateNativeAssetRepository: vi.fn(),
-}))
-vi.mock('./storage/nativeFileJobRecovery', () => ({
-    shouldReconcileNativeFileJobs: vi.fn(() => false),
-    reconcileNativeFileJobsBeforeBootstrap: async () => ({ pendingRestoreAcknowledgements: [], pendingOfficialPublications: [], interruptedRestores: [] }),
-    acknowledgeRecoveredNativeRestores: vi.fn(),
-}))
-vi.mock('./storage/persistentBootstrap', () => ({ bootstrapPersistentDatabase: async () => ({ database: startup.database, revision: 1, source: 'persistent' }) }))
-vi.mock('./storage/database.svelte', () => ({ setDatabase: (value: unknown) => { startup.database = value }, getDatabase: () => startup.database }))
-vi.mock('./storage/databasePreparation', () => ({
-    checkNewFormat: vi.fn(), prepareDatabaseForPersistence: vi.fn(), prepareDatabaseForBootstrap: vi.fn(), preparePersistentRootForWorkingSet: vi.fn(),
-    assignIds: vi.fn(),
-}))
-vi.mock('./storage/workingSetCatalog', () => ({
-    createCatalogPresetWorkingSet: vi.fn(), hasIncompletePersistentWorkingSet: vi.fn(() => false),
-    isCatalogCharacterStub: vi.fn(() => false), isCatalogPresetWorkingSet: vi.fn(() => false),
-    isWorkingSetCharacterStub: vi.fn(() => false),
-    projectCatalogWorkingSet: vi.fn(), projectCompleteScalableWorkingSet: vi.fn(),
-}))
-vi.mock('./storage/workingSetResidency', () => ({
-    workingSetResidency: { clear: vi.fn(), markCharacterReleased: vi.fn(), reconcileConversationResidency: vi.fn() },
-}))
-vi.mock('./storage/persistentDataRuntime.svelte', () => ({
-    getPersistentDataRuntime: () => ({ store: {}, revision: 1, flushPendingData: vi.fn(), expirePersistentTrash: vi.fn(async () => {}),
-        capturePersistentMutationToken: vi.fn(async () => ({ revision: 5 })), acquireDestructiveReplacementFence: vi.fn(async () => ({ revision: 5 })) }),
-    initializeActiveWorkingSet: vi.fn(), configurePersistentDataRuntime: vi.fn(),
-    hasPendingOfficialPublication: vi.fn(() => false), publishCurrentOfficialRevision: vi.fn(),
-}))
-vi.mock('./plugins/plugins.svelte', () => ({
-    keepPluginsOffForThisStart: vi.fn(), loadPlugins: vi.fn(), pluginCompatibility: { initialize: vi.fn(), profile: 'default' },
-}))
-vi.mock('./plugins/pluginCompatibility', () => ({ shouldProjectScalableWorkingSet: vi.fn(() => false) }))
-vi.mock('./storage/accountStorage', () => ({
-    AccountStorage: class { readItem = vi.fn() }, resetAccountStorageSession: vi.fn(),
-}))
-vi.mock('./storage/nativeAccountCredential', () => ({
-    createNativeAccountCredentialVault: () => ({ read: startup.readVault }),
-}))
-vi.mock('./storage/nativeDeviceSettings', () => ({
-    createNativeDeviceSettings: () => ({ get: vi.fn(async () => null), set: vi.fn() }), createNativeDeviceSettingsBag: vi.fn(),
-}))
-vi.mock('./storage/sync/officialAccountSnapshot', () => ({
-    OfficialAccountSnapshotAdapter: class {}, createOfficialAssociationMarkers: () => ({}),
-}))
-vi.mock('./storage/sync/officialAccountBootstrap', () => ({
-    initializeOfficialAccountBootstrap: vi.fn(async () => ({ officialEnabled: false })), publishOfficialRevisionIfChanged: vi.fn(),
-}))
-vi.mock('./storage/sync/officialAssetLedger', () => ({
-    createAccountScopedOfficialAssetLedger: () => ({ reset: vi.fn() }),
-}))
-vi.mock('./storage/accountAssetAccess', () => ({
-    configureOfficialAccountAssetReader: vi.fn(), createStructuredAccountAssetReader: vi.fn(),
-}))
-vi.mock('./storage/sync/nativeOfficialAccountFlow', () => ({
-    configureNativeOfficialAccountFlow: vi.fn(), createNativeOfficialAccountFlowService: () => ({ flow: {}, snapshotRequestReauthentication: {} }),
-    nativeOfficialAccountKeys: { credential: 'credential', association: 'association', assetLedger: 'asset-ledger' },
-    normalizeNativeOfficialAccountCredential: (value: unknown) => value,
-}))
-vi.mock('./storage/sync/nativeOfficialPublicationJob', () => ({
-    createNativeOfficialPublicationJobPublisher: vi.fn(() => ({})),
-}))
-vi.mock('./storage/sync/nativeOfficialPublicationRecovery', () => ({
-    createNativeOfficialPublicationRecovery: () => ({ reconcile: startup.reconcile, reconcileSettled: startup.reconcile }),
-}))
-vi.mock('./storage/platformBlobStore', () => ({ resolveBlobStore: vi.fn() }))
-vi.mock('./storage/sync/syncConflictBackup', () => ({ getSyncConflictBackupStore: vi.fn() }))
-vi.mock('./storage/sync/syncConflictSummary', () => ({ formatNameList: vi.fn(), summarizePinnedSyncConflict: vi.fn() }))
-vi.mock('./storage/persistentRecordIterator', () => ({ withPersistentRevisionLease: vi.fn() }))
-vi.mock('./process/coldstorage.svelte', () => ({
-    getAccountColdStorageItem: vi.fn(), getColdStorageItem: vi.fn(), makeColdData: vi.fn(),
-    setAccountColdStorageItem: vi.fn(),
-}))
+vi.mock('@tauri-apps/plugin-fs', async () => (await import('./bootstrap.testSupport')).tauriFsModule())
+vi.mock('@tauri-apps/api/webviewWindow', async () => (await import('./bootstrap.testSupport')).webviewWindowModule())
+vi.mock('@tauri-apps/api/core', async () => (await import('./bootstrap.testSupport')).tauriCoreModule())
+vi.mock('@tauri-apps/api/path', async () => (await import('./bootstrap.testSupport')).tauriPathModule())
+vi.mock('./util', async () => (await import('./bootstrap.testSupport')).utilModule())
+vi.mock('./gui/animation', async () => (await import('./bootstrap.testSupport')).animationModule())
+vi.mock('./gui/colorscheme', async () => (await import('./bootstrap.testSupport')).colorschemeModule(startup))
+vi.mock('./observer.svelte', async () => (await import('./bootstrap.testSupport')).observerModule())
+vi.mock('./gui/guisize', async () => (await import('./bootstrap.testSupport')).guisizeModule())
+vi.mock('./hotkey', async () => (await import('./bootstrap.testSupport')).hotkeyModule())
+vi.mock('./process/modules', async () => (await import('./bootstrap.testSupport')).modulesModule())
+vi.mock('./drive/accounter', async () => (await import('./bootstrap.testSupport')).accounterModule())
+vi.mock('./storage/remoteSaveCleanup', async () => (await import('./bootstrap.testSupport')).remoteSaveCleanupModule())
+vi.mock('./model/modellist', async () => (await import('./bootstrap.testSupport')).modellistModule())
+vi.mock('./nativeScreenshotArchiveWriter', async () => (await import('./bootstrap.testSupport')).nativeScreenshotArchiveWriterModule())
+vi.mock('./storage/nativePersistentMaintenance', async () => (await import('./bootstrap.testSupport')).nativePersistentMaintenanceModule())
+vi.mock('./storage/nativeFileJobs', async () => (await import('./bootstrap.testSupport')).nativeFileJobsModule())
+vi.mock('./storage/androidRisuSaveRouteProduction.svelte', async () => (await import('./bootstrap.testSupport')).androidRisuSaveRouteModule())
+vi.mock('./storage/iosFiles', async () => (await import('./bootstrap.testSupport')).iosFilesModule())
+vi.mock('./platform', async () => (await import('./platform.testSupport')).platformModule(() => (
+    // bootstrap.ts reads only isTauri, isTauriAndroid and isTauriDesktop; iOS is the native shape that leaves the
+    // desktop window and Android lifecycle paths out of these tests.
+    startup.native ? { runtime: 'tauri', os: 'ios' } : { runtime: 'web', os: 'windows' })))
+vi.mock('./storage/deviceSettings', async () => (await import('./bootstrap.testSupport')).deviceSettingsModule(startup))
+vi.mock('./storage/persistentStorageRuntime', async () => (await import('./bootstrap.testSupport')).persistentStorageRuntimeModule())
+vi.mock('./storage/nativeFileJobRecovery', async () => (await import('./bootstrap.testSupport')).nativeFileJobRecoveryModule())
+vi.mock('./storage/persistentBootstrap', async () => (await import('./bootstrap.testSupport')).persistentBootstrapModule(startup))
+vi.mock('./storage/database.svelte', async () => (await import('./bootstrap.testSupport')).databaseModule(startup))
+vi.mock('./storage/databasePreparation', async () => (await import('./bootstrap.testSupport')).databasePreparationModule())
+vi.mock('./storage/workingSetCatalog', async () => (await import('./bootstrap.testSupport')).workingSetCatalogModule())
+vi.mock('./storage/workingSetResidency', async () => (await import('./bootstrap.testSupport')).workingSetResidencyModule())
+vi.mock('./storage/persistentDataRuntime.svelte', async () => (await import('./bootstrap.testSupport')).persistentDataRuntimeModule())
+vi.mock('./plugins/plugins.svelte', async () => (await import('./bootstrap.testSupport')).pluginsModule())
+vi.mock('./storage/accountStorage', async () => (await import('./bootstrap.testSupport')).accountStorageModule())
+vi.mock('./storage/nativeAccountCredential', async () => (await import('./bootstrap.testSupport')).nativeAccountCredentialModule(startup))
+vi.mock('./storage/nativeDeviceSettings', async () => (await import('./bootstrap.testSupport')).nativeDeviceSettingsModule())
+vi.mock('./storage/sync/officialAccountSnapshot', async () => (await import('./bootstrap.testSupport')).officialAccountSnapshotModule())
+vi.mock('./storage/sync/officialAccountBootstrap', async () => (await import('./bootstrap.testSupport')).officialAccountBootstrapModule())
+vi.mock('./storage/sync/officialAssetLedger', async () => (await import('./bootstrap.testSupport')).officialAssetLedgerModule())
+vi.mock('./storage/accountAssetAccess', async () => (await import('./bootstrap.testSupport')).accountAssetAccessModule())
+vi.mock('./storage/sync/nativeOfficialAccountFlow', async () => (await import('./bootstrap.testSupport')).nativeOfficialAccountFlowModule())
+vi.mock('./storage/sync/nativeOfficialPublicationJob', async () => (await import('./bootstrap.testSupport')).nativeOfficialPublicationJobModule())
+vi.mock('./storage/sync/nativeOfficialPublicationRecovery', async () => (await import('./bootstrap.testSupport')).nativeOfficialPublicationRecoveryModule(startup))
+vi.mock('./storage/platformBlobStore', async () => (await import('./bootstrap.testSupport')).platformBlobStoreModule())
+vi.mock('./storage/sync/syncConflictBackup', async () => (await import('./bootstrap.testSupport')).syncConflictBackupModule())
+vi.mock('./storage/sync/syncConflictSummary', async () => (await import('./bootstrap.testSupport')).syncConflictSummaryModule())
+vi.mock('./storage/persistentRecordIterator', async () => (await import('./bootstrap.testSupport')).persistentRecordIteratorModule())
+vi.mock('./process/coldstorage.svelte', async () => (await import('./bootstrap.testSupport')).coldStorageModule())
 vi.mock('./globalApi.svelte', () => ({
     forageStorage: { Init: vi.fn(async () => {}), isAccount: false, setAccountModeForSession: vi.fn() }, saveDb: vi.fn(),
     getUncleanables: vi.fn(), getBasename: vi.fn(), invalidateAssetSourceCache: vi.fn(), setUsingSw: vi.fn(),
 }))
-vi.mock('./stores.svelte', () => ({
-    MobileGUI: { set: vi.fn() }, botMakerMode: { set: vi.fn() }, selectedCharID: { set: vi.fn() },
-    loadedStore: { set: vi.fn() }, DBState: {}, LoadingStatusState: { text: '' }, bootFailure: { set: vi.fn() },
-}))
-vi.mock('./alert', () => ({
-    alertConfirm: vi.fn(), alertError: vi.fn(), alertInput: vi.fn(), alertLogin: vi.fn(), alertMd: vi.fn(),
-    alertNormal: vi.fn(), alertSelect: vi.fn(), alertTOS: vi.fn(), alertRisuServiceTOS: vi.fn(), waitAlert: vi.fn(),
-    alertToast: vi.fn(),
-}))
-vi.mock('./characterCards', () => ({ applyHubSelection: vi.fn(), characterURLImport: vi.fn(), hubURL: 'https://hub.invalid' }))
-vi.mock('./storage/androidSafBridge', () => ({ isAndroidSafFileJobsEnabled: vi.fn(() => false) }))
-vi.mock('./storage/lifecycleCommit', () => ({ registerLifecycleCommitListeners: vi.fn() }))
+vi.mock('./stores.svelte', async () => (await import('./bootstrap.testSupport')).storesModule())
+vi.mock('./alert', async () => (await import('./bootstrap.testSupport')).alertModule())
+vi.mock('./characterCards', async () => (await import('./bootstrap.testSupport')).characterCardsModule())
+vi.mock('./storage/androidSafBridge', async () => (await import('./bootstrap.testSupport')).androidSafBridgeModule())
+vi.mock('./storage/lifecycleCommit', async () => (await import('./bootstrap.testSupport')).lifecycleCommitModule())
 vi.mock('./nativeStartup', () => startupMocks)
 
 
-vi.mock('./storage/deviceMarkers', () => ({ initializeDeviceMarkers: vi.fn(), getDeviceMarkers: () => startup.markers }))
+vi.mock('./storage/deviceMarkers', async () => (await import('./bootstrap.testSupport')).deviceMarkersModule(startup))
 vi.mock('./storage/recoveryMode.svelte', async (importOriginal) => ({
     ...await importOriginal<typeof import('./storage/recoveryMode.svelte')>(),
     finishBoot: vi.fn(async () => {}),
     takeRendererRecovery: startup.takeRendererRecovery,
 }))
-vi.mock('./storage/bootAttempt', () => ({ markBootStage: startup.stages, markBootSuspect: vi.fn() }))
-vi.mock('./ui/yieldToUi', () => ({ yieldToUi: async () => {} }))
-vi.mock('./nativeLocalUrls', () => ({ initializeNativeLocalUrls: vi.fn() }))
-vi.mock('./iosNative', () => ({ initializeIOSNative: vi.fn(), installIOSPersistenceLifecycle: vi.fn() }))
-vi.mock('./storage/sync/external/production', () => ({
-    installExternalStorageProduction: startup.external, installExternalSyncTransports: startup.transports,
-    getExternalStorageSyncExitDrainAdapter: startup.exitDrain,
-}))
-vi.mock('./storage/sync/external/lwwProduction', () => ({ isExternalLwwRunning: () => startup.lwwRunning }))
-vi.mock('./storage/syncExitCoordinator', () => ({ createSyncExitCoordinator: vi.fn(() => ({})) }))
-vi.mock('./storage/syncExitProduction', () => ({ configureSyncExitCoordinator: vi.fn(), registerWindowCloseDrain: vi.fn() }))
-vi.mock('./storage/sync/serverSyncProduction', () => ({
-    createServerSyncExitDrainAdapter: startup.serverDrain, initializeNativeSyncBindings: vi.fn(),
-    getServerSyncController: () => ({ snapshot: () => ({ paused: startup.serverPaused }) }),
-    installServerSyncProduction: vi.fn(), disposeNativeSyncBindings: vi.fn(),
-}))
-vi.mock('./storage/sync/external/bridge', () => ({ getExternalStorageBridge: vi.fn() }))
-vi.mock('./process/transformers', () => ({ releaseIdleTransformerModels: vi.fn() }))
-vi.mock('./process/files/inlayProviderImage', () => ({ forgetInlayProviderImages: vi.fn() }))
+vi.mock('./storage/bootAttempt', async () => (await import('./bootstrap.testSupport')).bootAttemptModule(startup))
+vi.mock('./ui/yieldToUi', async () => (await import('./bootstrap.testSupport')).yieldToUiModule())
+vi.mock('./nativeLocalUrls', async () => (await import('./bootstrap.testSupport')).nativeLocalUrlsModule())
+vi.mock('./iosNative', async () => (await import('./bootstrap.testSupport')).iosNativeModule())
+vi.mock('./storage/sync/external/production', async () => (await import('./bootstrap.testSupport')).externalStorageProductionModule(startup))
+vi.mock('./storage/sync/external/lwwProduction', async () => (await import('./bootstrap.testSupport')).externalLwwProductionModule(startup))
+vi.mock('./storage/syncExitCoordinator', async () => (await import('./bootstrap.testSupport')).syncExitCoordinatorModule())
+vi.mock('./storage/syncExitProduction', async () => (await import('./bootstrap.testSupport')).syncExitProductionModule())
+vi.mock('./storage/sync/serverSyncProduction', async () => (await import('./bootstrap.testSupport')).serverSyncProductionModule(startup))
+vi.mock('./storage/sync/external/bridge', async () => (await import('./bootstrap.testSupport')).externalStorageBridgeModule())
+vi.mock('./process/transformers', async () => (await import('./bootstrap.testSupport')).transformersModule())
+vi.mock('./process/files/inlayProviderImage', async () => (await import('./bootstrap.testSupport')).inlayProviderImageModule())
 
 import { loadData } from './bootstrap'
+import { language } from 'src/lang'
 import { keepPluginsOffForThisStart, loadPlugins } from './plugins/plugins.svelte'
-import { alertNormal, alertToast, alertTOS, waitAlert } from './alert'
+import { alertError, alertNormal, alertToast, alertTOS, waitAlert } from './alert'
+import { invoke } from '@tauri-apps/api/core'
+import { initializePersistentStorage } from './storage/persistentStorageRuntime'
 import { bootFailure } from './stores.svelte'
 import { loadRisuAccountData } from './drive/accounter'
 import { initializeOfficialAccountBootstrap } from './storage/sync/officialAccountBootstrap'
@@ -225,7 +147,9 @@ describe('bootstrap recovery exclusions', () => {
             expect(startup.stages.mock.calls.flat()).toContain('drive-sync')
             expect(startup.readVault).toHaveBeenCalledOnce()
             expect(startup.database.account).toBe(startup.credential)
+            expect(invoke).toHaveBeenCalledWith('native_log_set_file_enabled', { enabled: false })
         } else {
+            expect(invoke).not.toHaveBeenCalledWith('native_log_set_file_enabled', expect.anything())
             expect(initializeNativeSyncBindings).not.toHaveBeenCalled()
             expect(installServerSyncProduction).not.toHaveBeenCalled()
             expect(startup.transports).not.toHaveBeenCalled()
@@ -376,17 +300,11 @@ describe('renderer recovery notice', () => {
         expect(startup.takeRendererRecovery).not.toHaveBeenCalled()
         expect(defaultPlugins.startDefaultPluginBootstrap).not.toHaveBeenCalled()
         answerTerms(true)
-        await vi.waitFor(() => expect(alertToast).toHaveBeenCalledExactlyOnceWith('Synthetic recovery notice'))
+        await vi.waitFor(() => expect(alertToast).toHaveBeenCalledExactlyOnceWith(language.risuNest.startup.rendererRecovered))
         await vi.waitFor(() => expect(defaultPlugins.startDefaultPluginBootstrap).toHaveBeenCalledOnce())
         expect(alertNormal).not.toHaveBeenCalled()
         expect(vi.mocked(waitAlert).mock.invocationCallOrder.at(-1))
             .toBeLessThan(vi.mocked(alertToast).mock.invocationCallOrder[0])
-    })
-
-    it('words the notice as a reload with saved data', async () => {
-        const [{ languageKorean }, { languageEnglish }] = await Promise.all([import('src/lang/ko'), import('src/lang/en')])
-        expect(languageKorean.risuNest.startup.rendererRecovered).toBe('저장된 데이터로 화면을 다시 불러왔습니다.')
-        expect(languageEnglish.risuNest.startup.rendererRecovered).toBe('The screen was reloaded with your saved data.')
     })
 
     it('leaves the answer untaken when the terms are declined', async () => {
@@ -409,5 +327,28 @@ describe('renderer recovery notice', () => {
         answerTerms(true)
         await vi.waitFor(() => expect(startup.takeRendererRecovery).toHaveBeenCalled())
         expect(defaultPlugins.startDefaultPluginBootstrap).not.toHaveBeenCalled()
+    })
+})
+
+describe('native setup failure', () => {
+    it('stops bootstrap before diagnostics and exposes the existing failure panel state', async () => {
+        startup.native = true
+        startup.exclusions = []
+        const failure = new Error('synthetic native setup failure')
+        startupMocks.checkNativeStartupStatus.mockRejectedValueOnce(failure)
+
+        await loadData()
+
+        expect(invoke).not.toHaveBeenCalled()
+        expect(initializePersistentStorage).not.toHaveBeenCalled()
+        expect(loadPlugins).not.toHaveBeenCalled()
+        expect(initializeNativeSyncBindings).not.toHaveBeenCalled()
+        expect(installServerSyncProduction).not.toHaveBeenCalled()
+        expect(bootFailure.set).toHaveBeenLastCalledWith({
+            kind: 'unknown',
+            message: failure.message,
+            stage: 'native-setup',
+        })
+        expect(alertError).not.toHaveBeenCalled()
     })
 })

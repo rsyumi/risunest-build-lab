@@ -2,10 +2,11 @@ const OWNER = 'test-plugin'
 import { describe, expect, it, vi } from 'vitest'
 import {
     RevisionConflictError,
-    type PersistentDataStore,
+    type PersistentRoot,
     type PluginStorageMutation,
     type PluginStorageValueQuery,
 } from '../storage/persistentDataStore'
+import { createLeaseStub, createStoreStub } from '../storage/persistentDataStore.testSupport'
 import {
     createPluginStorageStore,
     observePluginStorageValue,
@@ -40,9 +41,9 @@ function harness(entries: Record<string, { byteSize: number; value: unknown }>, 
         return { revision, items: selected.map(({ ordinal, ...item }) => item),
             nextCursor: records.length > limit && last ? { owner: last.owner, key: last.key, ordinal: last.ordinal } : null }
     })
-    const store = {
+    const store = createStoreStub({
         open: vi.fn(async () => undefined),
-        readRoot: vi.fn(async () => ({ revision, value: {} })),
+        readRoot: vi.fn(async () => ({ revision, value: {} as PersistentRoot })),
         queryPluginStorage: vi.fn(async () => ({
             revision,
             items: Object.entries(entries)
@@ -50,7 +51,7 @@ function harness(entries: Record<string, { byteSize: number; value: unknown }>, 
                 .map(([key, entry]) => ({ owner: OWNER, key, byteSize: entry.byteSize })),
         })),
         readPluginStorage,
-        acquireRevision: vi.fn(async (requestedRevision: number) => ({
+        acquireRevision: vi.fn(async (requestedRevision: number) => createLeaseStub({
             revision: requestedRevision,
             readPluginStorageValues: async (query: PluginStorageValueQuery) => ({
                 ...await readPluginStorageValues(query), revision: requestedRevision,
@@ -69,7 +70,7 @@ function harness(entries: Record<string, { byteSize: number; value: unknown }>, 
             },
             release: vi.fn(async () => undefined),
         })),
-    } as unknown as PersistentDataStore
+    })
     const mutate = vi.fn(async (mutations: readonly PluginStorageMutation[]) => {
         for (const mutation of mutations) {
             if (mutation.type === 'clear') {
@@ -465,7 +466,7 @@ describe('plugin storage V3 residency', () => {
         const release = vi.fn()
             .mockRejectedValueOnce(new Error('release unavailable'))
             .mockResolvedValueOnce(undefined)
-        vi.mocked(store.acquireRevision).mockResolvedValueOnce({
+        vi.mocked(store.acquireRevision).mockResolvedValueOnce(createLeaseStub({
             revision: 4,
             queryPluginStorage: async () => ({
                 revision: 4,
@@ -475,7 +476,7 @@ describe('plugin storage V3 residency', () => {
                 items: [{ owner: OWNER, key: 'zero', value: 0 }] }),
             readPluginStorage: async () => ({ revision: 4, value: 0 }),
             release,
-        } as any)
+        }))
 
         await expect(storage.forOwner(OWNER).snapshot()).resolves.toEqual({ zero: 0 })
         expect(release).toHaveBeenCalledTimes(2)
@@ -483,7 +484,7 @@ describe('plugin storage V3 residency', () => {
 
     it('preserves an own proto key and catalog order in a pinned snapshot', async () => {
         const { storage, store } = harness({}, 100)
-        vi.mocked(store.acquireRevision).mockResolvedValueOnce({
+        vi.mocked(store.acquireRevision).mockResolvedValueOnce(createLeaseStub({
             revision: 4,
             queryPluginStorage: async () => ({
                 revision: 4,
@@ -502,7 +503,7 @@ describe('plugin storage V3 residency', () => {
                 value: key === '__proto__' ? false : key === '0' ? 0 : '',
             }),
             release: vi.fn(async () => undefined),
-        } as any)
+        }))
 
         const snapshot = await storage.forOwner(OWNER).snapshot()
 

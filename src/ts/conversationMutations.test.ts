@@ -316,7 +316,7 @@ describe('conversation mutations', () => {
         }))
     })
 
-    it('appends to an awaited trigger result without restoring the old array', () => {
+    it('appends to an awaited trigger result across a variable commit without restoring the old array', () => {
         const conversation = createConversation([{ role: 'user', data: 'before trigger' }])
         const character = createCharacter(conversation)
         const onMutation = vi.fn()
@@ -330,6 +330,13 @@ describe('conversation mutations', () => {
         const target = captureConversationMutationTarget(character, conversation, session)
         const triggerMessages: Message[] = [{ role: 'char', data: 'trigger result' }]
 
+        session.updateChatVariables(new Map([['scratch', 'trigger']]))
+        expect(isConversationMutationTargetCurrent(
+            target,
+            character,
+            conversation,
+            session,
+        )).toBe(true)
         appendConversationMessage(
             target,
             { role: 'user', data: 'new input' },

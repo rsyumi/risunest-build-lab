@@ -351,11 +351,17 @@ fn hydration_opens_the_same_databases_however_many_pack_groups_it_reads() {
 
 #[test]
 fn publication_holds_the_mutation_lock_once_per_batch_of_bodies() {
+    use crate::asset_repository::body_io;
     const BATCH: usize = 64;
     let received = received(&[2 * BATCH + 2]);
     let root = received.f.directory_b.path();
     let bodies = &received.publications[0];
+    body_io::reset_body_io();
     assert!(hydrate(root, bodies).unwrap().is_empty());
+    let observed = body_io::take_body_io();
+    // Download/decryption workers share this observation with the ten CAS workers.
+    assert!(observed.worker_scopes_started >= 10);
+    assert_eq!(observed.worker_scopes_started, observed.worker_scopes_settled);
     assert_resident(root, bodies);
     let holds = holds(root);
     for (index, (count, held)) in holds.iter().enumerate() {

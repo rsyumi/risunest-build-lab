@@ -11,6 +11,50 @@ if (process.env.RISUNEST_REQUIRE_NSIS === "1" && skip) throw new Error(skip);
 const quote = (value) => value.replaceAll("$", "$$").replaceAll('"', '$\\"');
 const installedExecutable = "$INSTDIR\\${MAINBINARYNAME}.exe";
 
+test("both installers use the template pinned to their Tauri CLI and automatic Korean/English languages", () => {
+  const template = readFileSync(resolve("src-tauri/windows-installer.nsi"), "utf8");
+  const pinned = template.match(/Based on @tauri-apps\/cli (\d+\.\d+\.\d+)/)?.[1];
+  assert.ok(pinned);
+  for (const [manifest, configuration] of [
+    ["package.json", "src-tauri/tauri.conf.json"],
+    ["server/manager/gui/package.json", "server/manager/gui/src-tauri/tauri.bundle.conf.json"],
+  ]) {
+    assert.equal(JSON.parse(readFileSync(resolve(manifest), "utf8")).devDependencies["@tauri-apps/cli"], pinned);
+    const nsis = JSON.parse(readFileSync(resolve(configuration), "utf8")).bundle.windows.nsis;
+    assert.equal(resolve(dirname(configuration), nsis.template), resolve("src-tauri/windows-installer.nsi"));
+    assert.deepEqual(nsis.languages, ["English", "Korean"]);
+    assert.equal(nsis.displayLanguageSelector, false);
+  }
+});
+
+test("missing or misfiled Korean installer strings fail compilation", { skip }, () => {
+  const root = mkdtempSync(join(tmpdir(), "risunest-nsis-language-"));
+  try {
+    const common = readFileSync(resolve("src-tauri/windows-common.nsh"), "utf8");
+    for (const [name, source] of [
+      ["missing", common.replace(/^LangString InstallPermission 1042 .*\r?\n/m, "")],
+      ["misfiled", common.replace("LangString InstallPermission 1042", "LangString InstallPermission ${LANG_KOREAN}")],
+    ]) {
+      const include = join(root, `${name}.nsh`);
+      writeFileSync(include, source);
+      const script = join(root, `${name}.nsi`);
+      writeFileSync(script, String.raw`Unicode true
+OutFile "${quote(join(root, `${name}.exe`))}"
+!include LogicLib.nsh
+!include "${quote(include)}"
+LoadLanguageFile "${'$'}{NSISDIR}\Contrib\Language files\English.nlf"
+LoadLanguageFile "${'$'}{NSISDIR}\Contrib\Language files\Korean.nlf"
+Section
+DetailPrint "$(InstallPermission)"
+SectionEnd
+`);
+      const result = spawnSync(compiler, ["/V2", script], { encoding: "utf8", windowsHide: true, timeout: 30000 });
+      assert.notEqual(result.status, 0, `${name}: incomplete localization compiled`);
+      assert.match(`${result.stdout}\n${result.stderr}`, /6040|7025/);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("NSIS executes app cleanup only on explicit removal and retains retry capability on failure", { skip }, () => {
   const root = mkdtempSync(join(tmpdir(), "risunest-nsis-contract-"));
   const compile = (name, source) => {
@@ -41,6 +85,8 @@ SilentUnInstall silent
 OutFile "${quote(join(root, "installer.exe"))}"
 !include LogicLib.nsh
 !include FileFunc.nsh
+LoadLanguageFile "${'$'}{NSISDIR}\Contrib\Language files\English.nlf"
+LoadLanguageFile "${'$'}{NSISDIR}\Contrib\Language files\Korean.nlf"
 !define MAINBINARYNAME "SyntheticRisuNest"
 !define PRODUCTNAME "Synthetic RisuNest"
 Var DeleteAppDataCheckboxState
@@ -54,6 +100,11 @@ Var UpdateMode
   FileClose $0
 !macroend
 !include "${quote(resolve("src-tauri/windows.nsh"))}"
+Function un.onUninstFailed
+  FileOpen $0 "$INSTDIR\diagnostic" w
+  FileWrite $0 "$InstallFailureMessage"
+  FileClose $0
+FunctionEnd
 Section
   SetOutPath "$INSTDIR"
   File /oname=SyntheticRisuNest.exe "${quote(join(root, "cleanup.exe"))}"
@@ -102,6 +153,11 @@ SectionEnd
       assert.equal(existsSync(join(location, "cleanup-called")), scenario.called, `${scenario.name}: cleanup invocation`);
       assert.equal(existsSync(join(location, "registered")), scenario.installed, `${scenario.name}: registration`);
       if (!scenario.missing) assert.equal(existsSync(join(location, "SyntheticRisuNest.exe")), scenario.installed, `${scenario.name}: binary`);
+      if (scenario.missing || scenario.fail) {
+        const diagnostic = readFileSync(join(location, "diagnostic"), "utf8");
+        assert.match(diagnostic, scenario.missing ? /app-cleanup-launch-failed/ : /app-cleanup-exit:7/);
+        assert.doesNotMatch(diagnostic, scenario.missing ? /app-cleanup-exit:/ : /app-cleanup-launch-failed/);
+      }
       if (scenario.fail) {
         rmSync(join(location, "fail-cleanup"));
         const retry = spawnSync(join(location, "uninstall.exe"), ["/S", "/DELETE_DATA", `_?=${location}`], { timeout: 30_000, windowsHide: true });

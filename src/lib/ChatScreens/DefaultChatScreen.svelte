@@ -767,7 +767,7 @@
             context.requireCurrent()
             generate =
                 confirmed &&
-                session?.version === version &&
+                (!session || session.isContentUnchangedSince(version!)) &&
                 JSON.stringify(conversation.message.at(-1)) === selected
         })
         if (generate) await reroll()

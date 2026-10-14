@@ -454,6 +454,26 @@ pub fn validate_removal_inventory(
     Ok(files.into_iter().collect())
 }
 
+pub fn previous_owned_files(path: &Path) -> Result<Option<Vec<PathBuf>>> {
+    let Ok(bytes) = fs::read(path) else { return Ok(None) };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return Ok(None) };
+    if value["schema"] != INVENTORY_SCHEMA || value["product"] != "sync" || value["variant"] != "managed" {
+        return Ok(None);
+    }
+    let Some(names) = value["files"].as_array() else { return Ok(None) };
+    let mut files = BTreeSet::new();
+    for name in names {
+        let name = name.as_str().ok_or("managed-install-marker-invalid")?;
+        validate_archive_entry(name, ArchiveEntryKind::File)
+            .map_err(|_| "managed-install-marker-invalid".to_owned())?;
+        let path = PathBuf::from(name);
+        if path == Path::new(INVENTORY_FILE) || !files.insert(path) {
+            return Err("managed-install-marker-invalid".into());
+        }
+    }
+    Ok(Some(files.into_iter().collect()))
+}
+
 pub fn managed_bundle_version(install: &Path) -> Result<String> {
     let marker = if cfg!(target_os = "macos") {
         install.join("Contents/Resources").join(INVENTORY_FILE)

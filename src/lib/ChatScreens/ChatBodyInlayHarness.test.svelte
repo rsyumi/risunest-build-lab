@@ -8,6 +8,7 @@
     import { getStreamingThoughtPreview } from '../../ts/parser/streamingThoughtPreview'
 
     import type { StreamingThoughtMode } from '../../ts/storage/database.svelte'
+    import type { DisplayRowReads } from 'src/ts/process/scriptVariableReads'
 
     interface Props {
         initialTranslated?: boolean
@@ -27,6 +28,7 @@
         initialThoughtPreview?: boolean
         streamingThoughtMode?: StreamingThoughtMode
         deferStreamingDisplay?: boolean
+        displayRow?: DisplayRowReads
     }
 
     let {
@@ -47,6 +49,7 @@
         initialThoughtPreview = false,
         streamingThoughtMode = 'off',
         deferStreamingDisplay = false,
+        displayRow,
     }: Props = $props()
     let message = $state(untrack(() => initialMessage))
     let previewThoughts = $state(untrack(() => initialThoughtPreview))
@@ -136,5 +139,6 @@
         {captureParserIndex}
         {parserProjection}
         {parserAbortSignal}
+        {displayRow}
     />
 </div>

@@ -142,9 +142,8 @@ class InMemoryNativeCommandDouble {
 }
 
 const native = vi.hoisted(() => ({ boundary: null as unknown as InMemoryNativeCommandDouble }))
-const platform = vi.hoisted(() => ({ isTauri: true }))
 
-vi.mock('../../platform', () => platform)
+vi.mock('../../platform', async () => (await import('../../platform.testSupport')).platformModule({ runtime: 'tauri', os: 'windows' }))
 vi.mock('../../alert',()=>({alertCheckboxConfirm:async()=>({confirmed:true,checked:true})}))
 vi.mock('../../plugins/apiV3/v3.svelte',()=>({fencePluginExecutionForAuthorityReplacement:async()=>{},invalidatePluginCachesAfterAuthorityReplacement:async()=>{},restartPluginsAfterAuthorityReplacement:async()=>{}}))
 vi.mock('@tauri-apps/api/core', () => ({
@@ -196,7 +195,6 @@ describe('simulated native persistent local backup boundary', () => {
 
     beforeEach(() => {
         native.boundary = new InMemoryNativeCommandDouble()
-        platform.isTauri = true
         indexedDbOpen = vi.fn(() => {
             throw new Error('IndexedDB must not open in Tauri')
         })

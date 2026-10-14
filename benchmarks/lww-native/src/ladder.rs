@@ -961,6 +961,7 @@ fn serverless_group(recorder:&Recorder,library:&Path,work:&Path,settings:&Settin
         };
         let engine=crate::external_storage::lww_engine::ExternalLwwEngine {provider:sender.provider.clone(),repository,
             library:sender.library.clone(),root_key:zeroize::Zeroizing::new(*sender.root_key),admission:sender.admission,
+            test_lease_clock:sender.test_lease_clock.clone(),
             connection_id:sender.connection_id.clone(),connection_root:root.clone(),capabilities,descriptor:sender.descriptor.clone()};
         crate::external_storage::connection_store::ConnectionStore::open(&root).at("connection store")?.insert(&connected.stored)
             .at("store connection")?;
@@ -1034,7 +1035,7 @@ fn serverless_group(recorder:&Recorder,library:&Path,work:&Path,settings:&Settin
         Ok(line)
     }));
     // Stores close before their temporary directories are removed.
-    if let Some(CycleFixture {directory_a,directory_b,a,b,provider,sender,receiver})=fixture {
+    if let Some(CycleFixture {directory_a,directory_b,a,b,provider,clock:_,sender,receiver})=fixture {
         drop((a,b,sender,receiver,provider));drop((directory_a,directory_b));
     }
 }

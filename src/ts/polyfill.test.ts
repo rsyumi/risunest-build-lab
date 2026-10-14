@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest'
 
-vi.mock('./platform', () => ({ isIOS: () => false }))
+vi.mock('./platform', async () => (await import('./platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 
 afterEach(() => {
     vi.unstubAllGlobals()

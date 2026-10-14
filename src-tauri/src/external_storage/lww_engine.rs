@@ -410,6 +410,8 @@ pub(crate) struct Admission {
     pub upper_ms: u64,
     at: Instant,
     wall_ms: u64,
+    #[cfg(test)]
+    reading: Option<(u64, u64)>,
 }
 impl Admission {
     pub(crate) fn from_sample(sample: &HttpClockSample) -> Result<Self> {
@@ -426,6 +428,8 @@ impl Admission {
             upper_ms: upper,
             at: sample.observed_at,
             wall_ms: sample.local_after_ms,
+            #[cfg(test)]
+            reading: None,
         })
     }
     #[cfg(test)]
@@ -434,11 +438,19 @@ impl Admission {
             upper_ms: now,
             at: Instant::now(),
             wall_ms: now,
+            reading: Some((now, 0)),
         }
     }
     fn upper(self) -> Result<u64> {
+        #[cfg(test)]
+        if let Some((now, elapsed)) = self.reading {
+            return self.upper_at(now, elapsed);
+        }
         let elapsed = u64::try_from(self.at.elapsed().as_millis()).map_err(transient)?;
         let now = super::runtime::now_ms();
+        self.upper_at(now, elapsed)
+    }
+    fn upper_at(self, now: u64, elapsed: u64) -> Result<u64> {
         if elapsed > 15 * 60_000 || now.abs_diff(self.wall_ms.saturating_add(elapsed)) > 1000 {
             return Err(ProviderError::new(ErrorKind::ClockSkew));
         }
@@ -451,8 +463,70 @@ impl Admission {
         self.at -= elapsed;
         self.wall_ms -= elapsed.as_millis() as u64;
         self.upper_ms -= elapsed.as_millis() as u64;
+        if let Some((_, age)) = self.reading.as_mut() {
+            *age += elapsed.as_millis() as u64;
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn set_reading_for_test(&mut self, wall_ms: u64, elapsed_ms: u64) {
+        self.reading = Some((wall_ms, elapsed_ms));
     }
 }
+#[cfg(test)]
+mod admission_clock_tests {
+    use super::*;
+
+    #[test]
+    fn synthetic_admission_uses_controlled_wall_and_elapsed_time() {
+        let mut admission = Admission::synthetic(1_700_000_000_000);
+        assert_eq!(admission.upper().unwrap(), 1_700_000_000_000);
+        admission.set_reading_for_test(1_700_000_060_000, 60_000);
+        assert_eq!(admission.upper().unwrap(), 1_700_000_060_000);
+        admission.age_for_test(Duration::from_secs(16 * 60));
+        assert_eq!(admission.upper().unwrap_err().kind, ErrorKind::ClockSkew);
+    }
+
+    #[test]
+    fn admission_rejects_forward_and_backward_jumps_beyond_one_second() {
+        let start = 1_700_000_000_000;
+        for (offset, accepted) in [(-1001_i64, false), (-1000, true), (0, true), (1000, true), (1001, false)] {
+            let mut admission = Admission::synthetic(start);
+            admission.set_reading_for_test((start as i64 + 60_000 + offset) as u64, 60_000);
+            let result = admission.upper();
+            if accepted {
+                assert_eq!(result.unwrap(), start + 60_000, "{offset}");
+            } else {
+                assert_eq!(result.unwrap_err().kind, ErrorKind::ClockSkew, "{offset}");
+            }
+        }
+    }
+
+    #[test]
+    fn admission_expires_only_after_fifteen_minutes() {
+        let start = 1_700_000_000_000;
+        let mut admission = Admission::synthetic(start);
+        admission.set_reading_for_test(start + 900_000, 900_000);
+        assert_eq!(admission.upper().unwrap(), start + 900_000);
+        admission.set_reading_for_test(start + 900_001, 900_001);
+        assert_eq!(admission.upper().unwrap_err().kind, ErrorKind::ClockSkew);
+    }
+
+    #[test]
+    fn synthetic_cycles_do_not_share_lease_clock_trust() {
+        let mut first = super::super::lww_tests::CycleFixture::new();
+        let second = super::super::lww_tests::CycleFixture::new();
+        let clock = Arc::new(super::super::fake::FakeLeaseClock::new(1_700_000_000_000));
+        first.sender.test_lease_clock = Some(clock.clone());
+        assert_eq!(first.sender.trusted_control_time(), Some(1_700_000_000_000));
+        clock.set_trusted(false);
+        assert_eq!(first.sender.trusted_control_time(), None);
+        assert!(second.sender.trusted_control_time().is_some());
+        clock.set_trusted(true);
+        clock.advance(60_000);
+        assert_eq!(first.sender.trusted_control_time(), Some(1_700_000_060_000));
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PublicationResult {
@@ -546,6 +620,8 @@ pub(crate) struct ExternalLwwEngine {
     pub library: String,
     pub root_key: zeroize::Zeroizing<[u8; 32]>,
     pub admission: Option<Admission>,
+    #[cfg(test)]
+    pub test_lease_clock: Option<Arc<dyn super::leases::LeaseClock>>,
     pub connection_id: String,
     pub connection_root: std::path::PathBuf,
     pub capabilities: super::capabilities::Capabilities,
@@ -807,7 +883,7 @@ impl ExternalLwwEngine {
                         writer: writer.clone(),
                         seq: DecimalU64(seq),
                         authority,
-                        captured_at_ms: Self::trusted_control_time(),
+                        captured_at_ms: self.trusted_control_time(),
                         object_id,
                         sha256,
                         payload_sha256,
@@ -876,7 +952,7 @@ impl ExternalLwwEngine {
                     root_key: &self.root_key,
                     provider: self.provider.as_ref(),
                     repository: &self.repository,
-                    clock: super::leases::system_clock(),
+                    clock: self.lease_clock(),
                     protection_supported: self.capabilities.lease_operations,
                     ledger: None,
                 };
@@ -950,7 +1026,7 @@ impl ExternalLwwEngine {
             }
             if !publication.complete {
                 for proof in &publication.reused_control_catalogs {
-                    if Self::trusted_control_time().and_then(|now|now.checked_sub(proof.rooted_at_ms))
+                    if self.trusted_control_time().and_then(|now|now.checked_sub(proof.rooted_at_ms))
                         .is_none_or(|age|age>super::leases::CACHE_REUSE_LIMIT_MS) {
                         super::snapshot_restore::revalidate_catalog(
                             &proof.catalog,risunest_external_storage_format::snapshot::CatalogKind::Records,
@@ -960,7 +1036,7 @@ impl ExternalLwwEngine {
                 }
                 let mut checked_assets=BTreeSet::new();
                 for proof in &publication.reused_assets {
-                    if Self::trusted_control_time().and_then(|now|now.checked_sub(proof.rooted_at_ms))
+                    if self.trusted_control_time().and_then(|now|now.checked_sub(proof.rooted_at_ms))
                         .is_none_or(|age|age>super::leases::CACHE_REUSE_LIMIT_MS) {
                         match &proof.reference {
                             AssetReference::Catalog(catalog)=>{
@@ -984,7 +1060,7 @@ impl ExternalLwwEngine {
                         }
                     }
                 }
-                if Self::trusted_control_time().and_then(|now|publication.captured_at_ms.and_then(|captured|now.checked_sub(captured)))
+                if self.trusted_control_time().and_then(|now|publication.captured_at_ms.and_then(|captured|now.checked_sub(captured)))
                     .is_none_or(|age|age>super::leases::CACHE_REUSE_LIMIT_MS) {
                     for catalog in &publication.data_catalogs {
                         super::snapshot_restore::revalidate_catalog(catalog,risunest_external_storage_format::snapshot::CatalogKind::Records,
@@ -1274,7 +1350,7 @@ impl ExternalLwwEngine {
             .external_lww_verify_versions(&self.target_scope(), &publication.writer, publication.seq.0, &payload.changes)
             .map_err(store_error)?;
         self.admit_objects(store, &payload, &publication.object_id, cancel).await?;
-        if let Some(rooted_at_ms)=Self::trusted_control_time() {
+        if let Some(rooted_at_ms)=self.trusted_control_time() {
             self.authorize_dependencies(store,&payload,rooted_at_ms)?;
         }
         for hash in payload
@@ -1322,9 +1398,13 @@ impl ExternalLwwEngine {
         }
         Ok(())
     }
-    fn trusted_control_time()->Option<u64> {
-        let clock:&dyn super::leases::LeaseClock=super::leases::system_clock();
-        let reading=clock.reading();
+    fn lease_clock(&self)->&dyn super::leases::LeaseClock {
+        #[cfg(test)]
+        if let Some(clock)=&self.test_lease_clock { return clock.as_ref(); }
+        super::leases::system_clock()
+    }
+    fn trusted_control_time(&self)->Option<u64> {
+        let reading=self.lease_clock().reading();
         (reading.trusted && reading.foreground).then_some(reading.wall_ms)
     }
     fn check_frozen_body_authority(store: &PersistentStore, authority: DecimalU64, cancel: &Cancellation) -> crate::server_sync::Result<()> {
@@ -1738,7 +1818,7 @@ impl ExternalLwwEngine {
             }
             fresh.push(hash.clone());
             if store.external_lww_object_is_control(&hash).map_err(store_error)? {
-                if let Some(now)=Self::trusted_control_time() {
+                if let Some(now)=self.trusted_control_time() {
                     if let Some(proof)=store.external_lww_reusable_control_catalog(&self.target_scope(),&hash,now).map_err(store_error)? {
                         if let Some(previous)=payload.data_catalogs.iter().find(|root|root.header.object_id==proof.catalog.header.object_id) {
                             if previous!=&proof.catalog {return Err(segment::corrupt());}
@@ -1753,7 +1833,7 @@ impl ExternalLwwEngine {
                 else { payload.message_pages.insert(hash,encoded); }
                 continue;
             }
-            if let Some(now)=Self::trusted_control_time() {
+            if let Some(now)=self.trusted_control_time() {
                 if let Some(proof)=store.external_lww_reusable_asset(&self.target_scope(),&hash,now).map_err(store_error)? {
                     match &proof.reference {
                         AssetReference::Catalog(catalog)=>{

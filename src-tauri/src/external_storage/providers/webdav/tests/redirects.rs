@@ -136,21 +136,14 @@ fn a_303_result_page_does_not_count_as_a_successful_write() {
 
 #[test]
 fn cancellation_after_a_redirect_stops_the_pending_response_body() {
+    use crate::external_storage::provider_contract::{a_read_cancelled_during_its_body_stops, held_body};
     runtime().block_on(async {
-        let harness = Harness::start(vec![established_root(), reply(307, &[("Location", "/moved/data")], b""), Reply::DelayedBody]);
+        let (held, _release) = held_body();
+        let harness = Harness::start(vec![established_root(), reply(307, &[("Location", "/moved/data")], b""), held]);
         let repository = harness.opened().await;
-        let directory = tempfile::tempdir().unwrap();
-        let mut sink = sink(&directory, "cancelled");
-        let cancel = Cancellation::default();
         let target = locator(&repository, None, HEAD_OBJECT);
-        let read = harness.provider.read_object(&repository, &target, None, &mut sink, &cancel);
-        let trigger = async {
-            while harness.count() < 3 { tokio::time::sleep(std::time::Duration::from_millis(1)).await; }
-            cancel.cancel();
-        };
-        let (outcome, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), futures::future::join(read, trigger)).await.unwrap();
-        assert_eq!(outcome.unwrap_err().kind, ErrorKind::Cancelled);
-        assert!(!sink.is_verified());
+        a_read_cancelled_during_its_body_stops(harness.provider.as_ref(), &repository, &target, &Cancellation::default()).await;
+        assert_eq!(harness.count(), 3);
     });
 }
 

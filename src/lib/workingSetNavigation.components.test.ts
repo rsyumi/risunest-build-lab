@@ -55,16 +55,6 @@ vi.mock('src/ts/util', async () => {
     }
 })
 vi.mock('src/ts/gui/guisize', async () => ({ sideBarSize: (await import('svelte/store')).writable(300) }))
-vi.mock('src/lang', () => ({
-    language: {
-        goback: 'Go Back', menu: 'Menu', search: 'Search', home: 'Home', settings: 'Settings',
-        character: 'Character', Chat: 'Chat', playground: { playground: 'Playground', inlayExplorer: 'Inlays' },
-        embedding: 'Embedding', tokenizer: 'Tokenizer', syntax: 'Syntax', imageGeneration: 'Images',
-        subtitles: 'Subtitles', imageTranslation: 'Image translation', translator: 'Translation',
-        promptConvertion: 'Prompts',
-        navigationBlockedWhileGenerating: 'Generation is active',
-    },
-}))
 
 import { language } from 'src/lang'
 import { DBState, MobileSideBar, PlaygroundStore, selectedCharID, settingsOpen, SettingsMenuIndex } from 'src/ts/stores.svelte'

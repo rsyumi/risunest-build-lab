@@ -3,13 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushSync } from 'svelte'
 import { get } from 'svelte/store'
 
-vi.mock('../parser/parser.svelte', () => ({
-    assetRegex: /$^/,
-    hasher: vi.fn(async () => 'hash'),
-    parseMarkdownSafe: (value: string) => value,
-    ParseMarkdown: vi.fn(async (value: string) => value),
-    risuChatParser: (value: string) => value,
-}))
+vi.mock('../parser/parser.svelte', async () => (await import('../parser/parser.testSupport')).parserStubModule())
 vi.mock('../process/modules', () => ({ moduleUpdate: vi.fn() }))
 vi.mock('../process/scripts', () => ({ resetScriptCache: vi.fn() }))
 
@@ -18,6 +12,7 @@ import { selectedCharID, selIdState } from '../stores.svelte'
 import type { Chat, Database, Message, character } from './database.svelte'
 import { getDatabase, setDatabaseLite } from './database.svelte'
 import { IndexedDbPersistentDataStore } from './indexedDbPersistentDataStore'
+import { CONVERSATION_RANGE_MAX_LIMIT } from './persistentDataStore'
 import { createPersistentDataRuntime } from './persistentDataRuntime'
 import { createProductionStateAdapter } from './persistentDataRuntime.svelte'
 import { workingSetResidency } from './workingSetResidency'
@@ -34,7 +29,8 @@ function makeLargeLegacyDatabase(): {
     database: Database
     messages: Message[]
 } {
-    const messages = Array.from({ length: 10_000 }, (_, index) => ({
+    // One row more than a single range read can return.
+    const messages = Array.from({ length: CONVERSATION_RANGE_MAX_LIMIT + 1 }, (_, index) => ({
         role: index % 2 === 0 ? 'user' : 'char',
         data: `synthetic-message-${index}`,
         chatId: `synthetic-id-${index}`,
@@ -1254,4 +1250,108 @@ describe('selected chat list edits', () => {
         }
     }, 30_000)
 
+})
+
+describe('HypaV3 always-on memory on character switch', () => {
+    function hypaLibrary(alwaysToggleOn: boolean): Database {
+        const library = syntheticLibrary('character')
+        library.characters[1].supaMemory = false
+        return Object.assign(library, {
+            hypaV3: true,
+            hypaV3PresetId: 0,
+            hypaV3Presets: [{ name: 'Synthetic preset', settings: { alwaysToggleOn } }],
+        })
+    }
+
+    async function withProductionApp(
+        library: Database,
+        run: (app: ProductionApp, reader: IndexedDbPersistentDataStore) => Promise<void>,
+    ) {
+        const indexedDB = new IDBFactory()
+        const previousGlobals = { indexedDB: globalThis.indexedDB, IDBKeyRange: globalThis.IDBKeyRange }
+        const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+        try {
+            const app = await bootProductionApp(indexedDB, library)
+            await run(app, new IndexedDbPersistentDataStore('risuai-persistent-data', indexedDB, IDBKeyRange))
+            expect(consoleError.mock.calls.map((args) => args.map((value) =>
+                value instanceof Error ? `${value.name}: ${value.message}` : String(value).slice(0, 200)))).toEqual([])
+        } finally {
+            consoleError.mockRestore()
+            Object.assign(globalThis, previousGlobals)
+        }
+    }
+
+    function switchTo(app: ProductionApp, id: string) {
+        const { characters, stores } = app
+        return characters.changeChar(stores.DBState.db.characters.findIndex((candidate) => candidate.chaId === id))
+    }
+
+    function selected(app: ProductionApp) {
+        return app.stores.DBState.db.characters[get(app.stores.selectedCharID)]
+    }
+
+    it('turns memory on while switching and saves it without loading the conversation', async () => {
+        await withProductionApp(hypaLibrary(true), async (app, reader) => {
+            const { runtime } = app
+            const readConversation = vi.spyOn(runtime.store, 'readConversation')
+            expect(await switchTo(app, 'edited-owner')).toBe(true)
+            expect(runtime.getSelectedConversationMode()).toBe('windowed')
+            expect(selected(app).supaMemory).toBe(true)
+            expect(await switchTo(app, 'second-character')).toBe(true)
+            expect(selected(app).supaMemory).toBe(true)
+            await runtime.flushPendingData('exit')
+            expect(readConversation).not.toHaveBeenCalled()
+            await reader.open()
+            expect((await reader.readCharacter('edited-owner'))?.value.supaMemory).toBe(true)
+            expect((await reader.readCharacter('second-character'))?.value.supaMemory).toBe(true)
+        })
+    })
+
+    it('turns memory on again on the next switch after it was turned off', async () => {
+        await withProductionApp(hypaLibrary(true), async (app, reader) => {
+            const { setCharacterMemory } = await import('../sidebarToggles')
+            expect(await switchTo(app, 'edited-owner')).toBe(true)
+            await setCharacterMemory(selected(app), false)
+            expect(selected(app).supaMemory).toBe(false)
+            expect(await switchTo(app, 'second-character')).toBe(true)
+            await app.runtime.flushPendingData('switched-away')
+            await reader.open()
+            expect((await reader.readCharacter('edited-owner'))?.value.supaMemory).toBe(false)
+            expect(await switchTo(app, 'edited-owner')).toBe(true)
+            expect(selected(app).supaMemory).toBe(true)
+            await app.runtime.flushPendingData('exit')
+            expect((await reader.readCharacter('edited-owner'))?.value.supaMemory).toBe(true)
+        })
+    })
+
+    it('leaves memory unchanged when the preset option is off', async () => {
+        await withProductionApp(hypaLibrary(false), async (app, reader) => {
+            expect(await switchTo(app, 'second-character')).toBe(true)
+            expect(selected(app).supaMemory).toBe(false)
+            await app.runtime.flushPendingData('exit')
+            await reader.open()
+            expect((await reader.readCharacter('second-character'))?.value.supaMemory).toBe(false)
+        })
+    })
+
+    it('turns memory on for a character without conversations', async () => {
+        const library = hypaLibrary(true)
+        library.characters[1].chats = []
+        await withProductionApp(library, async (app, reader) => {
+            expect(await switchTo(app, 'second-character')).toBe(true)
+            expect(app.runtime.getSelectedConversationMode()).toBe('complete')
+            expect(selected(app).supaMemory).toBe(true)
+            await app.runtime.flushPendingData('exit')
+            await reader.open()
+            expect((await reader.readCharacter('second-character'))?.value.supaMemory).toBe(true)
+        })
+    })
+
+    it('does not change character data when only the selection store moves', () => {
+        const database = hypaLibrary(true)
+        setDatabaseLite(structuredClone(database))
+        selectedCharID.set(1)
+        expect(selIdState.selId).toBe(1)
+        expect(getDatabase().characters[1].supaMemory).toBe(false)
+    })
 })

@@ -5,10 +5,12 @@ import { get } from "svelte/store";
 import { selectedCharID } from "src/ts/stores.svelte";
 import { getDatabase } from "../database.svelte";
 import { registerLibraryFileOperationGate } from '../libraryFileOperation';
+import { assetCleanupProgress, validAssetCleanupSnapshot, type AssetCleanupSnapshot } from './serverAssetCleanupProgress';
 
 const operations = new Set<Promise<unknown>>();
 registerLibraryFileOperationGate(async () => {
   while (operations.size) await Promise.allSettled([...operations]);
+  assetCleanupProgress.set(undefined);
 });
 
 export type AssetResidencyTarget = { kind: 'external'; connectionId: string } | { kind: 'server'; libraryId: string; targetId: string };
@@ -138,6 +140,39 @@ export const downloadRemoteAssets = async (connectionId?: string, options?: { si
     return result;
   } catch (error) { run?.finish(externalProgressFailure(error)); throw error; }
 };
-export const evictLocalAssets = () => protectedCommand("server_sync_asset_evict");
+let cleanup: { operationId: string; controller: AbortController } | undefined;
+export async function evictLocalAssets(): Promise<AssetResidencyStatus> {
+  if (cleanup) throw new Error('asset-cleanup-busy');
+  const operationId = crypto.randomUUID();
+  const controller = new AbortController();
+  cleanup = { operationId, controller };
+  assetCleanupProgress.set({ operationId, state: 'running', sequence: 0, stage: 'preparing', completedItems: 0, totalItems: null, evictedItems: 0, evictedBytes: 0 });
+  const progress = new Channel<AssetCleanupSnapshot>();
+  progress.onmessage = value => {
+    if (!validAssetCleanupSnapshot(value)) return;
+    // The final channel message can arrive after invoke rejects. Preserve the
+    // terminal state while accepting this operation's last partial counters.
+    assetCleanupProgress.update(current => current?.operationId === operationId
+      && current.state !== 'complete' && value.sequence > current.sequence
+      ? { ...current, ...value } : current);
+  };
+  try {
+    const result = await protectedCommand('server_sync_asset_evict', { operationId, progress }, controller.signal, operationId);
+    assetCleanupProgress.update(current => current?.operationId === operationId ? { ...current, state: 'complete', evictedBytes: result.evictedBytes } : current);
+    return result;
+  } catch (error) {
+    const cancelled = controller.signal.aborted || (typeof error === 'object' && error !== null
+      && (('code' in error && error.code === 'cancelled') || ('name' in error && error.name === 'AbortError')));
+    assetCleanupProgress.update(current => current?.operationId === operationId ? { ...current, state: cancelled ? 'cancelled' : 'failed' } : current);
+    throw error;
+  } finally {
+    if (cleanup?.operationId === operationId) cleanup = undefined;
+  }
+}
+export function cancelLocalAssetCleanup(): void {
+  if (!cleanup) return;
+  assetCleanupProgress.update(current => current?.operationId === cleanup?.operationId ? { ...current, state: 'cancelling' } : current);
+  cleanup.controller.abort();
+}
 export const cancelAssetResidencyOperation = (operationId?: string) =>
   invoke<void>("server_sync_cancel", operationId ? { operationId } : undefined);

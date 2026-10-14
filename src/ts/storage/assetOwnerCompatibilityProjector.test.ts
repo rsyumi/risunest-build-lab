@@ -13,10 +13,7 @@ import {
     type OwnerManifestEntry,
 } from './ownerManifestCodec'
 import type { AssetOwnerHead, AssetOwnerLocator } from './persistentDataStore'
-import {
-    ASSET_TUPLES_PER_OWNER,
-    makeAssetManifestFixture,
-} from './tests/assetManifestFixtures'
+import { makeAssetManifestFixture } from './tests/assetManifestFixtures'
 import { fixtureDatabase } from './tests/persistentDataFixtures'
 
 type PresentAssetOwnerHead = Extract<AssetOwnerHead, { present: true }>
@@ -260,9 +257,9 @@ describe('pinned asset-owner compatibility projector', () => {
         await lease.release()
     })
 
-    // Includes full-scale fixture construction and import while coverage is enabled.
-    it('bounds expected-scale projection to one head query and one manifest decode', async () => {
-        const database = makeAssetManifestFixture()
+    // The read count does not depend on the tuple count; assetManifest.bench.ts measures the full scale.
+    it('bounds projection to one head query and one manifest decode', async () => {
+        const database = makeAssetManifestFixture(100)
         database.personas = []
         database.characters = []
         const tuples = database.modules[0].assets!
@@ -292,23 +289,14 @@ describe('pinned asset-owner compatibility projector', () => {
         const readOwnerHead = vi.spyOn(lease, 'readAssetOwnerHead')
         const readOwnerManifest = vi.fn(async () => manifest.bytes.slice())
 
-        const start = performance.now()
         const projected = await projectPinnedCompatibilityDatabase(lease, {
             readOwnerManifest,
         })
-        const projectionMs = performance.now() - start
 
         expect(projected.modules[0].assets).toEqual(tuples)
-        expect(projected.modules[0].assets).toHaveLength(ASSET_TUPLES_PER_OWNER)
+        expect(projected.modules[0].assets).toHaveLength(100)
         expect(readOwnerHead).toHaveBeenCalledTimes(1)
         expect(readOwnerManifest).toHaveBeenCalledTimes(1)
-        console.info('owner-head-projector-measurement', JSON.stringify({
-            tuples: ASSET_TUPLES_PER_OWNER,
-            canonicalBytes: manifest.bytes.byteLength,
-            headQueries: readOwnerHead.mock.calls.length,
-            manifestReads: readOwnerManifest.mock.calls.length,
-            projectionMs,
-        }))
         await lease.release()
-    }, 15_000)
+    })
 })

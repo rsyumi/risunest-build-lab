@@ -544,7 +544,7 @@ async fn external_tier(output:&Path,store:PersistentStore,certificate:&scale_cer
     fixture.sender.receive_and_apply(&mut fixture.a,authority_a,&[],&cancel).await.map_err(|e|e.to_string())?;
     verify_bootstrap(&fixture.a,&fixture.b);verify_settled(&fixture.a,&fixture.sender);verify_settled(&fixture.b,&fixture.receiver);
     if selected==Some(Scenario::OrdinaryResume) {
-        let CycleFixture {directory_a,directory_b,a,b,provider,sender,receiver}=fixture;
+        let CycleFixture {directory_a,directory_b,a,b,provider,clock:_,sender,receiver}=fixture;
         let _directories=(directory_a,directory_b);
         let mut pair=Some((a,b,sender,receiver));let mut samples=Vec::new();
         for direction in [FinalDirection::AtoB,FinalDirection::BtoA] {for iteration in 0..final_runner::WARMUPS+final_runner::REPETITIONS {
@@ -734,6 +734,7 @@ async fn costly_external(output:&Path,fixture:&mut CycleFixture,hashes:&[String]
                 }
                 engines.push(crate::external_storage::lww_engine::ExternalLwwEngine {provider:engine.provider.clone(),repository:handle,
                     library:engine.library.clone(),root_key:zeroize::Zeroizing::new(*engine.root_key),admission:engine.admission.clone(),
+                    test_lease_clock:engine.test_lease_clock.clone(),
                     connection_id:engine.connection_id.clone(),connection_root:engine.connection_root.clone(),
                     capabilities,descriptor:engine.descriptor.clone()});
             }
@@ -794,6 +795,7 @@ async fn costly_external(output:&Path,fixture:&mut CycleFixture,hashes:&[String]
             let job_id=uuid::Uuid::new_v4().to_string();
             let compactor=crate::external_storage::lww_engine::ExternalLwwEngine {provider:fixture.sender.provider.clone(),repository:crate::external_storage::fake::repository(),
                 library:fixture.sender.library.clone(),root_key:zeroize::Zeroizing::new(*fixture.sender.root_key),admission:fixture.sender.admission.clone(),
+                test_lease_clock:fixture.sender.test_lease_clock.clone(),
                 connection_id:fixture.sender.connection_id.clone(),connection_root:fixture.sender.connection_root.clone(),
                 capabilities:fixture.sender.capabilities.clone(),descriptor:fixture.sender.descriptor.clone()};
             let context=leases::LeaseContext {root:&compactor.connection_root,connection_id:&compactor.connection_id,writer_id:&writer,
@@ -831,6 +833,7 @@ async fn fake_transfer_overlap(slot:&costly_runner::CostlySlot,destination:&mut 
         }
         engines.push(crate::external_storage::lww_engine::ExternalLwwEngine {provider:fixture.sender.provider.clone(),repository,
             library:fixture.sender.library.clone(),root_key:zeroize::Zeroizing::new(*fixture.sender.root_key),admission:fixture.sender.admission.clone(),
+            test_lease_clock:fixture.sender.test_lease_clock.clone(),
             connection_id:fixture.sender.connection_id.clone(),connection_root:root.to_owned(),capabilities,descriptor:fixture.sender.descriptor.clone()});
     }
     let peer_engine=engines.pop().ok_or("actual transfer peer engine absent")?;

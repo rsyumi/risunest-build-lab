@@ -46,57 +46,30 @@ vi.mock('../storage/persistentDataRuntime.svelte', async (importOriginal) => ({
     invalidateActiveConversationSession: () => current.runtime.invalidateActiveConversationSession(),
     getPersistentDataRuntime: () => current.runtime,
 }))
-vi.mock('../storage/persistentDataStoreFactory', () => ({ getPersistentDataStore: () => current.store }))
-vi.mock('../storage/deviceSettings', async (importOriginal) => {
-    const original = await importOriginal<typeof import('../storage/deviceSettings')>()
-    return {
-        ...original,
-        getDeviceSettings: () => ({
-            ...original.getDeviceSettings(),
-            generationHistoryLimitEnabled: true,
-            generationHistoryLimitMultiplier: 2,
-        }),
-    }
-})
-vi.mock('../iosNative', () => ({
-    beginIOSGeneration: async (signal?: AbortSignal) => ({
-        signal,
-        progress: () => undefined,
-        dispose: async () => undefined,
-    }),
-    notifyIOSGenerationComplete: vi.fn(),
-    isBackgroundExpiryReason: () => false,
-}))
+vi.mock('../storage/persistentDataStoreFactory', async () => (await import('./tests/sendChatTestHarness')).persistentDataStoreFactoryModule(() => current.store))
+vi.mock('../storage/deviceSettings', async (importOriginal) => (await import('./tests/sendChatTestHarness')).historyWindowDeviceSettingsModule(importOriginal, () => true))
+vi.mock('../iosNative', async () => (await import('./tests/sendChatTestHarness')).iosNativeModule())
 vi.mock('../tokenizer', async () => (await import('./tests/sendChatTestHarness')).tokenizerModule({
     // Every message costs ten tokens in the window walk.
     tokenize: vi.fn(async () => 10),
     encodeWithTokenizer: vi.fn(async () => new Array(10).fill(0)),
-}))
-vi.mock('../../lang', async () => (await import('./tests/sendChatTestHarness')).langModule({
-    generationConversationChanged: 'conversation changed',
-    chatConversationActionFailed: 'conversation action failed',
 }))
 vi.mock('../alert', async () => {
     const harness = await import('./tests/sendChatTestHarness')
     current.alertError = vi.fn()
     return harness.alertModule({ alertError: current.alertError, alertInput: vi.fn(), alertSelect: vi.fn(), alertConfirm: vi.fn() })
 })
-vi.mock('./request/request', () => ({
-    requestChatData: vi.fn(async () => ({
-        type: 'streaming',
-        result: new ReadableStream<Record<string, string>>({
-            start(controller) {
-                for (const response of current.snapshots) controller.enqueue({ response })
-                controller.close()
-            },
-        }),
-    })),
-}))
+vi.mock('./request/request', async () => (await import('./tests/sendChatTestHarness')).requestModule(vi.fn(async () => ({
+    type: 'streaming',
+    result: new ReadableStream<Record<string, string>>({
+        start(controller) {
+            for (const response of current.snapshots) controller.enqueue({ response })
+            controller.close()
+        },
+    }),
+}))))
 vi.mock('../parser/chatML', async () => (await import('./tests/sendChatTestHarness')).chatMLModule())
-vi.mock('../parser/parser.svelte', async () => (await import('./tests/sendChatTestHarness')).parserModule({
-    assetRegex: /$^/,
-    hasher: vi.fn(async () => 'hash'),
-}))
+vi.mock('../parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
 vi.mock('./lorebook.svelte', async () => (await import('./tests/sendChatTestHarness')).lorebookModule())
 vi.mock('./stableDiff', async () => (await import('./tests/sendChatTestHarness')).stableDiffModule({ generateAIImage: vi.fn() }))
 vi.mock('./templates/templates', async () => (await import('./tests/sendChatTestHarness')).templatesModule())
@@ -107,7 +80,7 @@ vi.mock('./memory/hypamemory', async () => (await import('./tests/sendChatTestHa
 vi.mock('./embedding/addinfo', async () => (await import('./tests/sendChatTestHarness')).addinfoModule())
 vi.mock('./files/inlays', async () => (await import('./tests/sendChatTestHarness')).inlaysModule({ writeInlayImage: vi.fn() }))
 vi.mock('./models/modelString', async () => (await import('./tests/sendChatTestHarness')).modelStringModule())
-vi.mock('./inlayScreen', () => ({ runInlayScreen: (_char: unknown, data: string) => ({ text: data }) }))
+vi.mock('./inlayScreen', async () => (await import('./tests/sendChatTestHarness')).inlayScreenModule())
 vi.mock('./transformers', async () => (await import('./tests/sendChatTestHarness')).transformersModule())
 vi.mock('./memory/hanuraiMemory', async () => (await import('./tests/sendChatTestHarness')).hanuraiMemoryModule())
 vi.mock('./memory/hypav2', async () => (await import('./tests/sendChatTestHarness')).hypav2Module())
@@ -118,24 +91,10 @@ vi.mock('../globalApi.svelte', async () => (await import('./tests/sendChatTestHa
     fetchNative: vi.fn(),
     downloadFile: vi.fn(),
 }))
-vi.mock('../plugins/plugins.svelte', () => ({
-    pluginV2: {
-        providers: new Map(),
-        providerOptions: new Map(),
-        editdisplay: new Set(),
-        editoutput: new Set(),
-        editprocess: new Set(),
-        editinput: new Set(),
-        replacerbeforeRequest: new Set(),
-        replacerafterRequest: new Set(),
-        chatOutput: new Set(),
-        unload: new Set(),
-        loaded: false,
-    },
-}))
-vi.mock('../plugins/pluginDatabaseAccess', async (importOriginal) => (await import('./tests/sendChatTestHarness')).pluginDatabaseAccessModule(importOriginal as () => Promise<Record<string, unknown>>))
+vi.mock('../plugins/plugins.svelte', async () => (await import('./tests/sendChatTestHarness')).pluginsModule())
+vi.mock('../plugins/pluginDatabaseAccess', async (importOriginal) => (await import('./tests/sendChatTestHarness')).pluginDatabaseAccessModule(importOriginal))
 vi.mock('./presetChain', async () => (await import('./tests/sendChatTestHarness')).presetChainModule())
-vi.mock('./command', () => ({ processMultiCommand: vi.fn() }))
+vi.mock('./command', async () => (await import('./tests/sendChatTestHarness')).commandModule())
 
 const MESSAGES = 1_000
 const WINDOW_START = 900

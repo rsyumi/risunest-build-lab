@@ -1,11 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { Database } from './database.svelte'
+import type { botPreset, Chat, Database } from './database.svelte'
 import type {
+    CharacterDetail,
     CharacterSummary,
     ContentChangeKey,
     ConversationSummary,
     PersistentRevisionReader,
+    PersistentRoot,
 } from './persistentDataStore'
+import { createLeaseStub } from './persistentDataStore.testSupport'
 import {
     applyTargetedWorkingSetInvalidation,
     TARGETED_INVALIDATION_KEY_LIMIT,
@@ -20,7 +23,7 @@ vi.mock('./database.svelte', () => ({
     presetTemplate: {},
 }))
 vi.mock('../globalApi.svelte', () => ({ forageStorage: {} }))
-vi.mock('src/ts/platform', () => ({ isTauri: false }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 
 interface ModelMessage {
     role: string
@@ -106,17 +109,13 @@ function pageOf<T>(
     }
 }
 
-function unsupported(name: string): never {
-    throw new Error(`${name} is not part of the scalable working-set projection`)
-}
-
 /// Mirrors what the native store hands a pinned reader, including the explicit
 /// failure an archived character's detail read produces.
 function createReader(model: Model): PersistentRevisionReader {
     const revision = model.revision
-    return {
+    return createLeaseStub({
         revision,
-        readRoot: async () => ({ revision, value: clone(model.root) }),
+        readRoot: async () => ({ revision, value: clone(model.root) as PersistentRoot }),
         queryPresets: async () => ({
             revision,
             items: model.presets.map((preset, configuredIndex) => ({
@@ -128,7 +127,7 @@ function createReader(model: Model): PersistentRevisionReader {
         }),
         readPreset: async (id: string) => {
             const preset = model.presets[Number(id)]
-            return preset ? { revision, value: clone(preset) } : null
+            return preset ? { revision, value: clone(preset) as unknown as botPreset } : null
         },
         queryCharacters: async (input) =>
             pageOf(
@@ -148,7 +147,7 @@ function createReader(model: Model): PersistentRevisionReader {
             const character = characterOf(model, id)
             if (!character) return null
             if (character.archived) throw new Error(`Character ${id} is archived`)
-            return { revision, value: clone(character.detail) }
+            return { revision, value: clone(character.detail) as CharacterDetail }
         },
         queryConversations: async (input) => {
             const character = characterOf(model, input.characterId)
@@ -176,18 +175,10 @@ function createReader(model: Model): PersistentRevisionReader {
                     localLore: [],
                     message: conversation.messages,
                     lastDate: conversation.recentAt,
-                }),
+                }) as Chat,
             }
         },
-        readConversationMetadata: async () => unsupported('readConversationMetadata'),
-        readConversationWindow: async () => unsupported('readConversationWindow'),
-        queryPluginStorage: async () => unsupported('queryPluginStorage'),
-        readPluginStorage: async () => unsupported('readPluginStorage'),
-        readAssetAlias: async () => unsupported('readAssetAlias'),
-        readAssetAliasesByKeys: async () => unsupported('readAssetAliasesByKeys'),
-        listAssetAliases: async () => unsupported('listAssetAliases'),
-        readAssetOwnerHead: async () => unsupported('readAssetOwnerHead'),
-    } as unknown as PersistentRevisionReader
+    })
 }
 
 /// Non-enumerable symbol payloads carry residency, configured position and the

@@ -5,7 +5,6 @@ import QRCode from 'qrcode'
 import ConnectionSettingsDialog from './ConnectionSettingsDialog.svelte'
 import { externalStorageStrings } from './strings'
 
-vi.mock('src/lang', () => ({ language: { loading: 'Loading' } }))
 vi.mock('qrcode', async importOriginal => {
     const actual = await importOriginal<{ default: typeof import('qrcode') }>()
     return { default: { ...actual.default, toDataURL: vi.fn(async () => 'data:image/png;base64,c3ludGhldGlj') } }

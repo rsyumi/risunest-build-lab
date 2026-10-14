@@ -1,5 +1,5 @@
 import { withLibraryFileSelection } from './libraryFileOperation'
-import { invoke } from '@tauri-apps/api/core'
+import { Channel, invoke } from '@tauri-apps/api/core'
 import { join } from '@tauri-apps/api/path'
 import { iosStagingPath } from './nativePaths'
 import { mkdir, remove, writeFile } from '@tauri-apps/plugin-fs'
@@ -11,6 +11,7 @@ export interface IOSPickedFile {
     bytes: number
 }
 export interface IOSPickedBackupSource { token: string; name: string; bytes: number }
+export interface IOSBackupCopyProgress { copiedBytes: number; totalBytes: number }
 interface InterruptedIOSBackupSources { names: (string | null)[]; cleanupFailed: boolean }
 let interruptedSourceNotice: Promise<void> | undefined
 /** Releases retired sources and finishes their notices before the next picker opens. */
@@ -63,8 +64,41 @@ export async function pickIOSBackupSource(signal?: AbortSignal): Promise<IOSPick
     })
 }
 export const discardIOSBackupSource = (token: string) => invoke<boolean>('native_portable_source_discard', { source: { type: 'iosScoped', token } })
-export async function materializeIOSBackupSource(token: string): Promise<IOSPickedFile> {
-    return invoke<IOSPickedFile>('plugin:ios-native|materialize_backup_source', { token })
+export async function materializeIOSBackupSource(
+    token: string,
+    options: { signal?: AbortSignal; onProgress?(progress: IOSBackupCopyProgress): void } = {},
+): Promise<IOSPickedFile> {
+    if (options.signal?.aborted) throw cancelled()
+    let copiedBytes = 0
+    const onProgress = options.onProgress ? new Channel<IOSBackupCopyProgress>(progress => {
+        if (options.signal?.aborted || !progress || !Number.isSafeInteger(progress.copiedBytes)
+            || progress.copiedBytes <= copiedBytes || !Number.isSafeInteger(progress.totalBytes)
+            || progress.totalBytes < progress.copiedBytes) return
+        copiedBytes = progress.copiedBytes
+        options.onProgress?.(progress)
+    }) : undefined
+    let cancellation: Promise<void> | undefined
+    const onAbort = () => {
+        cancellation = discardIOSBackupSource(token).then(() => {}, () => {})
+    }
+    options.signal?.addEventListener('abort', onAbort, { once: true })
+    try {
+        const result = await invoke<IOSPickedFile>('plugin:ios-native|materialize_backup_source', {
+            token, ...(onProgress ? { onProgress } : {}),
+        })
+        if (options.signal?.aborted) {
+            await discardIOSFile(result.path)
+            throw cancelled()
+        }
+        return result
+    } catch (error) {
+        if (options.signal?.aborted) throw cancelled()
+        throw error
+    } finally {
+        options.signal?.removeEventListener('abort', onAbort)
+        if (onProgress) onProgress.onmessage = () => {}
+        await cancellation
+    }
 }
 const cancelled = () =>
     new DOMException('File operation cancelled', 'AbortError')

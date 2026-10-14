@@ -260,6 +260,7 @@ export function packageNativeSuite({ nativeBuild, rawArchive, output, releaseInp
     checks: ["archive-layout"],
   }];
   const temporary = mkdtempSync(join(destination, ".sync-package-"));
+  const installerHooks = `${temporary}.nsh`;
   try {
     if (os === "linux") {
       copyRuntime(temporary, build, releaseInput, false);
@@ -284,11 +285,21 @@ export function packageNativeSuite({ nativeBuild, rawArchive, output, releaseInp
         writeOwnedInventory(join(gui, "src-tauri/binaries"), releaseInput, owned, "cloudflared.exe", build);
       }
       const bundleConfig = JSON.parse(readFileSync(join(tauriRoot, "tauri.bundle.conf.json"), "utf8"));
+      if (os === "windows") {
+        const quote = (path) => resolve(path).replaceAll("$", "$$").replaceAll('"', '$\\"');
+        writeFileSync(installerHooks, [
+          `!define SYNC_INSTALLER_MANAGER "${quote(build.manager)}"`,
+          `!define SYNC_INSTALLER_BACKGROUND "${quote(build.managerBackground)}"`,
+          `!include "${quote(join(manager, "install/windows.nsh"))}"`,
+          "",
+        ].join("\n"));
+      }
       const config = JSON.stringify({
         version: releaseInput.version,
         bundle: {
           active: true,
           createUpdaterArtifacts: false,
+          ...(os === "windows" ? { windows: { nsis: { installerHooks } } } : {}),
           // The macOS bundle shares the base list; only Windows ships the windowless manager.
           ...(os === "windows"
             ? { externalBin: [...bundleConfig.bundle.externalBin, "binaries/risunest-sync-manager-background"] }
@@ -402,6 +413,7 @@ export function packageNativeSuite({ nativeBuild, rawArchive, output, releaseInp
     writeFileSync(manifest, `${JSON.stringify(result, null, 2)}\n`);
     return { assets: result, manifest };
   } finally {
+    rmSync(installerHooks, { force: true });
     rmSync(temporary, { recursive: true, force: true });
   }
 }

@@ -37,6 +37,8 @@ pub(crate) mod package_cache;
 pub(crate) mod packaging;
 pub(crate) mod phase_progress;
 pub(crate) mod progress;
+#[cfg(test)]
+pub(crate) mod provider_contract;
 pub(crate) mod transfer_limit;
 pub(crate) mod providers;
 pub(crate) mod publication;

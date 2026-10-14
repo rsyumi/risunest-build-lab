@@ -7,6 +7,7 @@ import { risuChatParser } from "../parser/parser.svelte";
 import { sendChat } from "./index.svelte";
 import { loadLoreBookV3PromptFromCompatibilitySnapshot } from "./lorebook.svelte";
 import { runTrigger } from "./triggers";
+import { setSelectedChatVariable } from './selectedChatVariables'
 import { getActiveConversationSession } from '../storage/persistentDataRuntime.svelte'
 import type { ConversationOperationContext } from './conversationOperationContext'
 import type { GenerationReservation } from './generationState'
@@ -217,31 +218,14 @@ async function processCommand(command:string, pipe:string, conversationOperation
             return ''
         }
         case 'setvar':{
-            console.log(namedArg, arg)
-            const db = getDatabase()
-            const selectedChar = get(selectedCharID)
-            const char = db.characters[selectedChar]
-            const chat = char.chats[char.chatPage]
-            chat.scriptstate = chat.scriptstate ?? {}
-            chat.scriptstate['$' + namedArg['key']] = arg
-            console.log(chat.scriptstate)
-
-            char.chats[char.chatPage] = chat
-            db.characters[selectedChar] = char
-            setDatabase(db)
+            setSelectedChatVariable(namedArg['key'], arg)
             return ''
         }
         case 'addvar':{
             const db = getDatabase()
-            const selectedChar = get(selectedCharID)
-            const char = db.characters[selectedChar]
-            const chat = char.chats[char.chatPage]
-            chat.scriptstate = chat.scriptstate ?? {}
-            chat.scriptstate['$' + namedArg['key']] = (Number(chat.scriptstate['$' + namedArg['key']]) + Number(arg)).toString()
-
-            char.chats[char.chatPage] = chat
-            db.characters[selectedChar] = char
-            setDatabase(db)
+            const char = db.characters[get(selectedCharID)]
+            const value = char.chats[char.chatPage].scriptstate?.['$' + namedArg['key']]
+            setSelectedChatVariable(namedArg['key'], (Number(value) + Number(arg)).toString())
             return ''
         }
         case 'getvar':{

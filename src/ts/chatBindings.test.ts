@@ -12,7 +12,6 @@ const state = vi.hoisted(() => ({
 }))
 vi.mock('./stores.svelte', () => ({ DBState: state, selectedCharID: writable(0) }))
 vi.mock('./alert', () => ({ alertToast: state.toast }))
-vi.mock('src/lang', () => ({ language: { navigationBlockedWhileGenerating: 'wait' } }))
 vi.mock('./storage/persistentDataRuntime.svelte', () => ({
     getActiveConversationSession: () => null,
     getPersistentNavigationGeneration: () => state.navigation,
@@ -34,6 +33,7 @@ vi.mock('./storage/persistentDataRuntime.svelte', () => ({
 import { bindPersona, captureChatBindingTarget, chatBindingBlockedByGeneration, conversationMutationBlockedByGeneration, updateChatBinding } from './chatBindings.svelte'
 import { doingChat } from './process/generationState'
 import { activeRerollConversations } from './durableReroll'
+import { language } from 'src/lang'
 beforeEach(() => {
     doingChat.set(false)
     activeRerollConversations.set([])
@@ -170,5 +170,5 @@ it('blocks binding edits with a notice only while a response is generating', () 
     } finally {
         doingChat.set(false)
     }
-    expect(state.toast).toHaveBeenCalledWith('wait')
+    expect(state.toast).toHaveBeenCalledWith(language.navigationBlockedWhileGenerating)
 })

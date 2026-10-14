@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { writable } from 'svelte/store'
 
-vi.mock('../../platform', () => ({ isTauri: false, isNodeServer: false }))
+vi.mock('../../platform', async () => (await import('../../platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 
 const inlayMocks = vi.hoisted(() => ({
     getInlayAssetBlob: vi.fn(),
@@ -21,7 +21,6 @@ const databaseState = vi.hoisted(() => ({
 }))
 
 vi.mock(import('../../process/files/inlays'), () => inlayMocks)
-vi.mock(import('../../platform'), () => ({ isTauri: false }))
 vi.mock(
     import('../../storage/database.svelte'),
     () => ({

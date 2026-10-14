@@ -3,7 +3,7 @@ import {
     type CapturedChatMessageTarget,
     type ChatMessageUiContext,
 } from './chatMessageUi'
-import { safeStructuredClone } from './polyfill'
+import { safeStructuredClone } from './safeStructuredClone'
 import type { Chat, Message } from './storage/database.svelte'
 import type {
     PersistentDataRuntime,

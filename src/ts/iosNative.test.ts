@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn(async () => undefined) }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
-vi.mock("./platform", () => ({ isTauriIOS: true }));
+vi.mock("./platform", async () => (await import("./platform.testSupport")).platformModule({ runtime: "tauri", os: "ios" }));
 import {
   isBackgroundExpiryReason,
   beginIOSGeneration,

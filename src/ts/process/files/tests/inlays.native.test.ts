@@ -74,7 +74,7 @@ const nativeStore = {
     putNewInlayImage(key: string, data: Uint8Array, input: { name: string }): Promise<InlayBlobMetadata>
 }
 
-vi.mock('src/ts/platform', () => ({ isTauri: true }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'tauri', os: 'windows' }))
 vi.mock('src/ts/storage/platformBlobStore', () => ({ resolveBlobStore: vi.fn(async () => nativeStore) }))
 vi.mock('localforage', () => ({
     default: {

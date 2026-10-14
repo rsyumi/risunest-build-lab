@@ -159,6 +159,8 @@ async fn connect_with(
         library: connected.stored.descriptor.repository_id.clone(),
         root_key: connected.root_key,
         admission: None,
+        #[cfg(test)]
+        test_lease_clock: None,
         connection_id: stored.id.clone(),
         connection_root: root.to_path_buf(),
         capabilities: connected.stored.capabilities,
@@ -890,7 +892,10 @@ mod tests {
             session.use_cancellation(&Cancellation::default());
             assert!(session.engine.as_ref().unwrap().admitted_upper().is_err());
             connect_with(root.path(), &stored, &mut session, open_fixture(&stored, &opens)).await.unwrap();
-            session.engine.as_mut().unwrap().admission = Some(super::super::lww_engine::Admission::synthetic(0));
+            let now = runtime::now_ms();
+            let mut skewed = super::super::lww_engine::Admission::synthetic(now);
+            skewed.set_reading_for_test(now + 1001, 0);
+            session.engine.as_mut().unwrap().admission = Some(skewed);
             let cancel = session.cancel.clone();
             session.use_cancellation(&cancel);
             assert!(session.engine.as_ref().unwrap().admission.is_none());

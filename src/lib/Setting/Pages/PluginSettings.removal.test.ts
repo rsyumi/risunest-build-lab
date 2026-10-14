@@ -11,7 +11,7 @@ vi.mock('src/ts/stores.svelte', async () => ({
     DBState: { db: { plugins: [] as any[], currentPluginProvider: '', pluginPermissions: { synthetic: true } } },
     hotReloading: [], SettingsMenuIndex: (await import('svelte/store')).writable(0),
 }))
-vi.mock('src/ts/parser/parser.svelte', () => ({}))
+vi.mock('src/ts/parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
 vi.mock('src/lib/UI/GUI/TextInput.svelte', async () => ({ default: (await import('../../Others/AlertCompDependencyStub.test.svelte')).default }))
 vi.mock('src/lib/UI/GUI/NumberInput.svelte', async () => ({ default: (await import('../../Others/AlertCompDependencyStub.test.svelte')).default }))
 vi.mock('src/lib/UI/GUI/SelectInput.svelte', async () => ({ default: (await import('../../Others/AlertCompDependencyStub.test.svelte')).default }))

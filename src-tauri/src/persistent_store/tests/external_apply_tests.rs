@@ -1068,6 +1068,16 @@ fn long_conversation_snapshot(
     )
 }
 
+/// A conversation that spans three stage batches once
+/// `small_stage_batches` closes them at 512 work.
+const LONG_MESSAGES: usize = 1_250;
+
+/// Closes this thread's stage batches at 512 work rather than 8,192, so a
+/// long conversation needs a sixteenth of the messages to span several.
+fn small_stage_batches() {
+    super::TEST_STAGE_BATCH_WORK.with(|work| work.set(512));
+}
+
 /// The message rows and their bytes each stage transaction committed, read
 /// from another connection after every batch.
 fn stage_long_conversation(
@@ -1121,7 +1131,8 @@ fn stage_long_conversation(
 /// transactions, and what lands is every message in order.
 #[test]
 fn one_long_conversation_is_staged_in_bounded_transactions() {
-    const MESSAGES: usize = 20_000;
+    const MESSAGES: usize = LONG_MESSAGES;
+    small_stage_batches();
     let (directory, mut store) = open_store();
     super::super::message_pages::reset_capture_work();
     let page_work = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -1135,7 +1146,7 @@ fn one_long_conversation_is_staged_in_bounded_transactions() {
     assert!(
         committed
             .iter()
-            .all(|(rows, _)| *rows as u64 <= super::STAGE_BATCH_WORK),
+            .all(|(rows, _)| *rows as u64 <= super::stage_batch_work()),
         "{committed:?}"
     );
     assert_eq!(
@@ -1170,11 +1181,12 @@ fn one_long_conversation_is_staged_in_bounded_transactions() {
 /// batch that wrote the conversation or several batches later.
 #[test]
 fn activating_an_external_stage_reads_no_messages_for_paging() {
+    small_stage_batches();
     for long in [true, false] {
         let (directory, mut store) = open_store();
         let prepared = if long {
             let (staged, committed) =
-                stage_long_conversation(directory.path(), &mut store, 20_000, 0, &NeverCancelled, |_| {});
+                stage_long_conversation(directory.path(), &mut store, LONG_MESSAGES, 0, &NeverCancelled, |_| {});
             assert!(committed.len() >= 3, "{committed:?}");
             staged.unwrap()
         } else {
@@ -1218,10 +1230,11 @@ fn a_conversation_of_heavy_messages_is_staged_within_the_byte_bound() {
 /// and nothing of it is left behind.
 #[test]
 fn a_local_edit_between_the_batches_of_one_conversation_ends_the_stage() {
+    small_stage_batches();
     let (directory, mut store) = open_store();
     let mut other = store.open_native_job_store().unwrap();
     let (staged, committed) =
-        stage_long_conversation(directory.path(), &mut store, 20_000, 0, &NeverCancelled, move |written| {
+        stage_long_conversation(directory.path(), &mut store, LONG_MESSAGES, 0, &NeverCancelled, move |written| {
             if written == 2 {
                 let commit = serde_json::from_value(json!({
                     "expectedRevision": 1, "root": {"marker":"newer-local"}
@@ -1281,11 +1294,12 @@ fn staged_rows(store: &PersistentStore) -> (i64, i64) {
 /// further batch, and the stage it leaves is removed by its own owner.
 #[test]
 fn cancellation_between_the_batches_of_one_conversation_admits_no_later_batch() {
+    small_stage_batches();
     let (directory, mut store) = open_store();
     let probe = Cancel::default();
     let fired = probe.fired.clone();
     let (staged, committed) =
-        stage_long_conversation(directory.path(), &mut store, 20_000, 0, &probe, move |written| {
+        stage_long_conversation(directory.path(), &mut store, LONG_MESSAGES, 0, &probe, move |written| {
             if written == 2 {
                 fired.set(true);
             }
@@ -1303,18 +1317,19 @@ fn cancellation_between_the_batches_of_one_conversation_admits_no_later_batch() 
 /// into rows stops inside that record, before any of it is written.
 #[test]
 fn cancellation_inside_one_long_record_stops_before_its_rows_are_written() {
+    small_stage_batches();
     let (directory, mut store) = open_store();
-    // Staging the pages and the two short records asks far fewer than 10,000
-    // times; each of the 20,000 messages then asks once.
+    // Staging the pages and the two short records asks far fewer than 625
+    // times; each of the 1,250 messages then asks once.
     let probe = Cancel {
-        at: Some(10_000),
+        at: Some(625),
         ..Cancel::default()
     };
     let (staged, committed) =
-        stage_long_conversation(directory.path(), &mut store, 20_000, 0, &probe, |_| {});
+        stage_long_conversation(directory.path(), &mut store, LONG_MESSAGES, 0, &probe, |_| {});
     assert!(staged.is_err());
     assert!(committed.is_empty(), "{committed:?}");
-    assert_eq!(probe.asked.get(), 10_000);
+    assert_eq!(probe.asked.get(), 625);
     assert_eq!(probe.refused.get(), 1);
     assert_eq!(staged_rows(&store), (0, 0));
     assert_eq!(store.materialize(None).unwrap()["marker"], "local");

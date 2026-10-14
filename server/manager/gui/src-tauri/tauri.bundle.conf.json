@@ -9,6 +9,9 @@
     "resources": ["binaries/CLOUDFLARED-LICENSE"],
     "windows": {
       "nsis": {
+        "template": "../../../../src-tauri/windows-installer.nsi",
+        "languages": ["English", "Korean"],
+        "displayLanguageSelector": false,
         "installMode": "currentUser",
         "installerIcon": "icons/icon.ico",
         "installerHooks": "../../install/windows.nsh"

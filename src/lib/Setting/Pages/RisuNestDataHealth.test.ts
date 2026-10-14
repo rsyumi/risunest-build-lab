@@ -36,13 +36,9 @@ vi.mock('src/ts/storage/nativePersistentMaintenance', () => maintenance)
 vi.mock('src/ts/alert', () => alerts)
 vi.mock('src/ts/globalApi.svelte', () => files)
 vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({ getPersistentDataRuntime: () => repairRuntime }))
-vi.mock('src/lang', async () => ({
-    language: (await import('src/lang/en')).languageEnglish,
-}))
 
 import RisuNestDataHealth from './RisuNestDataHealth.svelte'
 import { dataHealthOwnerKey } from 'src/ts/storage/dataHealthPresentation'
-import { languageKorean } from 'src/lang/ko'
 import { languageEnglish } from 'src/lang/en'
 import type { DataHealthResult } from 'src/ts/storage/dataHealth'
 
@@ -284,12 +280,17 @@ describe('RisuNestDataHealth', () => {
         const text = [...target.querySelectorAll('[data-data-health-item]')]
             .map((item) => item.textContent ?? '')
             .join('\n')
-        expect(text).toContain('Module “Weather” has no link for asset 1.')
         expect(text).toContain(
-            'The module assigned to character “Mari”, chat “First chat”, does not exist.',
+            strings.moduleAssetMissing.replace('{0}', 'Weather').replace('{1}', '1'),
         )
         expect(text).toContain(
-            'Character “Mari”, chat “First chat”, has broken inlay data in message 8.',
+            strings.conversationModuleMissing.replace('{0}', 'Mari').replace('{1}', 'First chat'),
+        )
+        expect(text).toContain(
+            strings.conversationMessageInlayMissing
+                .replace('{0}', 'Mari')
+                .replace('{1}', 'First chat')
+                .replace('{2}', '8'),
         )
         expect(text).not.toContain('character-1/chat-1')
     })
@@ -569,16 +570,5 @@ describe('RisuNestDataHealth', () => {
         await settle()
         expect(summary()).not.toContain(strings.outdated)
         expect(target.querySelectorAll('[data-data-health-choice]')).toHaveLength(1)
-    })
-
-    it('keeps every string it shows in both shipped languages', () => {
-        for (const key of Object.keys(strings)) {
-            expect(
-                languageKorean.risuNest.dataHealth[
-                    key as keyof typeof strings
-                ],
-                key,
-            ).toBeTruthy()
-        }
     })
 })

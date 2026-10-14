@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
+import { createPersistentStoreHarness } from '../../../tests/support/persistentStoreHarness'
 import type { Database } from './database.svelte'
 import { createMutationGatedPersistentDataStore } from './mutationGatedPersistentDataStore'
 import type { PersistentDataStore, WorkingSetCommit } from './persistentDataStore'
+import { createStoreStub } from './persistentDataStore.testSupport'
 import {
     createInRealmStorageLockManager,
     createStorageMutationGate,
@@ -14,31 +16,9 @@ function deferred<T = void>() {
     return { promise, resolve }
 }
 
-function makeStore() {
-    return {
-        commit: vi.fn(),
-        replaceFromDatabase: vi.fn(),
-        materializeDatabase: vi.fn(),
-        acquireRevision: vi.fn(),
-        open: vi.fn(),
-        readRoot: vi.fn(),
-        queryPresets: vi.fn(),
-        readPreset: vi.fn(),
-        queryCharacters: vi.fn(),
-        readCharacter: vi.fn(),
-        queryConversations: vi.fn(),
-        readConversation: vi.fn(),
-        readConversationMetadata: vi.fn(),
-        readConversationWindow: vi.fn(),
-        queryPluginStorage: vi.fn(),
-        readPluginStorage: vi.fn(),
-        readAssetAliasesByKeys: vi.fn(),
-    } as unknown as PersistentDataStore
-}
-
 describe('createMutationGatedPersistentDataStore', () => {
     it('forwards optional current binding reads without acquiring a mutation gate', async () => {
-        const store = makeStore()
+        const store: PersistentDataStore = (await createPersistentStoreHarness()).store
         store.lwwBindingState = vi.fn(async () => ({targetAuthority:'17'}))
         const gate = {runWrite:vi.fn(),runTransition:vi.fn()} as unknown as StorageMutationGate
         const gated = createMutationGatedPersistentDataStore(store, gate)
@@ -46,10 +26,12 @@ describe('createMutationGatedPersistentDataStore', () => {
         expect(store.lwwBindingState).toHaveBeenCalledOnce()
         expect(gate.runWrite).not.toHaveBeenCalled()
         expect(gate.runTransition).not.toHaveBeenCalled()
-        expect(createMutationGatedPersistentDataStore(makeStore(), gate).lwwBindingState).toBeUndefined()
+        expect(createMutationGatedPersistentDataStore((await createPersistentStoreHarness()).store, gate).lwwBindingState).toBeUndefined()
     })
     it('gates activation on exposed native stages without nesting the normal replacement gate',async()=>{
-        const store=makeStore()
+        const harness=await createPersistentStoreHarness()
+        const store:PersistentDataStore=harness.store
+        const replace=harness.spy('replaceFromDatabase')
         const activate=vi.fn(async()=>({revision:2})),abort=vi.fn(async()=>{})
         store.stageDatabaseReplacement=vi.fn(async()=>({activate,abort}))
         let held=false
@@ -62,14 +44,15 @@ describe('createMutationGatedPersistentDataStore', () => {
         await stage.activate();expect(gate.runTransition).toHaveBeenCalledOnce()
         await gated.replaceFromDatabase({characters:[]} as unknown as Database,1)
         expect(gate.runTransition).toHaveBeenCalledTimes(2)
-        expect(store.replaceFromDatabase).not.toHaveBeenCalled()
+        expect(replace).not.toHaveBeenCalled()
     })
 
     it('forwards optional metadata reads with the original receiver without taking a mutation gate', async () => {
-        const store = makeStore()
+        const harness = await createPersistentStoreHarness()
+        const store = harness.store
         const query = { characterId: 'char-a', conversationId: 'chat-a', startIndex: 0, limit: 64 }
         const result = { revision: 1, value: { messages: [] } } as any
-        store.readConversationMessageMetadataWindow = vi.fn(async function (this: PersistentDataStore, input) {
+        harness.spy('readConversationMessageMetadataWindow').mockImplementation(async function (this: PersistentDataStore, input) {
             expect(this).toBe(store)
             expect(input).toBe(query)
             return result
@@ -79,12 +62,12 @@ describe('createMutationGatedPersistentDataStore', () => {
         const gated = createMutationGatedPersistentDataStore(store, gate)
         expect(await gated.readConversationMessageMetadataWindow!(query)).toBe(result)
         expect(write).not.toHaveBeenCalled()
-        delete store.readConversationMessageMetadataWindow
-        expect(createMutationGatedPersistentDataStore(store, gate).readConversationMessageMetadataWindow).toBeUndefined()
+        // The read is optional in the store contract, and the real store always has it.
+        expect(createMutationGatedPersistentDataStore(createStoreStub({}), gate).readConversationMessageMetadataWindow).toBeUndefined()
     })
 
     it('gates ordinary commits and full replacements while preserving exact inputs and results', async () => {
-        const store = makeStore()
+        const harness = await createPersistentStoreHarness()
         const calls: string[] = []
         const gate = {
             runWrite: vi.fn(async <T>(operation: () => Promise<T>) => {
@@ -107,12 +90,12 @@ describe('createMutationGatedPersistentDataStore', () => {
         const values = [{ owner: 'test-plugin', key: 'key', value: 'value' }]
         const commitResult = { revision: 4 }
         const replacementResult = { revision: 5 }
-        vi.mocked(store.commit).mockImplementation(async (input) => {
+        harness.spy('commit').mockImplementation(async (input) => {
             calls.push('commit')
             expect(input).toBe(commit)
             return commitResult
         })
-        vi.mocked(store.replaceFromDatabase).mockImplementation(async (input, revision, assets, pluginValues) => {
+        harness.spy('replaceFromDatabase').mockImplementation(async (input, revision, assets, pluginValues) => {
             calls.push('replace')
             expect(input).toBe(database)
             expect(revision).toBe(4)
@@ -120,7 +103,7 @@ describe('createMutationGatedPersistentDataStore', () => {
             expect(pluginValues).toBe(values)
             return replacementResult
         })
-        const gated = createMutationGatedPersistentDataStore(store, gate)
+        const gated = createMutationGatedPersistentDataStore(harness.store, gate)
 
         await expect(gated.commit(commit)).resolves.toBe(commitResult)
         await expect(gated.replaceFromDatabase(database, 4, aliases, values)).resolves.toBe(replacementResult)
@@ -131,14 +114,15 @@ describe('createMutationGatedPersistentDataStore', () => {
     })
 
     it('transition_does_not_reenter_shared_gate', async () => {
-        const store = makeStore()
+        const harness = await createPersistentStoreHarness()
+        const store = harness.store
         const gate = createStorageMutationGate({ locks: createInRealmStorageLockManager() })
         const shared = vi.spyOn(gate, 'runWrite')
         const exclusive = vi.spyOn(gate, 'runTransition')
         const started = deferred()
         const finishFirstWrite = deferred()
         const calls: string[] = []
-        vi.mocked(store.commit).mockImplementation(async ({ expectedRevision }) => {
+        harness.spy('commit').mockImplementation(async ({ expectedRevision }) => {
             calls.push(`write:${expectedRevision}`)
             if (expectedRevision === 0) {
                 started.resolve()
@@ -147,7 +131,7 @@ describe('createMutationGatedPersistentDataStore', () => {
             calls.push(`written:${expectedRevision + 1}`)
             return { revision: expectedRevision + 1 }
         })
-        vi.mocked(store.replaceFromDatabase).mockImplementation(async (_database, revision) => {
+        harness.spy('replaceFromDatabase').mockImplementation(async (_database, revision) => {
             calls.push('transition')
             // The replacement owns the exclusive permit and uses its internal store.
             const result = await store.commit({ expectedRevision: revision! })
@@ -174,17 +158,18 @@ describe('createMutationGatedPersistentDataStore', () => {
     })
 
     it('releases a failed exclusive transition before the next shared writer', async () => {
-        const store = makeStore()
+        const harness = await createPersistentStoreHarness()
+        const store = harness.store
         const gate = createStorageMutationGate({ locks: createInRealmStorageLockManager() })
         const started = deferred()
         const finishReplacement = deferred()
         const failure = new Error('replacement failed')
-        vi.mocked(store.replaceFromDatabase).mockImplementation(async () => {
+        harness.spy('replaceFromDatabase').mockImplementation(async () => {
             started.resolve()
             await finishReplacement.promise
             throw failure
         })
-        vi.mocked(store.commit).mockResolvedValue({ revision: 2 })
+        harness.spy('commit').mockResolvedValue({ revision: 2 })
         const gated = createMutationGatedPersistentDataStore(store, gate)
         const replacement = gated.replaceFromDatabase({ characters: [] } as unknown as Database, 1)
         const rejected = expect(replacement).rejects.toBe(failure)
@@ -198,15 +183,16 @@ describe('createMutationGatedPersistentDataStore', () => {
     })
 
     it('reads and exports without acquiring the write gate', async () => {
-        const store = makeStore()
+        const harness = await createPersistentStoreHarness({ username: 'Fixture', botPresets: [], characters: [] } as unknown as Database)
+        const aliases = harness.spy('readAssetAliasesByKeys')
+        const metadata = harness.spy('readConversationMetadata')
         const gate = { runWrite: vi.fn() } as unknown as StorageMutationGate
-        const database = { username: 'Fixture', characters: [] } as unknown as Database
-        vi.mocked(store.materializeDatabase).mockResolvedValue(database)
-        vi.mocked(store.acquireRevision).mockResolvedValue({ revision: 2 } as never)
-        const gated = createMutationGatedPersistentDataStore(store, gate)
+        const gated = createMutationGatedPersistentDataStore(harness.store, gate)
 
-        await expect(gated.materializeDatabase(2)).resolves.toBe(database)
-        await gated.acquireRevision(2)
+        await expect(gated.materializeDatabase(harness.revision)).resolves.toMatchObject({ username: 'Fixture' })
+        const lease = await gated.acquireRevision(harness.revision)
+        expect(lease.revision).toBe(harness.revision)
+        await lease.release()
         await gated.readRoot()
         await gated.queryPresets()
         await gated.readPreset('0')
@@ -216,20 +202,20 @@ describe('createMutationGatedPersistentDataStore', () => {
         await gated.readAssetAliasesByKeys('asset', ['assets/batch.bin'])
 
         expect(gate.runWrite).not.toHaveBeenCalled()
-        expect(store.readAssetAliasesByKeys).toHaveBeenCalledWith('asset', ['assets/batch.bin'])
-        expect(store.readConversationMetadata).toHaveBeenCalledWith('char-a', 'conv-a')
+        expect(aliases).toHaveBeenCalledWith('asset', ['assets/batch.bin'])
+        expect(metadata).toHaveBeenCalledWith('char-a', 'conv-a')
     })
 
     it('preserves ordinary write error identity', async () => {
-        const store = makeStore()
+        const harness = await createPersistentStoreHarness()
         const failure = new Error('commit failed')
-        vi.mocked(store.commit).mockRejectedValue(failure)
+        harness.failNext('commit', failure)
         const gate = {
             runWrite: <T>(operation: () => Promise<T>) => operation(),
             runKeyedWrite: <T>(_key: string, operation: () => Promise<T>) => operation(),
             runTransition: <T>(operation: () => Promise<T>) => operation(),
         }
-        const gated = createMutationGatedPersistentDataStore(store, gate)
+        const gated = createMutationGatedPersistentDataStore(harness.store, gate)
 
         await expect(gated.commit({ expectedRevision: 1 })).rejects.toBe(failure)
     })

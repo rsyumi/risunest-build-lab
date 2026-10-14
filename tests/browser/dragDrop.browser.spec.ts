@@ -1,5 +1,6 @@
 import { test, expect } from './fixture'
 import type { Locator, Page } from '@playwright/test'
+import { languageEnglish as language } from '../../src/lang/en'
 
 async function order(page: Page, kind: string) {
     return page.evaluate(kind => {
@@ -133,7 +134,7 @@ async function center(locator: Locator) {
     return { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2, top: box!.y + 3 }
 }
 const zone = (page: Page, direction: 'previous' | 'next') => page.locator(`[data-lore-page-zone="${direction}"]`)
-const pagerText = (page: Page) => page.getByRole('navigation', { name: 'Pages' }).first()
+const pagerText = (page: Page) => page.getByRole('navigation', { name: language.risuNest.pager.pages }).first()
 const itemButton = (page: Page, name: string) => page.getByRole('button', { name, exact: true })
 async function position(page: Page, name: string) {
     return (await order(page, 'lore')).indexOf(name)
@@ -192,7 +193,7 @@ test.describe('lore pages', () => {
         const errors: string[] = []
         page.on('pageerror', error => errors.push(error.message))
         await open(page, 'lore-pages')
-        await page.getByRole('button', { name: 'Next page' }).first().click()
+        await page.getByRole('button', { name: language.risuNest.pager.next }).first().click()
         await dragThroughZone(page, 'Item 100', 'previous', '1 / 3', 'Item 5')
         await expect.poll(async () => (await position(page, 'Item 5')) - (await position(page, 'Item 100'))).toBe(1)
         await expect(itemButton(page, 'Item 100')).toBeVisible()

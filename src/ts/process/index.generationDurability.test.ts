@@ -60,7 +60,6 @@ const harness = vi.hoisted(() => {
     const embeddingAddText = vi.fn(async () => undefined)
     const embeddingSearch = vi.fn(async () => [['happy', 1]])
     const chatOutput = new Set<(arg: any) => void | Promise<void>>()
-    const chatOutputListenerProvenance = new WeakMap<object, 'v2.1-live' | 'v3-legacy'>()
     const projectChatOutput = vi.fn(async (input: any) => ({
         char: structuredClone(input.liveCharacter),
         chat: structuredClone(input.liveConversation),
@@ -99,7 +98,6 @@ const harness = vi.hoisted(() => {
         embeddingAddText,
         embeddingSearch,
         chatOutput,
-        chatOutputListenerProvenance,
         projectChatOutput,
         resolvePosition,
         setChatToIndex,
@@ -125,7 +123,6 @@ vi.mock('../tokenizer', async () => (await import('./tests/sendChatTestHarness')
     tokenize: harness.tokenize,
     tokenizeNum: harness.tokenizeNum,
 }))
-vi.mock('../../lang', async () => (await import('./tests/sendChatTestHarness')).langModule())
 vi.mock('../alert', async () => (await import('./tests/sendChatTestHarness')).alertModule())
 vi.mock('../parser/chatML', async () => (await import('./tests/sendChatTestHarness')).chatMLModule({
     parseChatML: vi.fn(() => []),
@@ -135,7 +132,7 @@ vi.mock('../util', async () => (await import('./tests/sendChatTestHarness')).uti
     findCharacterbyId: vi.fn((id: string) => harness.characters.get(id)),
     isLastCharPunctuation: harness.isLastCharPunctuation,
 }))
-vi.mock('./request/request', () => ({ requestChatData: harness.requestChatData }))
+vi.mock('./request/request', async () => (await import('./tests/sendChatTestHarness')).requestModule(harness.requestChatData))
 vi.mock('./stableDiff', async () => (await import('./tests/sendChatTestHarness')).stableDiffModule({
     stableDiff: harness.stableDiff,
 }))
@@ -169,17 +166,11 @@ vi.mock('../model/modellist', async () => (await import('./tests/sendChatTestHar
 vi.mock('./memory/hypav3', async () => (await import('./tests/sendChatTestHarness')).hypav3Module())
 vi.mock('./modules', async () => (await import('./tests/sendChatTestHarness')).modulesModule())
 vi.mock('../globalApi.svelte', async () => (await import('./tests/sendChatTestHarness')).globalApiModule())
-vi.mock('../plugins/plugins.svelte', () => ({
-    pluginV2: { chatOutput: harness.chatOutput },
-    chatOutputListenerProvenance: harness.chatOutputListenerProvenance,
-    pluginCompatibility: { profile: 'scalable-v3' },
-}))
+vi.mock('../plugins/plugins.svelte', async () => (await import('./tests/sendChatTestHarness')).pluginsModule({ chatOutput: harness.chatOutput }))
 vi.mock('../plugins/pluginDatabaseAccess', () => ({
     createProductionPluginChatOutputProjector: () => harness.projectChatOutput,
 }))
-vi.mock('../plugins/pinnedConversationPosition', () => ({
-    resolvePinnedConversationPosition: harness.resolvePosition,
-}))
+vi.mock('../plugins/pinnedConversationPosition', async () => (await import('./tests/sendChatTestHarness')).pinnedConversationPositionModule(harness.resolvePosition))
 vi.mock('./presetChain', async () => (await import('./tests/sendChatTestHarness')).presetChainModule())
 vi.mock('./generationState', () => ({
     doingChat: harness.doingChat,
@@ -201,17 +192,9 @@ vi.mock('./generationState', () => ({
         }
     },
 }))
-vi.mock('../storage/persistentDataRuntime.svelte', () => ({
-    assertPersistentMutationAllowed: vi.fn(),
-    getPersistentStorageAuthorityEpoch: () => 0,
-    getPersistentNavigationGeneration: () => 0,
+vi.mock('../storage/persistentDataRuntime.svelte', async () => (await import('./tests/sendChatTestHarness')).persistentRuntimeModule({
     acknowledgeGenerationCompletion: harness.acknowledge,
     drainDeferredLwwReceives: harness.drainDeferredReceives,
-    captureSelectedConversationTarget: () => null,
-    captureSelectedConversationAuthority: () => null,
-    acquireCompleteConversation: vi.fn(),
-    getActiveConversationSession: () => null,
-    invalidateActiveConversationSession: vi.fn(),
     flushPendingData: harness.flushPendingData,
 }))
 vi.mock('../androidGenerationKeepAlive', () => ({
@@ -407,8 +390,6 @@ describe('sendChat generation durability control flow', () => {
         })
         harness.chatOutput.add(first)
         harness.chatOutput.add(second)
-        harness.chatOutputListenerProvenance.set(first, 'v3-legacy')
-        harness.chatOutputListenerProvenance.set(second, 'v3-legacy')
         harness.runTrigger.mockImplementation(async (_char, event, context) => {
             if (event !== 'output') return null
             const chat = structuredClone(context.chat)

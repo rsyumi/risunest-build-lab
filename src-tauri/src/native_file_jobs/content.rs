@@ -1,7 +1,7 @@
 use super::{
     charx::{
         inspect_charx_opened_file, CharXContainerKind, CharXInspection, CharXLimits,
-        CharXParseError, CharXParseErrorCode, ParsedCharXDescriptor, StagedPayloadDescriptor,
+        CharXParseError, CharXParseErrorCode, ParsedCharXDescriptor,
     },
     content_cancelled, open_regular_file_no_follow, ImportCounts, JobControl, JobDetail, JobPhase,
     JobProgress, JobStage, NativeJobError, OpenedJobSource, PreparedContent, PreparedContentAsset,
@@ -11,6 +11,7 @@ use crate::asset_repository::job_pins::{
     CasJobKind, CasObjectRole, CasReleaseOutcome, DurableCasJob,
 };
 use crate::asset_repository::{PayloadCas, PreparedPayload};
+use crate::asset_repository::import_payloads::{prepare_import_payloads, ImportPayload, ImportPinning};
 use crate::import_export_jobs::png_card::{
     parse_png_card, PngCardError, PngCardLimits, PngCardParseResult, StagedPngPayload,
 };
@@ -38,12 +39,6 @@ const ZIP_LOCAL_FILE_HEADER_BYTES: u64 = 30;
 const ZIP_LOCAL_VARIABLE_HEADER_MAX_BYTES: u64 = u16::MAX as u64 * 2;
 const ZIP_DATA_DESCRIPTOR_MAX_BYTES: u64 = 24;
 const ZIP_FOOTER_MAX_BYTES: u64 = 22 + 20 + 56 + u16::MAX as u64;
-
-#[derive(Clone)]
-struct PromotedPayload {
-    content_hash: String,
-    byte_size: u64,
-}
 
 struct CancellableReader<'a, R> {
     inner: R,
@@ -239,9 +234,10 @@ pub(super) fn prepare_content(
             owned_directory,
             &content_import_limits(),
             &cas,
+            &mut cas_session,
             job,
         ),
-        ContentKind::PngCard => prepare_png_content(&mut source, owned_directory, &cas, job),
+        ContentKind::PngCard => prepare_png_content(&mut source, owned_directory, &cas, &mut cas_session, job),
         ContentKind::CharxCard | ContentKind::AppendedCharxJpeg => {
             if source.total_bytes > max_charx_spool_bytes() {
                 return Err(abort_failed_content_session(
@@ -252,7 +248,7 @@ pub(super) fn prepare_content(
                     ),
                 ));
             }
-            prepare_charx_content(&mut source, display_name, owned_directory, &cas, job)
+            prepare_charx_content(&mut source, display_name, owned_directory, &cas, &mut cas_session, job)
         }
         ContentKind::RisuModule => {
             prepare_risum_content(&mut source, owned_directory, &cas, &mut cas_session, job)
@@ -291,6 +287,7 @@ fn prepare_png_content(
     source: &mut OpenedJobSource,
     owned_directory: &Path,
     cas: &PayloadCas,
+    cas_session: &mut DurableCasJob,
     job: &JobControl,
 ) -> Result<PreparedContent, NativeJobError> {
     source
@@ -317,30 +314,23 @@ fn prepare_png_content(
         .filter_map(|payload| payload.asset_reference.as_deref())
         .collect::<HashSet<_>>();
     let portrait_token = collision_safe_png_portrait_token(&embedded_tokens);
-    let portrait = promote_png_payload(
-        &base_image,
-        owned_directory,
-        &portrait_token,
-        "image/png",
-        cas,
-        job,
-    )?;
+    let inputs = std::iter::once(&base_image).chain(embedded_assets.iter()).map(|payload| ImportPayload {
+        path: owned_directory.join(&payload.staged_id),
+        hash: payload.sha256.clone(),
+        size: payload.byte_size,
+        sync_required: false,
+        progress_items: 1,
+    }).collect::<Vec<_>>();
+    report_content_progress(job, JobStage::PreparingAttachments, 0, Some(inputs.len() as u64))?;
+    let promoted = prepare_content_payloads(cas, cas_session, &inputs, ImportPinning::AfterContentMapping, job)?;
+    let portrait = promoted_png_asset(&promoted[0], &portrait_token, "image/png");
     let portrait_logical_id = portrait.logical_id.clone();
-    let mut assets = Vec::with_capacity(embedded_assets.len() + 1);
+    let mut assets = Vec::with_capacity(promoted.len());
     assets.push(portrait);
-    for payload in embedded_assets {
-        let reference = payload
-            .asset_reference
-            .as_deref()
+    for (payload, promoted) in embedded_assets.iter().zip(&promoted[1..]) {
+        let reference = payload.asset_reference.as_deref()
             .expect("PNG asset references were validated before promotion");
-        assets.push(promote_png_payload(
-            &payload,
-            owned_directory,
-            reference,
-            "",
-            cas,
-            job,
-        )?);
+        assets.push(promoted_png_asset(promoted, reference, ""));
     }
 
     let mut metadata = serde_json::Map::new();
@@ -390,40 +380,19 @@ fn collision_safe_png_portrait_token(embedded_tokens: &HashSet<&str>) -> String 
     unreachable!("the finite PNG asset set cannot exhaust portrait tokens")
 }
 
-fn promote_png_payload(
-    payload: &StagedPngPayload,
-    owned_directory: &Path,
-    token: &str,
-    mime: &str,
-    cas: &PayloadCas,
-    job: &JobControl,
-) -> Result<PreparedContentAsset, NativeJobError> {
-    let staged = StagedPayloadDescriptor {
-        original_name: payload.staged_id.clone(),
-        normalized_name: payload.staged_id.clone(),
-        extension: Some("png".to_owned()),
-        normalized_extension: Some("png".to_owned()),
-        mime_type: mime.to_owned(),
-        decoded_size: payload.byte_size,
-        compressed_size: payload.byte_size,
-        crc32: 0,
-        sha256: payload.sha256.clone(),
-        staged_path: owned_directory.join(&payload.staged_id),
-        card_asset_types: Vec::new(),
-    };
-    let promoted = promote_staged_payload(cas, &staged, job)?;
-    let object_hash = promoted.content_hash;
-    Ok(PreparedContentAsset {
+fn promoted_png_asset(payload: &PreparedPayload, token: &str, mime: &str) -> PreparedContentAsset {
+    let object_hash = payload.content_hash.clone();
+    PreparedContentAsset {
         reference_key: token.to_owned(),
         token: token.to_owned(),
         position: None,
         logical_id: format!("assets/{object_hash}.png"),
         name: format!("{object_hash}.png"),
         object_hash,
-        byte_size: promoted.byte_size,
+        byte_size: payload.byte_size,
         mime: mime.to_owned(),
         ext: "png".to_owned(),
-    })
+    }
 }
 
 fn prepare_json_content(
@@ -431,6 +400,7 @@ fn prepare_json_content(
     owned_directory: &Path,
     limits: &ImportLimits,
     cas: &PayloadCas,
+    cas_session: &mut DurableCasJob,
     job: &JobControl,
 ) -> Result<PreparedContent, NativeJobError> {
     source
@@ -443,7 +413,8 @@ fn prepare_json_content(
     })
     .map_err(native_format_error)?;
     let ParsedJsonCard { metadata, payloads } = parsed;
-    let assets = promote_json_assets(&metadata, payloads, owned_directory, cas, job)?;
+    report_content_progress(job, JobStage::PreparingAttachments, 0, Some(payloads.len() as u64))?;
+    let assets = promote_json_assets(&metadata, payloads, owned_directory, cas, cas_session, job)?;
     Ok(PreparedContent {
         format: PreparedContentFormat::JsonCard,
         metadata,
@@ -460,6 +431,7 @@ fn prepare_charx_content(
     display_name: &str,
     owned_directory: &Path,
     cas: &PayloadCas,
+    cas_session: &mut DurableCasJob,
     job: &JobControl,
 ) -> Result<PreparedContent, NativeJobError> {
     let source_metadata = source
@@ -513,12 +485,13 @@ fn prepare_charx_content(
             CharXContainerKind::AppendedCharXJpeg
         ));
     report_content_progress(job, JobStage::PreparingAttachments, 0, Some(total))?;
-    let mut assets = promote_archive_asset_occurrences(&descriptor, cas, job)?;
+    let mut assets = promote_archive_asset_occurrences(&descriptor, cas, cas_session, job)?;
     assets.extend(promote_json_assets(
         &metadata,
         payloads,
         owned_directory,
         cas,
+        cas_session,
         job,
     )?);
     let portrait_logical_id = match descriptor.container_kind {
@@ -526,7 +499,7 @@ fn prepare_charx_content(
         CharXContainerKind::AppendedCharXJpeg => {
             let portrait = promote_jpeg_prefix(source, descriptor.archive_offset, cas, job)?;
             let logical_id = portrait.logical_id.clone();
-            advance_content_asset(job)?;
+            advance_content_assets(job, 1)?;
             assets.push(portrait);
             Some(logical_id)
         }
@@ -606,28 +579,17 @@ fn prepare_risum_content(
         0,
         Some(parsed.assets.len() as u64),
     )?;
-    for asset in parsed.assets {
-        if job.is_cancel_requested() {
-            return Err(content_cancelled());
-        }
+    let inputs = parsed.assets.iter().map(|asset| ImportPayload {
+        path: owned_directory.join(&asset.payload.staged_name),
+        hash: asset.payload.sha256.clone(),
+        size: asset.payload.byte_size,
+        sync_required: false,
+        progress_items: 1,
+    }).collect::<Vec<_>>();
+    let promoted = prepare_content_payloads(cas, cas_session, &inputs, ImportPinning::DuringPreparation, job)?;
+    for (asset, prepared) in parsed.assets.into_iter().zip(promoted) {
+        if job.is_cancel_requested() { return Err(content_cancelled()); }
         let extension = asset.declared_extension;
-        let staged_path = owned_directory.join(&asset.payload.staged_name);
-        let prepared = cas_session
-            .adopt_import_payload(
-                cas,
-                &staged_path,
-                &asset.payload.sha256,
-                asset.payload.byte_size,
-                &|| job.is_cancel_requested(),
-            )
-            .map_err(|error| {
-                if job.is_cancel_requested() {
-                    content_cancelled()
-                } else {
-                    NativeJobError::new("store-error", error.to_string())
-                }
-            })?;
-        advance_content_asset(job)?;
         if prepared.content_hash != asset.payload.sha256
             || prepared.byte_size != asset.payload.byte_size
         {
@@ -732,6 +694,7 @@ fn prepare_risum_content(
 fn promote_archive_asset_occurrences(
     descriptor: &ParsedCharXDescriptor,
     cas: &PayloadCas,
+    cas_session: &mut DurableCasJob,
     job: &JobControl,
 ) -> Result<Vec<PreparedContentAsset>, NativeJobError> {
     let payloads = descriptor
@@ -739,7 +702,25 @@ fn promote_archive_asset_occurrences(
         .iter()
         .map(|payload| (payload.normalized_name.as_str(), payload))
         .collect::<HashMap<_, _>>();
-    let mut promoted = HashMap::<String, PromotedPayload>::new();
+    let mut names = HashMap::<&str, usize>::new();
+    let mut unique = Vec::new();
+    for reference in &descriptor.asset_references {
+        let count = names.entry(reference.normalized_name.as_str()).or_default();
+        *count += 1;
+        if *count == 1 {
+            let payload = payloads.get(reference.normalized_name.as_str()).ok_or_else(|| {
+                NativeJobError::new("invalid-input", "CharX card reference has no staged payload")
+            })?;
+            unique.push(*payload);
+        }
+    }
+    let inputs = unique.iter().map(|payload| ImportPayload {
+        path: payload.staged_path.clone(), hash: payload.sha256.clone(), size: payload.decoded_size,
+        sync_required: false, progress_items: names[payload.normalized_name.as_str()],
+    }).collect::<Vec<_>>();
+    let prepared = prepare_content_payloads(cas, cas_session, &inputs, ImportPinning::AfterContentMapping, job)?;
+    let promoted = unique.iter().zip(prepared).map(|(payload, result)|
+        (payload.normalized_name.as_str(), result)).collect::<HashMap<_, _>>();
     let mut assets = Vec::with_capacity(descriptor.asset_references.len());
     for reference in &descriptor.asset_references {
         if job.is_cancel_requested() {
@@ -753,17 +734,7 @@ fn promote_archive_asset_occurrences(
                     "CharX card reference has no staged payload",
                 )
             })?;
-        let promoted_payload = match promoted.get(&reference.normalized_name) {
-            Some(promoted_payload) => {
-                advance_content_asset(job)?;
-                promoted_payload.clone()
-            }
-            None => {
-                let promoted_payload = promote_staged_payload(cas, payload, job)?;
-                promoted.insert(reference.normalized_name.clone(), promoted_payload.clone());
-                promoted_payload
-            }
-        };
+        let promoted_payload = &promoted[reference.normalized_name.as_str()];
         let token = format!("native-charx-{}", reference.order);
         let suffix = storage_suffix(payload.normalized_extension.as_deref());
         let ext = reference
@@ -775,7 +746,7 @@ fn promote_archive_asset_occurrences(
             token,
             position: None,
             logical_id: format!("assets/{}.{}", promoted_payload.content_hash, suffix),
-            object_hash: promoted_payload.content_hash,
+            object_hash: promoted_payload.content_hash.clone(),
             byte_size: promoted_payload.byte_size,
             mime: payload.mime_type.clone(),
             name: reference.display_name.clone().unwrap_or_default(),
@@ -815,10 +786,16 @@ fn promote_json_assets(
     payloads: Vec<JsonCardPayload>,
     staging_root: &Path,
     cas: &PayloadCas,
+    cas_session: &mut DurableCasJob,
     job: &JobControl,
 ) -> Result<Vec<PreparedContentAsset>, NativeJobError> {
     let mut assets = Vec::with_capacity(payloads.len());
-    for payload in payloads {
+    let inputs = payloads.iter().map(|item| ImportPayload {
+        path: staging_root.join(&item.payload.staged_name),
+        hash: item.payload.sha256.clone(), size: item.payload.byte_size, sync_required: false, progress_items: 1,
+    }).collect::<Vec<_>>();
+    let promoted = prepare_content_payloads(cas, cas_session, &inputs, ImportPinning::AfterContentMapping, job)?;
+    for (payload, promoted) in payloads.into_iter().zip(promoted) {
         if job.is_cancel_requested() {
             return Err(content_cancelled());
         }
@@ -827,24 +804,8 @@ fn promote_json_assets(
             reference_key,
             media_type,
             extension,
-            payload,
             ..
         } = payload;
-        let staged_path = staging_root.join(&payload.staged_name);
-        let staged = StagedPayloadDescriptor {
-            original_name: payload.staged_name.clone(),
-            normalized_name: payload.staged_name,
-            extension: Some(extension.clone()),
-            normalized_extension: Some(extension.to_ascii_lowercase()),
-            mime_type: media_type.clone(),
-            decoded_size: payload.byte_size,
-            compressed_size: payload.byte_size,
-            crc32: 0,
-            sha256: payload.sha256,
-            staged_path,
-            card_asset_types: Vec::new(),
-        };
-        let promoted = promote_staged_payload(cas, &staged, job)?;
         let name_pointer = json_pointer
             .strip_suffix("/uri")
             .map(|pointer| format!("{pointer}/name"));
@@ -870,42 +831,28 @@ fn promote_json_assets(
     Ok(assets)
 }
 
-fn promote_staged_payload(
+fn prepare_content_payloads(
     cas: &PayloadCas,
-    payload: &StagedPayloadDescriptor,
+    cas_session: &mut DurableCasJob,
+    inputs: &[ImportPayload],
+    pinning: ImportPinning,
     job: &JobControl,
-) -> Result<PromotedPayload, NativeJobError> {
-    if job.is_cancel_requested() {
-        return Err(content_cancelled());
-    }
-    let promoted = cas
-        .adopt_import_payload(
-            &payload.staged_path,
-            &payload.sha256,
-            payload.decoded_size,
-            &|| job.is_cancel_requested(),
-        )
-        .map_err(|error| {
-            if job.is_cancel_requested() {
-                content_cancelled()
-            } else {
-                NativeJobError::new("store-error", error.to_string())
+) -> Result<Vec<PreparedPayload>, NativeJobError> {
+    let mut reported = 0;
+    let mut progress_error = None;
+    let prepared = prepare_import_payloads(cas, cas_session, inputs, pinning, &|| job.is_cancel_requested(), |_, count, _| {
+        if reported < count {
+            if let Err(error) = advance_content_assets(job, (count - reported) as u64) {
+                progress_error.get_or_insert(error);
             }
-        })?;
-    if promoted.content_hash != payload.sha256 || promoted.byte_size != payload.decoded_size {
-        return Err(NativeJobError::new(
-            "store-error",
-            "promoted content does not match its staged payload",
-        ));
-    }
-    if job.is_cancel_requested() {
-        return Err(content_cancelled());
-    }
-    advance_content_asset(job)?;
-    Ok(PromotedPayload {
-        content_hash: promoted.content_hash,
-        byte_size: promoted.byte_size,
-    })
+            reported = count;
+        }
+    }).map_err(|error| {
+        if job.is_cancel_requested() { content_cancelled() }
+        else { NativeJobError::new("store-error", error.to_string()) }
+    })?;
+    if let Some(error) = progress_error { return Err(error); }
+    Ok(prepared)
 }
 
 fn parse_root_module_overlay(
@@ -1154,9 +1101,9 @@ fn report_content_progress(
     })
 }
 
-fn advance_content_asset(job: &JobControl) -> Result<(), NativeJobError> {
+fn advance_content_assets(job: &JobControl, count: u64) -> Result<(), NativeJobError> {
     let detail = job.status().detail;
-    let completed = detail.as_ref().map_or(0, |d| d.counts.attachments_prepared) + 1;
+    let completed = detail.as_ref().map_or(0, |d| d.counts.attachments_prepared) + count;
     let total = detail.and_then(|d| {
         if d.stage == JobStage::PreparingAttachments {
             d.stage_total

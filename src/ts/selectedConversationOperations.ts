@@ -10,7 +10,7 @@ import type {
     ConversationViewportKey,
     ConversationViewportSource,
 } from './conversationViewportSource'
-import { safeStructuredClone } from './polyfill'
+import { safeStructuredClone } from './safeStructuredClone'
 import isEqual from 'lodash/isEqual'
 import {
     SelectedConversationPromotionStaleError,

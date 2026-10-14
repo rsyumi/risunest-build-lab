@@ -1,5 +1,5 @@
 import type { ConversationViewportSource } from './conversationViewportSource'
-import { safeStructuredClone } from './polyfill'
+import { safeStructuredClone } from './safeStructuredClone'
 import {
     isSameSelectedConversationTarget,
     type SelectedConversationTarget,

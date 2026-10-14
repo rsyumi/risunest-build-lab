@@ -1,7 +1,8 @@
-import { safeStructuredClone } from '../polyfill'
+import { safeStructuredClone } from '../safeStructuredClone'
 import {
     ActiveConversationSession,
     cloneConversationMetadata,
+    conversationContentMetadataEqual,
     conversationMetadataEqual,
     ConversationSessionStaleError,
     MessageLocatorMismatchError,
@@ -24,6 +25,12 @@ export interface ConversationOperationCommit {
 }
 
 export type ConversationCommitObserver = (commit: ConversationOperationCommit) => void
+
+export interface ConversationOperationCommitOptions {
+    origin?: 'display'
+    /** Chat variables written with the operation, applied over the session's current values. */
+    variables?: ReadonlyMap<string, string>
+}
 
 export interface ConversationReplaceRangeBatchEntry {
     type: 'replace-range'
@@ -69,7 +76,7 @@ function exceedsCloneBudget(value: unknown, maxBytes: number): boolean {
     return visit(value)
 }
 
-function valuesEqual(left: unknown, right: unknown): boolean {
+export function valuesEqual(left: unknown, right: unknown): boolean {
     if (Object.is(left, right)) return true
     if (typeof left !== typeof right || left === null || right === null) return false
     if (Array.isArray(left) || Array.isArray(right)) {
@@ -90,11 +97,46 @@ function valuesEqual(left: unknown, right: unknown): boolean {
     )
 }
 
+/** `database` with the given conversation in place of the stored one, without copying either. */
+export function createConversationDatabaseView(
+    database: Database,
+    characterId: string,
+    conversationId: string,
+    chat: Chat,
+): Database {
+    const characterIndex = database.characters.findIndex(
+        (character) => character.chaId === characterId,
+    )
+    if (characterIndex === -1) return database
+
+    const character = database.characters[characterIndex]
+    const conversationIndex = character.chats.findIndex(
+        (conversation) => conversation.id === conversationId,
+    )
+    if (conversationIndex === -1) return database
+
+    const characters = database.characters.slice()
+    const chats = character.chats.slice()
+    chats[conversationIndex] = chat
+    characters[characterIndex] = {
+        ...character,
+        chats,
+    }
+    return {
+        ...database,
+        characters,
+    }
+}
+
+/**
+ * A copy of the conversation an operation edits while it awaits. Variable-only commits
+ * made meanwhile keep it current: its commit writes only the variables it changed.
+ */
 export class ConversationOperationContext {
-    readonly baseVersion: number
     readonly chat: Chat
     readonly mode: ConversationOperationMode
 
+    readonly baseVersion: number
     private readonly originalMetadata: ConversationMetadata
     private readonly originalMessages: Message[]
     private readonly sourceMessages: Message[]
@@ -149,12 +191,7 @@ export class ConversationOperationContext {
                     : this.mode === 'prefetched'
                       ? session.readRange(0, totalMessages).messages
                       : compatibilitySnapshot!.takeMessages()
-            if (session.version !== this.baseVersion) {
-                throw new ConversationSessionStaleError(
-                    this.baseVersion,
-                    session.version,
-                )
-            }
+            this.requireContentUnchanged()
             this.originalMessages = messages
             this.originalMetadata = cloneConversationMetadata(sourceChat)
             this.chat = {
@@ -171,28 +208,12 @@ export class ConversationOperationContext {
     }
 
     createDatabaseView(database: Database): Database {
-        const characterIndex = database.characters.findIndex(
-            (character) => character.chaId === this.session.characterId,
+        return createConversationDatabaseView(
+            database,
+            this.session.characterId,
+            this.session.conversationId,
+            this.chat,
         )
-        if (characterIndex === -1) return database
-
-        const character = database.characters[characterIndex]
-        const conversationIndex = character.chats.findIndex(
-            (conversation) => conversation.id === this.session.conversationId,
-        )
-        if (conversationIndex === -1) return database
-
-        const characters = database.characters.slice()
-        const chats = character.chats.slice()
-        chats[conversationIndex] = this.chat
-        characters[characterIndex] = {
-            ...character,
-            chats,
-        }
-        return {
-            ...database,
-            characters,
-        }
     }
 
     hasPendingMutations(): boolean {
@@ -215,12 +236,7 @@ export class ConversationOperationContext {
     adoptMessageId(locator: MessageLocator, messageId: string): void {
         this.assertOpen()
         if (!messageId) throw new Error('Cannot adopt an empty message ID')
-        if (this.session.version !== this.baseVersion) {
-            throw new ConversationSessionStaleError(
-                this.baseVersion,
-                this.session.version,
-            )
-        }
+        this.requireContentUnchanged()
         const absoluteIndex = this.session.resolveLocator(locator)
         const liveMessage = this.session.resolveMessage(locator)
         if (liveMessage.chatId !== messageId) {
@@ -265,14 +281,11 @@ export class ConversationOperationContext {
         projectedMessage.chatId = messageId
     }
 
-    collectMutationBatch(): ConversationMutationBatch {
+    collectMutationBatch(
+        variables?: ReadonlyMap<string, string>,
+    ): ConversationMutationBatch {
         this.assertOpen()
-        if (this.session.version !== this.baseVersion) {
-            throw new ConversationSessionStaleError(
-                this.baseVersion,
-                this.session.version,
-            )
-        }
+        this.requireContentUnchanged()
         const liveMessages = this.session.materializeCompatibilityArray()
         if (
             liveMessages !== this.sourceMessages ||
@@ -286,7 +299,7 @@ export class ConversationOperationContext {
                 'Conversation operation baseline changed without a session command',
             )
         }
-        if (!conversationMetadataEqual(
+        if (!conversationContentMetadataEqual(
             this.originalMetadata,
             cloneConversationMetadata(this.sourceChat),
         )) {
@@ -332,7 +345,7 @@ export class ConversationOperationContext {
             })
         }
 
-        const metadata = cloneConversationMetadata(this.chat)
+        const metadata = this.committedMetadata(variables)
         if (!conversationMetadataEqual(this.originalMetadata, metadata)) {
             batch.push({
                 type: 'update-metadata',
@@ -342,32 +355,62 @@ export class ConversationOperationContext {
         return batch
     }
 
+    private requireContentUnchanged(): void {
+        if (!this.session.isContentUnchangedSince(this.baseVersion)) {
+            throw new ConversationSessionStaleError(
+                this.baseVersion,
+                this.session.version,
+            )
+        }
+    }
+
+    private committedMetadata(
+        variables?: ReadonlyMap<string, string>,
+    ): ConversationMetadata {
+        const metadata = cloneConversationMetadata(this.chat)
+        for (const [key, value] of variables ?? []) {
+            const scriptstate = (metadata.scriptstate ??= {}) as Record<string, unknown>
+            scriptstate['$' + key] = value
+        }
+        return metadata
+    }
+
+    /**
+     * The baseline the session diffs a commit against. Written variables are compared
+     * with their live values, so each one lands even if another commit changed it meanwhile.
+     */
+    private commitBaseline(
+        variables?: ReadonlyMap<string, string>,
+    ): ConversationMetadata {
+        if (!variables?.size) return this.originalMetadata
+        const scriptstate: Record<string, unknown> = {
+            ...(this.originalMetadata.scriptstate as Record<string, unknown> | undefined),
+        }
+        for (const key of variables.keys()) {
+            const live = this.session.readChatVariable(key)
+            if (live === undefined) delete scriptstate['$' + key]
+            else scriptstate['$' + key] = live
+        }
+        return { ...this.originalMetadata, scriptstate }
+    }
+
     commit(
         currentSession: ActiveConversationSession | null,
-        options: { origin?: 'display' } = {},
+        options: ConversationOperationCommitOptions = {},
     ): ConversationMutationBatch {
         try {
             requireCurrentConversationSession(this.session, currentSession)
-            if (this.session.version !== this.baseVersion) {
-                throw new ConversationSessionStaleError(
-                    this.baseVersion,
-                    this.session.version,
-                )
-            }
-            const batch = this.collectMutationBatch()
+            const batch = this.collectMutationBatch(options.variables)
             const range = batch.find(
                 (mutation): mutation is ConversationReplaceRangeBatchEntry =>
                     mutation.type === 'replace-range',
             )
-            const metadata = batch.find(
-                (mutation): mutation is ConversationMetadataBatchEntry =>
-                    mutation.type === 'update-metadata',
-            )
+            const preCommitVersion = this.session.version
             this.session.applyOperation({
-                ...options,
+                ...(options.origin ? { origin: options.origin } : {}),
                 expectedVersion: this.baseVersion,
-                expectedMetadata: this.originalMetadata,
-                metadata: metadata?.metadata ?? this.originalMetadata,
+                expectedMetadata: this.commitBaseline(options.variables),
+                metadata: this.committedMetadata(options.variables),
                 ...(range === undefined
                     ? {}
                     : {
@@ -378,7 +421,7 @@ export class ConversationOperationContext {
                           },
                       }),
             })
-            this.reportCommit(this.baseVersion + (batch.length > 0 ? 1 : 0))
+            this.reportCommit(preCommitVersion)
             return batch
         } finally {
             this.release()
@@ -387,18 +430,14 @@ export class ConversationOperationContext {
 
     commitMetadata(
         currentSession: ActiveConversationSession | null,
+        variables?: ReadonlyMap<string, string>,
     ): ConversationMutationBatch {
         try {
             requireCurrentConversationSession(this.session, currentSession)
-            if (this.session.version !== this.baseVersion) {
-                throw new ConversationSessionStaleError(
-                    this.baseVersion,
-                    this.session.version,
-                )
-            }
+            this.requireContentUnchanged()
             const currentMetadata = cloneConversationMetadata(this.sourceChat)
             if (
-                !conversationMetadataEqual(
+                !conversationContentMetadataEqual(
                     this.originalMetadata,
                     currentMetadata,
                 )
@@ -407,32 +446,35 @@ export class ConversationOperationContext {
                     'Conversation operation metadata baseline changed',
                 )
             }
-            const metadata = cloneConversationMetadata(this.chat)
+            const metadata = this.committedMetadata(variables)
             const batch: ConversationMutationBatch = conversationMetadataEqual(
                 this.originalMetadata,
                 metadata,
             )
                 ? []
                 : [{ type: 'update-metadata', metadata }]
+            const preCommitVersion = this.session.version
             this.session.applyOperation({
                 expectedVersion: this.baseVersion,
-                expectedMetadata: this.originalMetadata,
+                expectedMetadata: this.commitBaseline(variables),
                 metadata,
             })
-            this.reportCommit(this.baseVersion + (batch.length > 0 ? 1 : 0))
+            this.reportCommit(preCommitVersion)
             return batch
         } finally {
             this.release()
         }
     }
 
-    private reportCommit(version: number): void {
+    /** `preCommitVersion` may be past the base: variable-only commits do not change what a caller holds. */
+    private reportCommit(preCommitVersion: number): void {
+        const version = this.session.version
         this.onCommitted?.({
             follows: (session, previousVersion, chat) =>
                 session === this.session &&
                 previousVersion !== null &&
                 previousVersion >= this.precedingGenerationVersion &&
-                previousVersion <= this.baseVersion &&
+                previousVersion <= preCommitVersion &&
                 chat === this.sourceChat &&
                 session.isActive &&
                 session.version === version &&

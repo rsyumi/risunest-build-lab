@@ -37,6 +37,7 @@ use tauri::{
     target_os = "openbsd"
 ))]
 mod appimage;
+mod network_log;
 mod commands;
 mod config;
 mod error;

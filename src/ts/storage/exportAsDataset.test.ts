@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { language } from 'src/lang'
 
 import golden from './tests/fixtures/datasetExportGolden.json'
 
@@ -29,7 +30,6 @@ vi.mock('./nativeDatasetExportRoute', () => ({
 }))
 vi.mock('../globalApi.svelte', () => ({ downloadFile: mocks.downloadFile }))
 vi.mock('../alert', () => ({ alertNormal: mocks.alertNormal, alertError: mocks.alertError }))
-vi.mock('src/lang', () => ({ language: { successExport: 'exported' } }))
 
 function exportedDataset() {
     expect(mocks.downloadFile).toHaveBeenCalledOnce()
@@ -70,7 +70,7 @@ describe('exportAsDataset', () => {
             chats: [{ role: 'user', data: 'hello' }],
             lorebook: [{ key: 'lore' }],
         }])
-        expect(mocks.alertNormal).toHaveBeenCalledWith('exported')
+        expect(mocks.alertNormal).toHaveBeenCalledWith(language.successExport)
     })
 
     it('matches the dataset the native export parses to on the shared fixture', async () => {

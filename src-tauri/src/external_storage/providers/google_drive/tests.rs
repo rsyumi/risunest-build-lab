@@ -1924,13 +1924,15 @@ fn control_listing_rejects_a_repeated_page_token_cycle() {
 
 #[test]
 fn cancellation_during_a_body_leaves_the_staging_file_unverified() {
+    use crate::external_storage::provider_contract::{a_read_cancelled_during_its_body_stops, held_body};
     runtime().block_on(async {
+        let (held, _release) = held_body();
         let mut replies = open_existing_replies();
         replies.push(json_reply(
             200,
             json!({ "id": "pack-slow", "size": "100", "version": "2" }),
         ));
-        replies.push(Reply::DelayedBody);
+        replies.push(held);
         let server = WireServer::start(replies);
         let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
         let cancel = Cancellation::default();
@@ -1940,30 +1942,7 @@ fn cancellation_during_a_body_leaves_the_staging_file_unverified() {
             collection: None,
             object: "pack-slow".to_owned(),
         };
-        let directory = tempfile::tempdir().unwrap();
-        let mut sink = SpoolSink::create(&directory.path().join("slow"), 100).unwrap();
-        let read = async {
-            let failure = provider
-                .read_object(&repository, &locator, None, &mut sink, &cancel)
-                .await
-                .err()
-                .unwrap();
-            assert_eq!(failure.kind, ErrorKind::Cancelled);
-        };
-        let trigger = async {
-            while server.requests.lock().unwrap().len() < 5 {
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            cancel.cancel();
-        };
-        tokio::time::timeout(
-            std::time::Duration::from_millis(2000),
-            futures::future::join(read, trigger),
-        )
-        .await
-        .unwrap();
-        assert!(!sink.is_verified());
+        a_read_cancelled_during_its_body_stops(provider.as_ref(), &repository, &locator, &cancel).await;
     });
 }
 

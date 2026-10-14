@@ -1,4 +1,4 @@
-import { safeStructuredClone } from '../polyfill'
+import { safeStructuredClone } from '../safeStructuredClone'
 import type { Chat } from './database.svelte'
 
 const metadataOnlySelectedConversation = Symbol('metadataOnlySelectedConversation')

@@ -6,6 +6,9 @@ import { bootChatInteractionApp, interactionCharacterId, interactionConversation
 let app: Awaited<ReturnType<typeof bootChatInteractionApp>> | undefined
 let mounted: Record<string, any> | undefined
 let target: HTMLDivElement
+let disposeToggleObserver: (() => void) | undefined
+let bindingLifecycle: Record<string, any> | undefined
+let releaseComplete: (() => void) | undefined
 
 // The UI starts sidebar and chat list edits without awaiting them, and each one is a
 // store round trip. Recording every edit where it starts lets a test await that edit
@@ -73,6 +76,12 @@ beforeEach(() => {
 })
 
 afterEach(async () => {
+    disposeToggleObserver?.()
+    disposeToggleObserver = undefined
+    if (bindingLifecycle && app) await app.svelte.unmount(bindingLifecycle)
+    bindingLifecycle = undefined
+    releaseComplete?.()
+    releaseComplete = undefined
     if (mounted && app) await app.svelte.unmount(mounted)
     mounted = undefined
     app?.restore()
@@ -199,9 +208,18 @@ it.each(['desktop', 'mobile'] as const)('browses and edits the mounted %s chat l
     expect(savedConversation?.value.totalMessages).toBe(5000)
 }, 60_000)
 
-it.each(['desktop', 'mobile'] as const)('saves the %s chat list toggle edits of a windowed conversation', async (surface) => {
+it.each([
+    { surface: 'desktop', mode: 'windowed' },
+    { surface: 'mobile', mode: 'windowed' },
+    { surface: 'desktop', mode: 'complete' },
+] as const)('saves the $surface chat list toggle edits of a $mode conversation', async ({ surface, mode }) => {
     const current = await mountSurface(surface)
     await waitForLatest()
+    if (mode === 'complete') {
+        const lease = await current.runtime.acquireCompleteConversation('synthetic-toggle-binding')
+        releaseComplete = () => lease.release()
+        expect(current.runtime.getSelectedConversationMode()).toBe('complete')
+    }
     const { language } = await import('src/lang')
     const db = current.database.getDatabase()
     db.customPromptTemplateToggle = 'probe=Probe toggle'
@@ -246,7 +264,76 @@ it.each(['desktop', 'mobile'] as const)('saves the %s chat list toggle edits of 
     await current.runtime.flushPendingData('sidebar-unpin-toggle')
     expect((await savedChat())?.useLocallySetGlobalVariables).toBe(false)
     expect((await savedChat())?.GLGlobalVariables?.toggle_probe).toBeUndefined()
-    expect(current.fullReads).toEqual([])
+    if (mode === 'windowed') expect(current.fullReads).toEqual([])
+
+    const { default: BindingLifecycle } = await import('../SideBars/ChatBindingLifecycle.svelte')
+    bindingLifecycle = current.svelte.mount(BindingLifecycle, { target })
+    db.globalChatVariables.toggle_probe = '0'
+    await current.svelte.tick()
+    target.querySelector<HTMLButtonElement>(`button[title="${language.bindToggles}"]`)!.click()
+    await vi.waitFor(async () => expect((await savedChat())?.savedToggleValues).toEqual({ toggle_probe: '0' }))
+    const save = () => target.querySelector<HTMLButtonElement>(`button[title="${language.saveToggleChanges}"]`)!
+    await vi.waitFor(() => expect(save().disabled).toBe(true))
+    await toggleSwitch('Probe toggle')
+    await current.svelte.tick()
+    expect(save().disabled).toBe(false)
+    expect(save().textContent).toContain('(1)')
+    expect(db.globalChatVariables.toggle_probe).toBe('0')
+
+    const { observePersistentSaveChanges } = await import('src/ts/storage/persistentSaveObserver.svelte')
+    disposeToggleObserver = observePersistentSaveChanges({
+        readDatabase: () => current.database.getDatabase(),
+        readSelectedCharacter: current.selected,
+        markDirty: bytes => current.runtime.markPersistentDataDirty(bytes),
+    })
+    const nextJailbreak = !db.jailbreakToggle
+    db.jailbreakToggle = nextJailbreak
+    await current.svelte.tick()
+    await vi.waitFor(async () => expect((await current.raw.readRoot()).value.jailbreakToggle).toBe(nextJailbreak), { timeout: 5000 })
+    expect((await savedChat())?.savedToggleValues).toEqual({ toggle_probe: '0' })
+    expect(db.globalChatVariables.toggle_probe).toBe('0')
+    expect(save().disabled).toBe(false)
+    save().click()
+    await vi.waitFor(async () => expect((await savedChat())?.savedToggleValues).toEqual({ toggle_probe: '1' }))
+    await vi.waitFor(() => expect(db.globalChatVariables.toggle_probe).toBe('1'))
+    await vi.waitFor(() => expect(save().disabled).toBe(true))
+    disposeToggleObserver()
+    disposeToggleObserver = undefined
+
+    db.togglePresets = [{ name: 'Synthetic off', values: { toggle_probe: '0' }, promptPresetName: db.botPresets[db.botPresetsId]?.name }]
+    const presetsButton = await vi.waitFor(() => {
+        const button = target.querySelector<HTMLButtonElement>(`button[title="${language.togglePresets}"]`)!
+        expect(button.disabled).toBe(false)
+        return button
+    })
+    presetsButton.click()
+    await current.svelte.tick()
+    target.querySelector<HTMLButtonElement>(`[role="dialog"] button[title="${language.apply}"]`)!.click()
+    await vi.waitFor(() => expect(get(current.stores.alertStore).type).toBe('ask'))
+    current.stores.alertStore.set({ type: 'none', msg: 'yes' })
+    await vi.waitFor(() => expect(target.querySelector('[role="dialog"]')).toBeNull())
+    expect(save().disabled).toBe(false)
+    expect(db.globalChatVariables.toggle_probe).toBe('1')
+    await current.runtime.flushPendingData('sidebar-preset-draft')
+    expect((await savedChat())?.savedToggleValues).toEqual({ toggle_probe: '1' })
+    save().click()
+    await vi.waitFor(async () => expect((await savedChat())?.savedToggleValues).toEqual({ toggle_probe: '0' }))
+    await vi.waitFor(() => expect(db.globalChatVariables.toggle_probe).toBe('0'))
+    await vi.waitFor(() => expect(save().disabled).toBe(true))
+
+    await toggleSwitch(language.localToggles)
+    await finishedEdit('local-toggle-mode')
+    await toggleSwitch('Probe toggle')
+    await finishedEdit('toggle-value')
+    await toggleSwitch(language.localToggles)
+    await finishedEdit('local-toggle-mode')
+    await toggleSwitch('Probe toggle')
+    await current.svelte.tick()
+    expect(selectedChat().GLGlobalVariables?.toggle_probe).toBe('1')
+    expect(save().disabled).toBe(false)
+    save().click()
+    await vi.waitFor(async () => expect((await savedChat())?.GLGlobalVariables?.toggle_probe).toBeUndefined())
+    await vi.waitFor(() => expect(save().disabled).toBe(true))
 
     await toggleSwitch(language.ToggleHypaMemory)
     await finishedEdit('character-memory')

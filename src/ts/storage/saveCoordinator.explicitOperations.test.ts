@@ -8,8 +8,9 @@ import {
     type PersistentRootModuleAppend,
 } from './saveCoordinator'
 import type { Chat, Database, character } from './database.svelte'
-import type { PersistentDataStore, WorkingSetCommit } from './persistentDataStore'
+import type { AssetOwnerHead, CharacterDetail, WorkingSetCommit } from './persistentDataStore'
 import { RevisionConflictError } from './persistentDataStore'
+import { createLeaseStub, createStoreStub } from './persistentDataStore.testSupport'
 import { createPluginStorageStore } from '../plugins/pluginStorageStore'
 import { createConversationSummaryStubFromChat } from './conversationResidency'
 import {
@@ -159,7 +160,7 @@ describe('canonical JSON property safety', () => {
 
 function makeGroupDeletionLease(database: Database, revision = 1) {
     const authoritative = structuredClone(database)
-    return {
+    return createLeaseStub({
         revision,
         readRoot: vi.fn(async () => ({ revision, value: captureRoot(authoritative) })),
         queryCharacters: vi.fn(async ({ trash }: { trash: boolean }) => ({
@@ -183,7 +184,7 @@ function makeGroupDeletionLease(database: Database, revision = 1) {
             return { revision, value: detail }
         }),
         release: vi.fn(async () => undefined),
-    }
+    })
 }
 
 function publishGroupDeletion(database: Database, state: any): void {
@@ -218,7 +219,7 @@ describe('SaveCoordinator', () => {
                 owner.chats[index] = structuredClone(result.conversation)
             },
         )
-        const store = {
+        const store = createStoreStub({
             readConversation: vi.fn(async (characterId: string, conversationId: string) => {
                 const chat = database.characters
                     .find((character) => character.chaId === characterId)
@@ -226,7 +227,7 @@ describe('SaveCoordinator', () => {
                 return chat ? { revision: 7, value: structuredClone(chat) } : null
             }),
             commit: vi.fn(async () => ({ revision: 8 })),
-        } as unknown as PersistentDataStore
+        })
         const onLocalRevision = vi.fn()
         const coordinator = new SaveCoordinator({
             store,
@@ -472,7 +473,7 @@ describe('SaveCoordinator', () => {
             }
             return { revision }
         })
-        const store = {
+        const store = createStoreStub({
             commit,
             readConversation: vi.fn(async (_characterId: string, conversationId: string) => ({
                 revision,
@@ -480,7 +481,7 @@ describe('SaveCoordinator', () => {
             })),
             readCharacter: vi.fn(async () => ({
                 revision,
-                value: { type: 'character', chaId: 'char-a', name: 'Alpha' },
+                value: { type: 'character', chaId: 'char-a', name: 'Alpha' } as CharacterDetail,
             })),
             queryConversations: vi.fn(async () => ({
                 revision,
@@ -493,7 +494,7 @@ describe('SaveCoordinator', () => {
                     messageCount: chat.message.length,
                 })),
             })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -535,13 +536,13 @@ describe('SaveCoordinator', () => {
             dispose: vi.fn(async () => undefined),
         }
         const pin = vi.fn(async () => publication)
-        const store = {
+        const store = createStoreStub({
             readConversation: vi.fn(async () => ({
                 revision: 7,
                 value: structuredClone(database.characters[0].chats[0]),
             })),
             commit: vi.fn(async () => ({ revision: 8 })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -618,14 +619,14 @@ describe('SaveCoordinator', () => {
 
     it('does not let a caller promote a queued complete-character expected revision', async () => {
         const database = makeDatabase()
-        const store = {
+        const store = createStoreStub({
             readRoot: vi.fn(async () => ({ revision: 7, value: captureRoot(database) })),
             readCharacter: vi.fn(async () => ({
-                revision: 7, value: { type: 'character', chaId: 'char-a', name: 'Alpha' },
+                revision: 7, value: { type: 'character', chaId: 'char-a', name: 'Alpha' } as CharacterDetail,
             })),
             queryConversations: vi.fn(async () => ({ revision: 7, items: [] })),
             commit: vi.fn(async () => ({ revision: 8 })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -648,15 +649,15 @@ describe('SaveCoordinator', () => {
 
     it('fences complete character replacement with an expected revision', async () => {
         const database = makeDatabase()
-        const store = {
+        const store = createStoreStub({
             readRoot: vi.fn(async () => ({ revision: 7, value: captureRoot(database) })),
             readCharacter: vi.fn(async () => ({
                 revision: 7,
-                value: { type: 'character', chaId: 'char-a', name: 'Alpha' },
+                value: { type: 'character', chaId: 'char-a', name: 'Alpha' } as CharacterDetail,
             })),
             queryConversations: vi.fn(async () => ({ revision: 7, items: [] })),
             commit: vi.fn(async () => ({ revision: 8 })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -693,9 +694,9 @@ describe('SaveCoordinator', () => {
         const readStarted = deferred<void>()
         const readFinished = deferred<void>()
         const release = vi.fn(async () => undefined)
-        const store = {
+        const store = createStoreStub({
             commit: vi.fn(async (_input: WorkingSetCommit) => ({ revision: 8 })),
-            acquireRevision: vi.fn(async () => ({
+            acquireRevision: vi.fn(async () => createLeaseStub({
                 revision: 7,
                 readRoot: vi.fn(async () => ({ revision: 7, value: captureRoot(database) })),
                 readAssetAliasesByKeys: vi.fn(async () => {
@@ -705,7 +706,7 @@ describe('SaveCoordinator', () => {
                 }),
                 release,
             })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -763,7 +764,7 @@ describe('SaveCoordinator', () => {
             { id: 'persona-0', name: 'With module', embeddedModule: { id: 'embedded', name: 'Embedded', assets: [] } },
             { name: 'Without module' },
         ] as Database['personas']
-        const existingHeads = new Map([
+        const existingHeads = new Map<string, AssetOwnerHead>([
             ['root-module-assets:first', {
                 owner: { kind: 'root-module-assets', moduleId: database.modules?.[0]?.id ?? 'new-id' },
                 present: true,
@@ -790,16 +791,16 @@ describe('SaveCoordinator', () => {
         const release = vi.fn(async () => undefined)
         const commit = vi.fn(async (_input: WorkingSetCommit) => ({ revision: 8 }))
         const publishRootWorkingSet = vi.fn((root) => Object.assign(database, root))
-        const store = {
+        const store = createStoreStub({
             commit,
-            acquireRevision: vi.fn(async () => ({
+            acquireRevision: vi.fn(async () => createLeaseStub({
                 revision: 7,
                 readRoot: vi.fn(async () => ({ revision: 7, value: captureRoot(database) })),
                 readAssetOwnerHead,
                 readAssetAliasesByKeys: vi.fn(async () => ({ revision: 7, value: [] })),
                 release,
             })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -863,16 +864,16 @@ describe('SaveCoordinator', () => {
             resolveCommit = resolve
         }))
         const publishRootWorkingSet = vi.fn((root) => Object.assign(database, root))
-        const store = {
+        const store = createStoreStub({
             commit,
-            acquireRevision: vi.fn(async () => ({
+            acquireRevision: vi.fn(async () => createLeaseStub({
                 revision: 7,
                 readRoot: vi.fn(async () => ({ revision: 7, value: captureRoot(database) })),
                 readAssetOwnerHead: vi.fn(async () => null),
                 readAssetAlias: vi.fn(async () => null),
                 release: vi.fn(async () => undefined),
             })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -908,16 +909,16 @@ describe('SaveCoordinator', () => {
             clearTimeout: vi.fn(),
         }
         const pin = vi.fn(async () => { throw new Error('offline') })
-        const store = {
+        const store = createStoreStub({
             commit: vi.fn(async () => ({ revision: 8 })),
-            acquireRevision: vi.fn(async () => ({
+            acquireRevision: vi.fn(async () => createLeaseStub({
                 revision: 7,
                 readRoot: vi.fn(async () => ({ revision: 7, value: captureRoot(database) })),
                 readAssetOwnerHead: vi.fn(async () => null),
                 readAssetAlias: vi.fn(async () => null),
                 release: vi.fn(async () => undefined),
             })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -948,7 +949,7 @@ describe('SaveCoordinator', () => {
         },
         {
             name: 'root read',
-            acquireRevision: async () => ({
+            acquireRevision: async () => createLeaseStub({
                 revision: 7,
                 readRoot: vi.fn(async () => { throw new Error('root unavailable') }),
                 readAssetOwnerHead: vi.fn(async () => null),
@@ -958,7 +959,7 @@ describe('SaveCoordinator', () => {
         },
         {
             name: 'revision release',
-            acquireRevision: async () => ({
+            acquireRevision: async () => createLeaseStub({
                 revision: 7,
                 readRoot: vi.fn(async () => ({ revision: 7, value: captureRoot(makeDatabase()) })),
                 readAssetOwnerHead: vi.fn(async () => null),
@@ -973,7 +974,7 @@ describe('SaveCoordinator', () => {
         database.modules = []
         const commit = vi.fn()
         const coordinator = new SaveCoordinator({
-            store: { commit, acquireRevision } as unknown as PersistentDataStore,
+            store: createStoreStub({ commit, acquireRevision }),
             captureRoot: () => captureRoot(database),
             captureSelectedCharacter: () => database.characters[0],
             replaceDatabase: () => undefined,
@@ -1011,16 +1012,16 @@ describe('SaveCoordinator', () => {
         const database = makeDatabase()
         database.modules = []
         const commitError = new RevisionConflictError(7, 8)
-        const store = {
+        const store = createStoreStub({
             commit: vi.fn(async () => { throw commitError }),
-            acquireRevision: vi.fn(async () => ({
+            acquireRevision: vi.fn(async () => createLeaseStub({
                 revision: 7,
                 readRoot: vi.fn(async () => ({ revision: 7, value: captureRoot(database) })),
                 readAssetOwnerHead: vi.fn(async () => null),
                 readAssetAlias: vi.fn(async () => null),
                 release: vi.fn(async () => undefined),
             })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -1047,16 +1048,16 @@ describe('SaveCoordinator', () => {
         const database = makeDatabase()
         database.modules = []
         const callbackError = new RevisionConflictError(7, 8)
-        const store = {
+        const store = createStoreStub({
             commit: vi.fn(async () => ({ revision: 8 })),
-            acquireRevision: vi.fn(async () => ({
+            acquireRevision: vi.fn(async () => createLeaseStub({
                 revision: 7,
                 readRoot: vi.fn(async () => ({ revision: 7, value: captureRoot(database) })),
                 readAssetOwnerHead: vi.fn(async () => null),
                 readAssetAlias: vi.fn(async () => null),
                 release: vi.fn(async () => undefined),
             })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -1080,16 +1081,16 @@ describe('SaveCoordinator', () => {
         const database = makeDatabase()
         database.modules = []
         const commitError = new Error('commit response lost')
-        const store = {
+        const store = createStoreStub({
             commit: vi.fn(async () => { throw commitError }),
-            acquireRevision: vi.fn(async () => ({
+            acquireRevision: vi.fn(async () => createLeaseStub({
                 revision: 7,
                 readRoot: vi.fn(async () => ({ revision: 7, value: captureRoot(database) })),
                 readAssetOwnerHead: vi.fn(async () => null),
                 readAssetAlias: vi.fn(async () => null),
                 release: vi.fn(async () => undefined),
             })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -1115,16 +1116,16 @@ describe('SaveCoordinator', () => {
         const readAssetAliasesByKeys = vi.fn(() => aliasRead.promise)
         const release = vi.fn(async () => undefined)
         const commit = vi.fn()
-        const store = {
+        const store = createStoreStub({
             commit,
-            acquireRevision: vi.fn(async () => ({
+            acquireRevision: vi.fn(async () => createLeaseStub({
                 revision: 7,
                 readRoot: vi.fn(async () => ({ revision: 7, value: captureRoot(database) })),
                 readAssetOwnerHead: vi.fn(async () => null),
                 readAssetAliasesByKeys,
                 release,
             })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -1213,16 +1214,16 @@ describe('SaveCoordinator', () => {
         }
         const commit = vi.fn(async (_input: WorkingSetCommit) => ({ revision: 8 }))
         const readAssetAliasesByKeys = vi.fn(async () => ({ revision: 7, value: [existing] }))
-        const store = {
+        const store = createStoreStub({
             commit,
-            acquireRevision: vi.fn(async () => ({
+            acquireRevision: vi.fn(async () => createLeaseStub({
                 revision: 7,
                 readRoot: vi.fn(async () => ({ revision: 7, value: captureRoot(database) })),
                 readAssetOwnerHead: vi.fn(async () => null),
                 readAssetAliasesByKeys,
                 release: vi.fn(async () => undefined),
             })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -1246,16 +1247,16 @@ describe('SaveCoordinator', () => {
             value: [{ ...existing, objectHash: 'b'.repeat(64) }],
         }))
         const conflictingCoordinator = new SaveCoordinator({
-            store: {
-                ...store,
-                acquireRevision: vi.fn(async () => ({
+            store: createStoreStub({
+                commit,
+                acquireRevision: vi.fn(async () => createLeaseStub({
                     revision: 7,
                     readRoot: vi.fn(async () => ({ revision: 7, value: captureRoot(database) })),
                     readAssetOwnerHead: vi.fn(async () => null),
                     readAssetAliasesByKeys: conflictingReadAssetAliasesByKeys,
                     release: vi.fn(async () => undefined),
                 })),
-            } as unknown as PersistentDataStore,
+            }),
             captureRoot: () => captureRoot(database),
             captureSelectedCharacter: () => database.characters[0],
             replaceDatabase: () => undefined,
@@ -1300,16 +1301,16 @@ describe('SaveCoordinator', () => {
             revision: 7,
             value: keys.includes(existing.key) ? [existing] : [],
         }))
-        const store = {
+        const store = createStoreStub({
             commit,
-            acquireRevision: vi.fn(async () => ({
+            acquireRevision: vi.fn(async () => createLeaseStub({
                 revision: 7,
                 readRoot: vi.fn(async () => ({ revision: 7, value: captureRoot(database) })),
                 readAssetOwnerHead: vi.fn(async () => null),
                 readAssetAliasesByKeys,
                 release: vi.fn(async () => undefined),
             })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -1715,8 +1716,7 @@ describe('SaveCoordinator', () => {
             revision = result.revision
             return result
         })
-        const store = {
-            ...makeStore(commit),
+        const store = makeStore(commit, {
             open: vi.fn(async () => undefined),
             queryPluginStorage: vi.fn(async () => ({
                 revision,
@@ -1730,7 +1730,7 @@ describe('SaveCoordinator', () => {
                 Object.prototype.hasOwnProperty.call(durableStorage, key)
                     ? { revision, value: structuredClone(durableStorage[key]) }
                     : null),
-        } as unknown as PersistentDataStore
+        })
         let v3Storage: ReturnType<typeof createPluginStorageStore>
         const coordinator = new SaveCoordinator({
             store,
@@ -1839,7 +1839,7 @@ describe('SaveCoordinator', () => {
         const database = makeDatabase()
         database.botPresets = [{ name: 'Projected active' }] as Database['botPresets']
         const committed = deferred<{ revision: number }>()
-        const store = {
+        const store = createStoreStub({
             commit: vi.fn(() => committed.promise),
             readRoot: vi.fn(async () => ({
                 revision: 3,
@@ -1854,9 +1854,9 @@ describe('SaveCoordinator', () => {
             })),
             readPreset: vi.fn(async (id: string) => ({
                 revision: 3,
-                value: { name: id === '0' ? 'First' : 'Second', mainPrompt: id },
+                value: { name: id === '0' ? 'First' : 'Second', mainPrompt: id } as Database['botPresets'][number],
             })),
-        } as unknown as PersistentDataStore
+        })
         const publishPresetWorkingSet = vi.fn()
         const coordinator = new SaveCoordinator({
             store,
@@ -1900,7 +1900,7 @@ describe('SaveCoordinator', () => {
 
     it('does not publish an explicit preset mutation when the atomic commit fails', async () => {
         const database = makeDatabase()
-        const store = {
+        const store = createStoreStub({
             commit: vi.fn().mockRejectedValue(new Error('preset commit failed')),
             readRoot: vi.fn(async () => ({ revision: 8, value: captureRoot(database) })),
             queryPresets: vi.fn(async () => ({
@@ -1909,9 +1909,9 @@ describe('SaveCoordinator', () => {
             })),
             readPreset: vi.fn(async () => ({
                 revision: 8,
-                value: { name: 'First', mainPrompt: 'full' },
+                value: { name: 'First', mainPrompt: 'full' } as Database['botPresets'][number],
             })),
-        } as unknown as PersistentDataStore
+        })
         const publishPresetWorkingSet = vi.fn()
         const coordinator = new SaveCoordinator({
             store,
@@ -1940,7 +1940,7 @@ describe('SaveCoordinator', () => {
             .mockImplementationOnce(async ({ expectedRevision }) => ({
                 revision: expectedRevision + 1,
             }))
-        const store = {
+        const store = createStoreStub({
             commit,
             readRoot: vi.fn(async () => ({ revision: 20, value: captureRoot(database) })),
             queryPresets: vi.fn(async () => ({
@@ -1949,9 +1949,9 @@ describe('SaveCoordinator', () => {
             })),
             readPreset: vi.fn(async () => ({
                 revision: 20,
-                value: { name: 'Initial', mainPrompt: 'initial' },
+                value: { name: 'Initial', mainPrompt: 'initial' } as Database['botPresets'][number],
             })),
-        } as unknown as PersistentDataStore
+        })
         const publishPresetWorkingSet = vi.fn()
         const coordinator = new SaveCoordinator({
             store,
@@ -2164,9 +2164,9 @@ describe('SaveCoordinator', () => {
         const candidate = makeDatabase()
         candidate.username = 'Imported complete database'
         const replaceDatabase = vi.fn()
-        const store = {
+        const store = createStoreStub({
             replaceFromDatabase: vi.fn(async () => ({ revision: 2 })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -2299,12 +2299,12 @@ describe('SaveCoordinator', () => {
             const commit = vi.fn(async ({ expectedRevision }) => ({
                 revision: expectedRevision + 1,
             }))
-            const store = {
+            const store = createStoreStub({
                 commit,
                 replaceFromDatabase: vi.fn().mockRejectedValue(
                     new RevisionConflictError(6, 7),
                 ),
-            } as unknown as PersistentDataStore
+            })
             const coordinator = new SaveCoordinator({
                 store,
                 captureRoot: () => captureRoot(database),
@@ -2336,7 +2336,7 @@ describe('SaveCoordinator', () => {
         const database = makeDatabase()
         const commitStarted = deferred<void>()
         const commitFinished = deferred<{ revision: number }>()
-        const store = {
+        const store = createStoreStub({
             commit: vi.fn(() => {
                 commitStarted.resolve()
                 return commitFinished.promise
@@ -2344,10 +2344,10 @@ describe('SaveCoordinator', () => {
             readRoot: vi.fn(async () => ({ revision: 4, value: captureRoot(database) })),
             readCharacter: vi.fn(async () => ({
                 revision: 4,
-                value: { type: 'character', chaId: 'char-a', name: 'Alpha' },
+                value: { type: 'character', chaId: 'char-a', name: 'Alpha' } as CharacterDetail,
             })),
             readConversation: vi.fn(),
-        } as unknown as PersistentDataStore
+        })
         const publishCharacterMutation = vi.fn((result) => {
             Object.assign(database, result.root)
             Object.assign(database.characters[0], structuredClone(result.character))
@@ -2395,7 +2395,7 @@ describe('SaveCoordinator', () => {
         const database = makeDatabase()
         database.characterOrder = ['char-a', 'unrelated']
         const committed = deferred<{ revision: number }>()
-        const store = {
+        const store = createStoreStub({
             commit: vi.fn(() => committed.promise),
             readRoot: vi.fn(async () => ({
                 revision: 4,
@@ -2403,9 +2403,9 @@ describe('SaveCoordinator', () => {
             })),
             readCharacter: vi.fn(async () => ({
                 revision: 4,
-                value: { type: 'character', chaId: 'char-a', name: 'Alpha' },
+                value: { type: 'character', chaId: 'char-a', name: 'Alpha' } as CharacterDetail,
             })),
-        } as unknown as PersistentDataStore
+        })
         const publishCharacterMutation = vi.fn()
         const coordinator = new SaveCoordinator({
             store,
@@ -2447,19 +2447,19 @@ describe('SaveCoordinator', () => {
 
     it('replaces exactly one complete character from authoritative detail and conversations', async () => {
         const database = makeDatabase()
-        const storedChat = {
+        const storedChat: Chat = {
             id: 'chat-a',
             name: 'Stored chat',
             note: '',
             localLore: [],
             message: [{ role: 'user', data: 'preserved' }],
         }
-        const store = {
+        const store = createStoreStub({
             commit: vi.fn(async ({ expectedRevision }) => ({ revision: expectedRevision + 1 })),
             readRoot: vi.fn(async () => ({ revision: 7, value: captureRoot(database) })),
             readCharacter: vi.fn(async () => ({
                 revision: 7,
-                value: { type: 'character', chaId: 'char-a', name: 'Cold stub' },
+                value: { type: 'character', chaId: 'char-a', name: 'Cold stub' } as CharacterDetail,
             })),
             queryConversations: vi.fn(async () => ({
                 revision: 7,
@@ -2473,7 +2473,7 @@ describe('SaveCoordinator', () => {
                 }],
             })),
             readConversation: vi.fn(async () => ({ revision: 7, value: storedChat })),
-        } as unknown as PersistentDataStore
+        })
         const publishCharacterMutation = vi.fn()
         const coordinator = new SaveCoordinator({
             store,
@@ -2505,14 +2505,14 @@ describe('SaveCoordinator', () => {
 
     it('does not publish a stable-ID character mutation when its commit fails', async () => {
         const database = makeDatabase()
-        const store = {
+        const store = createStoreStub({
             commit: vi.fn().mockRejectedValue(new Error('character commit failed')),
             readRoot: vi.fn(async () => ({ revision: 9, value: captureRoot(database) })),
             readCharacter: vi.fn(async () => ({
                 revision: 9,
-                value: { type: 'character', chaId: 'char-a', name: 'Alpha' },
+                value: { type: 'character', chaId: 'char-a', name: 'Alpha' } as CharacterDetail,
             })),
-        } as unknown as PersistentDataStore
+        })
         const publishCharacterMutation = vi.fn()
         const coordinator = new SaveCoordinator({
             store,
@@ -2552,7 +2552,7 @@ describe('SaveCoordinator', () => {
             return { revision: ++revision }
         })
         const coordinator = new SaveCoordinator({
-            store: {
+            store: createStoreStub({
                 acquireRevision: vi.fn(async () => lease),
                 readRoot: vi.fn(async () => ({ revision, value: captureRoot(database) })),
                 readCharacter: vi.fn(async () => {
@@ -2561,7 +2561,7 @@ describe('SaveCoordinator', () => {
                     return { revision, value: structuredClone(detail) }
                 }),
                 commit,
-            } as unknown as PersistentDataStore,
+            }),
             captureRoot: () => captureRoot(database),
             captureSelectedCharacter: () => selected,
             captureCharacter: (id) =>
@@ -2615,17 +2615,16 @@ describe('SaveCoordinator', () => {
         'releases a failed permanent-delete lease and does not commit for %s',
         async (failure) => {
             const database = makeDatabase()
-            const lease = makeGroupDeletionLease(database)
-            if (failure === 'stale-lease') lease.revision = 0
+            const lease = makeGroupDeletionLease(database, failure === 'stale-lease' ? 0 : 1)
             if (failure === 'read-failure') {
-                lease.readRoot.mockRejectedValueOnce(new Error('read failed'))
+                vi.mocked(lease.readRoot).mockRejectedValueOnce(new Error('read failed'))
             }
             const commit = vi.fn()
             const coordinator = new SaveCoordinator({
-                store: {
+                store: createStoreStub({
                     acquireRevision: vi.fn(async () => lease),
                     commit,
-                } as unknown as PersistentDataStore,
+                }),
                 captureRoot: () => captureRoot(database),
                 captureSelectedCharacter: () => null,
                 captureCharacter: () => null,
@@ -2647,17 +2646,17 @@ describe('SaveCoordinator', () => {
     it('retries a transient permanent-delete lease release before committing', async () => {
         const database = makeDatabase()
         const lease = makeGroupDeletionLease(database)
-        lease.release
+        vi.mocked(lease.release)
             .mockRejectedValueOnce(new Error('release unavailable'))
             .mockResolvedValueOnce(undefined)
         const commit = vi.fn(async ({ expectedRevision }) => ({
             revision: expectedRevision + 1,
         }))
         const coordinator = new SaveCoordinator({
-            store: {
+            store: createStoreStub({
                 acquireRevision: vi.fn(async () => lease),
                 commit,
-            } as unknown as PersistentDataStore,
+            }),
             captureRoot: () => captureRoot(database),
             captureSelectedCharacter: () => null,
             captureCharacter: () => null,
@@ -2679,14 +2678,14 @@ describe('SaveCoordinator', () => {
         const database = makeDatabase()
         const lease = makeGroupDeletionLease(database)
         const primaryError = new Error('read failed')
-        lease.readRoot.mockRejectedValueOnce(primaryError)
-        lease.release.mockRejectedValue(new Error('release unavailable'))
+        vi.mocked(lease.readRoot).mockRejectedValueOnce(primaryError)
+        vi.mocked(lease.release).mockRejectedValue(new Error('release unavailable'))
         const commit = vi.fn()
         const coordinator = new SaveCoordinator({
-            store: {
+            store: createStoreStub({
                 acquireRevision: vi.fn(async () => lease),
                 commit,
-            } as unknown as PersistentDataStore,
+            }),
             captureRoot: () => captureRoot(database),
             captureSelectedCharacter: () => null,
             captureCharacter: () => null,
@@ -2709,15 +2708,15 @@ describe('SaveCoordinator', () => {
             const database = makeDatabase()
             const mutationStarted = deferred<void>()
             const mutationGate = deferred<void>()
-            const store = {
+            const store = createStoreStub({
                 commit: vi.fn(async () => ({ revision: 11 })),
                 readRoot: vi.fn(async () => ({ revision: 10, value: captureRoot(database) })),
                 readCharacter: vi.fn(async () => ({
                     revision: 10,
-                    value: { type: 'character', chaId: 'char-a', name: 'Alpha' },
+                    value: { type: 'character', chaId: 'char-a', name: 'Alpha' } as CharacterDetail,
                 })),
                 queryConversations: vi.fn(async () => ({ revision: 10, items: [] })),
-            } as unknown as PersistentDataStore
+            })
             const coordinator = new SaveCoordinator({
                 store,
                 captureRoot: () => captureRoot(database),
@@ -2779,14 +2778,14 @@ describe('SaveCoordinator', () => {
             const database = makeDatabase()
             const characterRead = deferred<{
                 revision: number
-                value: { type: 'character'; chaId: string; name: string }
+                value: CharacterDetail
             }>()
-            const store = {
+            const store = createStoreStub({
                 commit: vi.fn(async () => ({ revision: 11 })),
                 readRoot: vi.fn(async () => ({ revision: 10, value: captureRoot(database) })),
                 readCharacter: vi.fn(() => characterRead.promise),
                 queryConversations: vi.fn(async () => ({ revision: 10, items: [] })),
-            } as unknown as PersistentDataStore
+            })
             const coordinator = new SaveCoordinator({
                 store,
                 captureRoot: () => captureRoot(database),
@@ -2824,7 +2823,7 @@ describe('SaveCoordinator', () => {
             coordinator.markPersistentDataDirty(1)
             characterRead.resolve({
                 revision: 10,
-                value: { type: 'character', chaId: 'char-a', name: 'Alpha' },
+                value: { type: 'character', chaId: 'char-a', name: 'Alpha' } as CharacterDetail,
             })
 
             await expect(mutation).resolves.toBe(true)
@@ -2843,15 +2842,15 @@ describe('SaveCoordinator', () => {
             .mockImplementationOnce(async ({ expectedRevision }) => ({
                 revision: expectedRevision + 1,
             }))
-        const store = {
+        const store = createStoreStub({
             commit,
             readRoot: vi.fn(async () => ({ revision: 10, value: captureRoot(database) })),
             readCharacter: vi.fn(async () => ({
                 revision: 10,
-                value: { type: 'character', chaId: 'char-a', name: 'Alpha' },
+                value: { type: 'character', chaId: 'char-a', name: 'Alpha' } as CharacterDetail,
             })),
             queryConversations: vi.fn(async () => ({ revision: 10, items: [] })),
-        } as unknown as PersistentDataStore
+        })
         const publishCharacterMutation = vi.fn()
         const coordinator = new SaveCoordinator({
             store,
@@ -2914,7 +2913,7 @@ describe('SaveCoordinator', () => {
             if (input.replaceCharacter) durable = structuredClone(input.replaceCharacter)
             return { revision: ++revision }
         })
-        const store = {
+        const store = createStoreStub({
             commit,
             readRoot: vi.fn(async () => ({ revision, value: captureRoot(database) })),
             readCharacter: vi.fn(async () => {
@@ -2922,7 +2921,7 @@ describe('SaveCoordinator', () => {
                 return { revision, value: structuredClone(detail) }
             }),
             queryConversations: vi.fn(async () => ({ revision, items: [] })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -2973,15 +2972,15 @@ describe('SaveCoordinator', () => {
         let selected = database.characters[0]
         const firstCommit = deferred<{ revision: number }>()
         const commit = vi.fn().mockImplementationOnce(() => firstCommit.promise)
-        const store = {
+        const store = createStoreStub({
             commit,
             readRoot: vi.fn(async () => ({ revision: 10, value: captureRoot(database) })),
             readCharacter: vi.fn(async () => ({
                 revision: 10,
-                value: { type: 'character', chaId: 'char-a', name: 'Alpha' },
+                value: { type: 'character', chaId: 'char-a', name: 'Alpha' } as CharacterDetail,
             })),
             queryConversations: vi.fn(async () => ({ revision: 10, items: [] })),
-        } as unknown as PersistentDataStore
+        })
         const publishCharacterMutation = vi.fn()
         const coordinator = new SaveCoordinator({
             store,
@@ -3024,15 +3023,15 @@ describe('SaveCoordinator', () => {
             }
             return { revision }
         })
-        const store = {
+        const store = createStoreStub({
             commit,
             readRoot: vi.fn(async () => ({ revision: 10, value: captureRoot(database) })),
             readCharacter: vi.fn(async () => ({
                 revision: 10,
-                value: { type: 'character', chaId: 'char-a', name: 'Alpha' },
+                value: { type: 'character', chaId: 'char-a', name: 'Alpha' } as CharacterDetail,
             })),
             queryConversations: vi.fn(async () => ({ revision: 10, items: [] })),
-        } as unknown as PersistentDataStore
+        })
         const publishedRevisions: number[] = []
         const pin = vi.fn(async (pinnedRevision: number) => ({
             publish: async () => {
@@ -3074,12 +3073,12 @@ describe('SaveCoordinator', () => {
         const database = makeDatabase()
         const snapshot = makeDatabase()
         snapshot.username = 'Authoritative snapshot'
-        const store = {
+        const store = createStoreStub({
             materializeDatabase: vi.fn(async (revision?: number) => {
                 expect(revision).toBe(12)
                 return snapshot
             }),
-        } as unknown as PersistentDataStore
+        })
         const replaceDatabase = vi.fn()
         const coordinator = new SaveCoordinator({
             store,
@@ -3101,11 +3100,11 @@ describe('SaveCoordinator', () => {
 
     it('flushes and captures one atomic revision and mutation generation token', async () => {
         const database = makeDatabase()
-        const store = {
+        const store = createStoreStub({
             commit: vi.fn(async ({ expectedRevision }) => ({
                 revision: expectedRevision + 1,
             })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -3126,11 +3125,11 @@ describe('SaveCoordinator', () => {
 
     it('pins a normal exit revision locally without publishing a pending account revision', async () => {
         const database = makeDatabase()
-        const store = {
+        const store = createStoreStub({
             commit: vi.fn(async ({ expectedRevision }) => ({
                 revision: expectedRevision + 1,
             })),
-        } as unknown as PersistentDataStore
+        })
         const pin = vi.fn(async () => {
             throw new Error('offline')
         })
@@ -3160,11 +3159,11 @@ describe('SaveCoordinator', () => {
 
     it('rejects a stale destructive replacement token after flushing the newer live edit', async () => {
         const database = makeDatabase()
-        const store = {
+        const store = createStoreStub({
             commit: vi.fn(async ({ expectedRevision }) => ({
                 revision: expectedRevision + 1,
             })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -3276,7 +3275,7 @@ describe('SaveCoordinator', () => {
         const database = makeDatabase()
         const snapshot = makeDatabase()
         snapshot.username = 'Revision 12 snapshot'
-        const store = {
+        const store = createStoreStub({
             materializeDatabase: vi.fn(async () => snapshot),
             readPluginStorageValues: vi.fn(async () => ({ revision: 12, nextCursor: null,
                 items: [{ owner: 'plugin-a', key: 'shared', value: 'a' },
@@ -3293,7 +3292,7 @@ describe('SaveCoordinator', () => {
                 value: owner === 'plugin-a' ? 'a' : 'b',
             })),
             replaceFromDatabase: vi.fn(async () => ({ revision: 13 })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -3327,17 +3326,17 @@ describe('SaveCoordinator', () => {
 
     it('reads one detached complete character without publishing it', async () => {
         const database = makeDatabase()
-        const chat = {
+        const chat: Chat = {
             id: 'chat-a',
             name: 'Stored chat',
             note: '',
             localLore: [],
             message: [{ role: 'user', data: 'authoritative' }],
         }
-        const store = {
+        const store = createStoreStub({
             readCharacter: vi.fn(async () => ({
                 revision: 13,
-                value: { type: 'character', chaId: 'char-a', name: 'Stored detail' },
+                value: { type: 'character', chaId: 'char-a', name: 'Stored detail' } as CharacterDetail,
             })),
             queryConversations: vi.fn(async () => ({
                 revision: 13,
@@ -3351,7 +3350,7 @@ describe('SaveCoordinator', () => {
                 }],
             })),
             readConversation: vi.fn(async () => ({ revision: 13, value: chat })),
-        } as unknown as PersistentDataStore
+        })
         const publishCharacterMutation = vi.fn()
         const coordinator = new SaveCoordinator({
             store,
@@ -3376,16 +3375,16 @@ describe('SaveCoordinator', () => {
 
     it('reads one detached authoritative conversation without changing selection', async () => {
         const database = makeDatabase()
-        const chat = {
+        const chat: Chat = {
             id: 'chat-a',
             name: 'Stored chat',
             note: '',
             localLore: [],
             message: [{ role: 'user', data: 'authoritative' }],
         }
-        const store = {
+        const store = createStoreStub({
             readConversation: vi.fn(async () => ({ revision: 17, value: chat })),
-        } as unknown as PersistentDataStore
+        })
         const publishCharacterMutation = vi.fn()
         const coordinator = new SaveCoordinator({
             store,
@@ -3411,7 +3410,7 @@ describe('SaveCoordinator', () => {
     it('reads one ordered-position conversation when configured indexes have gaps', async () => {
         const database = makeDatabase()
         const chat = { id: 'chat-c', name: 'Third', note: '', localLore: [], message: [] }
-        const store = {
+        const store = createStoreStub({
             queryConversations: vi.fn(async () => ({
                 revision: 18,
                 items: [{
@@ -3424,7 +3423,7 @@ describe('SaveCoordinator', () => {
                 }],
             })),
             readConversation: vi.fn(async () => ({ revision: 18, value: chat })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -3459,14 +3458,14 @@ describe('SaveCoordinator', () => {
             ...database.characters[0],
             chatPage: 1,
         }
-        const chat = {
+        const chat: Chat = {
             id: 'chat-b',
             name: 'Selected',
             note: '',
             localLore: [],
             message: [{ role: 'user', data: 'authoritative' }],
         }
-        const store = {
+        const store = createStoreStub({
             readCharacter: vi.fn()
                 .mockImplementationOnce(() => firstCharacterRead.promise)
                 .mockResolvedValueOnce({ revision: 19, value: character }),
@@ -3482,7 +3481,7 @@ describe('SaveCoordinator', () => {
                 }],
             })),
             readConversation: vi.fn(async () => ({ revision: 19, value: chat })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -3521,10 +3520,10 @@ describe('SaveCoordinator', () => {
     it('distinguishes an existing character without a selected conversation', async () => {
         const database = makeDatabase()
         const character = { ...database.characters[0], chatPage: 0 }
-        const store = {
+        const store = createStoreStub({
             readCharacter: vi.fn(async () => ({ revision: 20, value: character })),
             queryConversations: vi.fn(async () => ({ revision: 20, items: [] })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -3544,10 +3543,10 @@ describe('SaveCoordinator', () => {
 
     it('returns null only when the selected character is missing', async () => {
         const database = makeDatabase()
-        const store = {
+        const store = createStoreStub({
             readCharacter: vi.fn(async () => null),
             queryConversations: vi.fn(),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -3572,11 +3571,11 @@ describe('SaveCoordinator', () => {
             name: 'Temporary',
             chats: [],
         } as Database['characters'][number]
-        const store = {
+        const store = createStoreStub({
             readRoot: vi.fn(async () => ({ revision: 14, value: captureRoot(database) })),
             readCharacter: vi.fn(async () => null),
             commit: vi.fn(async ({ expectedRevision }) => ({ revision: expectedRevision + 1 })),
-        } as unknown as PersistentDataStore
+        })
         const publishCharacterMutation = vi.fn()
         const coordinator = new SaveCoordinator({
             store,
@@ -3612,11 +3611,11 @@ describe('SaveCoordinator', () => {
     it('captures character insertion and asset options before asynchronous creation', async () => {
         const database = makeDatabase()
         database.characterOrder = ['char-a']
-        const store = {
+        const store = createStoreStub({
             readRoot: vi.fn(async () => ({ revision: 7, value: captureRoot(database) })),
             readCharacter: vi.fn(async () => null),
             commit: vi.fn(async (_input: WorkingSetCommit) => ({ revision: 8 })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -3701,7 +3700,7 @@ describe('SaveCoordinator', () => {
             entryCount: 1,
         }]
         const events: string[] = []
-        const store = {
+        const store = createStoreStub({
             readRoot: vi.fn(async () => ({ revision: 23, value: captureRoot(database) })),
             readCharacter: vi.fn(async () => null),
             commit: vi.fn(async () => {
@@ -3709,7 +3708,7 @@ describe('SaveCoordinator', () => {
                 expect(database.characters.map((item) => item.chaId)).toEqual(['char-a'])
                 return { revision: 24 }
             }),
-        } as unknown as PersistentDataStore
+        })
         const publishCharacterMutation = vi.fn((state) => {
             events.push('publish')
             database.characters.push(state.character as Database['characters'][number])
@@ -3748,15 +3747,15 @@ describe('SaveCoordinator', () => {
 
     it('uses replacement instead of adding a duplicate complete character ID', async () => {
         const database = makeDatabase()
-        const store = {
+        const store = createStoreStub({
             readRoot: vi.fn(async () => ({ revision: 15, value: captureRoot(database) })),
             readCharacter: vi.fn(async () => ({
                 revision: 15,
-                value: { type: 'character', chaId: 'char-a', name: 'Existing' },
+                value: { type: 'character', chaId: 'char-a', name: 'Existing' } as CharacterDetail,
             })),
             queryConversations: vi.fn(async () => ({ revision: 15, items: [] })),
             commit: vi.fn(async ({ expectedRevision }) => ({ revision: expectedRevision + 1 })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -3781,11 +3780,11 @@ describe('SaveCoordinator', () => {
 
     it('does not publish an absent character when its atomic add fails', async () => {
         const database = makeDatabase()
-        const store = {
+        const store = createStoreStub({
             readRoot: vi.fn(async () => ({ revision: 16, value: captureRoot(database) })),
             readCharacter: vi.fn(async () => null),
             commit: vi.fn().mockRejectedValue(new Error('add failed')),
-        } as unknown as PersistentDataStore
+        })
         const publishCharacterMutation = vi.fn()
         const coordinator = new SaveCoordinator({
             store,
@@ -3810,11 +3809,11 @@ describe('SaveCoordinator', () => {
         const database = makeDatabase()
         database.characterOrder = ['char-a']
         const before = structuredClone(database)
-        const store = {
+        const store = createStoreStub({
             readRoot: vi.fn(async () => ({ revision: 17, value: captureRoot(database) })),
             readCharacter: vi.fn(async () => null),
             commit: vi.fn().mockRejectedValue(new Error('activation failed')),
-        } as unknown as PersistentDataStore
+        })
         const publishCharacterMutation = vi.fn()
         const coordinator = new SaveCoordinator({
             store,
@@ -3865,11 +3864,11 @@ describe('SaveCoordinator', () => {
 
     it('rejects an Inlay alias before prepared character activation', async () => {
         const database = makeDatabase()
-        const store = {
+        const store = createStoreStub({
             readRoot: vi.fn(async () => ({ revision: 18, value: captureRoot(database) })),
             readCharacter: vi.fn(async () => null),
             commit: vi.fn(async () => ({ revision: 19 })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -3906,11 +3905,11 @@ describe('SaveCoordinator', () => {
 
     it('rejects an owner head for another character before activation', async () => {
         const database = makeDatabase()
-        const store = {
+        const store = createStoreStub({
             readRoot: vi.fn(async () => ({ revision: 20, value: captureRoot(database) })),
             readCharacter: vi.fn(async () => null),
             commit: vi.fn(async () => ({ revision: 21 })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -3949,11 +3948,11 @@ describe('SaveCoordinator', () => {
     it('can add an absent sentinel without adding it to character order', async () => {
         const database = makeDatabase()
         database.characterOrder = ['char-a']
-        const store = {
+        const store = createStoreStub({
             readRoot: vi.fn(async () => ({ revision: 19, value: captureRoot(database) })),
             readCharacter: vi.fn(async () => null),
             commit: vi.fn(async ({ expectedRevision }) => ({ revision: expectedRevision + 1 })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -3982,7 +3981,7 @@ describe('SaveCoordinator', () => {
             revision: number
             value: Database['botPresets'][number]
         }>()
-        const store = {
+        const store = createStoreStub({
             commit: vi.fn(async ({ expectedRevision }) => ({ revision: expectedRevision + 1 })),
             readRoot: vi.fn(async () => ({ revision: 6, value: captureRoot(database) })),
             queryPresets: vi.fn(async () => ({
@@ -3990,7 +3989,7 @@ describe('SaveCoordinator', () => {
                 items: [{ id: '0', configuredIndex: 0, name: 'First' }],
             })),
             readPreset: vi.fn(() => presetRead.promise),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -4025,7 +4024,7 @@ describe('SaveCoordinator', () => {
             revision: number
             value: Database['botPresets'][number]
         }>()
-        const store = {
+        const store = createStoreStub({
             commit: vi.fn(async ({ expectedRevision }) => ({ revision: expectedRevision + 1 })),
             readRoot: vi.fn(async () => ({ revision: 8, value: captureRoot(database) })),
             queryPresets: vi.fn(async () => ({
@@ -4033,7 +4032,7 @@ describe('SaveCoordinator', () => {
                 items: [{ id: '0', configuredIndex: 0, name: 'First' }],
             })),
             readPreset: vi.fn(() => presetRead.promise),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -4071,7 +4070,7 @@ describe('SaveCoordinator', () => {
             if (commit.mock.calls.length === 1) return presetCommit.promise
             return Promise.resolve({ revision: expectedRevision + 1 })
         })
-        const store = {
+        const store = createStoreStub({
             commit,
             readRoot: vi.fn(async () => ({ revision: 6, value: captureRoot(database) })),
             queryPresets: vi.fn(async () => ({
@@ -4080,9 +4079,9 @@ describe('SaveCoordinator', () => {
             })),
             readPreset: vi.fn(async () => ({
                 revision: 6,
-                value: { name: 'First' },
+                value: { name: 'First' } as Database['botPresets'][number],
             })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),
@@ -4137,7 +4136,7 @@ describe('SaveCoordinator', () => {
             if (commit.mock.calls.length === 1) return presetCommit.promise
             return Promise.resolve({ revision: expectedRevision + 1 })
         })
-        const store = {
+        const store = createStoreStub({
             commit,
             readRoot: vi.fn(async () => ({ revision: 30, value: captureRoot(database) })),
             queryPresets: vi.fn(async () => ({
@@ -4146,9 +4145,9 @@ describe('SaveCoordinator', () => {
             })),
             readPreset: vi.fn(async () => ({
                 revision: 30,
-                value: { name: 'First' },
+                value: { name: 'First' } as Database['botPresets'][number],
             })),
-        } as unknown as PersistentDataStore
+        })
         const coordinator = new SaveCoordinator({
             store,
             captureRoot: () => captureRoot(database),

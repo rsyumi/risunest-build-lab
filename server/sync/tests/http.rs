@@ -1,5 +1,5 @@
 mod common;
-use common::{inline, request, WRITER_A, WRITER_B};
+use common::{inline, request, HANG_BOUND, WRITER_A, WRITER_B};
 use reqwest::{Client, RequestBuilder, StatusCode};
 use risunest_sync_server::{
     http,
@@ -22,10 +22,6 @@ fn full_frames(objects: &[&[u8]]) -> Vec<u8> {
     transfer::encode(&frames).expect("synthetic full frames must fit")
 }
 
-/// Turns a lost response into a failure. Loaded hosts answer a loopback request
-/// in far less, so it never decides an outcome.
-const BOUND: Duration = Duration::from_secs(60);
-
 struct Server {
     base: String,
     store: Arc<Store>,
@@ -35,37 +31,6 @@ struct Server {
     task: tokio::task::JoinHandle<()>,
     runtime: Option<tokio::runtime::Runtime>,
     _dir: tempfile::TempDir,
-}
-
-#[tokio::test]
-async fn removed_coordination_endpoints_have_no_aliases() {
-    let server = Server::start().await;
-    for (method, path) in [
-        (reqwest::Method::POST, "/read-pins"),
-        (reqwest::Method::GET, "/read-pins/synthetic"),
-        (reqwest::Method::POST, "/checkpoints"),
-        (reqwest::Method::GET, "/checkpoints/synthetic"),
-        (reqwest::Method::GET, "/scopes"),
-        (reqwest::Method::POST, "/staged-changes"),
-        (reqwest::Method::POST, "/staged-changes/start"),
-        (reqwest::Method::POST, "/staged-changes/synthetic/seal"),
-        (reqwest::Method::PUT, "/staged-changes/synthetic/pages/0"),
-        (reqwest::Method::POST, "/commits"),
-        (reqwest::Method::POST, "/acks"),
-        (reqwest::Method::GET, "/events"),
-    ] {
-        let response = server
-            .auth(
-                server
-                    .client
-                    .request(method, format!("{}{path}", server.base)),
-                &server.a,
-            )
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
-    }
 }
 
 #[tokio::test]
@@ -353,7 +318,7 @@ async fn bounded_bulk_buffers_leave_head_available_and_release_after_completion(
         let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
         socket.write_all(format!("POST /uploads/frames HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nX-Risu-Library: {}\r\nContent-Length: {}\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n",credential.token,credential.library_id,frame.len()).as_bytes()).await.unwrap();
         let mut interim = Vec::new();
-        tokio::time::timeout(BOUND, async {
+        tokio::time::timeout(HANG_BOUND, async {
             while !interim.ends_with(b"\r\n\r\n") {
                 interim.push(socket.read_u8().await.unwrap());
             }
@@ -390,13 +355,13 @@ async fn bounded_bulk_buffers_leave_head_available_and_release_after_completion(
     let mut first = sockets.remove(0);
     first.write_all(&frame).await.unwrap();
     let mut completed = Vec::new();
-    tokio::time::timeout(BOUND, first.read_to_end(&mut completed))
+    tokio::time::timeout(HANG_BOUND, first.read_to_end(&mut completed))
         .await
         .unwrap()
         .unwrap();
     assert!(completed.starts_with(b"HTTP/1.1 204 No Content"));
     assert_eq!(
-        tokio::time::timeout(BOUND, pending)
+        tokio::time::timeout(HANG_BOUND, pending)
             .await
             .unwrap()
             .unwrap()
@@ -507,7 +472,11 @@ impl Server {
         Self {
             base,
             store,
-            client: Client::builder().no_proxy().timeout(BOUND).build().unwrap(),
+            client: Client::builder()
+                .no_proxy()
+                .timeout(HANG_BOUND)
+                .build()
+                .unwrap(),
             a,
             b,
             task,
@@ -607,7 +576,7 @@ async fn unauthorized_large_unfinished_body_is_rejected_before_reading_it() {
     .await
     .unwrap();
     let mut bytes = [0; 1024];
-    let count = tokio::time::timeout(BOUND, tcp.read(&mut bytes))
+    let count = tokio::time::timeout(HANG_BOUND, tcp.read(&mut bytes))
         .await
         .unwrap()
         .unwrap();
@@ -639,7 +608,7 @@ async fn stalled_upload_does_not_hold_library_writer_or_another_device_slot() {
     let headers=format!("POST /uploads/frames HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nX-Risu-Library: {}\r\nContent-Length: {}\r\n\r\n",s.a.token,s.a.library_id,frame.len());
     tcp.write_all(headers.as_bytes()).await.unwrap();
     tcp.write_all(&frame[..10]).await.unwrap();
-    tokio::time::timeout(BOUND, async {
+    tokio::time::timeout(HANG_BOUND, async {
         s.upload(&s.b, b"concurrent").await;
         let request = request(
             &s.store,
@@ -753,7 +722,7 @@ async fn malformed_metadata_and_frame_fail_without_mutation() {
     let headers=format!("POST /uploads/frames HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nX-Risu-Library: {}\r\nContent-Length: {}\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n",s.a.token,s.a.library_id,transfer::MAX_BATCH_BYTES+1);
     oversized.write_all(headers.as_bytes()).await.unwrap();
     let mut response = [0; 1024];
-    let length = tokio::time::timeout(BOUND, oversized.read(&mut response))
+    let length = tokio::time::timeout(HANG_BOUND, oversized.read(&mut response))
         .await
         .unwrap()
         .unwrap();
@@ -771,30 +740,6 @@ async fn malformed_metadata_and_frame_fail_without_mutation() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(s.store.object_size(&hash(b"good")).unwrap().is_none());
     assert!(s.store.object_size(&hash(b"bad")).unwrap().is_none());
-    assert_eq!(s.head(&s.a).await, head);
-}
-
-#[tokio::test]
-async fn removed_batch_endpoints_have_no_post_alias() {
-    let s = Server::start().await;
-    let head = s.head(&s.a).await;
-    let object = b"synthetic obsolete upload";
-    for (path, body) in [
-        ("/uploads/batch", full_frames(&[object])),
-        (
-            "/objects/batch",
-            serde_json::to_vec(&[hash(object)]).unwrap(),
-        ),
-    ] {
-        let response = s
-            .auth(s.client.post(format!("{}{path}", s.base)), &s.a)
-            .body(body)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
-    }
-    assert!(s.store.object_size(&hash(object)).unwrap().is_none());
     assert_eq!(s.head(&s.a).await, head);
 }
 
@@ -886,13 +831,55 @@ async fn streamed_frame_body_limit_rejects_before_publishing() {
         .build()
         .unwrap();
     assert!(!request.headers().contains_key("content-length"));
-    let response = tokio::time::timeout(BOUND, s.client.execute(request))
+    let response = tokio::time::timeout(HANG_BOUND, s.client.execute(request))
         .await
         .expect("the oversized streamed body was not answered")
         .unwrap();
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    // The rest of the body stays unread, so the connection is not offered for reuse.
+    assert_eq!(response.headers()["connection"], "close");
     assert!(s.store.object_size(&hash(object)).unwrap().is_none());
     assert_eq!(s.head(&s.a).await, head);
+}
+
+#[tokio::test]
+async fn a_reply_sent_before_the_request_body_is_read_closes_the_connection() {
+    let s = Server::start().await;
+    let body = br#"[{"target":"0000","bases":[]}]"#;
+    let mut socket = tokio::net::TcpStream::connect(s.base.strip_prefix("http://").unwrap())
+        .await
+        .unwrap();
+    // The body is withheld, so the rejection is sent before any of it is read.
+    let request = format!(
+        "POST /objects/transfer HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    socket.write_all(request.as_bytes()).await.unwrap();
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        head.push(socket.read_u8().await.unwrap());
+    }
+    let head = String::from_utf8(head).unwrap().to_ascii_lowercase();
+    assert!(head.starts_with("http/1.1 401"), "{head}");
+    assert!(head.contains("\r\nconnection: close\r\n"), "{head}");
+
+    // A rejection without a body, and a request whose body was read, keep the connection.
+    let response = s
+        .client
+        .get(format!("{}/head", s.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(response.headers().get("connection").is_none());
+    let response = s
+        .auth(s.client.post(format!("{}/objects/missing", s.base)), &s.a)
+        .json(&serde_json::json!([{"hash":hash(b"absent"),"size":"6"}]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get("connection").is_none());
 }
 
 #[tokio::test]

@@ -14,25 +14,11 @@ const deviceSettings = vi.hoisted(() => ({
 }))
 
 vi.mock('src/ts/storage/deviceSettings', () => deviceSettings)
-vi.mock('src/lang', () => ({
-    language: {
-        risuNest: {
-            perf: {
-                title: 'Performance',
-                profile: 'Performance profile',
-                profileNormal: 'Standard',
-                profileLowSpec: 'Low-spec',
-                profileHelp: 'Help',
-                historyLimit: 'Skip older messages',
-                historyLimitHelp: 'Help',
-                historyLimitMultiplier: 'Loading limit',
-                historyLimitMultiplierHelp: 'Help',
-            },
-        },
-    },
-}))
 
+import { language } from 'src/lang'
 import RisuNestPerformanceSettings from './RisuNestPerformanceSettings.svelte'
+
+const strings = language.risuNest.perf
 
 describe('RisuNestPerformanceSettings', () => {
     let mounted: ReturnType<typeof mount> | undefined
@@ -50,9 +36,9 @@ describe('RisuNestPerformanceSettings', () => {
         mounted = mount(RisuNestPerformanceSettings, { target })
         await tick()
 
-        const group = target.querySelector('[role="group"][aria-label="Performance profile"]')
-        const standard = [...target.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent === 'Standard')
-        const lowSpec = [...target.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent === 'Low-spec')
+        const group = target.querySelector(`[role="group"][aria-label="${strings.profile}"]`)
+        const standard = [...target.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent === strings.profileNormal)
+        const lowSpec = [...target.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent === strings.profileLowSpec)
         expect(group).not.toBeNull()
         expect(standard?.getAttribute('aria-pressed')).toBe('true')
         expect(lowSpec?.getAttribute('aria-pressed')).toBe('false')
@@ -73,9 +59,9 @@ describe('RisuNestPerformanceSettings', () => {
         mounted = mount(RisuNestPerformanceSettings, { target })
         await tick()
 
-        const toggle = target.querySelector<HTMLInputElement>('input[type="checkbox"][aria-label="Skip older messages"]')
+        const toggle = target.querySelector<HTMLInputElement>(`input[type="checkbox"][aria-label="${strings.historyLimit}"]`)
             ?? [...target.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((input) =>
-                input.closest('label')?.textContent?.includes('Skip older messages'))
+                input.closest('label')?.textContent?.includes(strings.historyLimit))
         expect(toggle).toBeTruthy()
         expect(target.querySelector('input[type="number"]')).toBeNull()
 
@@ -83,7 +69,7 @@ describe('RisuNestPerformanceSettings', () => {
         await tick()
 
         expect(deviceSettings.updateDeviceSettings).toHaveBeenCalledWith({ generationHistoryLimitEnabled: true })
-        const number = target.querySelector<HTMLInputElement>('input[type="number"][aria-label="Loading limit"]')
+        const number = target.querySelector<HTMLInputElement>(`input[type="number"][aria-label="${strings.historyLimitMultiplier}"]`)
         expect(number?.value).toBe('2')
 
         toggle!.click()
@@ -104,7 +90,7 @@ describe('RisuNestPerformanceSettings', () => {
         mounted = mount(RisuNestPerformanceSettings, { target })
         await tick()
 
-        const number = target.querySelector<HTMLInputElement>('input[type="number"][aria-label="Loading limit"]')!
+        const number = target.querySelector<HTMLInputElement>(`input[type="number"][aria-label="${strings.historyLimitMultiplier}"]`)!
         number.value = '0.5'
         number.dispatchEvent(new Event('input', { bubbles: true }))
         number.dispatchEvent(new Event('change', { bubbles: true }))

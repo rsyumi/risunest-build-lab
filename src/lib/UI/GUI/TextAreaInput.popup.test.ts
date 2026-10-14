@@ -17,7 +17,7 @@ vi.mock('src/ts/stores.svelte', async () => {
         disableHighlight: writable(false),
     }
 })
-vi.mock('src/ts/platform', () => ({ isMobile: false }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 const hotkey = vi.hoisted(() => ({ matches: false }))
 vi.mock('src/ts/hotkey', () => ({ hotkeyMatches: () => hotkey.matches }))
 vi.mock('src/ts/util', () => ({ sleep: async () => {} }))

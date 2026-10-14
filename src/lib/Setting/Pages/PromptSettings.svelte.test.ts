@@ -1,11 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
-import { languageEnglish } from 'src/lang/en'
 import { DBState } from 'src/ts/stores.svelte'
 import { RISU_PROMPT_DRAG_TYPE } from 'src/ts/dragTypes'
 import PromptSettings from './PromptSettings.svelte'
 
-vi.mock('src/lang', () => ({ language: languageEnglish }))
 vi.mock('src/ts/stores.svelte', () => {
     const DBState = $state({ db: {} })
     return { DBState }

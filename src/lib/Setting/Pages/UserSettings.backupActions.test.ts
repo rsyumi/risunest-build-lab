@@ -7,7 +7,7 @@ const m = vi.hoisted(() => ({
     export: vi.fn(), restore: vi.fn(), webExport: vi.fn(), webImport: vi.fn(),
     confirm: vi.fn(), normal: vi.fn(), error: vi.fn(),
 }))
-vi.mock('src/ts/platform', () => ({ get isTauri() { return m.native } }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule(() => ({ runtime: m.native ? 'tauri' : 'web', os: 'windows' })))
 vi.mock('src/ts/stores.svelte', () => ({ DBState: { db: {} } }))
 vi.mock('src/ts/characterCards', () => ({ hubURL: 'https://synthetic.invalid' }))
 vi.mock('src/ts/storage/deviceMarkers', () => ({ getDeviceMarkers: vi.fn() }))

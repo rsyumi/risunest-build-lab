@@ -12,6 +12,7 @@ import { isIOS, isTauri, isTauriMobile, isTauriDesktop } from "src/ts/platform"
 import type { Attachment } from "svelte/attachments"
 import { mount, unmount, type Snippet } from "svelte"
 import PopupList from "src/lib/UI/PopupList.svelte"
+import { indexCharactersById } from "./characterIndex"
 const appWindow = isTauri ? getCurrentWebviewWindow() : null
 
 export interface Messagec extends Message{
@@ -52,6 +53,10 @@ export function selectSingleFile(ext:string[]){
 }
 
 async function readSingleFile(ext:string[]){
+    if (isTauriMobile) {
+        const { selectNativeFileData } = await import('./storage/nativeFileSelection')
+        return (await selectNativeFileData({ accept: fileAccept(ext) }))[0] ?? null
+    }
     if(domSelect){
         const v = await selectFileByDom(ext, 'single')
         const file = v[0]
@@ -79,9 +84,11 @@ export function selectMultipleFile(ext:string[]){
 }
 
 async function readMultipleFiles(ext:string[]){
-    // The Android picker returns content URIs and drops extensions it does not know, so it uses
-    // the same DOM input that selectSingleFile already relies on everywhere.
-    if(!isTauri || isTauriMobile){
+    if (isTauriMobile) {
+        const { selectNativeFileData } = await import('./storage/nativeFileSelection')
+        return selectNativeFileData({ accept: fileAccept(ext), multiple: true })
+    }
+    if(!isTauri){
         const v = await selectFileByDom(ext, 'multiple')
         let arr:{name:string, data:Uint8Array}[] = []
         for(const file of v){
@@ -175,6 +182,11 @@ export function getUserIconProtrait(){
     }
 }
 
+function fileAccept(allowedExtensions: string[]): string {
+    return getDatabase().allowAllExtentionFiles || isIOS() || allowedExtensions[0] === '*'
+        ? '*' : allowedExtensions.map(ext => `.${ext}`).join(',')
+}
+
 export function selectFileByDom(allowedExtensions:string[], multiple:'multiple'|'single' = 'single') {
     const acceptAll = (getDatabase().allowAllExtentionFiles || isIOS() || allowedExtensions[0] === '*')
     return selectDomFiles({
@@ -196,7 +208,7 @@ function readFileAsUint8Array(file: File) {
       };
   
       reader.onerror = () => {
-        reject(new Error('Failed to read file', { cause: reader.error }));
+        reject(new Error(`Failed to read file${reader.error ? `: ${reader.error.name}: ${reader.error.message}` : ''}`, { cause: reader.error }));
       };
   
       reader.readAsArrayBuffer(file);
@@ -250,14 +262,7 @@ export function findCharacterIndexbyId(id:string) {
 }
 
 export function getCharacterIndexObject() {
-    const db = getDatabase()
-    let i=0;
-    let result:{[key:string]:number} = {}
-    for(const char of db.characters){
-        result[char.chaId] = i
-        i += 1
-    }
-    return result
+    return indexCharactersById(getDatabase().characters)
 }
 
 export function defaultEmotion(em:[string,string][]){
@@ -1040,14 +1045,7 @@ export function parseToggleSyntax(template:string){
     }
 }
 
-export const sortableOptions = {
-	delay: 300, // time in milliseconds to define when the sorting should start
-	delayOnTouchOnly: true,
-    filter: '.no-sort',
-    onMove: (event) => {
-        return event.related.className.indexOf('no-sort') === -1
-    }
-} as const
+export { sortableOptions } from './sortableOptions'
 
 
 export function pickHashRand(cid:number,word:string) {

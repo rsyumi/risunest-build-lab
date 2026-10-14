@@ -25,9 +25,37 @@ fn present_bulk_hydration_completes_without_any_body_open_or_hash() {
     assert!(session.hydrate_many_outcomes(&hashes, &|| Ok(()), |hash,outcome| completed.push((hash.to_owned(),outcome))).unwrap().is_empty());
     let work = take_body_io(); let hashes_work = crate::persistent_store::hash_work::take_hash_work();
     assert!(work.complete()); assert!(work.domains.is_empty());
+    assert_eq!((work.stat_requests, work.batch_stat_requests), (0, 1));
     assert_eq!(completed.len(), hashes.len());
     assert!(completed.iter().all(|(_,outcome)| *outcome == super::residency::HydrationOutcome::AlreadyLocal));
     assert!(hashes_work.domains.is_empty()); assert!(hashes_work.incomplete.is_empty());
+}
+
+#[test]
+fn server_hydration_prepares_downloaded_bodies_with_four_joined_workers() {
+    use crate::asset_repository::body_io;
+    let server = LocalServerFixture::new();
+    let (_root, mut store) = local();
+    let core = server.client(&store);
+    let bodies = (0_u8..8).map(|index| vec![index; 80 * 1024]).collect::<Vec<_>>();
+    let hashes = bodies.iter().enumerate().map(|(index, body)| {
+        put_asset(&mut store, &format!("assets/parallel-{index}.png"), body).object_hash.unwrap()
+    }).collect::<Vec<_>>();
+    super::lww_tests::drain_publications(&core, &mut store, &[]).unwrap();
+    store.asset_residency_set_policy(super::residency::AssetPolicy::Remote, || Ok(())).unwrap();
+    store.asset_residency_evict(|| Ok(())).unwrap();
+    body_io::reset_body_io();
+    for hash in &hashes { body_io::register_object_purpose(hash, body_io::BodyPurpose::Asset); }
+    let mut session = super::residency::HydrationSession::new(store.repository_root(), None).unwrap();
+    assert!(session.hydrate_many(&hashes, &|| Ok(())).unwrap().is_empty());
+    let observed = body_io::take_body_io();
+    assert_eq!(observed.worker_scopes_started, 4);
+    assert_eq!(observed.worker_scopes_settled, 4);
+    let cas = PayloadCas::new(store.repository_root()).unwrap();
+    for (hash, body) in hashes.iter().zip(bodies) {
+        assert_eq!(cas.read_object(hash).unwrap(), Some(body));
+        assert_eq!(store.asset_object_byte_size(hash).unwrap(), Some(80 * 1024));
+    }
 }
 
 /// A body fetched from server custody, or already here when asked for, has its

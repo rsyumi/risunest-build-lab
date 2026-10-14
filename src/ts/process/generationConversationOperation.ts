@@ -1,5 +1,5 @@
 import { trackRerollOutput } from '../responseVariants'
-import { safeStructuredClone } from '../polyfill'
+import { safeStructuredClone } from '../safeStructuredClone'
 import type { ConversationOperationCommit } from './conversationOperationContext'
 import type { Chat, Message } from '../storage/database.svelte'
 import type {
@@ -367,9 +367,8 @@ function captureEmptyTailFallbackOperation(
             || options.getCurrentChat() !== options.chat
         ) return false
         return session === null || (
-            session.isActive
-            && options.getCurrentSession() === session
-            && session.version === sessionVersion
+            options.getCurrentSession() === session
+            && session.isContentUnchangedSince(sessionVersion!)
             && session.totalMessages === messageCount
             && session.materializeCompatibilityArray() === options.chat.message
         )

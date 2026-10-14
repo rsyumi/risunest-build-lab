@@ -6,11 +6,7 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }))
-vi.mock('../platform', () => ({
-    get isTauri() {
-        return mocks.isTauri
-    },
-}))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule(() => ({ runtime: mocks.isTauri ? 'tauri' : 'web', os: 'windows' })))
 
 import { createNativeAccountCredentialVault } from './nativeAccountCredential'
 
