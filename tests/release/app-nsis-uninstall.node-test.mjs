@@ -60,7 +60,7 @@ SectionEnd
     assert.equal(spawnSync(join(root, "normalize.exe"), ["/S"], { timeout: 30000, windowsHide: true }).status, 0);
     assert.deepEqual(readFileSync(join(root, "results"), "utf8").split("|").slice(0, -1), cases.map(([, expected]) => expected));
     assert.equal(existsSync(missing), false);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally { rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
 
 test("missing or misfiled Korean installer strings fail compilation", { skip }, () => {

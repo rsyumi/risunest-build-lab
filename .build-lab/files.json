@@ -18003,14 +18003,14 @@
     {
       "path": "tests/referencePins.node-test.mjs",
       "mode": "100644",
-      "bytes": 1979,
-      "sha256": "9695c1e624be164047a9539df3fc73212f2047a65fae27198ad51f17e72f43c6"
+      "bytes": 2699,
+      "sha256": "f58bae03e676c4e7cbdb6dcf883e15fdb72dd52e0ffba04904108177bca37d73"
     },
     {
       "path": "tests/release/app-nsis-uninstall.node-test.mjs",
       "mode": "100644",
-      "bytes": 10515,
-      "sha256": "fc2b9f81596269f7d933b8f2b290f7c70e5b75559356950d45a41d7f21db1e99"
+      "bytes": 10548,
+      "sha256": "43623903a6b441c1ffa4bd51ac70a31f8419b1ccc5533fc1ed610760d4ef14f9"
     },
     {
       "path": "tests/release/build-collect.node-test.mjs",
