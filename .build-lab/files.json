@@ -51,8 +51,8 @@
     {
       "path": "benchmarks/device-backup/android-smoke.mjs",
       "mode": "100644",
-      "bytes": 26945,
-      "sha256": "6d1440357f907127d250593641ab5a76a6c778c4c4c8e7e84dfe3d433bb875e0"
+      "bytes": 27208,
+      "sha256": "4eab8ca6b573b844aec196f95e27e7011454600872f3f3056184136bbc4d55bc"
     },
     {
       "path": "benchmarks/device-backup/index.html",
@@ -63,8 +63,8 @@
     {
       "path": "benchmarks/device-backup/main.ts",
       "mode": "100644",
-      "bytes": 21712,
-      "sha256": "22495a6b161ef4a1bd5b279897ff1e91d149f96b98347680852cbdc2e0dfb125"
+      "bytes": 21950,
+      "sha256": "ddc2f3d4f7e1f33da7b71d81ef173b7f6d2e2f285e94fd37a0a8acef63077ab7"
     },
     {
       "path": "benchmarks/device-backup/plugin-sync-driver.mjs",
@@ -99,8 +99,8 @@
     {
       "path": "benchmarks/device-backup/windows-smoke.mjs",
       "mode": "100644",
-      "bytes": 37637,
-      "sha256": "963359ba39bb4bc0527fe53671c5afb35164279f59214db3bb522beb7424a305"
+      "bytes": 37951,
+      "sha256": "76622294cd8f98d1774e0f46bac957434d7179ec18460b0c0d8089084bb64c48"
     },
     {
       "path": "benchmarks/file-backup/Cargo.lock",
@@ -7011,8 +7011,8 @@
     {
       "path": "src-tauri/src/native_file_jobs/legacy_backup.rs",
       "mode": "100644",
-      "bytes": 71452,
-      "sha256": "dd06b9bdc82b14926fdb2462dd5b90621df3e58088e269d72b13209bff9c8d49"
+      "bytes": 71716,
+      "sha256": "cda22723dc12782a5f165dc357056f6e948a0ce92c4a9d2f664a3232e120844f"
     },
     {
       "path": "src-tauri/src/native_file_jobs/legacy_backup/account_encryption.rs",
@@ -7023,8 +7023,8 @@
     {
       "path": "src-tauri/src/native_file_jobs/legacy_backup/cold_expansion.rs",
       "mode": "100644",
-      "bytes": 10976,
-      "sha256": "7eb1e58e8323bdc2bca92c6b807572d0a925e22b06316fdcd9159e1cade3f1f2"
+      "bytes": 11374,
+      "sha256": "58002bf41ab6b938b229c7590500a1bbfd7c76fdacadd819d19f21af6c60ea64"
     },
     {
       "path": "src-tauri/src/native_file_jobs/legacy_backup/compatibility_contracts/pocket.json",
@@ -7173,8 +7173,8 @@
     {
       "path": "src-tauri/src/native_file_jobs/restore.rs",
       "mode": "100644",
-      "bytes": 244420,
-      "sha256": "21bb4238b6ce0e891345b22d937edb9eba250bbdd45196f13f955bdc60f721e3"
+      "bytes": 248646,
+      "sha256": "b315df56ab3881b6df469a196a6e4d7befdf4e3e7964df832f3128ff8d7ddefd"
     },
     {
       "path": "src-tauri/src/native_file_jobs/restore/historical.rs",
@@ -15573,8 +15573,8 @@
     {
       "path": "src/ts/storage/nativeFileJobs.test.ts",
       "mode": "100644",
-      "bytes": 217449,
-      "sha256": "254720910a041c1b74e43113b821bfdcafda9abb30a7dd9c336b8e874bb7c831"
+      "bytes": 218593,
+      "sha256": "b000ffa4f2bbe93c3c03d999be5bb9b9ff857ec79671e250962c503c77482064"
     },
     {
       "path": "src/ts/storage/nativeFileJobs.testSupport.ts",

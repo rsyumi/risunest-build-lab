@@ -23,7 +23,8 @@ import {
   type HypaEmbeddingEntry,
 } from "../../src/ts/storage/hypaEmbeddingCache";
 import { createNativeDeviceSettings } from "../../src/ts/storage/nativeDeviceSettings";
-import { initializeDeviceMarkers } from '../../src/ts/storage/deviceMarkers';
+import { getDeviceMarkers, initializeDeviceMarkers } from '../../src/ts/storage/deviceMarkers';
+import { updateDeviceSettings } from '../../src/ts/storage/deviceSettings';
 import { normalizeDatabaseDefaults, setDatabase } from '../../src/ts/storage/database.svelte';
 import { pluginValueMeasurement } from './plugin-values';
 import {
@@ -161,10 +162,12 @@ async function seed() {
     "graph",
     JSON.stringify({ nested: [1, 2, 3], enabled: true }),
   );
-  await createNativeDeviceSettings().set(settingKey, {
-    enabled: true,
-    label: "synthetic",
+  updateDeviceSettings({
+    messageSendKey: 'button',
+    generationHistoryLimitEnabled: true,
+    generationHistoryLimitMultiplier: 3,
   });
+  await getDeviceMarkers().flush();
 }
 
 async function mutate() {
@@ -184,11 +187,12 @@ async function mutate() {
   await plugins.setItem("string", "text", "replaced");
   await plugins.removeItem("json", "graph");
   await plugins.setItem("json", "extra", JSON.stringify({ remove: true }));
-  await createNativeDeviceSettings().set(settingKey, {
-    enabled: false,
-    label: "replaced",
-    extra: true,
+  updateDeviceSettings({
+    messageSendKey: 'ctrl-shift-enter',
+    generationHistoryLimitEnabled: false,
+    generationHistoryLimitMultiplier: 4,
   });
+  await getDeviceMarkers().flush();
 }
 
 async function fingerprints() {

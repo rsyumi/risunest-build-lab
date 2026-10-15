@@ -373,6 +373,7 @@ async function run() {
   let app;
   let page;
   let browser;
+  let pageOrigin;
   let appOutput = "";
   try {
     const knownFolder = await command("powershell.exe", [
@@ -521,7 +522,7 @@ async function run() {
       await page.call("Runtime.enable");
       const identity = await evaluate(
         page,
-        `(async()=>{if(document.title!==${JSON.stringify(title)})throw new Error('wrong-synthetic-title');return {identifier:await globalThis.__TAURI_INTERNALS__.invoke('plugin:app|identifier'),nativeRoot:(await globalThis.__TAURI_INTERNALS__.invoke('app_paths_roots')).data}})()`,
+        `(async()=>{if(document.title!==${JSON.stringify(title)})throw new Error('wrong-synthetic-title');return {identifier:await globalThis.__TAURI_INTERNALS__.invoke('plugin:app|identifier'),nativeRoot:(await globalThis.__TAURI_INTERNALS__.invoke('app_paths_roots')).data,origin:location.origin}})()`,
       );
       if (
         identity.identifier !== identifier ||
@@ -530,6 +531,7 @@ async function run() {
         throw new Error("synthetic-native-identity-mismatch");
       }
       report.identityVerified = true;
+      pageOrigin = identity.origin;
       report.ownedAppPid = app.pid;
       report.environment.webview = await browser.call("Browser.getVersion");
       report.environment.originStorage = await evaluate(
@@ -649,7 +651,7 @@ async function run() {
       try {
         const state = await evaluate(
           page,
-          `(()=>{if(document.title!==${JSON.stringify(title)})throw new Error('wrong-synthetic-title');return globalThis.__deviceBackupSmoke?.state()??null})()`,
+          `(()=>{if(document.title!==${JSON.stringify(title)}){if(${controlRehydrationPending}&&location.origin===${JSON.stringify(pageOrigin)}&&document.title===''&&document.readyState==='loading')return null;throw new Error('wrong-synthetic-title:'+JSON.stringify({title:document.title,state:document.readyState,origin:location.origin}))}return globalThis.__deviceBackupSmoke?.state()??null})()`,
         );
         if (!state) {
           await delay(100);
