@@ -35,6 +35,7 @@ const mocks = vi.hoisted(() => ({
     editWindowedChatList: vi.fn(),
     alertConfirm: vi.fn(async (_options?: unknown) => true),
     alertSelect: vi.fn(async () => '0'),
+    presentAlert: vi.fn((_alert: { type: string, msg: string, onSelect?(index: number): void }) => {}),
     alertAddCharacter: vi.fn(async () => 'createfromScratch'),
     alertError: vi.fn(),
     alertToast: vi.fn(),
@@ -61,20 +62,17 @@ vi.mock('./storage/database.svelte', () => ({
         mocks.database.characters[index] = character
     },
 }))
-vi.mock('./alert', async () => {
-    const { writable } = await import('svelte/store')
-    return {
-        alertAddCharacter: mocks.alertAddCharacter,
-        alertConfirm: mocks.alertConfirm,
-        alertCheckboxConfirm: async (options: unknown) => ({ confirmed: await mocks.alertConfirm(options), checked: true }),
-        alertError: mocks.alertError,
-        alertToast: mocks.alertToast,
-        alertNormal: vi.fn(),
-        alertSelect: mocks.alertSelect,
-        alertStore: writable({ type: 'none', msg: '' }),
-        alertWait: vi.fn(),
-    }
-})
+vi.mock('./alert', () => ({
+    alertAddCharacter: mocks.alertAddCharacter,
+    alertConfirm: mocks.alertConfirm,
+    alertCheckboxConfirm: async (options: unknown) => ({ confirmed: await mocks.alertConfirm(options), checked: true }),
+    alertError: mocks.alertError,
+    alertToast: mocks.alertToast,
+    alertNormal: vi.fn(),
+    alertSelect: mocks.alertSelect,
+    alertStore: { set: mocks.presentAlert },
+    alertWait: vi.fn(),
+}))
 vi.mock('./util', () => ({
     checkNullish: (value: unknown) => value === null || value === undefined,
     findCharacterbyId: mocks.findCharacterbyId,
@@ -1481,6 +1479,39 @@ describe('chat list operations', () => {
         expect(exported).not.toContain('onerror')
         expect(exported).toContain('<h2>&lt;b&gt;A&amp;B&lt;/b&gt;</h2>')
         expect(exported).not.toContain('<b>A')
+    })
+
+    it.each([
+        { mode: '2', name: '"', text: 'bo×××b met ×××BO×××B×××', alt: 'a×××b BO×××B' },
+        { mode: '3', name: '"', text: 'bo×××b met ×××BO×××B×××', alt: 'a×××b BO×××B' },
+        { mode: '2', name: 'Bo"b', text: '××× met "×××"', alt: 'a"b ×××' },
+    ])('hides the name $name in anonymous export mode $mode without changing the markup', async ({ mode, name, text, alt }) => {
+        const character = buildCharacter()
+        character.name = name
+        // The first image is what parseMarkdownSafe makes of `![x onerror=alert(1)//](y)`; the parser stub passes it through.
+        character.firstMessage = '<p>bo"b met "BO"B"</p><img src="y" alt="x onerror=alert(1)//"><img src="z" alt="a&quot;b BO&quot;B">'
+        mocks.database.characters.push(character)
+        selectedCharID.set(0)
+        mocks.readPersistentConversation.mockResolvedValue({ ...character.chats[0], fmIndex: -1, message: [] })
+        // Export mode, keep the original text, then hide names.
+        mocks.alertSelect.mockResolvedValueOnce(mode).mockResolvedValueOnce('1').mockResolvedValueOnce('1')
+        mocks.downloadFile.mockResolvedValueOnce(true)
+
+        await exportChat(0)
+        if (mode === '3') {
+            const offer = mocks.presentAlert.mock.lastCall![0]
+            offer.onSelect!(offer.msg.split('||').findIndex(choice => choice.endsWith('(.html)')))
+        }
+
+        const exported = await vi.waitFor(() => Buffer.from(mocks.downloadFile.mock.calls[0][1]).toString())
+        const exportedDocument = new DOMParser().parseFromString(exported, 'text/html')
+        const images = [...exportedDocument.querySelectorAll('img')]
+        expect(images.flatMap(image => image.getAttributeNames()).filter(attribute => attribute.startsWith('on'))).toEqual([])
+        expect(images.map(image => [image.getAttribute('src'), image.getAttribute('alt')])).toEqual([
+            ['y', 'x onerror=alert(1)//'],
+            ['z', alt],
+        ])
+        expect(exportedDocument.querySelector('p')?.textContent).toBe(text)
     })
 
     it('reads the complete character authoritatively before exporting all chats', async () => {

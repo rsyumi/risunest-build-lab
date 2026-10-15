@@ -95,6 +95,14 @@ export const languageKorean = {
         restored: '선택한 백업 영역을 복원했습니다.',
     
         "invalidInlaysConfirm": (count: number) => `손상된 인레이 ${count}개는 복원되지 않습니다. 계속 복원하시겠습니까?`,
+        omittedRestoreData: {
+            data: (count: number) => `지원하지 않는 저장 데이터 ${count}개는 복원되지 않습니다.`,
+            remote: (count: number) => `백업 외부에 저장된 데이터 ${count}개는 복원되지 않습니다.`,
+            missing: (count: number) => `백업에 없는 저장 데이터 ${count}개는 복원되지 않습니다.`,
+            values: (count: number) => `지원하지 않는 저장 값 ${count}개는 복원되지 않습니다.`,
+            pluginStorage: (count: number) => `지원하지 않는 플러그인 저장 데이터 ${count}개는 복원되지 않습니다.`,
+            inlays: (count: number) => `지원하지 않는 인레이 ${count}개는 복원되지 않습니다.`,
+        },
         "recovery": {
             "dismiss": '기록 삭제',
             "later": '나중에 확인',
@@ -1792,6 +1800,8 @@ export const languageKorean = {
         
             "archiveFailed": '캐릭터를 보관하지 못했습니다.',
             "restoreFailed": '캐릭터를 복원하지 못했습니다.',
+            "archiveTooLarge": '캐릭터 데이터 크기가 너무 커서 보관하지 못했습니다.',
+            "restoreTooLarge": '캐릭터 데이터 크기가 너무 커서 복원하지 못했습니다.',
             "archiveRefreshFailed": '캐릭터를 보관했지만 목록에 반영하지 못했습니다. 앱을 다시 시작해주세요.',
             "restoreRefreshFailed": '캐릭터를 복원했지만 목록에 반영하지 못했습니다. 앱을 다시 시작해주세요.',
             "archiveRemoteAssetUnavailable": '서버나 외부 저장소에만 있는 파일을 가져오지 못해 캐릭터를 보관하지 못했습니다. 연결을 확인한 후 다시 시도해주세요.',
@@ -2581,6 +2591,9 @@ export const languageKorean = {
             stagePreparingAttachments: '첨부 파일 준비 중',
             stageReadingDatabase: '데이터베이스 읽는 중',
             stageDecodingDatabase: '데이터베이스 해석 중',
+            stageRequestingBackupKey: '백업 키 요청 중',
+            stageDecryptingDatabase: '백업 암호 해제 중',
+            stageCleaningUp: '복원 완료, 임시 파일 정리 중',
             stageFinalizingStaging: '설정과 프리셋 저장 중',
             stageAssignPluginValues: '플러그인 값 할당',
             stageActivating: '데이터 적용 중',
@@ -2614,6 +2627,7 @@ export const languageKorean = {
                 '가져오기에 실패했습니다. 기존 데이터는 그대로입니다.',
             resultFailedAfterCommit:
                 '데이터는 가져왔지만 화면을 새로 고치지 못했습니다. 다른 변경을 하기 전에 화면 새로 고침을 선택해주세요.',
+            resultActivationUnresolved: '복원 결과를 확인하지 못했습니다. 다른 변경을 하기 전에 화면 새로 고침을 선택해 결과를 확인해주세요.',
             errorDetails: '오류 상세',
             errorDetailsHide: '오류 상세 숨기기',
             copyDetails: '복사',
@@ -2629,8 +2643,11 @@ export const languageKorean = {
             reasonStoreError: '저장소 오류로 가져오지 못했습니다.',
             reasonUnknown: '알 수 없는 오류가 발생했습니다.',
             reasonTooLarge: '{0} 크기가 너무 커서 가져오지 못했습니다.',
+            reasonExportTooLarge: '{0} 크기가 너무 커서 내보내지 못했습니다.',
+            reasonCompatibleDatabaseTooLarge: '데이터 크기가 너무 커서 호환 백업으로 내보내지 못했습니다. RisuNest 백업을 사용하세요.',
             tooLargeItems: {
                 root: '설정', preset: '프리셋', character: '캐릭터', conversation: '대화', message: '메시지', 'plugin-value': '플러그인 데이터',
+                record: '데이터 항목', backup: '백업 데이터', 'backup-entry': '백업 항목', card: '캐릭터 카드', module: '모듈', content: '카드 또는 모듈', 'owner-manifest': '추가 에셋 목록', 'compatible-database': '데이터',
             },
             warningCleanupFailed:
                 '임시 파일을 정리하지 못했습니다. 다음 시작 때 다시 시도합니다.',
@@ -2663,7 +2680,7 @@ export const languageKorean = {
             "reasonCompatibilityImport": '이 형식의 백업을 가져오려면 백업 파일을 다시 선택하세요.',
             "reasonBackupEncryptionInvalid": '백업의 암호화 정보를 읽을 수 없습니다. 백업 파일을 다시 생성해주세요.',
             "reasonBackupKeyRequest": 'RisuAI 서버에서 백업의 복호화 키를 가져오지 못했습니다. 인터넷 연결을 확인한 후 다시 시도해주세요.',
-            "reasonBackupKeyHttp": 'RisuAI 서버가 백업 복호화 키 요청에 오류를 반환했습니다. 오류 상세에서 HTTP 상태 코드를 확인해주세요.',
+            "reasonBackupKeyHttp": 'RisuAI 서버가 백업 복호화 키 요청에 오류를 반환했습니다. 잠시 후 다시 시도해주세요.',
             "reasonBackupKeyInvalid": 'RisuAI 서버에서 올바른 백업 복호화 키를 받지 못했습니다. 잠시 후 다시 시도해주세요.',
             "reasonBackupDecryption": '백업의 암호화를 해제하지 못했습니다. 백업 파일을 확인해주세요.',
             "reasonBackupDatabase": '백업의 데이터베이스를 읽을 수 없습니다. 백업 파일을 확인해주세요.',

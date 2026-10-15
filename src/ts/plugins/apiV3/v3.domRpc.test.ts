@@ -11,6 +11,9 @@ import {
     loadV3Plugins,
     areV3PluginsIdle,
     prepareV3PluginsForReload,
+    fencePluginExecutionForAuthorityReplacement,
+    restartPluginsAfterAuthorityReplacement,
+    canInterruptV3Plugins,
 } from './v3.svelte'
 import { registerOwnedPluginMCP } from '../hostToolHost'
 import { requestChatDataMain } from '../../process/request/request'
@@ -26,6 +29,7 @@ const mocks = vi.hoisted(() => ({
     confirm: vi.fn(async () => true),
     permissionValues: new Map<string, unknown>(),
     providers: new Map<string, Function>(),
+    cancelReload: vi.fn(),
     patchConversation: vi.fn(async (): Promise<unknown> => ({ status: 'applied', revision: 4 })),
     listHostTools: vi.fn(async (_owner: string): Promise<unknown> => ({ scope: 'scope', tools: [] })),
     callHostTool: vi.fn(async (_owner: string, _request: unknown, _signal?: AbortSignal): Promise<unknown> => []),
@@ -35,6 +39,8 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('../plugins.svelte', async () => (await import('./v3Host.testSupport')).pluginsModule({
     pluginV2: { providers: mocks.providers, providerOptions: new Map() },
+    cancelPluginReloadAfterSync: mocks.cancelReload,
+    loadPluginsAfterAuthoritativeRestore: async () => {},
 }))
 vi.mock('src/ts/storage/database.svelte', async () => (await import('./v3Host.testSupport')).databaseModule({
     read: () => mocks.database,
@@ -241,6 +247,7 @@ function __postToParent(message) {
         })
         mocks.permissionValues.clear()
         mocks.providers.clear()
+        mocks.cancelReload.mockReset()
         guestEvaluations = []
         mocks.confirm.mockResolvedValue(true)
         mocks.selectedId = 0
@@ -254,6 +261,7 @@ function __postToParent(message) {
     })
 
     afterEach(async () => {
+        await restartPluginsAfterAuthorityReplacement()
         await loadV3Plugins([])
         document.body.replaceChildren()
         vi.unstubAllEnvs()
@@ -459,6 +467,29 @@ function __postToParent(message) {
         `)
         await loadV3Plugins([])
         expect(dispose).toHaveBeenCalledOnce()
+    })
+
+    it('permits plugin reload after restore preparation fails', async () => {
+        mocks.cancelReload.mockImplementationOnce(() => { throw new Error('Synthetic preparation failure') })
+        await expect(fencePluginExecutionForAuthorityReplacement()).rejects.toThrow('Synthetic preparation failure')
+        expect(canInterruptV3Plugins()).toBe(true)
+        await startFixture('after-failed-restore')
+        expect(getV3PluginInstance('after-failed-restore')).toBeDefined()
+    })
+
+    it('cancels a stalled restore fence without letting late teardown erase the next plugin load', async () => {
+        await startFixture('cancelled-restore', `globalThis.rpcReady = risuai.onUnload(() => new Promise(resolve => { globalThis.finishCleanup = resolve; }));`)
+        const child = getV3PluginInstance('cancelled-restore')!.host
+        const controller = new AbortController()
+        const fencing = fencePluginExecutionForAuthorityReplacement(controller.signal)
+        const cancelled = expect(fencing).rejects.toMatchObject({name:'AbortError'})
+        await vi.waitFor(async () => expect(await child.executeInIframe('return typeof globalThis.finishCleanup')).toBe('function'))
+        controller.abort()
+        expect(canInterruptV3Plugins()).toBe(true)
+        await child.executeInIframe('globalThis.finishCleanup(); return true')
+        await cancelled
+        await startFixture('after-cancelled-restore')
+        expect(getV3PluginInstance('after-cancelled-restore')).toBeDefined()
     })
 
     it('serializes overlapping reloads and invokes guest cleanup once', async () => {

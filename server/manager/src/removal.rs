@@ -3,9 +3,14 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Component, Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 const RECORD: &str = "risunest-sync-instance.json";
+/// The marker of the replaced bundle, kept by an NSIS install until obsolete files are removed.
+const INSTALL_BASELINE: &str = "risunest-sync-bundle.previous.json";
+/// Antivirus scans and exiting helper processes briefly hold files that are free to remove.
+const TRANSIENT_REMOVAL_BUDGET: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -417,6 +422,9 @@ fn plan_at_with_force(
         .into_iter()
         .map(|p| install.join(p))
         .collect();
+    if cfg!(windows) && install.join(INSTALL_BASELINE).is_file() {
+        plan.files.push(install.join(INSTALL_BASELINE));
+    }
     for file in &plan.files {
         safe_path(file)?;
     }
@@ -472,9 +480,32 @@ pub async fn cleanup_services(root: &Path, server: &Path) -> Result<()> {
     Ok(())
 }
 
+fn retry_transient<T>(
+    budget: Duration,
+    mut operation: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let deadline = Instant::now() + budget;
+    loop {
+        match operation() {
+            Err(error)
+                if cfg!(windows)
+                    && matches!(error.raw_os_error(), Some(5 | 32))
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            result => return result,
+        }
+    }
+}
+
 fn remove_file(path: &Path) -> Result<()> {
+    remove_file_within(path, Duration::ZERO)
+}
+
+fn remove_file_within(path: &Path, budget: Duration) -> Result<()> {
     safe_path(path)?;
-    match fs::remove_file(path) {
+    match retry_transient(budget, || fs::remove_file(path)) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!("removal-file-failed: {} ({error})", path.display())),
@@ -520,13 +551,26 @@ pub fn remove_owned_files(root: &Path, server: &Path, force: bool) -> Result<()>
     if lifecycle::owner_active(root)? {
         return Err("removal-process-still-running".into());
     }
-    let inventory = marker(&plan.install);
-    for file in &plan.files {
-        if file != &inventory {
-            remove_file(file)?;
-        }
+    remove_planned_files(&plan, TRANSIENT_REMOVAL_BUDGET)
+}
+
+/// A retried uninstall runs the installed manager again, which needs the background manager
+/// for its guard and the marker for its plan, so those are removed after every other file.
+/// The manager goes first among them: an open console manager then fails before the others.
+#[cfg(windows)]
+fn remove_planned_files(plan: &RemovalPlan, budget: Duration) -> Result<()> {
+    let last = [
+        plan.install.join("risunest-sync-manager.exe"),
+        plan.install.join("risunest-sync-manager-background.exe"),
+        marker(&plan.install),
+    ];
+    for file in plan.files.iter().filter(|file| !last.contains(file)) {
+        remove_file_within(file, budget)?;
     }
-    remove_file(&inventory)
+    for file in last.iter().filter(|file| plan.files.contains(file)) {
+        remove_file_within(file, budget)?;
+    }
+    Ok(())
 }
 
 pub fn delete_registered_data(root: &Path, server: &Path) -> Result<()> {
@@ -578,11 +622,12 @@ pub fn delete_registered_data(root: &Path, server: &Path) -> Result<()> {
         remove_profiles(&profiles)?;
     }
     platform::cleanup_update_helpers(root)?;
-    remove_data_files(root)?;
+    // The installer guard publishes its release before its executable in manager-update exits.
+    remove_data_files(root, TRANSIENT_REMOVAL_BUDGET)?;
     Ok(())
 }
 
-fn remove_data_files(root: &Path) -> Result<()> {
+fn remove_data_files(root: &Path, budget: Duration) -> Result<()> {
     safe_data_tree(root)?;
     if root.exists() {
         for entry in fs::read_dir(root).map_err(|_| "removal-data-failed")? {
@@ -592,9 +637,10 @@ fn remove_data_files(root: &Path) -> Result<()> {
             }
             safe_tree(&path)?;
             if path.is_dir() {
-                fs::remove_dir_all(&path).map_err(|_| "removal-data-failed")?;
+                retry_transient(budget, || fs::remove_dir_all(&path))
+                    .map_err(|_| "removal-data-failed")?;
             } else {
-                remove_file(&path)?;
+                remove_file_within(&path, budget)?;
             }
         }
         remove_file(&root.join(RECORD))?;
@@ -1087,10 +1133,10 @@ mod tests {
         fs::write(root.join("objects/blob"), "synthetic").unwrap();
         fs::write(root.join("metadata.sqlite"), "synthetic").unwrap();
         fs::write(temp.path().join("export.zip"), "external").unwrap();
-        remove_data_files(&root).unwrap();
+        remove_data_files(&root, Duration::ZERO).unwrap();
         assert!(!root.exists());
         assert!(temp.path().join("export.zip").exists());
-        remove_data_files(&root).unwrap();
+        remove_data_files(&root, Duration::ZERO).unwrap();
     }
     #[test]
     fn unknown_data_or_install_files_prevent_destructive_removal() {
@@ -1116,11 +1162,94 @@ mod tests {
             .share_mode(0)
             .open(&path)
             .unwrap();
-        assert!(remove_data_files(&root).is_err());
+        assert!(remove_data_files(&root, Duration::ZERO).is_err());
         assert!(root.join(RECORD).exists());
         drop(handle);
-        remove_data_files(&root).unwrap();
+        remove_data_files(&root, Duration::ZERO).unwrap();
         assert!(!root.exists());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn data_removal_waits_for_an_exiting_guard_to_release_its_executable() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (_temp, root, _server, _registry) = fixture();
+        let helper = root.join("manager-update/helper/risunest-sync-update-helper.exe");
+        fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        fs::write(&helper, "synthetic").unwrap();
+        let handle = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&helper)
+            .unwrap();
+        let exit = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(handle);
+        });
+        remove_data_files(&root, Duration::from_secs(5)).unwrap();
+        exit.join().unwrap();
+        assert!(!root.exists());
+    }
+    #[cfg(windows)]
+    fn windows_bundle(server: &Path, names: &[&str]) {
+        let install = server.parent().unwrap();
+        let path = marker(install);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["files"] = serde_json::json!(names);
+        fs::write(path, value.to_string()).unwrap();
+        for name in names {
+            fs::write(install.join(name), "synthetic").unwrap();
+        }
+    }
+    #[cfg(windows)]
+    #[test]
+    fn files_a_retried_uninstall_needs_are_removed_last() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (_temp, root, server, registry) = fixture();
+        let install = server.parent().unwrap().to_owned();
+        windows_bundle(
+            &server,
+            &[
+                "server",
+                "risunest-sync-manager.exe",
+                "risunest-sync-manager-background.exe",
+                "risunest-sync-server.exe",
+            ],
+        );
+        let handle = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(install.join("risunest-sync-server.exe"))
+            .unwrap();
+        let plan = plan_at(&registry, &root, &server, false).unwrap();
+        assert!(plan.blockers.is_empty());
+        assert!(remove_planned_files(&plan, Duration::ZERO).is_err());
+        for name in [
+            "risunest-sync-manager.exe",
+            "risunest-sync-manager-background.exe",
+            "risunest-sync-bundle.json",
+        ] {
+            assert!(install.join(name).is_file(), "{name} was removed early");
+        }
+        let scan = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(handle);
+        });
+        let plan = plan_at(&registry, &root, &server, false).unwrap();
+        remove_planned_files(&plan, Duration::from_secs(5)).unwrap();
+        scan.join().unwrap();
+        assert_eq!(fs::read_dir(&install).unwrap().count(), 0);
+    }
+    #[cfg(windows)]
+    #[test]
+    fn an_unfinished_install_baseline_is_removed_with_the_installation() {
+        let (_temp, root, server, registry) = fixture();
+        let baseline = server.with_file_name(INSTALL_BASELINE);
+        fs::write(&baseline, "synthetic").unwrap();
+        let plan = plan_at(&registry, &root, &server, false).unwrap();
+        assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+        remove_planned_files(&plan, Duration::ZERO).unwrap();
+        assert!(!baseline.exists());
     }
     #[cfg(unix)]
     #[test]

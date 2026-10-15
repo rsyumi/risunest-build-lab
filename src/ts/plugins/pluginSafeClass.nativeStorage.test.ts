@@ -10,6 +10,7 @@ vi.mock('../storage/persistentDataStoreFactory', () => ({ getPersistentDataStore
 import { SafeLocalPluginStorage } from './pluginSafeClass'
 import { invalidatePluginDeviceKeyspaces } from './pluginDeviceKeyspace'
 import { deletePluginDataItems } from './pluginDataInventory'
+import { pluginDeviceParts, pluginDeviceValueSize, readNativePluginDeviceValue, writeNativePluginDeviceValues, PLUGIN_DEVICE_PART_BYTES } from './pluginDeviceTransfer'
 
 beforeEach(() => {
     native.values.clear()
@@ -34,6 +35,64 @@ beforeEach(() => {
 })
 
 describe('native JSON plugin values', () => {
+    it('counts encoded UTF-8 and splits only between complete code points', () => {
+        for (const value of ['a가😀\"\n\u0000z', '😀😀😀', '', '한글'.repeat(20)]) {
+            const size = new TextEncoder().encode(JSON.stringify(value)).length
+            expect(pluginDeviceValueSize(value, size)).toBe(size)
+            expect(() => pluginDeviceValueSize(value, size - 1)).toThrow('too large')
+            const parts = [...pluginDeviceParts(value, 8)]
+            expect(parts.map(({ part }) => part).join('')).toBe(value)
+            for (const { part, byteLength } of parts) {
+                expect(new TextEncoder().encode(part).length).toBe(byteLength)
+                expect(pluginDeviceValueSize(part, 8)).toBeLessThanOrEqual(8)
+            }
+        }
+        expect(() => pluginDeviceValueSize('\ud800')).toThrow('surrogate')
+        expect(() => [...pluginDeviceParts('\udc00')]).toThrow('surrogate')
+    })
+
+    it('discards a changed ranged read before assembling the new value', async () => {
+        let started = 0
+        native.invoke.mockImplementation(async (command, args) => {
+            if (command === 'pds_read_plugin_device_value') return { byteSize: ++started === 1 ? 12 : 7, version: String(started) }
+            if (command === 'pds_read_plugin_device_range') {
+                if (args.version === '1') return args.offset === 0
+                    ? { type: 'value', value: 'old', nextOffset: 3 } : { type: 'changed' }
+                return args.offset === 0 ? { type: 'value', value: '가', nextOffset: 3 }
+                    : { type: 'value', value: '😀', nextOffset: 7 }
+            }
+            throw new Error(`Unexpected native command ${command}`)
+        })
+        await expect(readNativePluginDeviceValue('owner', 'string', 'key')).resolves.toBe('가😀')
+    })
+
+    it('commits a large value only after all parts arrive and aborts a failed transfer', async () => {
+        const value = 'x'.repeat(PLUGIN_DEVICE_PART_BYTES - 3) + '😀가tail'
+        let saved = 'before', received: string[] = [], fail = true
+        native.invoke.mockImplementation(async (command, args) => {
+            if (command === 'pds_open_plugin_device_write') { received = []; return { sessionId: 'session' } }
+            if (command === 'pds_append_plugin_device_write') {
+                if (fail && received.length) throw new Error('synthetic transport failure')
+                received.push(args.part)
+                return args.offset + new TextEncoder().encode(args.part).length
+            }
+            if (command === 'pds_write_plugin_device_values') {
+                expect(args.mutations).toEqual([{ type: 'staged', sessionId: 'session' }])
+                saved = received.join(''); return
+            }
+            if (command === 'pds_abort_plugin_device_write') { received = []; return }
+            throw new Error(`Unexpected native command ${command}`)
+        })
+        const write = () => writeNativePluginDeviceValues('owner', [{ type: 'set', space: 'string', key: 'key', value }])
+        await expect(write()).rejects.toThrow('synthetic transport failure')
+        expect(saved).toBe('before')
+        expect(received).toEqual([])
+        fail = false
+        await write()
+        expect(saved).toBe(value)
+        expect(received).toEqual([])
+    })
+
     it('preserves ordinary JSON and rejects unsupported values before the native boundary', async () => {
         const storage = new SafeLocalPluginStorage('native-json')
         for (const value of [{ nested: true }, [1, null], null, 42, 'text']) {

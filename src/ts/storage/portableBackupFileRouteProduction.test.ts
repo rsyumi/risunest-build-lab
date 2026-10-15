@@ -14,6 +14,7 @@ const m = vi.hoisted(() => ({
     status: vi.fn(),
     export: vi.fn(),
     discard: vi.fn(),
+    discardIOS: vi.fn(),
     materializeAndroid: vi.fn(),
     materializeIOS: vi.fn(),
     beginReplacement: vi.fn(),
@@ -39,7 +40,7 @@ vi.mock('./androidSafBridge', () => ({
     pickAndroidPortableBackupSource: vi.fn(),
     materializeAndroidBackupSource: m.materializeAndroid,
 }))
-vi.mock('./iosFiles', async (original) => ({...(await original<object>()),pickIOSBackupSource:vi.fn(),materializeIOSBackupSource:m.materializeIOS,discardIOSFile:vi.fn()}))
+vi.mock('./iosFiles', async (original) => ({...(await original<object>()),pickIOSBackupSource:vi.fn(),materializeIOSBackupSource:m.materializeIOS,discardIOSFile:m.discardIOS}))
 vi.mock('./deviceBackup/selectionDialog', () => ({
     selectPortableBackupExport: m.chooseExport,
     selectPortableBackupRestore: m.chooseRestore,
@@ -86,7 +87,7 @@ const result = {
 describe('common backup file production route', () => {
     beforeEach(() => {
         vi.resetAllMocks()
-        vi.stubGlobal('window', { crypto: globalThis.crypto })
+        vi.stubGlobal('window', Object.assign(new EventTarget(), { crypto: globalThis.crypto }))
         mockIPC(() => undefined)
         m.controller = new AbortController()
         m.manager.mockImplementation(async (_kind, _label, run) =>
@@ -141,6 +142,65 @@ describe('common backup file production route', () => {
         expect(m.legacy.mock.calls[0][1]).toEqual({type:'androidSpool',token:'synthetic-materialized'})
         expect(m.discard).toHaveBeenCalledWith('synthetic-materialized')
     })
+    it('propagates cancellation into the Android copy and removes its late result before restore', async () => {
+        m.invoke.mockResolvedValue('local-backup')
+        const released: string[] = []
+        const removed: string[] = []
+        const bridge = {
+            copyExport() {},
+            async materializeBackupSource() {
+                m.controller.abort()
+                await Promise.resolve()
+                return JSON.stringify({ ready: [{ token: 'late-copy' }], failures: [] })
+            },
+            discardPortableSource(token: string) { released.push(token); return true },
+            discardSource(token: string) { removed.push(token); return true },
+        }
+        const { materializeAndroidBackupSource } = await vi.importActual<typeof import('./androidSafBridge')>('./androidSafBridge')
+        m.materializeAndroid.mockImplementation((token, options) => materializeAndroidBackupSource(token, options, bridge))
+        await expect(restoreBackupFromNativeSource({ type: 'androidSeekable', token: 'synthetic-custody' }))
+            .rejects.toMatchObject({ name: 'AbortError' })
+        expect(released).toEqual(['synthetic-custody'])
+        expect(removed).toEqual(['late-copy'])
+        expect(m.legacy).not.toHaveBeenCalled()
+        expect(m.invoke).toHaveBeenLastCalledWith('native_portable_source_discard', { source: { type: 'androidSeekable', token: 'synthetic-custody' } })
+    })
+    it.each(['androidSeekable', 'iosScoped'] as const)('settles a %s restore cancelled during its copy without waiting for the copy reply', async type => {
+        const source = { type, token: 'synthetic-custody' }
+        let reply!: (value: unknown) => void
+        const copyReply = new Promise(resolve => { reply = resolve })
+        let copying = false
+        const released: string[] = []
+        const removed: string[] = []
+        const { materializeAndroidBackupSource } = await vi.importActual<typeof import('./androidSafBridge')>('./androidSafBridge')
+        const { materializeIOSBackupSource } = await vi.importActual<typeof import('./iosFiles')>('./iosFiles')
+        m.materializeAndroid.mockImplementation((token, options) => materializeAndroidBackupSource(token, options, {
+            copyExport() {},
+            materializeBackupSource() { copying = true; return copyReply as Promise<string> },
+            discardPortableSource(token) { released.push(token); return true },
+            discardSource(token) { removed.push(token); return true },
+        }))
+        m.materializeIOS.mockImplementation(materializeIOSBackupSource)
+        m.invoke.mockImplementation(async (command, args) => {
+            if (command === 'native_backup_source_format') return 'local-backup'
+            if (command === 'plugin:ios-native|materialize_backup_source') { copying = true; return copyReply }
+            if (command === 'native_portable_source_discard' && type === 'iosScoped') released.push(args.source.token)
+            if (command === 'plugin:ios-native|discard_file') removed.push(args.path)
+            return true
+        })
+        const restoring = restoreBackupFromNativeSource(source)
+        await vi.waitFor(() => expect(copying).toBe(true))
+        m.controller.abort()
+        await expect(restoring).rejects.toMatchObject({ name: 'AbortError' })
+        // Android releases through its control bridge, iOS through the same command the route uses.
+        expect(released).toEqual(type === 'iosScoped' ? ['synthetic-custody', 'synthetic-custody'] : ['synthetic-custody'])
+        expect(m.legacy).not.toHaveBeenCalled()
+        expect(m.invoke).toHaveBeenLastCalledWith('native_portable_source_discard', { source })
+        reply(type === 'iosScoped'
+            ? { path: '/owned/late.risudat', name: 'late.risudat', bytes: 42 }
+            : JSON.stringify({ ready: [{ token: 'late-copy' }], failures: [] }))
+        await vi.waitFor(() => expect(removed).toEqual([type === 'iosScoped' ? '/owned/late.risudat' : 'late-copy']))
+    })
     it.each([false, true])('reports iOS copy progress and propagates cancellation before restore (cancel %s)', async cancel => {
         const { materializeIOSBackupSource, discardIOSFile } = await vi.importActual<typeof import('./iosFiles')>('./iosFiles')
         m.materializeIOS.mockImplementation(materializeIOSBackupSource)
@@ -173,7 +233,40 @@ describe('common backup file production route', () => {
             expect(m.legacy.mock.calls[0][1]).toEqual({ type: 'desktopPath', path: '/owned/copied.risudat' })
         }
         expect(m.invoke).toHaveBeenCalledWith('native_portable_source_discard', { source: { type: 'iosScoped', token: 'synthetic-custody' } })
-        expect(m.invoke).toHaveBeenCalledWith('plugin:ios-native|discard_file', { path: '/owned/copied.risudat' })
+        if (cancel) expect(m.invoke).toHaveBeenCalledWith('plugin:ios-native|discard_file', { path: '/owned/copied.risudat' })
+    })
+    it.each(['androidSeekable', 'iosScoped'] as const)('removes a delivered %s copy on page reload while a choice is pending', async type => {
+        const source = { type, token: 'synthetic-custody' }
+        m.invoke.mockImplementation(async command => command === 'native_backup_source_format' ? 'local-backup' : true)
+        m.materializeAndroid.mockResolvedValue({ type: 'androidSpool', token: 'owned-copy' })
+        m.materializeIOS.mockResolvedValue({ path: '/owned/copy.risudat', name: 'backup.bin', bytes: 42 })
+        let finish!: (value: typeof result) => void
+        m.legacy.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+        const restoring = restoreBackupFromNativeSource(source)
+        await vi.waitFor(() => expect(m.legacy).toHaveBeenCalled())
+        window.dispatchEvent(new Event('pagehide'))
+        expect(m.legacy.mock.calls[0][2].signal.aborted).toBe(true)
+        if (type === 'androidSeekable') expect(m.discard).toHaveBeenCalledWith('owned-copy')
+        expect(m.invoke).toHaveBeenCalledWith('native_portable_source_discard', { source })
+        finish(result)
+        await restoring
+    })
+    it('cancels a stalled source probe without waiting for descriptor release', async () => {
+        m.invoke.mockImplementation(() => new Promise(() => {}))
+        const restoring = restoreBackupFromNativeSource({ type: 'androidSeekable', token: 'stalled-probe' })
+        await vi.waitFor(() => expect(m.invoke).toHaveBeenCalledWith('native_backup_source_format', expect.anything()))
+        m.controller.abort()
+        await expect(restoring).rejects.toMatchObject({ name: 'AbortError' })
+        expect(m.invoke).toHaveBeenCalledWith('native_portable_source_discard', { source: { type: 'androidSeekable', token: 'stalled-probe' } })
+        expect(m.legacy).not.toHaveBeenCalled()
+    })
+    it('preserves the committed result and reports failed source cleanup', async () => {
+        const committed = { ...result, warningCodes: [] as string[] }
+        m.portable.mockResolvedValue(committed)
+        m.invoke.mockImplementation(async command => command === 'native_backup_source_format' ? 'portable' : false)
+        await expect(restoreBackupFromNativeSource({ type: 'iosScoped', token: 'source' }))
+            .resolves.toEqual({ ...committed, warningCodes: ['cleanup-failed'] })
+        expect(m.portable).toHaveBeenCalledTimes(1)
     })
     it('discards invalid seekable custody without materializing',async()=>{
         m.invoke.mockImplementation(async(command)=>{if(command==='native_backup_source_format')throw new Error('invalid-catalog');return true})
@@ -221,43 +314,14 @@ describe('common backup file production route', () => {
             expect(m.resume).not.toHaveBeenCalled()
         },
     )
-    it.each([false, true])('reselects recognized compatibility input inside the same operation (first run %s)', async (firstRun) => {
+    it.each(['compatibility-import-required', 'unsupported-format', 'corrupt-input'])('retains %s and releases an unclaimed source without a browser retry', async code => {
         const { NativeFileJobError } = await import('./nativeFileJobs')
         m.invoke.mockResolvedValue('local-backup')
-        m.legacy.mockRejectedValue(new NativeFileJobError('compatibility-import-required', 'Recognized upstream form'))
-        m.fallback.mockImplementation(async (context, lifecycle) => {
-            expect(context.signal.aborted).toBe(false)
-            expect(lifecycle.firstRun).toBe(firstRun)
-            expect(m.beginReplacement).not.toHaveBeenCalled()
-            await lifecycle.beforeActivation()
-            expect(m.confirmReplacement).not.toHaveBeenCalled()
-            lifecycle.onCommitted()
-            return { warningCodes: [] }
-        })
-        await expect(restoreBackupFromNativeSource({ type: 'androidSpool', token: 'synthetic' }, { firstRun })).resolves.toEqual({ warningCodes: [] })
-        expect(m.manager).toHaveBeenCalledOnce()
-        expect(m.fallback).toHaveBeenCalledOnce()
-        expect(m.status).toHaveBeenCalledWith(expect.objectContaining({ detail: expect.objectContaining({ stage: 'awaiting-reselect' }) }))
-        expect(m.hold).toHaveBeenCalledOnce()
-        expect(m.releaseReplacement).not.toHaveBeenCalled()
-        expect(m.discard).toHaveBeenCalledWith('synthetic')
-    })
-    it.each(['unsupported-format', 'corrupt-input'])('does not reselect for %s input', async (code) => {
-        const { NativeFileJobError } = await import('./nativeFileJobs')
-        m.invoke.mockResolvedValue('local-backup')
-        m.legacy.mockRejectedValue(new NativeFileJobError(code, 'Invalid synthetic input'))
-        await expect(restoreBackupFromNativeSource({ type: 'desktopPath', path: 'garbage.bin' })).rejects.toMatchObject({ code })
+        m.legacy.mockRejectedValue(new NativeFileJobError(code, 'Synthetic input failure'))
+        await expect(restoreBackupFromNativeSource({type:'androidSpool',token:'synthetic'})).rejects.toMatchObject({code})
         expect(m.fallback).not.toHaveBeenCalled()
+        expect(m.discard).toHaveBeenCalledWith('synthetic')
         expect(m.beginReplacement).not.toHaveBeenCalled()
-    })
-    it('keeps a cancelled compatibility reselect silent without beginning replacement', async () => {
-        const { NativeFileJobError } = await import('./nativeFileJobs')
-        m.invoke.mockResolvedValue('local-backup')
-        m.legacy.mockRejectedValue(new NativeFileJobError('compatibility-import-required', 'Recognized upstream form'))
-        m.fallback.mockResolvedValue(null)
-        await expect(restoreBackupFromNativeSource({ type: 'desktopPath', path: 'synthetic.bin' })).resolves.toBeNull()
-        expect(m.beginReplacement).not.toHaveBeenCalled()
-        expect(m.hold).not.toHaveBeenCalled()
     })
 
     it('native cancellation discards the unclaimed Android source', async () => {

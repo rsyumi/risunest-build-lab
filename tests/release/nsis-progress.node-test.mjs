@@ -37,7 +37,7 @@ function commandStage(command) {
   if (command.includes('schedule reconcile')) return 'schedule';
   if (command.includes('autostart install')) return 'autostart';
   if (command.includes('start-and-verify')) return 'start';
-  if (command.includes('installer finish')) return 'finish';
+  if (command.includes('installer finish')) return command.includes('risunest-sync-remove.exe') ? 'finish-removal' : 'finish';
   if (command.includes('prepare-update')) return 'update';
   if (command.includes('uninstall lock-held')) return 'cleanup';
   if (command.includes('installer delete-data')) return 'data';
@@ -61,8 +61,7 @@ test('NSIS displays the active operation and does not complete failed Sync setup
       .replaceAll('$LOCALAPPDATA', '$INSTDIR\\local')
       .replace(/!include [^\r\n]+windows-common.nsh"/, `!include "${resolve('src-tauri/windows-common.nsh')}"`)
       .replace(/MessageBox MB_OK\|MB_ICON(?:STOP|EXCLAMATION) "\$SyncFailureMessage"/g, 'DetailPrint "$SyncFailureMessage"')
-      .replace(/nsExec::ExecToStack '([^\r\n]+)'/g, (_, command) => `!insertmacro Manager "${commandStage(command)}"`)
-      .replace('StrCpy $R6 300', '!insertmacro Capture "finish-removal"\n  StrCpy $R6 1');
+      .replace(/nsExec::ExecToStack '([^\r\n]+)'/g, (_, command) => `!insertmacro Manager "${commandStage(command)}"`);
     writeFileSync(join(root, 'sync.nsh'), syncHook);
     const appHook = readFileSync(resolve('src-tauri/windows.nsh'), 'utf8')
       .replace(/!include [^\r\n]+windows-common.nsh"/, `!include "${resolve('src-tauri/windows-common.nsh')}"`)
@@ -209,10 +208,6 @@ SectionEnd
       assert.equal(install.status, !remove && fail ? 1 : 0, `${name}: install ${install.error ?? ''}`);
       if (remove) {
         rmSync(join(location, 'progress'), { force: true });
-        if (fail === 'wait') {
-          mkdirSync(join(data, 'manager-update'), { recursive: true });
-          writeFileSync(join(data, `manager-update/installer-${nonce}.ready`), '{}');
-        }
         const result = spawnSync(join(location, 'uninstall.exe'), [...(fail ? ['/S'] : []), `_?=${location}`], { env: { ...env, RISUNEST_NSIS_FIXTURE_FAIL: fail }, timeout: 30000, windowsHide: true });
         assert.equal(result.status, fail ? 1 : 0, `${name}: removal ${result.error ?? ''}\n${existsSync(join(location, 'progress')) ? readFileSync(join(location, 'progress'), 'utf8') : 'no progress'}`);
       }
@@ -257,8 +252,10 @@ SectionEnd
       assert.doesNotMatch(result.failure, /ignored diagnostic text/);
       assert.equal(result.progress.at(-1)[0], stage, 'failed removal stops before the next manager command');
     }
-    const waiting = run('sync', 'remove-wait-failure', { remove: true, fail: 'wait' });
+    const waiting = run('sync', 'remove-wait-failure', { remove: true, fail: 'finish-removal' });
     assert.match(waiting.failure, /program files were removed, but removal could not be finalized/);
+    assert.match(waiting.failure, /synthetic-failure:80070005/);
+    assert.doesNotMatch(waiting.failure, /ignored diagnostic text/);
     assert.equal(waiting.progress.at(-1)[0], 'finish-removal');
   } finally {
     assert.equal(dirname(root), resolve(tmpdir()));

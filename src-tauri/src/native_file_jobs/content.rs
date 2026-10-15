@@ -154,9 +154,7 @@ pub(super) fn spool_charx_source(
         return Err(content_cancelled());
     }
     if source.total_bytes > max_charx_spool_bytes() {
-        return Err(NativeJobError::new(
-            "invalid-input",
-            "CharX source exceeds its raw container limit",
+        return Err(NativeJobError::too_large("card", "CharX source exceeds its raw container limit",
         ));
     }
     spool_opened_source(source, destination, is_cancelled)
@@ -242,9 +240,7 @@ pub(super) fn prepare_content(
             if source.total_bytes > max_charx_spool_bytes() {
                 return Err(abort_failed_content_session(
                     cas_session,
-                    NativeJobError::new(
-                        "invalid-input",
-                        "CharX source exceeds its raw container limit",
+                    NativeJobError::too_large("card", "CharX source exceeds its raw container limit",
                     ),
                 ));
             }
@@ -899,9 +895,7 @@ fn bounded_module_array(
         )
     })?;
     if values.len() > MAX_MODULE_OVERLAY_ITEMS {
-        return Err(NativeJobError::new(
-            "invalid-input",
-            format!("Risu module {field} exceeds its item limit"),
+        return Err(NativeJobError::too_large("module", format!("Risu module {field} exceeds its item limit"),
         ));
     }
     Ok(Some(values.clone()))
@@ -1048,6 +1042,9 @@ fn storage_suffix(extension: Option<&str>) -> String {
 }
 
 pub(super) fn native_format_error(error: FormatError) -> NativeJobError {
+    if matches!(error.kind, FormatErrorKind::LimitExceeded) {
+        return NativeJobError::too_large("content", error.message);
+    }
     let code = match error.kind {
         FormatErrorKind::Cancelled => "cancelled",
         FormatErrorKind::InvalidFormat | FormatErrorKind::LimitExceeded => "invalid-input",
@@ -1057,6 +1054,11 @@ pub(super) fn native_format_error(error: FormatError) -> NativeJobError {
 }
 
 fn native_charx_error(error: CharXParseError) -> NativeJobError {
+    if matches!(error.code(), CharXParseErrorCode::TooManyEntries | CharXParseErrorCode::EntryTooLarge
+        | CharXParseErrorCode::AggregateTooLarge | CharXParseErrorCode::MetadataTooLarge
+        | CharXParseErrorCode::CompressionRatioExceeded) {
+        return NativeJobError::too_large("card", error.to_string());
+    }
     let code = match error.code() {
         CharXParseErrorCode::Cancelled => "cancelled",
         CharXParseErrorCode::Io => "invalid-source",
@@ -1066,6 +1068,9 @@ fn native_charx_error(error: CharXParseError) -> NativeJobError {
 }
 
 fn native_png_error(error: PngCardError) -> NativeJobError {
+    if matches!(error, PngCardError::LimitExceeded(_)) {
+        return NativeJobError::too_large("card", error.to_string());
+    }
     let code = match error {
         PngCardError::Cancelled => "cancelled",
         PngCardError::Io(_) => "invalid-source",
@@ -1197,7 +1202,10 @@ impl super::NativeFileJobState {
         if ext.is_empty() || ext.len() > 32 || !ext.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"+_-".contains(&byte)) {
             return Err(invalid("Inline asset extension is invalid"));
         }
-        if data.len() > COPY_BUFFER_BYTES || total_bytes > limits.max_embedded_asset_bytes
+        if total_bytes > limits.max_embedded_asset_bytes {
+            return Err(NativeJobError::too_large("card", "PNG embedded asset exceeds its limit"));
+        }
+        if data.len() > COPY_BUFFER_BYTES
             || offset > total_bytes || data.len() as u64 > total_bytes - offset
             || (data.is_empty() && total_bytes != 0) || name.len() > 4096
         {
@@ -1225,7 +1233,7 @@ impl super::NativeFileJobState {
         if count >= limits.max_embedded_asset_count || total.checked_add(total_bytes)
             .is_none_or(|total| total > limits.max_embedded_asset_total_bytes)
         {
-            return Err(invalid("PNG embedded asset count or total exceeds its limit"));
+            return Err(NativeJobError::too_large("card", "PNG embedded asset count or total exceeds its limit"));
         }
         let mut wait = job.wait_state.lock().map_err(|error| invalid(&error.to_string()))?;
         let mut upload = match wait.inline_asset_upload.take() {

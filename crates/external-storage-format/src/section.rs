@@ -13,6 +13,7 @@ pub const MAX_INLINE_VALUE_BYTES: usize = 4 * 1024;
 
 pub const MAX_SECTION_ENTRY_BYTES: usize = 64 * 1024;
 pub const MAX_SECTION_OBJECT_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_PLUGIN_VALUE_BYTES: u64 = 512 * 1024 * 1024;
 pub const MAX_VECTOR_DIMENSIONS: u32 = 16_384;
 
 const HYPA_ID: &str = "hypa";
@@ -206,7 +207,45 @@ pub struct HypaValue {
 pub struct LocalPluginValue {
     pub space: PluginSpace,
     #[serde(flatten)]
-    pub value: ValueOrObject,
+    pub value: PluginValue,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PluginValue {
+    #[serde(rename = "value")]
+    Inline(serde_json::Value),
+    #[serde(rename = "object")]
+    Object(ObjectReference),
+    #[serde(rename = "objects")]
+    Objects(Vec<ObjectReference>),
+}
+
+impl From<ValueOrObject> for PluginValue {
+    fn from(value: ValueOrObject) -> Self {
+        match value { ValueOrObject::Inline(value) => Self::Inline(value), ValueOrObject::Object(value) => Self::Object(value) }
+    }
+}
+
+impl PluginValue {
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::Inline(_) => Ok(()),
+            Self::Object(reference) => {
+                if reference.byte_length <= MAX_INLINE_VALUE_BYTES as u64 { return Err(FormatError("invalid-section-value")); }
+                reference.validate()
+            }
+            Self::Objects(references) => {
+                if references.len() < 2 { return Err(FormatError("invalid-section-value")); }
+                let mut total = 2u64;
+                for reference in references {
+                    reference.validate()?;
+                    total = total.checked_add(reference.byte_length).ok_or(FormatError("invalid-section-value"))?;
+                }
+                if total > MAX_PLUGIN_VALUE_BYTES { return Err(FormatError("invalid-section-value")); }
+                Ok(())
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -255,11 +294,17 @@ impl SectionValue {
     pub fn object_reference(&self) -> Option<&ObjectReference> {
         match self {
             Self::Hypa(HypaValue { vector: InlineOrObject::Object(reference), .. })
-            | Self::LocalPlugin(LocalPluginValue { value: ValueOrObject::Object(reference), .. })
             | Self::LocalSetting(LocalSettingValue { value: ValueOrObject::Object(reference) }) => {
                 Some(reference)
             }
+            Self::LocalPlugin(LocalPluginValue { value: PluginValue::Object(reference), .. }) => Some(reference),
             _ => None,
+        }
+    }
+    pub fn object_references(&self) -> &[ObjectReference] {
+        match self {
+            Self::LocalPlugin(LocalPluginValue { value: PluginValue::Objects(references), .. }) => references,
+            _ => self.object_reference().map(std::slice::from_ref).unwrap_or_default(),
         }
     }
 }
@@ -357,7 +402,7 @@ impl SectionEntry {
                 }
                 value.value.validate()?;
                 if matches!(value.space, PluginSpace::String)
-                    && matches!(&value.value, ValueOrObject::Inline(inline) if !inline.is_string())
+                    && matches!(&value.value, PluginValue::Inline(inline) if !inline.is_string())
                 {
                     return Err(FormatError("invalid-section-value"));
                 }
@@ -470,7 +515,7 @@ mod tests {
                 local_plugin_entry_key("provider-manager", "json", "settings").unwrap(),
                 SectionValue::LocalPlugin(LocalPluginValue {
                     space: PluginSpace::Json,
-                    value: ValueOrObject::Inline(serde_json::json!({ "b": 1, "a": [2, 3] })),
+                    value: PluginValue::Inline(serde_json::json!({ "b": 1, "a": [2, 3] })),
                 }),
                 version(9),
             )
@@ -480,7 +525,7 @@ mod tests {
                 local_plugin_entry_key("yumi-translator", "string", "token").unwrap(),
                 SectionValue::LocalPlugin(LocalPluginValue {
                     space: PluginSpace::String,
-                    value: ValueOrObject::Inline(serde_json::Value::String("kept".into())),
+                    value: PluginValue::Inline(serde_json::Value::String("kept".into())),
                 }),
                 None,
             )
@@ -496,6 +541,19 @@ mod tests {
         for entry in &entries {
             let encoded = entry.encode().unwrap();
             assert_eq!(&SectionEntry::decode(&encoded).unwrap(), entry);
+        }
+        let text = "part-one가😀part-two";
+        let parts = text.as_bytes().chunks(7).map(|bytes| ObjectReference {
+            content_sha256: crate::content_identity::hash(bytes), byte_length: bytes.len() as u64,
+        }).collect::<Vec<_>>();
+        let multipart = SectionEntry::new(SectionKind::LocalPlugins,
+            local_plugin_entry_key("owner", "string", "parts").unwrap(),
+            SectionValue::LocalPlugin(LocalPluginValue { space: PluginSpace::String, value: PluginValue::Objects(parts.clone()) }), None).unwrap();
+        assert_eq!(SectionEntry::decode(&multipart.encode().unwrap()).unwrap(), multipart);
+        assert_eq!(multipart.value.object_references(), parts.as_slice());
+        for invalid_parts in [vec![], vec![parts[0].clone()], vec![ObjectReference { content_sha256: [1;32], byte_length: MAX_SECTION_OBJECT_BYTES as u64 + 1 }; 2]] {
+            assert!(SectionEntry::new(SectionKind::LocalPlugins, multipart.key.clone(),
+                SectionValue::LocalPlugin(LocalPluginValue { space: PluginSpace::String, value: PluginValue::Objects(invalid_parts) }), None).is_err());
         }
         // An empty section is a real, publishable state. It differs from a
         // section that was never published, which carries no reference at all.
@@ -529,7 +587,7 @@ mod tests {
             local_plugin_entry_key("owner", "json", "key").unwrap(),
             SectionValue::LocalPlugin(LocalPluginValue {
                 space: PluginSpace::Json,
-                value: ValueOrObject::Inline(value.clone()),
+                value: PluginValue::Inline(value.clone()),
             }),
             None,
         )
@@ -538,8 +596,8 @@ mod tests {
         let SectionValue::LocalPlugin(restored) = decoded.value else {
             panic!("plugin value changed kind");
         };
-        assert_eq!(restored.value, ValueOrObject::Inline(value.clone()));
-        let ValueOrObject::Inline(restored) = restored.value else { unreachable!() };
+        assert_eq!(restored.value, PluginValue::Inline(value.clone()));
+        let PluginValue::Inline(restored) = restored.value else { unreachable!() };
         assert_eq!(
             serde_json::to_string(&restored).unwrap(),
             serde_json::to_string(&value).unwrap()
@@ -549,7 +607,7 @@ mod tests {
             local_plugin_entry_key("owner", "string", "key").unwrap(),
             SectionValue::LocalPlugin(LocalPluginValue {
                 space: PluginSpace::String,
-                value: ValueOrObject::Inline(serde_json::json!(5)),
+                value: PluginValue::Inline(serde_json::json!(5)),
             }),
             None,
         )
@@ -603,7 +661,7 @@ mod tests {
             SectionKind::LocalPlugins,
             local_plugin_entry_key("owner", "json", "key").unwrap(),
             SectionValue::LocalPlugin(LocalPluginValue {
-                space: PluginSpace::String, value: ValueOrObject::Inline(serde_json::Value::String("value".into())),
+                space: PluginSpace::String, value: PluginValue::Inline(serde_json::Value::String("value".into())),
             }),
             version(1),
         ), Err(FormatError("section-plugin-space-mismatch")));
@@ -691,7 +749,7 @@ mod tests {
                 hypa_entry_key(&"f".repeat(64)).unwrap(),
                 SectionValue::LocalPlugin(LocalPluginValue {
                     space: PluginSpace::Json,
-                    value: ValueOrObject::Inline(serde_json::json!(1)),
+                    value: PluginValue::Inline(serde_json::json!(1)),
                 }),
                 None,
             ),
@@ -706,7 +764,7 @@ mod tests {
                 SectionEntry::new(
                     kind,
                     local_plugin_entry_key("owner", id, "key").unwrap(),
-                    SectionValue::LocalPlugin(LocalPluginValue { space, value }),
+                    SectionValue::LocalPlugin(LocalPluginValue { space, value: value.into() }),
                     version(3),
                 )
             }

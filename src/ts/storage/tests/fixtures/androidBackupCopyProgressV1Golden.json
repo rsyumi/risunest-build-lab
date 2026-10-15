@@ -1,0 +1,23 @@
+{
+    "format": "risunest-android-backup-copy-progress-golden",
+    "version": 1,
+    "method": "saf.materializeBackupSource",
+    "id": "6f1c2d3e-4b5a-4c6d-8e7f-90a1b2c3d4e5",
+    "messages": [
+        {
+            "copiedBytes": 65536,
+            "totalBytes": null,
+            "wire": "{\"id\":\"6f1c2d3e-4b5a-4c6d-8e7f-90a1b2c3d4e5\",\"progress\":{\"copiedBytes\":65536,\"totalBytes\":null}}"
+        },
+        {
+            "copiedBytes": 4294967296,
+            "totalBytes": 8589934592,
+            "wire": "{\"id\":\"6f1c2d3e-4b5a-4c6d-8e7f-90a1b2c3d4e5\",\"progress\":{\"copiedBytes\":4294967296,\"totalBytes\":8589934592}}"
+        },
+        {
+            "copiedBytes": 8589934592,
+            "totalBytes": 8589934592,
+            "wire": "{\"id\":\"6f1c2d3e-4b5a-4c6d-8e7f-90a1b2c3d4e5\",\"progress\":{\"copiedBytes\":8589934592,\"totalBytes\":8589934592}}"
+        }
+    ]
+}

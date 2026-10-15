@@ -50,6 +50,26 @@ async fn stop(client: &Client) {
 #[tokio::test]
 #[ignore = "creates a temporary current-user scheduled task; requires RISUNEST_TEST_SERVER"]
 async fn manual_start_is_independent_of_login_and_survives_registration_changes() {
+    if std::env::var_os("RISUNEST_TEST_EMPTY_PATH").is_none() {
+        let output = platform::process(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "manual_start_is_independent_of_login_and_survives_registration_changes",
+                "--nocapture",
+            ])
+            .env("PATH", "")
+            .env("RISUNEST_TEST_EMPTY_PATH", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     let executable = PathBuf::from(
         std::env::var_os("RISUNEST_TEST_SERVER").expect("explicit synthetic server required"),
     );

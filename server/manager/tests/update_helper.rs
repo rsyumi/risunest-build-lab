@@ -140,8 +140,7 @@ fn stopped_helper_rolls_back_when_the_replacement_cannot_be_started() {
 
     assert!(result.recv_timeout(Duration::from_millis(250)).is_err());
     assert_old_install(&fixture.install);
-    // Both Task Scheduler calls start Windows PowerShell, which takes about
-    // 22 s per start on Windows ARM runners.
+    // Allow bounded time for parent exit and rollback on slow runners.
     let error = result
         .recv_timeout(Duration::from_secs(120))
         .unwrap()
@@ -242,8 +241,7 @@ fn helper_waits_for_the_parent_update_lock_handoff_before_replacement() {
     assert_old_install(&fixture.install);
     drop(lock);
 
-    // Task Scheduler calls each start Windows PowerShell, which can take
-    // about 22 s per start on Windows ARM runners.
+    // Allow bounded time for startup failure and rollback after the lock handoff.
     let error = result
         .recv_timeout(Duration::from_secs(120))
         .unwrap()
@@ -276,8 +274,7 @@ fn helper_waits_for_owner_release_and_restores_files_when_restart_fails() {
     assert_old_install(&fixture.install);
     owner.unlock().unwrap();
 
-    // Task Scheduler calls each start Windows PowerShell, which can take
-    // about 22 s per start on Windows ARM runners.
+    // Allow bounded time for startup failure and rollback after owner release.
     let error = result
         .recv_timeout(Duration::from_secs(120))
         .unwrap()
@@ -491,8 +488,12 @@ fn scheduled_harness_action(
 }
 
 #[cfg(windows)]
-fn register_synthetic_task(name: &str, description: &str) -> Result<(), String> {
-    const REGISTER: &str = r#"$ErrorActionPreference='Stop';$service=New-Object -ComObject 'Schedule.Service';$service.Connect();$folder=$service.GetFolder('\');$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;$definition=$service.NewTask(0);$definition.RegistrationInfo.Description=$env:RISUNEST_TEST_TASK_DESCRIPTION;$definition.Principal.UserId=$sid;$definition.Principal.LogonType=3;$definition.Principal.RunLevel=0;$definition.Settings.Enabled=$true;$action=$definition.Actions.Create(0);$action.Path='cmd.exe';$action.Arguments='/d /c exit 0';$null=$folder.RegisterTaskDefinition($env:RISUNEST_TEST_TASK_NAME,$definition,6,$sid,$null,3,$null)"#;
+fn register_synthetic_task(
+    name: &str,
+    description: &str,
+    date: Option<&str>,
+) -> Result<(), String> {
+    const REGISTER: &str = r#"$ErrorActionPreference='Stop';$service=New-Object -ComObject 'Schedule.Service';$service.Connect();$folder=$service.GetFolder('\');$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;$definition=$service.NewTask(0);$definition.RegistrationInfo.Description=$env:RISUNEST_TEST_TASK_DESCRIPTION;if($env:RISUNEST_TEST_TASK_DATE){$definition.RegistrationInfo.Date=$env:RISUNEST_TEST_TASK_DATE};$definition.Principal.UserId=$sid;$definition.Principal.LogonType=3;$definition.Principal.RunLevel=0;$definition.Settings.Enabled=$true;$action=$definition.Actions.Create(0);$action.Path='cmd.exe';$action.Arguments='/d /c exit 0';$null=$folder.RegisterTaskDefinition($env:RISUNEST_TEST_TASK_NAME,$definition,6,$sid,$null,3,$null)"#;
     let output = platform::process("powershell.exe")
         .args([
             "-NoLogo",
@@ -503,6 +504,7 @@ fn register_synthetic_task(name: &str, description: &str) -> Result<(), String> 
         ])
         .env("RISUNEST_TEST_TASK_NAME", name)
         .env("RISUNEST_TEST_TASK_DESCRIPTION", description)
+        .env("RISUNEST_TEST_TASK_DATE", date.unwrap_or_default())
         .stdin(Stdio::null())
         .output()
         .map_err(|_| "scheduled-harness-unavailable")?;
@@ -1433,9 +1435,9 @@ fn no_claim_helper_task_is_removed_without_consuming_recovery_state() {
         platform::instance_name(other_instance.path()),
         "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee".to_owned()
     );
-    register_synthetic_task(&foreign_task, "RisuNest foreign helper").unwrap();
-    register_synthetic_task(&invalid_suffix_task, "RisuNest update helper").unwrap();
-    register_synthetic_task(&other_instance_task, "RisuNest update helper").unwrap();
+    register_synthetic_task(&foreign_task, "RisuNest foreign helper", None).unwrap();
+    register_synthetic_task(&invalid_suffix_task, "RisuNest update helper", None).unwrap();
+    register_synthetic_task(&other_instance_task, "RisuNest update helper", None).unwrap();
 
     let result = (|| -> Result<(), String> {
         let _lock = try_lock(&fixture.root)?;
@@ -1456,6 +1458,24 @@ fn no_claim_helper_task_is_removed_without_consuming_recovery_state() {
         }
         if owned_transient_helper_task_count(&fixture.root)? != 1 {
             return Err("no-claim helper task was not retained before cleanup".into());
+        }
+        let stale_task = format!(
+            "{}-update-helper-dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            platform::instance_name(&fixture.root)
+        );
+        register_synthetic_task(
+            &stale_task,
+            "RisuNest update helper",
+            Some("2020-01-01T00:00:00.0000000Z"),
+        )?;
+        if owned_transient_helper_task_count(&fixture.root)? != 2 {
+            return Err("stale helper fixture was not registered".into());
+        }
+        platform::sweep_stale_update_helpers(&fixture.root)?;
+        if scheduled_task_exists(&stale_task)?
+            || owned_transient_helper_task_count(&fixture.root)? != 1
+        {
+            return Err("stale sweep did not remove only the old helper".into());
         }
         platform::cleanup_update_helpers(&fixture.root)?;
         if owned_transient_helper_task_count(&fixture.root)? != 0 {

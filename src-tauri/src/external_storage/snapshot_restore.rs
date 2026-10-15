@@ -2064,6 +2064,11 @@ pub(crate) async fn admit_data_catalogs(
         for control in controls.into_values() {
             cancel.check()?;
             let ObjectSource::File(path)=control.source else {return Err(corrupt("control file is unavailable"));};
+            let mut input = crate::trust_boundary::open_regular_source(&path).map_err(transient)?;
+            if crate::persistent_store::external_capture::verified_string_control(&mut input, &control.content_hash, control.byte_length, "native_data_catalog_control_identity").map_err(corrupt)? {
+                store.lww_put_object_reader(&control.content_hash, &mut input, control.byte_length).map_err(corrupt)?;
+                continue;
+            }
             let bytes=read_bytes(&path,usize::try_from(control.byte_length).map_err(corrupt)?)?;
             if bytes.len() as u64!=control.byte_length || crate::persistent_store::external_capture::hash_backup_body(&bytes,"native_data_catalog_control_identity")!=control.content_hash {return Err(corrupt("control body identity differs"));}
             if bytes.len()>risunest_sync_wire::MAX_METADATA_BYTES {crate::persistent_store::external_capture::verified_oversized_control(&bytes).map_err(corrupt)?;}

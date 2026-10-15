@@ -5,7 +5,7 @@ use super::{invalid, observe_remote_clock, sequence, DeviceStore, Section};
 use crate::persistent_store::StoreResult;
 use risunest_external_storage_format::section::{
     decode_local_plugin_entry_key, hypa_entry_key, local_plugin_entry_key, HypaValue,
-    InlineOrObject, LocalPluginValue, LocalSettingValue, ObjectReference, PluginSpace,
+    InlineOrObject, LocalPluginValue, LocalSettingValue, ObjectReference, PluginSpace, PluginValue,
     SectionEntry, SectionEntryVersion, SectionKind, SectionValue, ValueOrObject,
     MAX_INLINE_VALUE_BYTES,
 };
@@ -13,6 +13,9 @@ use risunest_sync_wire::Sequence;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use super::plugin_values::{self, text_value};
+
+mod large_plugin;
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -68,6 +71,11 @@ pub(crate) enum SectionValueRow {
         space: String,
         value: String,
     },
+    PluginObject {
+        space: String,
+        object: text_value::TextInfo,
+        parts: Vec<ObjectReference>,
+    },
     Setting {
         value: String,
     },
@@ -92,6 +100,11 @@ impl SectionValueRow {
             (Self::Plugin { space: a_space, value: a }, Self::Plugin { space: b_space, value: b })
                 if a_space == "json" && b_space == "json" => same_json(a, b),
             (Self::Setting { value: a }, Self::Setting { value: b }) => same_json(a, b),
+            (Self::PluginObject { space: a, object: x, .. }, Self::PluginObject { space: b, object: y, .. }) => a == b && x == y,
+            (Self::Plugin { space, value }, Self::PluginObject { space: other_space, object, .. })
+            | (Self::PluginObject { space: other_space, object, .. }, Self::Plugin { space, value }) => {
+                space == other_space && text_value::encode(value.as_bytes(), std::io::sink(), text_value::MAX_VALUE_BYTES).ok().as_ref() == Some(object)
+            }
             (
                 Self::Hypa { producer: ap, model: am, endpoint: ae, preprocess_version: av,
                     dimensions: ad, vector: ab, metadata: ax },
@@ -118,7 +131,7 @@ impl SectionValueRow {
         let bytes = match self {
             Self::Hypa { vector, .. } => vector.as_slice(),
             Self::Plugin { value, .. } | Self::Setting { value } => value.as_bytes(),
-            Self::PluginPermission { .. } | Self::Tombstone { .. } => return None,
+            Self::PluginObject { .. } | Self::PluginPermission { .. } | Self::Tombstone { .. } => return None,
         };
         rides_as_object(bytes).then_some(bytes)
     }
@@ -127,7 +140,7 @@ impl SectionValueRow {
         match self {
             Self::Hypa { vector, .. } => Some(std::mem::take(vector)),
             Self::Plugin { value, .. } | Self::Setting { value } => Some(std::mem::take(value).into_bytes()),
-            Self::PluginPermission { .. } | Self::Tombstone { .. } => None,
+            Self::PluginObject { .. } | Self::PluginPermission { .. } | Self::Tombstone { .. } => None,
         }
     }
 }
@@ -227,7 +240,9 @@ impl SectionMergeRow for SectionRow {
     fn matching_key(&self, other: &Self) -> bool {
         (&self.key1, &self.key2, &self.key3) == (&other.key1, &other.key2, &other.key3)
             && (self.value.is_tombstone() || other.value.is_tombstone()
-                || std::mem::discriminant(&self.value) == std::mem::discriminant(&other.value))
+                || std::mem::discriminant(&self.value) == std::mem::discriminant(&other.value)
+                || matches!((&self.value, &other.value), (SectionValueRow::Plugin { .. }, SectionValueRow::PluginObject { .. })
+                    | (SectionValueRow::PluginObject { .. }, SectionValueRow::Plugin { .. })))
     }
     fn merge_version(&self) -> StoreResult<(&Sequence, &str)> {
         if self.writer_id.is_empty() || self.writer_id.len() > 1024 {
@@ -387,7 +402,11 @@ fn vector_identity(vector: &InlineOrObject) -> StoreResult<([u8; 32], u64)> {
     }
 }
 
-fn row_from_sql(section: Section, row: &rusqlite::Row<'_>) -> StoreResult<SectionRow> {
+fn plugin_columns() -> String {
+    format!("rowid AS value_rowid,owner,space,key,CASE WHEN byte_size<={} THEN value END AS value,byte_size,tombstone,write_clock,writer_id,published_clock,first_published_generation,first_published_at_ms", text_value::PART_BYTES)
+}
+
+fn row_from_sql(db: &Connection, section: Section, row: &rusqlite::Row<'_>, objects: Option<&Connection>) -> StoreResult<SectionRow> {
     let tombstone: bool = row.get("tombstone")?;
     let value = if tombstone {
         SectionValueRow::Tombstone {
@@ -400,7 +419,14 @@ fn row_from_sql(section: Section, row: &rusqlite::Row<'_>) -> StoreResult<Sectio
                 preprocess_version: row.get("preprocess_version")?, dimensions: row.get("dimensions")?,
                 vector: row.get("vector")?, metadata: row.get("metadata")?,
             },
-            Section::LocalPlugins => SectionValueRow::Plugin { space: row.get("space")?, value: row.get("value")? },
+            Section::LocalPlugins => {
+                let size: i64 = row.get("byte_size")?;
+                let space: String = row.get("space")?;
+                if size > text_value::PART_BYTES as i64 {
+                    let rowid = row.get("value_rowid")?;
+                    large_plugin::capture(objects, &space, || Ok(db.blob_open(rusqlite::MAIN_DB, "plugin_device_storage", "value", rowid, true)?))?
+                } else { SectionValueRow::Plugin { space, value: row.get("value")? } }
+            }
         }
     };
     let (key1, key2, key3) = match section {
@@ -415,26 +441,28 @@ fn row_from_sql(section: Section, row: &rusqlite::Row<'_>) -> StoreResult<Sectio
 }
 
 fn read_rows(db: &Connection, section: Section) -> StoreResult<Vec<SectionRow>> {
-    let mut statement = db.prepare(match section {
-        Section::Hypa => "SELECT * FROM hypa_embeddings ORDER BY cache_key",
-        Section::LocalPlugins => "SELECT * FROM plugin_device_storage ORDER BY owner,space,key",
-    })?;
+    let sql = match section {
+        Section::Hypa => "SELECT * FROM hypa_embeddings ORDER BY cache_key".into(),
+        Section::LocalPlugins => format!("SELECT {} FROM plugin_device_storage ORDER BY owner,space,key", plugin_columns()),
+    };
+    let mut statement = db.prepare(&sql)?;
     let mut query = statement.query([])?;
     let mut rows = Vec::new();
     while let Some(row) = query.next()? {
-        rows.push(row_from_sql(section, row)?);
+        rows.push(row_from_sql(db, section, row, None)?);
     }
     Ok(rows)
 }
 
 fn read_row(db: &Connection, section: Section, key: &SectionKey) -> StoreResult<Option<(SectionRow, bool)>> {
-    let mut statement = db.prepare(match section {
-        Section::Hypa => "SELECT * FROM hypa_embeddings WHERE cache_key=?1 AND ?2='' AND ?3=''",
-        Section::LocalPlugins => "SELECT * FROM plugin_device_storage WHERE owner=?1 AND space=?2 AND key=?3",
-    })?;
+    let sql = match section {
+        Section::Hypa => "SELECT * FROM hypa_embeddings WHERE cache_key=?1 AND ?2='' AND ?3=''".into(),
+        Section::LocalPlugins => format!("SELECT {} FROM plugin_device_storage WHERE owner=?1 AND space=?2 AND key=?3", plugin_columns()),
+    };
+    let mut statement = db.prepare(&sql)?;
     let mut query = statement.query(params![key.0, key.1, key.2])?;
     let Some(row) = query.next()? else { return Ok(None); };
-    let current = row_from_sql(section, row)?;
+    let current = row_from_sql(db, section, row, None)?;
     let published: Option<String> = row.get("published_clock")?;
     let published = published.as_deref() == Some(current.write_clock.as_str());
     Ok(Some((current, published)))
@@ -515,6 +543,13 @@ impl SectionRow {
                     "json" => (PluginSpace::Json, json_value(value)?),
                     _ => return Err(invalid("Plugin device space is invalid")),
                 };
+                SectionValue::LocalPlugin(LocalPluginValue { space, value: value.into() })
+            }
+            (SectionValueRow::PluginObject { space, parts, .. }, SectionKind::LocalPlugins) => {
+                if space != &self.key2 { return Err(invalid("Plugin value names another space")); }
+                let space = match space.as_str() { "string" => PluginSpace::String, "json" => PluginSpace::Json,
+                    _ => return Err(invalid("Plugin device space is invalid")) };
+                let value = if parts.len() == 1 { PluginValue::Object(parts[0].clone()) } else { PluginValue::Objects(parts.clone()) };
                 SectionValue::LocalPlugin(LocalPluginValue { space, value })
             }
             (SectionValueRow::Setting { value }, SectionKind::LocalSettings) => {
@@ -574,11 +609,14 @@ impl SectionRow {
                 let space = match value.space { PluginSpace::String => "string", PluginSpace::Json => "json" };
                 if space != key2 { return Err(invalid("Plugin value names another space")); }
                 let text = match (value.space, value.value) {
-                    (PluginSpace::String, ValueOrObject::Inline(serde_json::Value::String(text))) => text,
-                    (PluginSpace::String, ValueOrObject::Inline(_)) => return Err(invalid("Plugin string value is not text")),
-                    (PluginSpace::String, ValueOrObject::Object(reference)) => object_text(&reference, &mut object, false)?,
-                    (PluginSpace::Json, value) => json_text(value, &mut object)?,
+                    (PluginSpace::String, PluginValue::Inline(serde_json::Value::String(text))) => text,
+                    (PluginSpace::String, PluginValue::Inline(_)) => return Err(invalid("Plugin string value is not text")),
+                    (PluginSpace::String, PluginValue::Object(reference)) => object_text(&reference, &mut object, false)?,
+                    (PluginSpace::Json, PluginValue::Inline(value)) => json_text(ValueOrObject::Inline(value), &mut object)?,
+                    (PluginSpace::Json, PluginValue::Object(reference)) => json_text(ValueOrObject::Object(reference), &mut object)?,
+                    (_, PluginValue::Objects(_)) => return Err(invalid("Multipart plugin value requires a section spool")),
                 };
+                if text_value::encoded_length(&text) > text_value::MAX_VALUE_BYTES { return Err(invalid("plugin device value is too large")); }
                 SectionValueRow::Plugin { space: space.to_owned(), value: text }
             }
             SectionValue::LocalSetting(value) => match key1.as_str() {
@@ -771,6 +809,10 @@ impl SectionSpoolBuilder {
              PRAGMA temp_store=FILE;
              PRAGMA mmap_size=0;
              CREATE TABLE vector_values(hash TEXT PRIMARY KEY,bytes BLOB NOT NULL) WITHOUT ROWID;
+             CREATE TABLE section_objects(hash TEXT PRIMARY KEY,bytes BLOB NOT NULL) WITHOUT ROWID;
+             CREATE TABLE message_page_objects(hash TEXT PRIMARY KEY,body BLOB NOT NULL);
+             CREATE TABLE message_page_verified_objects(hash TEXT PRIMARY KEY);
+             CREATE TABLE message_page_object_marks(hash TEXT PRIMARY KEY,unreferenced_since INTEGER NOT NULL);
              CREATE TABLE row_values(id INTEGER PRIMARY KEY,metadata TEXT NOT NULL,vector_hash TEXT);
              CREATE TABLE row_index(
                 key1 TEXT NOT NULL,key2 TEXT NOT NULL,key3 TEXT NOT NULL,
@@ -801,7 +843,7 @@ impl SectionSpoolBuilder {
         let encoded = entry.encode().map_err(section_format_error)?;
         let entry_key = entry.key.clone();
         let entry_hash = risunest_external_storage_format::content_identity::hash(&encoded);
-        let row = SectionRow::from_entry(entry, false, object)?;
+        let row = self.decode_entry(entry, false, object)?;
         if row.value.is_tombstone() { return Err(invalid("Backup section entry is a removal")); }
         self.push_row(row, &entry_key, &entry_hash)
     }
@@ -817,6 +859,11 @@ impl SectionSpoolBuilder {
     }
 
     fn push_row(&mut self, mut row: SectionRow, entry_key: &str, entry_hash: &[u8; 32]) -> StoreResult<()> {
+        if let SectionValueRow::Plugin { space, value } = &row.value {
+            if text_value::encoded_length(value) > text_value::PART_BYTES as u64 {
+                row.value = large_plugin::capture(Some(&self.connection), space, || Ok(std::io::Cursor::new(value.as_bytes())))?;
+            }
+        }
         if section_entry_key(self.kind, &row)? != entry_key {
             return Err(invalid("Section spool key differs from its entry"));
         }
@@ -959,14 +1006,14 @@ impl PreparedSectionRows {
 
     pub(crate) fn visit_entries(
         &self,
-        visitor: impl FnMut(&SectionEntry, Option<&[u8]>) -> StoreResult<()>,
+        visitor: impl FnMut(&SectionEntry, &mut dyn FnMut(&ObjectReference) -> StoreResult<Vec<u8>>) -> StoreResult<()>,
     ) -> StoreResult<()> {
         self.visit_entries_mapped(visitor, |error| error)
     }
 
     pub(crate) fn visit_entries_mapped<E>(
         &self,
-        mut visitor: impl FnMut(&SectionEntry, Option<&[u8]>) -> std::result::Result<(), E>,
+        mut visitor: impl FnMut(&SectionEntry, &mut dyn FnMut(&ObjectReference) -> StoreResult<Vec<u8>>) -> std::result::Result<(), E>,
         mut map_error: impl FnMut(crate::persistent_store::StoreError) -> E,
     ) -> std::result::Result<(), E> {
         let mut after = String::new();
@@ -984,12 +1031,20 @@ impl PreparedSectionRows {
                 let mut row = self.row_by_entry_key(&key).map_err(&mut map_error)?
                     .ok_or_else(|| map_error(invalid("Prepared row is missing")))?;
                 let entry = row.to_entry(self.kind, self.versioned).map_err(&mut map_error)?;
-                let object = row.value.take_object_body();
-                #[cfg(test)]
-                if let Some(object) = &object {
-                    SECTION_TEST_MAX_VALUE_BYTES.fetch_max(object.len(), Ordering::Relaxed);
-                }
-                visitor(&entry, object.as_deref())?;
+                let mut object = row.value.take_object_body();
+                visitor(&entry, &mut |reference| {
+                    let bytes = match object.take() {
+                        Some(bytes) => bytes,
+                        None => self.connection.query_row("SELECT bytes FROM section_objects WHERE hash=?1",
+                            [hex::encode(reference.content_sha256)], |row| row.get(0))?,
+                    };
+                    if bytes.len() as u64 != reference.byte_length || object_reference(&bytes) != *reference {
+                        return Err(invalid("Section object does not match its reference"));
+                    }
+                    #[cfg(test)]
+                    SECTION_TEST_MAX_VALUE_BYTES.fetch_max(bytes.len(), Ordering::Relaxed);
+                    Ok(bytes)
+                })?;
                 visited += 1;
                 after = key;
             }
@@ -1037,7 +1092,13 @@ fn validate_sync_row(section: Section, row: &SectionRow) -> StoreResult<()> {
             if space != &row.key2 || !matches!(space.as_str(), "string" | "json") {
                 return Err(invalid("Plugin value names another space"));
             }
-            if space == "json" { serde_json::from_str::<serde_json::Value>(value)?; }
+            if space == "json" { serde_json::from_str::<serde::de::IgnoredAny>(value)?; }
+            if text_value::encoded_length(value) > text_value::MAX_VALUE_BYTES { return Err(invalid("plugin device value is too large")); }
+        }
+        (Section::LocalPlugins, SectionValueRow::PluginObject { space, object, .. }) => {
+            if space != &row.key2 || !matches!(space.as_str(), "string" | "json") || object.encoded_length > text_value::MAX_VALUE_BYTES {
+                return Err(invalid("Plugin value names another space or is too large"));
+            }
         }
         _ => return Err(invalid("Section row belongs to another section")),
     }
@@ -1170,15 +1231,18 @@ fn capture_backup_rows(
     kind: SectionKind,
     spool: &mut SectionSpoolBuilder,
 ) -> StoreResult<()> {
-    let mut push = |row: SectionRow| spool.push_backup_row(row);
     match section_of_kind(kind) {
         Some(section) => {
-            let mut statement = snapshot.prepare(match section {
-                Section::Hypa => "SELECT * FROM hypa_embeddings WHERE tombstone=0 ORDER BY cache_key",
-                Section::LocalPlugins => "SELECT * FROM plugin_device_storage WHERE tombstone=0 ORDER BY owner,space,key",
-            })?;
+            let sql = match section {
+                Section::Hypa => "SELECT * FROM hypa_embeddings WHERE tombstone=0 ORDER BY cache_key".into(),
+                Section::LocalPlugins => format!("SELECT {} FROM plugin_device_storage WHERE tombstone=0 ORDER BY owner,space,key", plugin_columns()),
+            };
+            let mut statement = snapshot.prepare(&sql)?;
             let mut rows = statement.query([])?;
-            while let Some(row) = rows.next()? { push(row_from_sql(section, row)?)?; }
+            while let Some(row) = rows.next()? {
+                let row = row_from_sql(snapshot, section, row, Some(&spool.connection))?;
+                spool.push_backup_row(row)?;
+            }
         }
         None if kind == SectionKind::LocalSettings => {
             let mut statement = snapshot.prepare("SELECT key,value FROM device_settings ORDER BY key")?;
@@ -1186,7 +1250,7 @@ fn capture_backup_rows(
             while let Some(row) = rows.next()? {
                 let key: String = row.get(0)?;
                 if setting_is_local(&key) {
-                    push(SectionRow { key1: "setting".into(), key2: key, key3: String::new(),
+                    spool.push_backup_row(SectionRow { key1: "setting".into(), key2: key, key3: String::new(),
                         value: SectionValueRow::Setting { value: row.get(1)? },
                         write_clock: Sequence::from(0u64), writer_id: String::new() })?;
                 }
@@ -1198,7 +1262,7 @@ fn capture_backup_rows(
             )?;
             let mut rows = statement.query([])?;
             while let Some(row) = rows.next()? {
-                push(SectionRow { key1: "pluginPermission".into(), key2: row.get(0)?, key3: row.get(1)?,
+                spool.push_backup_row(SectionRow { key1: "pluginPermission".into(), key2: row.get(0)?, key3: row.get(1)?,
                     value: SectionValueRow::PluginPermission { granted: row.get::<_, i64>(2)? == 1 },
                     write_clock: Sequence::from(0u64), writer_id: String::new() })?;
             }
@@ -1515,6 +1579,7 @@ fn write_row(
             if *space != row.key2 {
                 return Err(invalid("received plugin value names another space"));
             }
+            if text_value::encoded_length(value) > text_value::MAX_VALUE_BYTES { return Err(invalid("plugin device value is too large")); }
             let byte_size = i64::try_from(value.len())
                 .map_err(|_| invalid("received plugin value is too large"))?;
             tx.execute(
@@ -1538,6 +1603,21 @@ fn write_row(
                     published_clock
                 ],
             )?;
+        }
+        (Section::LocalPlugins, SectionValueRow::PluginObject { space, object, .. }) => {
+            if *space != row.key2 { return Err(invalid("received plugin value names another space")); }
+            let verified = text_value::inspect_object(tx, &object.hash)?;
+            if verified != *object { return Err(invalid("received plugin value identity differs")); }
+            let (source, _) = text_value::object_row(tx, &object.hash)?;
+            plugin_values::write_reserved(tx, &row.key1, space, &row.key3, object.byte_length, row.write_clock.as_str(), &row.writer_id, |target| {
+                let input = tx.blob_open(rusqlite::MAIN_DB, "message_page_objects", "body", source, true)?;
+                if text_value::decode(input, target, text_value::MAX_VALUE_BYTES)? != *object {
+                    return Err(invalid("received plugin value identity differs"));
+                }
+                Ok(())
+            })?;
+            tx.execute("UPDATE plugin_device_storage SET published_clock=?4 WHERE owner=?1 AND space=?2 AND key=?3",
+                params![row.key1, row.key2, row.key3, published_clock])?;
         }
         _ => return Err(invalid("received section row belongs to another section")),
     }

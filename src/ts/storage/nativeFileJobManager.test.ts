@@ -392,6 +392,13 @@ describe('renderer-lifetime native file job manager', () => {
                 },
             },
             {
+                error: new NativeFileJobError('payload-too-large', 'synthetic native limit', [], 'compatible-database'),
+                expected: {
+                    state: 'failed',
+                    error: { code: 'payload-too-large', message: 'synthetic native limit', recoveryRequired: false, itemKind: 'compatible-database' },
+                },
+            },
+            {
                 error: new TypeError('boom'),
                 expected: {
                     state: 'failed',

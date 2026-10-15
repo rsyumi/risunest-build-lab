@@ -5,57 +5,7 @@ use std::path::Path;
 
 #[cfg(windows)]
 fn setting_at(root: &Path, enabled: Option<bool>, current: &Path) -> Result<bool> {
-    const SCRIPT: &str = r#"
-    $ErrorActionPreference='Stop'
-    try {
-      if($env:RISUNEST_GUI_ACTION -eq 'enable') {
-        $key=[Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Software\Microsoft\Windows\CurrentVersion\Run')
-      } else {
-        $key=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Run',($env:RISUNEST_GUI_ACTION -eq 'disable'))
-      }
-      if($null -eq $key){'false';exit 0}
-      if($env:RISUNEST_GUI_ACTION -eq 'enable'){$key.SetValue($env:RISUNEST_GUI_NAME,$env:RISUNEST_GUI_COMMAND)}
-      if($env:RISUNEST_GUI_ACTION -eq 'disable'){$key.DeleteValue($env:RISUNEST_GUI_NAME,$false)}
-      $value=$key.GetValue($env:RISUNEST_GUI_NAME); $key.Close()
-      if($null -eq $value){'false'}else{'true'}
-    } catch { exit 1 }
-    "#;
-    let value = format!(
-        "\"{}\" --tray --data-dir \"{}\"",
-        current.to_string_lossy(),
-        root.to_string_lossy().trim_end_matches(['\\', '/'])
-    );
-    let output = platform::process("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            SCRIPT,
-        ])
-        .env(
-            "RISUNEST_GUI_ACTION",
-            match enabled {
-                Some(true) => "enable",
-                Some(false) => "disable",
-                None => "status",
-            },
-        )
-        .env(
-            "RISUNEST_GUI_NAME",
-            format!("{}-gui", platform::instance_name(root)),
-        )
-        .env("RISUNEST_GUI_COMMAND", value)
-        .output()
-        .map_err(|_| "gui-startup-unavailable")?;
-    if !output.status.success() {
-        return Err("gui-startup-operation-failed".into());
-    }
-    match String::from_utf8_lossy(&output.stdout).trim() {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        _ => Err("gui-startup-status-unavailable".into()),
-    }
+    platform::windows::gui::setting(root, enabled, current)
 }
 
 #[cfg(target_os = "macos")]
@@ -108,19 +58,7 @@ pub fn setting(_: &Path, _: Option<bool>) -> Result<bool> {
 pub fn relaunch(root: &Path, gui: &Path, tray: bool) -> Result<()> {
     #[cfg(windows)]
     {
-        let arguments = format!(
-            "{}--data-dir \"{}\"",
-            if tray { "--tray " } else { "" },
-            root.to_string_lossy().trim_end_matches(['\\', '/'])
-        );
-        let status = platform::process("powershell.exe")
-            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-                "$ErrorActionPreference='Stop';$shell=New-Object -ComObject Shell.Application;$shell.ShellExecute($env:RISUNEST_GUI_PATH,$env:RISUNEST_GUI_ARGS,'','open',1)"])
-            .env("RISUNEST_GUI_PATH", gui).env("RISUNEST_GUI_ARGS", arguments)
-            .status().map_err(|_| "update-relaunch-unavailable")?;
-        if !status.success() {
-            return Err("update-relaunch-unavailable".into());
-        }
+        platform::windows::gui::relaunch(root, gui, tray)?;
     }
     #[cfg(target_os = "macos")]
     {

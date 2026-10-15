@@ -66,10 +66,14 @@ ${body}`)
 // What the native store says when an archive or a restore cannot reach a file it reads.
 const ARCHIVE_DATA_MISSING = 'character archive data is missing'
 const ARCHIVE_DATA_UNAVAILABLE = 'character archive data could not be fetched'
+const ARCHIVE_TOO_LARGE = 'archived character exceeds the decoded size limit'
 
 function mutationFailure(error: unknown, restoring: boolean): string {
     const strings = language.risuNest.archive
     const message = error instanceof Error ? error.message : undefined
+    if (message === ARCHIVE_TOO_LARGE) {
+        return restoring ? strings.restoreTooLarge : strings.archiveTooLarge
+    }
     if (message === ARCHIVE_DATA_UNAVAILABLE) {
         return restoring ? strings.restoreRemoteAssetUnavailable : strings.archiveRemoteAssetUnavailable
     }

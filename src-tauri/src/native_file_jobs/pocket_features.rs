@@ -1,132 +1,129 @@
 use serde_json::{json, Map, Value};
-use std::collections::HashSet;
 
-fn toggles(value: &Value) -> Result<(), String> {
-    let values = value
-        .as_object()
-        .ok_or("PocketRisu toggle values must be a record")?;
-    if values
-        .iter()
-        .any(|(key, value)| !key.starts_with("toggle_") || !value.is_string())
-    {
-        return Err("PocketRisu toggle values must be toggle_ strings".into());
-    }
-    Ok(())
+pub(crate) fn toggle_entry(key: &str, value: &Value) -> bool {
+    key.starts_with("toggle_") && value.is_string()
 }
 
-pub(crate) fn root(root: &Map<String, Value>) -> Result<(), String> {
+/// Keeps the `toggle_` string entries of a toggle record; false when the value is not a record.
+fn toggles(value: &mut Value) -> bool {
+    let Some(values) = value.as_object_mut() else {
+        return false;
+    };
+    values.retain(|key, value| toggle_entry(key, value));
+    true
+}
+
+/// Keeps a named toggle preset; values that are not a record become empty.
+pub(crate) fn toggle_preset(value: &mut Value) -> bool {
+    let Some(preset) = value.as_object_mut() else {
+        return false;
+    };
+    if !preset.get("name").is_some_and(Value::is_string) {
+        return false;
+    }
+    if !preset.get_mut("values").is_some_and(toggles) {
+        preset.insert("values".into(), Value::Object(Map::new()));
+    }
+    true
+}
+
+/// Drops root values RisuNest cannot read, such as the null PocketRisu stores for a cleared toggle default.
+pub(crate) fn root(root: &mut Map<String, Value>) {
     if root
         .get("disableToggleBinding")
         .is_some_and(|value| !value.is_boolean())
     {
-        return Err("PocketRisu disableToggleBinding must be boolean".into());
+        root.shift_remove("disableToggleBinding");
     }
-    if let Some(value) = root.get("defaultToggleValues") {
-        toggles(value)?;
+    if root
+        .get_mut("defaultToggleValues")
+        .is_some_and(|value| !toggles(value))
+    {
+        root.shift_remove("defaultToggleValues");
     }
-    if let Some(value) = root.get("togglePresets") {
-        for preset in value
-            .as_array()
-            .ok_or("PocketRisu toggle presets must be an array")?
-        {
-            if !preset.get("name").is_some_and(Value::is_string) {
-                return Err("PocketRisu toggle preset must have a name".into());
-            }
-            toggles(
-                preset
-                    .get("values")
-                    .ok_or("PocketRisu toggle preset values missing")?,
-            )?;
+    match root.get_mut("togglePresets") {
+        Some(Value::Array(presets)) => presets.retain_mut(toggle_preset),
+        Some(_) => {
+            root.shift_remove("togglePresets");
         }
+        None => {}
     }
-    if let Some(personas) = root.get("personas").and_then(Value::as_array) {
-        let mut ids = HashSet::new();
-        for persona in personas {
-            if let Some(id) = persona.get("id") {
-                let id = id
-                    .as_str()
-                    .ok_or("PocketRisu persona IDs must be strings")?;
-                if !id.is_empty() && !ids.insert(id) {
-                    return Err("PocketRisu persona IDs must be unique".into());
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
-pub(crate) fn character(value: &mut Value, fallback: &str) -> Result<(), String> {
+pub(crate) fn character(value: &mut Value, fallback: &str) {
     if let Some(chats) = value.get_mut("chats").and_then(Value::as_array_mut) {
         for (index, value) in chats.iter_mut().enumerate() {
-            chat(value, &format!("{fallback}:chat:{index}"))?;
+            chat(value, &format!("{fallback}:chat:{index}"));
         }
     }
-    Ok(())
 }
 
-pub(crate) fn chat(value: &mut Value, fallback: &str) -> Result<(), String> {
-    if let Some(value) = value.get("savedToggleValues") {
-        toggles(value)?;
+pub(crate) fn chat(value: &mut Value, fallback: &str) {
+    let Some(chat) = value.as_object_mut() else {
+        return;
+    };
+    if chat
+        .get_mut("savedToggleValues")
+        .is_some_and(|value| !toggles(value))
+    {
+        chat.shift_remove("savedToggleValues");
     }
-    if value
+    if chat
         .get("bindedPersona")
         .is_some_and(|value| !value.is_string())
     {
-        return Err("PocketRisu persona binding must be a string".into());
+        chat.shift_remove("bindedPersona");
     }
-    let id = value
+    let id = chat
         .get("id")
         .and_then(Value::as_str)
         .unwrap_or(fallback)
         .to_owned();
-    if let Some(messages) = value.get_mut("message").and_then(Value::as_array_mut) {
+    if let Some(messages) = chat.get_mut("message").and_then(Value::as_array_mut) {
         for (index, value) in messages.iter_mut().enumerate() {
-            message(value, &format!("{id}:response:{index}"))?;
+            message(value, &format!("{id}:response:{index}"));
         }
     }
-    Ok(())
 }
 
-pub(crate) fn message(value: &mut Value, fallback: &str) -> Result<(), String> {
+pub(crate) fn message(value: &mut Value, fallback: &str) {
     let Some(object) = value.as_object_mut() else {
-        return Ok(());
+        return;
     };
-    let Some(swipes) = object.get("swipes") else {
-        return Ok(());
+    let Some(Value::Array(items)) = object.get("swipes") else {
+        return;
     };
-    let mut swipes: Vec<String> = swipes
-        .as_array()
-        .ok_or("PocketRisu swipes must be strings")?
-        .iter()
-        .map(|value| {
-            value
-                .as_str()
-                .map(str::to_owned)
-                .ok_or("PocketRisu swipes must be strings".to_owned())
-        })
-        .collect::<Result<_, _>>()?;
-    let raw_index = object.get("swipeId");
-    if raw_index.is_some_and(|value| {
-        value
-            .as_f64()
-            .is_none_or(|number| !number.is_finite() || number.fract() != 0.0)
-    }) {
-        return Err("PocketRisu swipeId must be an integer".into());
-    }
-    let body = object
-        .get("data")
-        .and_then(Value::as_str)
-        .ok_or("PocketRisu response body must be a string")?
-        .to_owned();
     if object.contains_key("responseVariants") {
-        return Ok(());
+        return;
     }
-    let mut warnings = Vec::new();
-    let index = match raw_index
+    // Array holes are not candidates; a usable swipeId keeps pointing at its own text.
+    let raw_index = object
+        .get("swipeId")
         .and_then(Value::as_f64)
-        .filter(|index| *index >= 0.0 && *index < swipes.len() as f64)
-        .map(|index| index as usize)
-    {
+        .filter(|index| index.is_finite() && index.fract() == 0.0);
+    let mut swipes = Vec::new();
+    let mut selected = None;
+    for (index, swipe) in items.iter().enumerate() {
+        if let Some(swipe) = swipe.as_str() {
+            if raw_index == Some(index as f64) {
+                selected = Some(swipes.len());
+            }
+            swipes.push(swipe.to_owned());
+        }
+    }
+    let body = match object.get("data").and_then(Value::as_str) {
+        Some(body) => body.to_owned(),
+        None => {
+            let body = swipes
+                .get(selected.unwrap_or(0))
+                .cloned()
+                .unwrap_or_default();
+            object.insert("data".into(), Value::String(body.clone()));
+            body
+        }
+    };
+    let mut warnings = Vec::new();
+    let index = match selected {
         Some(index) if swipes[index] == body => index,
         Some(_) => {
             warnings.push("swipe-body-mismatch");
@@ -177,7 +174,6 @@ pub(crate) fn message(value: &mut Value, fallback: &str) -> Result<(), String> {
     if !warnings.is_empty() {
         object.insert("pocketRisuImportWarnings".into(), json!(warnings));
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -191,13 +187,8 @@ mod tests {
         .unwrap();
         for fixture in fixtures.as_array().unwrap() {
             let mut actual = fixture["input"].clone();
-            let result = message(&mut actual, "fallback");
-            if fixture["invalid"] == true {
-                assert!(result.is_err());
-            } else {
-                result.unwrap();
-                assert_eq!(actual, fixture["expected"]);
-            }
+            message(&mut actual, "fallback");
+            assert_eq!(actual, fixture["expected"]);
         }
     }
 }

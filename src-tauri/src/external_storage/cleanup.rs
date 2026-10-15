@@ -19,6 +19,9 @@ use super::{
 use risunest_external_storage_format::control::BundleSource;
 use std::{collections::{BTreeMap, BTreeSet}, path::Path, time::{Duration, Instant}};
 
+// A locator-free lookup can span many individually bounded provider requests.
+const INVENTORY_METADATA_TIMEOUT: Duration = Duration::from_secs(3 * 60);
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CleanupLimits {
     pub batch: usize,
@@ -746,7 +749,7 @@ impl ConnectedRepositoryView<'_> {
                         byte_length: entry.ciphertext_length,
                         sha256: hex::encode(entry.ciphertext_sha256),
                     };
-                    let Some(receipt) = leases::control_request(
+                    let Some(receipt) = leases::control_request_with_timeout(
                         cancel,
                         self.connected.provider.lookup_metadata(
                             &self.connected.handle,
@@ -754,6 +757,7 @@ impl ConnectedRepositoryView<'_> {
                             None,
                             cancel,
                         ),
+                        INVENTORY_METADATA_TIMEOUT,
                     )
                     .await?
                     else {
@@ -1892,7 +1896,7 @@ pub(super) mod tests {
                     last_sync_at_ms: None,
                     last_backup_at_ms: None,
                 },
-                provider,
+                provider: provider.clone(),
                 handle: repository,
                 dependencies: test.dependencies,
                 root_key: zeroize::Zeroizing::new([7; 32]),
@@ -1906,11 +1910,26 @@ pub(super) mod tests {
                 cache_root: empty_cache.path(),
             };
 
+            tokio::time::pause();
+            provider.delay_metadata(Duration::from_secs(90));
             let survey = view.read_inventory(&Cancellation::default()).await.unwrap();
             assert_eq!(survey.objects.len(), 1);
             assert_eq!(survey.objects[0].object_id, intent.object_id);
             assert_eq!(survey.pages.len(), 1);
             assert!(!survey.pages[0].all_objects_absent);
+
+            provider.delay_metadata(Duration::from_secs(181));
+            let expired = view.read_inventory(&Cancellation::default()).await.err().unwrap();
+            assert_eq!(expired.kind, ErrorKind::Transient);
+
+            let cancel = Cancellation::default();
+            let started = tokio::time::Instant::now();
+            let (cancelled, ()) = tokio::join!(view.read_inventory(&cancel), async {
+                tokio::time::sleep(Duration::from_secs(61)).await;
+                cancel.cancel();
+            });
+            assert_eq!(cancelled.err().unwrap().kind, ErrorKind::Cancelled);
+            assert!(started.elapsed() < Duration::from_secs(62));
         });
     }
     #[test]

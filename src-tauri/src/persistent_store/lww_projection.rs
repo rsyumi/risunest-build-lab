@@ -1,6 +1,7 @@
 use super::classification::*;
 use super::*;
 use serde_json::{json, Map};
+use device_store::plugin_values::{self, text_value as plugin_text};
 
 const PERSONA_FIELDS: &[&str] = &[
     "personaPrompt",
@@ -820,6 +821,9 @@ pub(in crate::persistent_store) fn validate_received(
     if !known(key) {
         return Ok(());
     }
+    if key.components()[0] == "plugin-local" {
+        return validate_plugin_unit(_db, value);
+    }
     if key.components()[0] == "messages" && !matches!(value, UnitValue::Deleted) {
         return super::super::message_pages::validate_manifest(_db, value);
     }
@@ -1082,6 +1086,25 @@ fn apply_value(
     if p[0] == "plugin-local" && !plugin_participates(tx)? {
         return Ok(());
     }
+    if p[0] == "plugin-local" {
+        if let UnitValue::Object { descriptor, .. } = value {
+            let (rowid, length) = plugin_text::object_row(tx, &descriptor.object_hash)?;
+            if length > plugin_text::PART_BYTES as u64 {
+                validate_plugin_unit(tx, value)?;
+                let info = plugin_text::inspect_object(tx, &descriptor.object_hash)?;
+                let (clock, writer): (String, String) = tx.query_row(
+                    "SELECT write_clock,writer_id FROM plugin_device_storage WHERE owner=?1 AND space=?2 AND key=?3",
+                    params![p[1], p[2], p[3]], |row| Ok((row.get(0)?, row.get(1)?))).optional()?.unwrap_or(("0".into(), String::new()));
+                return plugin_values::write_reserved(tx, &p[1], &p[2], &p[3], info.byte_length, &clock, &writer, |output| {
+                    let input = tx.blob_open(rusqlite::MAIN_DB, "message_page_objects", "body", rowid, true)?;
+                    if plugin_text::decode(input, output, plugin_text::MAX_VALUE_BYTES)? != info {
+                        return Err(error("invalid-large-unit"));
+                    }
+                    Ok(())
+                });
+            }
+        }
+    }
     let next = json_value_resolved(tx, value)?;
     match p[0].as_str() {
         "root" => {
@@ -1311,6 +1334,9 @@ fn apply_value(
                         .ok_or_else(|| error("plugin-local-value-invalid"))
                 })
                 .transpose()?;
+            if value.is_some_and(|value| plugin_text::encoded_length(value) > plugin_text::MAX_VALUE_BYTES) {
+                return Err(error("plugin device value is too large"));
+            }
             tx.execute("INSERT INTO plugin_device_storage VALUES(?1,?2,?3,?4,?5,?6,'0','',NULL,NULL,NULL) ON CONFLICT(owner,space,key) DO UPDATE SET value=excluded.value,byte_size=excluded.byte_size,tombstone=excluded.tombstone",params![p[1],p[2],p[3],value,value.map(str::len).unwrap_or(0) as i64,i64::from(value.is_none())])?;
         }
         "hypa" => apply_hypa(tx, &p[1], next)?,
@@ -1340,7 +1366,7 @@ pub(in crate::persistent_store) fn device_replacement_changes(
 ) -> StoreResult<Vec<(UnitKey, UnitValue)>> {
     use device_store::sections::{FrozenBackupSections, SectionValueRow};
     use base64::Engine;
-    fn units(tx: &Connection, rows: &FrozenBackupSections) -> StoreResult<BTreeMap<UnitKey, UnitValue>> {
+    fn units(tx: &Connection, rows: &FrozenBackupSections, local: bool) -> StoreResult<BTreeMap<UnitKey, UnitValue>> {
         let mut values = BTreeMap::new();
         for row in &rows.hypa {
             let value = match &row.value {
@@ -1357,6 +1383,10 @@ pub(in crate::persistent_store) fn device_replacement_changes(
         for row in &rows.local_plugins {
             let value = match &row.value {
                 SectionValueRow::Plugin { value, .. } => unit_value(tx, &json!(value))?,
+                SectionValueRow::PluginObject { object, .. } => {
+                    if local { plugin_unit_value(tx, &row.key1, &row.key2, &row.key3)? }
+                    else { wire(UnitValue::object(RecordDescriptor::content(object.hash.clone())))? }
+                }
                 SectionValueRow::Tombstone { .. } => UnitValue::Deleted,
                 _ => return Err(error("replacement-plugin-row-invalid")),
             };
@@ -1364,8 +1394,8 @@ pub(in crate::persistent_store) fn device_replacement_changes(
         }
         Ok(values)
     }
-    let before = units(tx, &device_store::sections::capture_replacement_device_rows(tx)?)?;
-    let after = units(tx, replacement)?;
+    let before = units(tx, &device_store::sections::capture_replacement_device_rows(tx)?, true)?;
+    let after = units(tx, replacement, false)?;
     let mut keys: BTreeSet<_> = before.keys().chain(after.keys()).cloned().collect();
     let mut statement = tx.prepare("SELECT key FROM lww_units WHERE json_extract(key,'$[0]') IN ('hypa','plugin-local')")?;
     let stored = statement.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
@@ -1424,11 +1454,7 @@ pub(in crate::persistent_store) fn capture_device_changes(
             };
             (unit_key(&["hypa", &k1])?, value)
         } else {
-            let row:Option<(Option<String>,bool)>=tx.query_row("SELECT value,tombstone FROM plugin_device_storage WHERE owner=?1 AND space=?2 AND key=?3",params![k1,k2,k3],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-            let value = match row {
-                Some((Some(value), false)) => unit_value(tx, &json!(value))?,
-                _ => UnitValue::Deleted,
-            };
+            let value = plugin_unit_value(tx, &k1, &k2, &k3)?;
             (unit_key(&["plugin-local", &k1, &k2, &k3])?, value)
         };
         #[cfg(test)]
@@ -1446,6 +1472,34 @@ pub(in crate::persistent_store) fn capture_device_changes(
         )?;
     }
     Ok(())
+}
+fn validate_plugin_unit(db: &Connection, value: &UnitValue) -> StoreResult<()> {
+    if let UnitValue::Object { descriptor, .. } = value {
+        let (_, length) = plugin_text::object_row(db, &descriptor.object_hash)?;
+        if length <= plugin_text::PART_BYTES as u64 { return validate_large_unit(db, value).map(|_| ()); }
+        if *descriptor != RecordDescriptor::content(descriptor.object_hash.clone()) {
+            return Err(error("invalid-large-unit"));
+        }
+        let info = plugin_text::inspect_object(db, &descriptor.object_hash).map_err(|failure| {
+            if failure.to_string().contains("too large") { failure } else { error("invalid-large-unit") }
+        })?;
+        if info.encoded_length <= MAX_INLINE_UNIT_BYTES as u64 { return Err(error("invalid-large-unit")); }
+    } else { json_value(value)?; }
+    Ok(())
+}
+
+pub(in crate::persistent_store) fn plugin_unit_value(db: &Connection, owner: &str, space: &str, key: &str) -> StoreResult<UnitValue> {
+    let row: Option<(i64, i64)> = db.query_row(
+        "SELECT rowid,byte_size FROM plugin_device_storage WHERE owner=?1 AND space=?2 AND key=?3 AND tombstone=0",
+        params![owner, space, key], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+    let Some((rowid, size)) = row else { return Ok(UnitValue::Deleted); };
+    if size < 0 { return Err(error("plugin device size is invalid")); }
+    if size <= plugin_text::PART_BYTES as i64 {
+        let value: String = db.query_row("SELECT value FROM plugin_device_storage WHERE rowid=?1", [rowid], |row| row.get(0))?;
+        return unit_value(db, &Value::String(value));
+    }
+    let info = plugin_text::store_encoded(db, || Ok(db.blob_open(rusqlite::MAIN_DB, "plugin_device_storage", "value", rowid, true)?))?;
+    wire(UnitValue::object(RecordDescriptor::content(info.hash)))
 }
 pub(in crate::persistent_store) fn refresh_orders(
     tx: &Transaction<'_>,

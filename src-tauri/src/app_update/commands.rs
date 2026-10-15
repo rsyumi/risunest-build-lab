@@ -18,10 +18,7 @@ use super::platform::{current_selection, InstallStrategy};
 use super::transport::GithubTransport;
 use crate::native_log::logged;
 
-const PUBLIC_KEY: &str = match option_env!("RISUNEST_UPDATE_PUBLIC_KEY") {
-    Some(value) => value,
-    None => "",
-};
+include!(concat!(env!("OUT_DIR"), "/update_public_key.rs"));
 
 pub(crate) struct AppUpdateState {
     loader: Option<MetadataLoader<GithubTransport>>,

@@ -1,9 +1,10 @@
 import { withLibraryFileSelection } from './libraryFileOperation'
 import { Channel, invoke } from '@tauri-apps/api/core'
 import { join } from '@tauri-apps/api/path'
-import { iosStagingPath } from './nativePaths'
+import { iosStagingPath, nativeRoots } from './nativePaths'
 import { mkdir, remove, writeFile } from '@tauri-apps/plugin-fs'
 import { isTauriIOS } from '../platform'
+import { backupSourceCopyFailure } from './backupSourceCopyFailure'
 
 export interface IOSPickedFile {
     path: string
@@ -68,7 +69,7 @@ export async function materializeIOSBackupSource(
     token: string,
     options: { signal?: AbortSignal; onProgress?(progress: IOSBackupCopyProgress): void } = {},
 ): Promise<IOSPickedFile> {
-    if (options.signal?.aborted) throw cancelled()
+    await ensureDataRoot(options.signal)
     let copiedBytes = 0
     const onProgress = options.onProgress ? new Channel<IOSBackupCopyProgress>(progress => {
         if (options.signal?.aborted || !progress || !Number.isSafeInteger(progress.copiedBytes)
@@ -77,37 +78,46 @@ export async function materializeIOSBackupSource(
         copiedBytes = progress.copiedBytes
         options.onProgress?.(progress)
     }) : undefined
-    let cancellation: Promise<void> | undefined
+    let stopWaiting!: (error: DOMException) => void
+    const aborted = new Promise<never>((_resolve, reject) => { stopWaiting = reject })
     const onAbort = () => {
-        cancellation = discardIOSBackupSource(token).then(() => {}, () => {})
+        // Releasing custody cancels the native copy, and the page stops waiting for its reply.
+        void discardIOSBackupSource(token).catch(() => {})
+        stopWaiting(cancelled())
     }
     options.signal?.addEventListener('abort', onAbort, { once: true })
+    let copy: Promise<IOSPickedFile | undefined> = Promise.resolve(undefined)
     try {
-        const result = await invoke<IOSPickedFile>('plugin:ios-native|materialize_backup_source', {
+        copy = invoke<IOSPickedFile>('plugin:ios-native|materialize_backup_source', {
             token, ...(onProgress ? { onProgress } : {}),
         })
-        if (options.signal?.aborted) {
-            await discardIOSFile(result.path)
-            throw cancelled()
-        }
+        const result = await Promise.race([copy, aborted])
+        if (options.signal?.aborted) throw cancelled()
         return result
     } catch (error) {
-        if (options.signal?.aborted) throw cancelled()
-        throw error
+        if (!options.signal?.aborted) throw backupSourceCopyFailure(error)
+        // A copy that still finishes after cancellation is removed whenever its reply arrives.
+        void copy.then(result => result && discardIOSFile(result.path)).catch(() => {})
+        throw cancelled()
     } finally {
         options.signal?.removeEventListener('abort', onAbort)
         if (onProgress) onProgress.onmessage = () => {}
-        await cancellation
     }
 }
 const cancelled = () =>
     new DOMException('File operation cancelled', 'AbortError')
+/** The native side rejects staged-file work until it holds the data root, which it receives on first use. */
+async function ensureDataRoot(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw cancelled()
+    await nativeRoots()
+    if (signal?.aborted) throw cancelled()
+}
 
 export async function pickIOSFile(
     signal?: AbortSignal,
 ): Promise<IOSPickedFile | null> {
     return withLibraryFileSelection(async () => {
-        if (signal?.aborted) throw cancelled()
+        await ensureDataRoot(signal)
         const result = await invoke<IOSPickedFile & { cancelled: boolean }>(
             'plugin:ios-native|pick_file',
         )
@@ -130,7 +140,7 @@ export async function exportIOSFile(request: {
     requestId?: string
 }): Promise<{ bytes: number; warningCodes?: string[] }> {
     return withLibraryFileSelection(async () => {
-        if (request.signal?.aborted) throw cancelled()
+        await ensureDataRoot(request.signal)
         const requestId = request.requestId ?? crypto.randomUUID()
         const result = await invoke<{ cancelled: boolean; bytes: number }>(
             'plugin:ios-native|export_file',
@@ -150,12 +160,15 @@ export async function exportIOSFile(request: {
     })
 }
 
-export const acknowledgeIOSPublication = (id: string) =>
-    invoke<void>('plugin:ios-native|acknowledge_publication', { id })
+export async function acknowledgeIOSPublication(id: string): Promise<void> {
+    await ensureDataRoot()
+    await invoke<void>('plugin:ios-native|acknowledge_publication', { id })
+}
 
 export async function getIOSPublication(
     requestId: string,
 ): Promise<{ bytes: number } | null> {
+    await ensureDataRoot()
     const result = await invoke<{ state: string; bytes?: number }>(
         'plugin:ios-native|publication',
         { id: requestId },

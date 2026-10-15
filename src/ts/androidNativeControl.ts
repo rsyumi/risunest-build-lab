@@ -38,20 +38,12 @@ export function createAndroidControlClient(port: AndroidControlMessagePort) {
         if (pending.size >= 32) return Promise.reject(new Error('android-control-busy'))
         const id = crypto.randomUUID()
         const copying = method === 'saf.materializeBackupSource'
-        const timeout = copying ? 120_000 : 15_000
         return new Promise<T>((resolve, reject) => {
             const entry = {
                 resolve: (value: unknown) => resolve(value as T),
                 reject,
                 timer: undefined as ReturnType<typeof setTimeout> | undefined,
                 progress: undefined as ((value: unknown) => void) | undefined,
-            }
-            const renewTimeout = () => {
-                clearTimeout(entry.timer)
-                entry.timer = setTimeout(() => {
-                    pending.delete(id)
-                    reject(new Error('android-control-timeout'))
-                }, timeout)
             }
             if (copying) {
                 let copiedBytes = 0
@@ -63,11 +55,17 @@ export function createAndroidControlClient(port: AndroidControlMessagePort) {
                     if (progress.totalBytes !== null && (typeof progress.totalBytes !== 'number'
                         || !Number.isSafeInteger(progress.totalBytes) || progress.totalBytes < progress.copiedBytes)) return
                     copiedBytes = progress.copiedBytes
-                    renewTimeout()
                     onProgress?.({ copiedBytes, totalBytes: progress.totalBytes })
                 }
             }
-            if (method !== 'files.pick') renewTimeout()
+            // A picker waits for the user. A backup copy ends only when native replies, as on iOS, so its
+            // copied file is never left without a page to remove it; cancelling the copy stops it.
+            if (method !== 'files.pick' && !copying) {
+                entry.timer = setTimeout(() => {
+                    pending.delete(id)
+                    reject(new Error('android-control-timeout'))
+                }, 15_000)
+            }
             pending.set(id, entry)
             try {
                 port.postMessage(JSON.stringify({ id, method, args }))

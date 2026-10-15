@@ -1,43 +1,43 @@
+import { v4 } from 'uuid'
 import type { Message } from '../storage/database.svelte'
 import { snapshotResponse, type ResponseVariantSet } from '../responseVariants'
+import { sanitizeToggleValues } from '../toggleBindings'
 
 type RecordValue = Record<string, unknown>
 const object = (value: unknown): value is RecordValue =>
     !!value && typeof value === 'object' && !Array.isArray(value)
 
-function toggleValues(value: unknown): void {
-    if (
-        !object(value) ||
-        Object.entries(value).some(([key, value]) => !key.startsWith('toggle_') || typeof value !== 'string')
-    ) {
-        throw new TypeError('PocketRisu toggle values must be a toggle_ string record')
-    }
+/** Keeps a named toggle preset; values that are not a record become empty. */
+function togglePreset(value: unknown): boolean {
+    if (!object(value) || typeof value.name !== 'string') return false
+    value.values = sanitizeToggleValues(value.values) ?? {}
+    return true
 }
 
 export function normalizePocketMessage(value: unknown, fallbackId: string): void {
-    if (!object(value) || value.swipes === undefined) return
-    if (!Array.isArray(value.swipes) || value.swipes.some((swipe) => typeof swipe !== 'string'))
-        throw new TypeError('PocketRisu swipes must be strings')
-    if (
-        value.swipeId !== undefined &&
-        (typeof value.swipeId !== 'number' || !Number.isInteger(value.swipeId))
-    )
-        throw new TypeError('PocketRisu swipeId must be an integer')
-    if (typeof value.data !== 'string') throw new TypeError('PocketRisu response body must be a string')
-    if (value.responseVariants !== undefined) return
-    const swipes = [...value.swipes] as string[]
-    let index = value.swipeId as number | undefined
+    if (!object(value) || !Array.isArray(value.swipes) || value.responseVariants !== undefined) return
+    // Array holes are not candidates; a usable swipeId keeps pointing at its own text.
+    const swipes: string[] = []
+    let selected: number | undefined
+    value.swipes.forEach((swipe: unknown, i: number) => {
+        if (typeof swipe !== 'string') return
+        if (i === value.swipeId) selected = swipes.length
+        swipes.push(swipe)
+    })
+    if (typeof value.data !== 'string') value.data = swipes[selected ?? 0] ?? ''
+    const body = value.data as string
+    let index: number
     const warnings: string[] = []
-    if (index === undefined || index < 0 || index >= swipes.length) {
+    if (selected === undefined) {
         warnings.push('invalid-swipe-index')
-        const matching = swipes.flatMap((swipe, i) => (swipe === value.data ? [i] : []))
+        const matching = swipes.flatMap((swipe, i) => (swipe === body ? [i] : []))
         index = matching.length === 1 ? matching[0] : swipes.length
-        if (index === swipes.length) swipes.push(value.data)
-    } else if (swipes[index] !== value.data) {
+        if (index === swipes.length) swipes.push(body)
+    } else if (swipes[selected] !== body) {
         warnings.push('swipe-body-mismatch')
         index = swipes.length
-        swipes.push(value.data)
-    }
+        swipes.push(body)
+    } else index = selected
     const groupId = typeof value.chatId === 'string' && value.chatId ? value.chatId : fallbackId
     const snapshot = snapshotResponse([value as unknown as Message])[0] as unknown as RecordValue
     delete snapshot.swipes
@@ -63,9 +63,12 @@ export function normalizePocketMessage(value: unknown, fallbackId: string): void
 
 export function normalizePocketChat(value: unknown, fallbackId: string): void {
     if (!object(value)) return
-    if (value.savedToggleValues !== undefined) toggleValues(value.savedToggleValues)
-    if (value.bindedPersona !== undefined && typeof value.bindedPersona !== 'string')
-        throw new TypeError('PocketRisu persona binding must be a string')
+    if (value.savedToggleValues !== undefined) {
+        const values = sanitizeToggleValues(value.savedToggleValues)
+        if (values) value.savedToggleValues = values
+        else delete value.savedToggleValues
+    }
+    if (value.bindedPersona !== undefined && typeof value.bindedPersona !== 'string') delete value.bindedPersona
     if (Array.isArray(value.message))
         value.message.forEach((message, index) =>
             normalizePocketMessage(
@@ -80,31 +83,30 @@ export function normalizePocketCharacter(value: unknown, fallbackId = 'character
         value.chats.forEach((chat, index) => normalizePocketChat(chat, `${fallbackId}:chat:${index}`))
 }
 
+/** Drops root values RisuNest cannot read, such as the null PocketRisu stores for a cleared toggle default. */
 export function normalizePocketFeatures<T>(value: T): T {
     if (!object(value)) return value
-    if (value.disableToggleBinding !== undefined && typeof value.disableToggleBinding !== 'boolean')
-        throw new TypeError('PocketRisu disableToggleBinding must be boolean')
-    if (value.defaultToggleValues !== undefined) toggleValues(value.defaultToggleValues)
-    if (value.togglePresets !== undefined) {
-        if (!Array.isArray(value.togglePresets))
-            throw new TypeError('PocketRisu toggle presets must be an array')
-        for (const preset of value.togglePresets) {
-            if (!object(preset) || typeof preset.name !== 'string')
-                throw new TypeError('PocketRisu toggle preset must have a name')
-            toggleValues(preset.values)
-        }
+    const root: RecordValue = value
+    if (root.disableToggleBinding !== undefined && typeof root.disableToggleBinding !== 'boolean')
+        delete root.disableToggleBinding
+    if (root.defaultToggleValues !== undefined) {
+        const values = sanitizeToggleValues(root.defaultToggleValues)
+        if (values) root.defaultToggleValues = values
+        else delete root.defaultToggleValues
     }
-    if (Array.isArray(value.personas)) {
+    if (Array.isArray(root.togglePresets)) root.togglePresets = root.togglePresets.filter(togglePreset)
+    else if (root.togglePresets !== undefined) delete root.togglePresets
+    if (Array.isArray(root.personas)) {
+        // Lookups take the first persona with an ID, so a later duplicate gets a new one.
         const ids = new Set<string>()
-        for (const persona of value.personas) {
-            if (!object(persona) || persona.id === undefined) continue
-            if (typeof persona.id !== 'string' || (persona.id && ids.has(persona.id)))
-                throw new TypeError('PocketRisu persona IDs must be unique strings')
-            if (persona.id) ids.add(persona.id)
+        for (const persona of root.personas) {
+            if (!object(persona) || persona.id === undefined || persona.id === '') continue
+            if (typeof persona.id !== 'string' || ids.has(persona.id)) persona.id = v4()
+            ids.add(persona.id as string)
         }
     }
-    if (Array.isArray(value.characters))
-        value.characters.forEach((character, index) =>
+    if (Array.isArray(root.characters))
+        root.characters.forEach((character, index) =>
             normalizePocketCharacter(character, `character:${index}`),
         )
     return value

@@ -1,14 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks'
 import type { Channel } from '@tauri-apps/api/core'
-const { invoke, alertError, waitAlert } = vi.hoisted(() => ({ invoke: vi.fn(), alertError: vi.fn(), waitAlert: vi.fn() }))
-vi.mock('@tauri-apps/api/core', async original => ({ ...(await original<typeof import('@tauri-apps/api/core')>()), invoke } satisfies typeof import('@tauri-apps/api/core')))
+const { invoke, roots, alertError, waitAlert } = vi.hoisted(() => ({ invoke: vi.fn(), roots: vi.fn(), alertError: vi.fn(), waitAlert: vi.fn() }))
+vi.mock('@tauri-apps/api/core', async original => ({ ...(await original<typeof import('@tauri-apps/api/core')>()),
+    invoke: ((command, ...args) => command === 'app_paths_roots' ? roots() : invoke(command, ...args)) as typeof import('@tauri-apps/api/core').invoke,
+} satisfies typeof import('@tauri-apps/api/core')))
 vi.mock('../alert', () => ({ alertError, waitAlert }))
 vi.mock('../gui/nativeFileJobDialogModel', () => ({ failureReason: (code: string) => `reason:${code}` }))
 import { exportIOSFile, pickIOSFile, getIOSPublication, pickIOSBackupSource, materializeIOSBackupSource, reportInterruptedIOSBackupSources } from './iosFiles'
+import { isLibraryFileOperationReserved } from './libraryFileOperation'
 beforeEach(() => {
     mockIPC(() => undefined)
     invoke.mockReset()
+    roots.mockReset().mockResolvedValue({ data: '/owned' })
     alertError.mockReset()
     waitAlert.mockReset().mockResolvedValue(undefined)
 })
@@ -104,6 +108,32 @@ describe('iOS file publication', () => {
         expect(reports).toEqual([{ copiedBytes: 4 * 1024 ** 3, totalBytes: 8 * 1024 ** 3 }])
         expect(invoke.mock.calls.map(call => call[0])).toEqual(['plugin:ios-native|materialize_backup_source'])
     })
+    it('ignores copy progress that arrives after a finished copy nobody cancelled', async () => {
+        const reports: unknown[] = []
+        let channel!: Channel<{ copiedBytes: number; totalBytes: number }>
+        invoke.mockImplementation(async (_command, args) => {
+            channel = args.onProgress
+            return { path: '/owned/copied.risudat', name: 'copied.risudat', bytes: 42 }
+        })
+        await materializeIOSBackupSource('source', { onProgress: progress => reports.push(progress) })
+        channel.onmessage({ copiedBytes: 42, totalBytes: 42 })
+        expect(reports).toEqual([])
+    })
+    // androidSafBridge.test.ts expects the same reasons for the same native codes.
+    it.each([
+        ['source-changed', 'source-reselect-required'],
+        ['cancelled', 'source-reselect-required'],
+        ['spool-create-failed', 'spool-write-failed'],
+        ['source-busy', 'source-busy'],
+        ['source-read-failed', 'source-read-failed'],
+    ])('reports a native %s copy failure with the %s dialog reason', async (nativeCode, code) => {
+        invoke.mockRejectedValue({ message: 'Backup source could not be copied', code: nativeCode })
+        await expect(materializeIOSBackupSource('source')).rejects.toMatchObject({ code, message: expect.stringContaining(nativeCode) })
+    })
+    it('passes on a copy rejection that carries no failure code', async () => {
+        invoke.mockRejectedValue('plugin unavailable')
+        await expect(materializeIOSBackupSource('source')).rejects.toBe('plugin unavailable')
+    })
     it.each([false, true])('cancels the selected copy and cleans any late result (failed %s)', async failed => {
         const controller = new AbortController()
         let finish!: (value: unknown) => void
@@ -122,6 +152,7 @@ describe('iOS file publication', () => {
         })
         const pending = materializeIOSBackupSource('source', { signal: controller.signal })
         const rejected = expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+        await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('plugin:ios-native|materialize_backup_source', { token: 'source' }))
         controller.abort()
         await rejected
         expect(discarded).toEqual(failed ? [] : ['/owned/late.risudat'])
@@ -142,14 +173,13 @@ describe('iOS file publication', () => {
         ).rejects.toMatchObject({ name: 'AbortError' })
     })
     it('keeps selection reserved through native return and cleanup', async () => {
-        const { isLibraryFileOperationReserved } = await import('./libraryFileOperation')
         let finish!: (value: { cancelled: boolean }) => void
         invoke.mockImplementation(() => new Promise(resolve => { finish = resolve }))
         const selected = pickIOSFile()
         expect(isLibraryFileOperationReserved()).toBe(true)
         window.dispatchEvent(new Event('focus'))
         document.dispatchEvent(new Event('visibilitychange'))
-        await Promise.resolve()
+        await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('plugin:ios-native|pick_file'))
         expect(isLibraryFileOperationReserved()).toBe(true)
         finish({ cancelled: true })
         expect(await selected).toBeNull()
@@ -205,5 +235,46 @@ describe('iOS file publication', () => {
         await expect(getIOSPublication('receipt')).resolves.toEqual({
             bytes: 42,
         })
+    })
+})
+type IOSFiles = typeof import('./iosFiles')
+const stagedCalls: [string, string, (files: IOSFiles, signal?: AbortSignal) => Promise<unknown>, unknown][] = [
+    ['pickIOSFile', 'pick_file', (files, signal) => files.pickIOSFile(signal), { cancelled: true }],
+    ['exportIOSFile', 'export_file', (files, signal) => files.exportIOSFile({ sourcePath: '/owned/file', suggestedName: 'backup.risunest', requestId: 'caller-owned', signal }), { cancelled: false, bytes: 42 }],
+    ['materializeIOSBackupSource', 'materialize_backup_source', (files, signal) => files.materializeIOSBackupSource('source', { signal }), { path: '/owned/copied.risudat', name: 'copied.risudat', bytes: 42 }],
+    ['getIOSPublication', 'publication', files => files.getIOSPublication('receipt'), { state: 'unknown' }],
+    ['acknowledgeIOSPublication', 'acknowledge_publication', files => files.acknowledgeIOSPublication('receipt'), undefined],
+]
+describe('iOS data root handover', () => {
+    // A fresh module graph has no cached root, as on a fresh launch, and the native side rejects staged work until it arrives.
+    async function beforeDataRoot(reply: unknown) {
+        vi.resetModules()
+        let delivered = false
+        let deliver!: () => void
+        roots.mockImplementation(() => new Promise(resolve => { deliver = () => { delivered = true; resolve({ data: '/owned' }) } }))
+        invoke.mockImplementation(async () => {
+            if (!delivered) throw new Error('The application data root has not been received yet')
+            return reply
+        })
+        return { files: await import('./iosFiles'), deliver: () => deliver() }
+    }
+    it.each(stagedCalls)('%s sends %s only after the native side holds the data root', async (_name, command, run, reply) => {
+        const { files, deliver } = await beforeDataRoot(reply)
+        const pending = run(files)
+        await vi.waitFor(() => expect(roots).toHaveBeenCalledOnce())
+        expect(invoke).not.toHaveBeenCalled()
+        deliver()
+        await pending
+        expect(invoke.mock.calls.map(([name]) => name)).toEqual([`plugin:ios-native|${command}`])
+    })
+    it.each(stagedCalls.slice(0, 3))('%s sends nothing when cancelled while the data root is pending', async (_name, _command, run, reply) => {
+        const { files, deliver } = await beforeDataRoot(reply)
+        const controller = new AbortController()
+        const pending = run(files, controller.signal)
+        await vi.waitFor(() => expect(roots).toHaveBeenCalledOnce())
+        controller.abort()
+        deliver()
+        await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+        expect(invoke).not.toHaveBeenCalled()
     })
 })

@@ -335,11 +335,6 @@ function isCapabilityUnavailable(error: unknown): boolean {
     return error instanceof NativeFileJobError && error.code === 'capability-unavailable'
 }
 
-function isNativeCompatibilityFallback(error: unknown): boolean {
-    return isCapabilityUnavailable(error)
-        || error instanceof NativeFileJobError && error.code === 'unsupported-format'
-}
-
 const WEB_IMPORT_KIND = 'restore-block-risu-save' as const
 
 function webImportStatus(
@@ -399,11 +394,6 @@ async function importWithWebCodec(
     return importWithBytes(runtime, bytes, options, dependencies)
 }
 
-/** Tells the dialog the native job gave up and the user must pick the file again in the WebView. */
-function announceWebReselect(options: RisuSaveFileRouteOptions): void {
-    options.onStatus?.(syntheticNativeFileJobStatus({ kind: WEB_IMPORT_KIND }, 'awaiting-reselect'))
-}
-
 async function exportWithWebCodec(
     name: string,
     omitAccount: boolean,
@@ -430,9 +420,7 @@ export async function importRisuSaveFromPicker(
                         : { name: basenameOf(path) },
                 )
             }
-            let result: NativeFileJobResult
-            try {
-                result = await dependencies.runNativeImport(
+            const result = await dependencies.runNativeImport(
                     runtime,
                     { type: 'desktopPath', path },
                     {
@@ -447,13 +435,6 @@ export async function importRisuSaveFromPicker(
                             : {}),
                     },
                 )
-            } catch (error) {
-                if (isNativeCompatibilityFallback(error)) {
-                    announceWebReselect(options)
-                    return importWithWebCodec(runtime, options, dependencies)
-                }
-                throw error
-            }
             return {
                 mode: 'native',
                 warningCodes: result.warningCodes,
@@ -464,6 +445,7 @@ export async function importRisuSaveFromPicker(
         }
     }
 
+    if (dependencies.platform() !== 'web') throw new NativeFileJobError('native-required', 'Use the native backup source picker')
     return importWithWebCodec(runtime, options, dependencies)
 }
 

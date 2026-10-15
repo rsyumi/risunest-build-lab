@@ -37,8 +37,25 @@ export async function openSyncConflictBackups(): Promise<void> {
     const selected = await alertSelect(entries.map(entryLabel), language.syncConflictBackups)
     const entry = entries[Number(selected)]
     if (!entry) return
-    // Native replacement asks once in its own restore dialog, after the sync pull.
-    if (!isTauri && await hasLibraryCharacters() && !await alertConfirm(language.syncConflictRestoreConfirm)) return
+    if (isTauri) {
+        try {
+            const { invoke } = await import('@tauri-apps/api/core')
+            const { nativeRestoreDeadline } = await import('../nativeRestoreDeadline')
+            const { restoreBackupFromNativeSource } = await import('../portableBackupFileRouteProduction.svelte')
+            await restoreBackupFromNativeSource(({signal}) => nativeRestoreDeadline(
+                invoke('native_conflict_backup_source', { backupId: entry.id }),
+                'saved backup lookup', undefined, undefined, undefined, signal,
+            ), {
+                confirmationWarnings: [language.syncConflictRestoreScope],
+            })
+        } catch (cause) {
+            if (cause instanceof DOMException && cause.name === 'AbortError') return
+            const code = typeof cause === 'object' && cause !== null && 'code' in cause ? cause.code : undefined
+            alertError(code === 'sync-unavailable' ? language.risuNest.backup.syncUnavailable : language.risuNest.backup.actionFailed)
+        }
+        return
+    }
+    if (await hasLibraryCharacters() && !await alertConfirm(language.syncConflictRestoreConfirm)) return
     let decoded: Database
     try {
         const bytes = await store.read(entry.id)
@@ -52,31 +69,17 @@ export async function openSyncConflictBackups(): Promise<void> {
         alertError(language.syncConflictBackupUnreadable)
         return
     }
-    let release: (() => void | Promise<void>) | undefined
-    let hold: (() => void) | undefined
     try {
-        if (isTauri) {
-            const { getServerSyncController, holdServerSyncAfterRestore } = await import('./serverSyncProduction')
-            const controller = getServerSyncController()
-            release = await controller.beginReplacement()
-            await controller.confirmReplacement()
-            hold = holdServerSyncAfterRestore
-        }
         await flushPendingData('sync-conflict-restore')
-        // The native replacement pins the revision it pauses at, which follows the sync pull.
-        const current = isTauri ? undefined : await capturePersistentMutationToken('sync-conflict-restore')
+        const current = await capturePersistentMutationToken('sync-conflict-restore')
         await installLocalBackup(decoded, {
-            ...(isTauri ? { upstreamImportWarnings: [language.syncConflictRestoreScope] } : {}),
             replaceDatabase: async (database, reason, options) => {
                 const outcome = await replacePersistentDatabase(database, reason, {
                     ...options,
                     authoritative: true,
-                    ...(current ? {
-                        expectedRevision: current.revision,
-                        expectedMutationGeneration: current.mutationGeneration,
-                    } : {}),
+                    expectedRevision: current.revision,
+                    expectedMutationGeneration: current.mutationGeneration,
                 })
-                hold?.()
                 return outcome
             },
             publishAcceptedRevision: publishCurrentOfficialRevision,
@@ -91,7 +94,5 @@ export async function openSyncConflictBackups(): Promise<void> {
         console.error('Conflict backup restoration failed', cause)
         const syncUnavailable = typeof cause === 'object' && cause !== null && 'code' in cause && cause.code === 'sync-unavailable'
         alertError(syncUnavailable ? language.risuNest.backup.syncUnavailable : language.risuNest.backup.actionFailed)
-    } finally {
-        await release?.()
     }
 }

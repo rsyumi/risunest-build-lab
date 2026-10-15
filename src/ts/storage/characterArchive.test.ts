@@ -115,6 +115,7 @@ describe('character archive ownership', () => {
             for (const [message, restoreText, archiveText] of [
                 ['character archive data could not be fetched', strings.restoreRemoteAssetUnavailable, strings.archiveRemoteAssetUnavailable],
                 ['character archive data is missing', strings.restoreAssetMissing, strings.archiveAssetMissing],
+                ['archived character exceeds the decoded size limit', strings.restoreTooLarge, strings.archiveTooLarge],
                 ['synthetic other failure', strings.restoreFailed, strings.archiveFailed],
             ]) {
                 const failure = Object.assign(new Error(message), { code: 'validation' })

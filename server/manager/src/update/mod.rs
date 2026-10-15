@@ -828,11 +828,16 @@ pub async fn run_installer_guard(
                 let _ = fs::remove_file(&cancel);
                 return Err("installer-guard-cancelled".into());
             }
-            write_json(
-                &ready,
-                &serde_json::json!({"ready":true,"wasRunning":was_running}),
-                "installer-guard-write-failed",
-            )
+            let ready_state = serde_json::json!({"ready":true,"wasRunning":was_running});
+            #[cfg(windows)]
+            let ready_state = {
+                let process = platform::InstallerOwner::open(std::process::id())?;
+                let mut state = ready_state;
+                state["processId"] = serde_json::json!(std::process::id());
+                state["processStarted"] = serde_json::json!(process.started()?);
+                state
+            };
+            write_json(&ready, &ready_state, "installer-guard-write-failed")
         }
         .await;
         if let Err(error) = prepare_result {
@@ -909,6 +914,19 @@ pub fn finish_installer_guard(root: &Path, nonce: &str) -> Result<()> {
     if !ready.is_file() {
         return Err("installer-guard-not-active".into());
     }
+    #[cfg(windows)]
+    let guard = {
+        let state: serde_json::Value = read_json(&ready, "installer-guard-invalid")?;
+        let pid = state["processId"]
+            .as_u64()
+            .and_then(|pid| u32::try_from(pid).ok())
+            .ok_or("installer-guard-invalid")?;
+        let process = platform::InstallerOwner::open(pid)?;
+        if state["processStarted"].as_u64() != Some(process.started()?) {
+            return Err("installer-guard-invalid".into());
+        }
+        process
+    };
     let release = installer_guard_path(root, nonce, "release")?;
     write_json(
         &release,
@@ -918,6 +936,12 @@ pub fn finish_installer_guard(root: &Path, nonce: &str) -> Result<()> {
     let deadline = std::time::Instant::now() + INSTALLER_GUARD_RELEASE_TIMEOUT;
     while std::time::Instant::now() < deadline {
         if !ready.exists() {
+            // The scheduled guard still owns its executable while removing its task.
+            #[cfg(windows)]
+            if !guard.is_alive()? {
+                return Ok(());
+            }
+            #[cfg(not(windows))]
             return Ok(());
         }
         thread::sleep(INSTALLER_GUARD_POLL);
@@ -1243,6 +1267,62 @@ mod tests {
                 "installer-guard-invalid"
             );
         }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn installer_finish_waits_for_the_guard_process_after_ready_is_removed() {
+        use std::{io::Write, process::Stdio, sync::mpsc};
+
+        let root = tempfile::tempdir().unwrap();
+        let nonce = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let ready = installer_guard_path(root.path(), nonce, "ready").unwrap();
+        let release = installer_guard_path(root.path(), nonce, "release").unwrap();
+        let mut child = platform::process("cmd.exe")
+            .args(["/D", "/Q", "/C", "set /p RISUNEST_TEST_WAIT="])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let guard = platform::InstallerOwner::open(child.id()).unwrap();
+        let mut state = serde_json::json!({
+            "ready": true,
+            "wasRunning": false,
+            "processId": child.id(),
+            "processStarted": guard.started().unwrap() + 1,
+        });
+        write_json(&ready, &state, "test-write-failed").unwrap();
+        assert_eq!(
+            finish_installer_guard(root.path(), nonce).unwrap_err(),
+            "installer-guard-invalid"
+        );
+        assert!(!release.exists());
+        state["processStarted"] = serde_json::json!(guard.started().unwrap());
+        write_json(&ready, &state, "test-write-failed").unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let guard_root = root.path().to_owned();
+        let finish = thread::spawn(move || {
+            sender
+                .send(finish_installer_guard(&guard_root, nonce))
+                .unwrap();
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !release.exists() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let released = release.exists();
+        fs::remove_file(&ready).unwrap();
+        let before_exit = receiver.recv_timeout(Duration::from_millis(200));
+        child.stdin.take().unwrap().write_all(b"\r\n").unwrap();
+        child.wait().unwrap();
+        finish.join().unwrap();
+        assert!(released);
+        assert!(matches!(before_exit, Err(mpsc::RecvTimeoutError::Timeout)));
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Ok(())
+        );
     }
 
     #[test]

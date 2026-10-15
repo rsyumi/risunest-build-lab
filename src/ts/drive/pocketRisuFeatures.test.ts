@@ -12,11 +12,8 @@ describe('Pocket feature import', () => {
         'matches the shared native fixture %i',
         (_, fixture) => {
             const input = structuredClone(fixture.input)
-            if ('invalid' in fixture) expect(() => normalizePocketMessage(input, 'fallback')).toThrow()
-            else {
-                normalizePocketMessage(input, 'fallback')
-                expect(input).toEqual(fixture.expected)
-            }
+            normalizePocketMessage(input, 'fallback')
+            expect(input).toEqual(fixture.expected)
         },
     )
     it('preserves toggle snapshots, persona IDs and excluded opaque fields without interpreting them', () => {
@@ -32,11 +29,35 @@ describe('Pocket feature import', () => {
             characters: [{ chats: [{ savedToggleValues: {}, bindedPersona: 'missing', message: [] }] }],
         }
         expect(normalizePocketFeatures(structuredClone(db))).toEqual(db)
-        expect(() => normalizePocketFeatures({ personas: [{ id: 'same' }, { id: 'same' }] })).toThrow()
-        expect(() => normalizePocketFeatures({ defaultToggleValues: { other: '1' } })).toThrow()
-        expect(() =>
-            normalizePocketFeatures({ characters: [{ chats: [{ savedToggleValues: { toggle_a: 1 } }] }] }),
-        ).toThrow()
+    })
+    it('drops PocketRisu values RisuNest cannot read instead of rejecting the backup', () => {
+        const db = normalizePocketFeatures({
+            disableToggleBinding: null,
+            defaultToggleValues: null,
+            togglePresets: [
+                { name: 'Imported', values: { toggle_a: '1', custom: '2' } },
+                { values: {} },
+                { name: 'No values' },
+            ],
+            personas: [{ id: 'same' }, { id: 'same' }, { id: 3 }],
+            characters: [{ chats: [
+                { savedToggleValues: { toggle_kept: '1', other: 'x', toggle_number: 2 }, bindedPersona: null, message: [] },
+                { savedToggleValues: null, message: [] },
+            ] }],
+        })
+        expect(db).not.toHaveProperty('disableToggleBinding')
+        expect(db).not.toHaveProperty('defaultToggleValues')
+        expect(db.togglePresets).toEqual([
+            { name: 'Imported', values: { toggle_a: '1' } },
+            { name: 'No values', values: {} },
+        ])
+        const ids = db.personas.map((persona) => persona.id)
+        expect(ids[0]).toBe('same')
+        expect(ids.every((id) => typeof id === 'string')).toBe(true)
+        expect(new Set(ids).size).toBe(3)
+        expect(db.characters[0].chats[0]).toEqual({ savedToggleValues: { toggle_kept: '1' }, message: [] })
+        expect(db.characters[0].chats[1]).toEqual({ message: [] })
+        expect(normalizePocketFeatures({ togglePresets: null })).toEqual({})
     })
     it('normalizes cold payloads on decode without changing the input backup', async () => {
         const original = {

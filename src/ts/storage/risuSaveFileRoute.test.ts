@@ -660,56 +660,18 @@ describe('RisuSave picker route', () => {
         expect(deps.runNativeExport).not.toHaveBeenCalled()
     })
 
-    it('falls back to the JavaScript importer when the desktop native capability is unavailable', async () => {
-        const deps = dependencies('native-desktop')
-        const runtime = deps.runtime()
-        deps.runtime = () => runtime
-        vi.mocked(deps.runNativeImport).mockRejectedValueOnce(
-            new NativeFileJobError('capability-unavailable', 'native jobs unavailable'),
-        )
-
-        const result = await importRisuSaveFromPicker({}, deps)
-
-        expect(result?.mode).toBe('web')
-        expect(deps.chooseWebImport).toHaveBeenCalledOnce()
-        expect(runtime.replacePersistentDatabase).toHaveBeenCalledOnce()
-    })
-
-    it.each([true,false])('decoded native fallback avoids duplicate loading only after its restart receipt=%s',async restarted=>{
-        const deps=dependencies('native-desktop')
-        const runtime=deps.runtime()
-        deps.runtime=()=>runtime
-        vi.mocked(deps.runNativeImport).mockRejectedValueOnce(new NativeFileJobError('unsupported-format','synthetic upstream format'))
-        vi.mocked(runtime.replacePersistentDatabase).mockImplementationOnce(async(_database,_reason,options)=>{
-            if(restarted)options?.onPluginsRestarted?.()
-            return {kind:'committed',revision:5,projection:'applied'}
-        })
-        await importRisuSaveFromPicker({},deps)
-        expect(runtime.replacePersistentDatabase).toHaveBeenCalledOnce()
-        expect(deps.reloadPlugins).toHaveBeenCalledTimes(restarted?0:1)
-    })
-
-    it('uses a separate Web picker with the JavaScript codec for unsupported formats', async () => {
-        const deps = dependencies('native-desktop')
-        vi.mocked(deps.runNativeImport).mockRejectedValueOnce(
-            new NativeFileJobError('unsupported-format', 'not a block save'),
-        )
-        const stages: string[] = []
-        const onSource = vi.fn()
-
-        const result = await importRisuSaveFromPicker({
-            onStatus: (status) => stages.push(status.detail?.stage ?? status.phase),
-            onSource,
-        }, deps)
-
-        expect(result?.mode).toBe('web')
-        expect(deps.chooseWebImport).toHaveBeenCalledOnce()
-        expect(deps.decodeRisuSave).toHaveBeenCalledWith(Uint8Array.from([1, 2, 3]))
-        expect(stages).toEqual([
-            'awaiting-reselect', 'reading-database', 'decoding-database', 'activating', 'reloading-plugins',
-        ])
-        expect(onSource).toHaveBeenNthCalledWith(1, { name: 'source.risudat' })
-        expect(onSource).toHaveBeenNthCalledWith(2, { name: 'source.risudat', bytes: 3 })
+    it.each(['native-desktop', 'native-ios'] as const)('retains native failure and source cleanup on %s without a browser read', async platform => {
+        for (const code of ['capability-unavailable', 'unsupported-format']) {
+            const deps = dependencies('native-desktop')
+            deps.platform = () => platform
+            deps.cleanupNativeImport = vi.fn(async () => {})
+            const failure = new NativeFileJobError(code, 'Synthetic native failure')
+            vi.mocked(deps.runNativeImport).mockRejectedValueOnce(failure)
+            await expect(importRisuSaveFromPicker({}, deps)).rejects.toBe(failure)
+            expect(deps.chooseWebImport).not.toHaveBeenCalled()
+            expect(deps.decodeRisuSave).not.toHaveBeenCalled()
+            expect(deps.cleanupNativeImport).toHaveBeenCalledOnce()
+        }
     })
 
     it('reports the picked desktop file through the source describer when one is configured', async () => {

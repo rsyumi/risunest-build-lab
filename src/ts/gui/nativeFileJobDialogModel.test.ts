@@ -23,6 +23,15 @@ import {
 
 const copy = languageEnglish.risuNest.importDialog
 
+it.each(['activating-database', 'cleaning-up'] as const)('does not present source EOF as completed restoration during %s', phase => {
+    const stage = phase === 'cleaning-up' ? 'cleaning-up' : 'activating'
+    const model = buildNativeFileJobDialogModel(running({status:status({phase,progress:{completedBytes:100,totalBytes:100,completedItems:1},detail:detail(stage)}),observedStages:[stage]}),null,1000)
+    expect(model.overallPercent).toBeNull()
+    expect(model.indeterminate).toBe(true)
+    expect(model.cancelEnabled).toBe(false)
+    expect(model.terminal).toBeNull()
+})
+
 it('shows dataset publication progress without a terminal outcome or invented counters', () => {
     const current = status({ kind: 'export-dataset', phase: 'publishing-destination', progress: { completedBytes: 5, totalBytes: 10, completedItems: 0 } })
     const model = buildNativeFileJobDialogModel(running({ kind: 'export', format: 'dataset', status: current, observedStages: ['preparing-export', 'writing-export', 'publishing-destination'] }), null, 2000)
@@ -162,6 +171,11 @@ describe('nativeFileJobDialogModel', () => {
                 code: 'payload-too-large', message: 'synthetic detail', recoveryRequired: false, itemKind: kind,
             } }), 0)
             expect(model.terminal?.reason).toBe(copy.reasonTooLarge.replace('{0}', item))
+            const exported = buildNativeFileJobDialogModel(null, outcome({ kind: 'export', state: 'failed', error: {
+                code: 'payload-too-large', message: 'synthetic detail', recoveryRequired: false, itemKind: kind,
+            } }), 0)
+            expect(exported.terminal?.reason).toBe(kind === 'compatible-database'
+                ? copy.reasonCompatibleDatabaseTooLarge : copy.reasonExportTooLarge.replace('{0}', item))
         }
         expect(failureReason('payload-too-large', 'import', 'commit')).toBe(copy.reasonUnknown)
         expect(failureReason('payload-too-large')).toBe(copy.reasonUnknown)
@@ -290,8 +304,8 @@ describe('nativeFileJobDialogModel', () => {
         expect(reading.stages[0].detail).toBe(
             fillTemplate(copy.overall, '512 KiB', '1.0 MiB'),
         )
-        expect(reading.overallPercent).toBe(50)
-        expect(reading.indeterminate).toBe(false)
+        expect(reading.overallPercent).toBeNull()
+        expect(reading.indeterminate).toBe(true)
 
         const staging = buildNativeFileJobDialogModel(
             running({
@@ -786,7 +800,7 @@ describe('nativeFileJobDialogModel', () => {
             summary: copy.resultCancelled,
             details: '',
         })
-        expect(cancelled.overallPercent).toBe(10)
+        expect(cancelled.overallPercent).toBeNull()
         expect(stageIds(cancelled)).toEqual(['reading-archive:stopped'])
 
         const partial = buildNativeFileJobDialogModel(

@@ -165,7 +165,7 @@ fn section_control_metadata_changes_without_normalizing_user_payload_numbers() {
     assert_eq!(value["metadata"], json!({"n": 1.25, "nested": [3]}));
     assert_eq!(serde_json::from_value::<HypaValue>(value).unwrap(), hypa);
     let payload = json!({"fraction": 0.5, "count": 9});
-    let plugin = LocalPluginValue { space: PluginSpace::Json, value: ValueOrObject::Inline(payload.clone()) };
+    let plugin = LocalPluginValue { space: PluginSpace::Json, value: ValueOrObject::Inline(payload.clone()).into() };
     assert_eq!(serde_json::to_value(&plugin).unwrap()["value"], payload);
 }
 

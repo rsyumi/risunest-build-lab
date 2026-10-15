@@ -29,6 +29,42 @@ test("both installers use the template pinned to their Tauri CLI and automatic K
   }
 });
 
+test("the template normalizes an installation folder that no longer exists", { skip }, () => {
+  const root = mkdtempSync(join(tmpdir(), "risunest-nsis-path-"));
+  try {
+    const template = readFileSync(resolve("src-tauri/windows-installer.nsi"), "utf8");
+    const normalize = template.match(/^Function NormalizePath\r?\n[\s\S]*?^FunctionEnd\r?$/m)?.[0];
+    assert.ok(normalize);
+    const existing = join(root, "existing");
+    const missing = join(root, "missing");
+    mkdirSync(existing);
+    const cases = [
+      [`${existing}\\.`, existing],
+      [`${missing}\\.`, missing],
+      [`${missing}\\\\.`, missing],
+      [`${root.replaceAll("\\", "/")}/missing/nested/../.`, missing],
+    ];
+    const script = join(root, "normalize.nsi");
+    writeFileSync(script, String.raw`Unicode true
+RequestExecutionLevel user
+SilentInstall silent
+OutFile "${quote(join(root, "normalize.exe"))}"
+!include LogicLib.nsh
+${normalize}
+Section
+  FileOpen $9 "$EXEDIR\results" w
+${cases.map(([input]) => `  StrCpy $0 "${quote(input)}"\n  Call NormalizePath\n  FileWrite $9 "$0|"`).join("\n")}
+  FileClose $9
+SectionEnd
+`);
+    const compiled = spawnSync(compiler, ["/V2", script], { encoding: "utf8", windowsHide: true, timeout: 30000 });
+    assert.equal(compiled.status, 0, `${compiled.stdout}\n${compiled.stderr}`);
+    assert.equal(spawnSync(join(root, "normalize.exe"), ["/S"], { timeout: 30000, windowsHide: true }).status, 0);
+    assert.deepEqual(readFileSync(join(root, "results"), "utf8").split("|").slice(0, -1), cases.map(([, expected]) => expected));
+    assert.equal(existsSync(missing), false);
+  } finally { rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
+});
+
 test("missing or misfiled Korean installer strings fail compilation", { skip }, () => {
   const root = mkdtempSync(join(tmpdir(), "risunest-nsis-language-"));
   try {

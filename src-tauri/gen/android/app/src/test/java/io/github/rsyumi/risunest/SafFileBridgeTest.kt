@@ -22,6 +22,26 @@ class SafFileBridgeTest {
 
   private fun temporaryDirectory(): File = temporaryFolder.newFolder()
 
+  @Test
+  fun `directory failures return a failed batch without opening the source`() {
+    for (failRoot in listOf(true, false)) {
+      val root = temporaryDirectory().resolve("sources")
+      val publisher = object : SafAtomicPublisher {
+        override fun createDirectory(directory: File, parents: Boolean) {
+          if (parents == failRoot) throw IOException("synthetic filesystem failure")
+          super.createDirectory(directory, parents)
+        }
+        override fun publish(temporary: File, target: File) = testAtomicPublisher.publish(temporary, target)
+      }
+      val source = TestSafSource("backup.bin", 3L) { error("Provider must not open before staging exists") }
+      val store = SafSpoolStore(root, atomicPublisher = publisher)
+      val result = store.spool(listOf(source))
+      assertTrue(result.ready.isEmpty())
+      assertEquals("spool-write-failed", result.failures.single().code)
+      assertTrue(store.listReady().isEmpty())
+      assertTrue(root.listFiles().orEmpty().isEmpty())
+    }
+  }
   private fun terminalDestinationRecord(
     requestId: String,
     exportId: String,
@@ -474,6 +494,83 @@ class SafFileBridgeTest {
     assertEquals(listOf(SafSpoolFailure("large.json", SPOOL_INTERRUPTED_CODE)), replay.failures)
     assertFalse(root.resolve(received).exists())
     assertEquals(SafSpoolBatch(replay.ready, emptyList()), replayReadySpoolBatch(restarted, emptySet()))
+  }
+
+  @Test
+  fun `a backup copy handed to its request is published already received and never replayed as a restore`() {
+    val root = temporaryDirectory()
+    val token = "77777777-7777-4777-8777-777777777777"
+    val publishedMarked = mutableListOf<Boolean>()
+    val store = SafSpoolStore(
+      root = root,
+      atomicPublisher = SafAtomicPublisher { temporary, target ->
+        if (target.name == token) publishedMarked += temporary.resolve("delivered").isFile
+        testAtomicPublisher.publish(temporary, target)
+      },
+      tokenFactory = { UUID.fromString(token) },
+    )
+
+    val copied = store.spool(
+      listOf(TestSafSource("backup.risudat", 2) { ByteArrayInputStream(byteArrayOf(1, 2)) }),
+      restoreCopy = true,
+    )
+
+    // Process death right after publication must not leave an unreceived spool.
+    assertEquals(listOf(true), publishedMarked)
+    assertEquals(listOf(token), copied.ready.map(SafSpoolReady::token))
+    val replay = replayReadySpoolBatch(SafSpoolStore(root, atomicPublisher = testAtomicPublisher), emptySet())
+    assertEquals(SafSpoolBatch(emptyList(), emptyList()), replay)
+    assertFalse(root.resolve(token).exists())
+  }
+
+  @Test
+  fun `an abandoned restore copy reports failed cleanup and retries without another interrupted notice`() {
+    val root = temporaryDirectory()
+    var cleanupFails = false
+    val store = SafSpoolStore(root, atomicPublisher = SafAtomicPublisher { source, target ->
+      if (cleanupFails && target.name.startsWith(".cleanup-")) throw IOException("synthetic cleanup failure")
+      testAtomicPublisher.publish(source, target)
+    })
+    val copy = store.spool(
+      listOf(TestSafSource("backup.bin", 2) { ByteArrayInputStream(byteArrayOf(1, 2)) }),
+      delivered = true, restoreCopy = true,
+    ).ready.single()
+    assertEquals(SafSpoolBatch(emptyList(), emptyList()), replayReadySpoolBatch(store, setOf(copy.token)))
+    assertTrue(root.resolve(copy.token).exists())
+    cleanupFails = true
+    val failedCleanup = replayReadySpoolBatch(store, emptySet())
+    assertTrue(failedCleanup.ready.isEmpty())
+    assertEquals(listOf("cleanup-failed"), failedCleanup.failures.map { it.code })
+    assertTrue(root.resolve(copy.token).exists())
+    cleanupFails = false
+    assertEquals(SafSpoolBatch(emptyList(), emptyList()), replayReadySpoolBatch(store, emptySet()))
+    assertFalse(root.resolve(copy.token).exists())
+  }
+
+  @Test
+  fun `a backup copy cancelled or changed after its last byte never reaches the page`() {
+    val root = temporaryDirectory()
+    val store = SafSpoolStore(root, atomicPublisher = testAtomicPublisher)
+    fun copy() = store.spool(listOf(TestSafSource("backup.risudat", 1) { ByteArrayInputStream(byteArrayOf(1)) }), delivered = true)
+
+    val kept = copy()
+    assertEquals(kept, settlePortableSourceCopy(store, kept, verified = { true }, cancelled = { false }))
+    val cancelled = copy()
+    assertEquals(
+      portableSourceCopyFailure("backup.risudat", "cancelled"),
+      settlePortableSourceCopy(store, cancelled, verified = { error("A cancelled copy needs no verification") }, cancelled = { true }),
+    )
+    val changed = copy()
+    assertEquals(
+      portableSourceCopyFailure("backup.risudat", "source-changed"),
+      settlePortableSourceCopy(store, changed, verified = { false }, cancelled = { false }),
+    )
+    assertEquals(listOf(kept.ready.single().token), store.listReady().map(SafSpoolReady::token))
+    // A copy whose spool is already gone reports the cleanup failure instead of a token the page cannot use.
+    assertEquals(
+      portableSourceCopyFailure("backup.risudat", "cleanup-failed"),
+      withdrawPortableSourceCopy(store, cancelled, "cancelled"),
+    )
   }
 
   @Test

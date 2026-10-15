@@ -282,6 +282,61 @@ pub(crate) async fn pds_replace_android_finish(
     }.await)
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PluginPart { owner: String, session_id: String, offset: u64, part: String }
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PluginWrite {
+    owner: String,
+    mutations: Vec<crate::persistent_store::device_store::plugin_values::PluginDeviceMutation>,
+}
+
+#[tauri::command]
+pub(crate) async fn pds_plugin_part_android_finish(
+    app: AppHandle, window: WebviewWindow, state: State<'_, AndroidCommitState>, id: String,
+) -> StoreResult<u64> {
+    logged("pds_plugin_part_android_finish", async move {
+        guard(&window)?;
+        let bytes = state.lock()?.take(&id)?;
+        let lease = FinishGuard { app, id };
+        tauri::async_runtime::spawn_blocking(move || {
+            if bytes.len() > crate::persistent_store::device_store::plugin_values::text_value::PART_BYTES + 16 * 1024 {
+                return Err(invalid("plugin device write part is too large"));
+            }
+            let part: PluginPart = serde_json::from_slice(&bytes)?;
+            drop(bytes);
+            with_store_mut(lease.app.state(), |store| {
+                store.device_store_mut()?.append_plugin_device_write(&part.owner, &part.session_id, part.offset, &part.part)
+            })
+        }).await.map_err(|_| invalid("Android plugin part task failed"))?
+    }.await)
+}
+
+#[tauri::command]
+pub(crate) async fn pds_plugin_write_android_finish(
+    app: AppHandle, window: WebviewWindow, state: State<'_, AndroidCommitState>, id: String,
+) -> StoreResult<()> {
+    logged("pds_plugin_write_android_finish", async move {
+        guard(&window)?;
+        let bytes = state.lock()?.take(&id)?;
+        let lease = FinishGuard { app, id };
+        tauri::async_runtime::spawn_blocking(move || {
+            let request: PluginWrite = serde_json::from_slice(&bytes)?;
+            drop(bytes);
+            let changed = with_store_mut(lease.app.state(), |store| {
+                let device = store.device_store_mut()?;
+                let before = device.revision()?;
+                device.write_plugin_device_values(&request.owner, &request.mutations)?;
+                Ok(device.revision()? != before)
+            })?;
+            if changed { crate::server_sync::events::notify_device_changed(&lease.app); }
+            Ok(())
+        }).await.map_err(|_| invalid("Android plugin write task failed"))?
+    }.await)
+}
+
 #[tauri::command(async)]
 pub(crate) fn pds_commit_android_cancel(
     window: WebviewWindow,

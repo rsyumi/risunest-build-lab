@@ -474,6 +474,10 @@ Function un.ConfirmShow ; Add add a `Delete app data` check box
   Pop $DeleteAppDataCheckbox
   SendMessage $HWNDPARENT ${WM_GETFONT} 0 0 $1
   SendMessage $DeleteAppDataCheckbox ${WM_SETFONT} $1 1
+  ; /DELETEAPPDATA preselects the option; the user's final choice on this page decides.
+  ${If} $DeleteAppDataCheckboxState = 1
+    SendMessage $DeleteAppDataCheckbox ${BM_SETCHECK} ${BST_CHECKED} 0
+  ${EndIf}
 FunctionEnd
 !define MUI_PAGE_CUSTOMFUNCTION_LEAVE un.ConfirmLeave
 Function un.ConfirmLeave
@@ -496,20 +500,6 @@ FunctionEnd
 
 Function .onInit
   StrCpy $RequestedInstallDir $INSTDIR
-  StrCpy $PackageArchitecture "${ARCH}"
-  StrCpy $DetectedArchitecture "x86"
-  ${If} ${IsNativeAMD64}
-    StrCpy $DetectedArchitecture "x64"
-  ${ElseIf} ${IsNativeARM64}
-    StrCpy $DetectedArchitecture "arm64"
-  ${EndIf}
-  ${If} $DetectedArchitecture != $PackageArchitecture
-    StrCpy $InstallFailureMessage "$(InstallArchitecture)"
-    ${If} $DetectedArchitecture == "x86"
-      StrCpy $InstallFailureMessage "$(InstallUnsupportedWindows)"
-    ${EndIf}
-    Call InitializationFailure
-  ${EndIf}
   ${GetOptions} $CMDLINE "/P" $PassiveMode
   ${IfNot} ${Errors}
     StrCpy $PassiveMode 1
@@ -557,6 +547,31 @@ Function .onInit
     !insertmacro MULTIUSER_INIT
   !endif
   ReadRegStr $0 SHCTX "${UNINSTKEY}" "UninstallString"
+  StrCpy $PackageArchitecture "${ARCH}"
+  StrCpy $DetectedArchitecture "x86"
+  ${If} ${IsNativeAMD64}
+    StrCpy $DetectedArchitecture "x64"
+  ${ElseIf} ${IsNativeARM64}
+    StrCpy $DetectedArchitecture "arm64"
+  ${EndIf}
+  StrCpy $1 1
+  ${If} $DetectedArchitecture != $PackageArchitecture
+    StrCpy $1 0
+    ; x64 builds installed on ARM64 before this check request x64 packages from their updater.
+    ${If} $DetectedArchitecture == "arm64"
+    ${AndIf} $PackageArchitecture == "x64"
+    ${AndIf} $UpdateMode = 1
+    ${AndIf} $0 != ""
+      StrCpy $1 1
+    ${EndIf}
+  ${EndIf}
+  ${If} $1 = 0
+    StrCpy $InstallFailureMessage "$(InstallArchitecture)"
+    ${If} $DetectedArchitecture == "x86"
+      StrCpy $InstallFailureMessage "$(InstallUnsupportedWindows)"
+    ${EndIf}
+    Call InitializationFailure
+  ${EndIf}
   ${If} $0 != ""
     ReadRegStr $ExistingNsis SHCTX "${MANUPRODUCTKEY}" ""
     ${If} $ExistingNsis == ""
@@ -570,11 +585,19 @@ Function .onInit
       StrCpy $InstallFailureMessage "$(InstallLocationMissing)"
       Call InitializationFailure
     ${EndIf}
-    GetFullPathName $INSTDIR "$ExistingNsis\."
+    ; The installation folder may be gone; reinstalling there recreates it.
+    StrCpy $0 "$ExistingNsis\."
+    Call NormalizePath
+    ${If} $0 == ""
+      StrCpy $InstallFailureMessage "$(InstallLocationMissing)"
+      Call InitializationFailure
+    ${EndIf}
+    StrCpy $INSTDIR $0
     ${If} ${Silent}
     ${OrIf} $PassiveMode = 1
       ${If} $RequestedInstallDir != "${PLACEHOLDER_INSTALL_DIR}"
-        GetFullPathName $0 "$RequestedInstallDir\."
+        StrCpy $0 "$RequestedInstallDir\."
+        Call NormalizePath
         ${If} $0 != $INSTDIR
           StrCpy $InstallFailureMessage "$(InstallRelocation)"
           Call InitializationFailure
@@ -582,6 +605,10 @@ Function .onInit
       ${EndIf}
     ${EndIf}
     ReadRegStr $0 SHCTX "${UNINSTKEY}" "DisplayVersion"
+    !ifmacrodef NSIS_HOOK_INSTALLED_VERSION
+      ; Replaces $0 with the version of the files in $INSTDIR when they can change without this installer.
+      !insertmacro NSIS_HOOK_INSTALLED_VERSION
+    !endif
     StrCpy $ExistingVersionRelation "unknown"
     ${If} $0 != ""
       ; The plugin ranks invalid versions below valid ones, including an empty string.
@@ -617,6 +644,18 @@ Function InitializationFailure
     MessageBox MB_OK|MB_ICONSTOP "$InstallFailureMessage"
   SetErrorLevel 1
   Quit
+FunctionEnd
+
+; GetFullPathName fails for a path that does not exist; the Win32 call only normalizes it.
+; Takes the path in $0 and leaves the normalized path, or "" on failure, in $0.
+Function NormalizePath
+  System::Call 'kernel32::GetFullPathNameW(w r0, i ${NSIS_MAX_STRLEN}, w .r1, p 0) i .r2'
+  ${If} $2 = 0
+  ${OrIf} $2 >= ${NSIS_MAX_STRLEN}
+    StrCpy $0 ""
+  ${Else}
+    StrCpy $0 $1
+  ${EndIf}
 FunctionEnd
 
 Function SkipExistingDirectory
@@ -871,6 +910,11 @@ Function un.onInit
   ${IfNot} ${Errors}
     StrCpy $UpdateMode 1
   ${EndIf}
+
+  ${GetOptions} $CMDLINE "/DELETEAPPDATA" $DeleteAppDataCheckboxState
+  ${IfNot} ${Errors}
+    StrCpy $DeleteAppDataCheckboxState 1
+  ${EndIf}
 FunctionEnd
 
 Section Uninstall
@@ -979,8 +1023,10 @@ Section Uninstall
     DeleteRegKey /ifempty HKCU "${MANUKEY}"
 
     SetShellVarContext current
-    RmDir /r "$APPDATA\${BUNDLEID}"
-    RmDir /r "$LOCALAPPDATA\${BUNDLEID}"
+    !ifndef RISUNEST_HOOK_OWNS_APP_DATA
+      RmDir /r "$APPDATA\${BUNDLEID}"
+      RmDir /r "$LOCALAPPDATA\${BUNDLEID}"
+    !endif
   ${EndIf}
 
   !ifmacrodef NSIS_HOOK_POSTUNINSTALL

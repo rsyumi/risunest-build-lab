@@ -7,6 +7,8 @@ import type { CommittedApplyOutcome, PersistentDataRuntime } from 'src/ts/storag
 import { File } from 'node:buffer'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { gzipSync } from 'fflate'
+import { pack } from 'msgpackr'
 import { encodeRisuSaveLegacy } from 'src/ts/storage/risuSave'
 import { risuSaveFixtureDatabase } from 'src/ts/storage/tests/risuSaveFixtures'
 import { encodeBackupInlayEntry, getBackupInlayName } from 'src/ts/drive/backupAssets'
@@ -176,7 +178,7 @@ describe('legacy WebView restore integrity', () => {
         expect(state.blobs.size).toBe(0)
     })
 
-    it.each([null, { type: 'account' }, { type: 'account', time: '123' }, { type: 'account', time: -1 }])('rejects invalid encryption metadata %j before decoding', async metadata => {
+    it.each([{ type: 'account' }, { type: 'account', time: '123' }, { type: 'account', time: -1 }])('rejects invalid account encryption metadata %j before decoding', async metadata => {
         vi.stubGlobal('fetch', async () => { throw new Error('Unexpected key request') })
         await expect(restore(encryptedArchive(metadata))).rejects.toMatchObject({ code: 'backup-encryption-invalid' })
         expect(state.replace).not.toHaveBeenCalled()
@@ -197,9 +199,11 @@ describe('legacy WebView restore integrity', () => {
         expect(state.replace).not.toHaveBeenCalled()
     })
 
-    it('keeps compatibility with explicitly unencrypted backups', async () => {
+    // The native importer treats every readable metadata except the account type as unencrypted.
+    it.each(['{"type":"none"}', '{}', 'null', '{"type":"synthetic"}'])('restores a backup with non-account encryption metadata %s unencrypted', async metadata => {
+        vi.stubGlobal('fetch', async () => { throw new Error('Unexpected key request') })
         await restore(backupArchive(
-            backupEntry('encryption.risudat', new TextEncoder().encode('{"type":"none"}')),
+            backupEntry('encryption.risudat', new TextEncoder().encode(metadata)),
             databaseEntry(),
         ))
         expect(state.replace.mock.calls[0][0].characters).toEqual(risuSaveFixtureDatabase.characters)
@@ -208,6 +212,16 @@ describe('legacy WebView restore integrity', () => {
     it('classifies an undecodable database separately from account decryption', async () => {
         await expect(restore(backupEntry('database.risudat', Uint8Array.of(7, 7, 7, 7))))
             .rejects.toMatchObject({ code: 'backup-database-invalid', message: expect.stringContaining('invalid block type') })
+        expect(state.replace).not.toHaveBeenCalled()
+    })
+
+    it('keeps decoded content of a corrupted database out of the error detail', async () => {
+        const decoded = pack({ note: 'Synthetic private note' })
+        const corrupted = gzipSync(Uint8Array.of(...decoded, 0xc0), { mtime: 0 })
+        await expect(restore(backupEntry('database.risudat', corrupted))).rejects.toMatchObject({
+            code: 'backup-database-invalid',
+            message: 'Could not decode the backup database: Data read, but end of buffer not reached',
+        })
         expect(state.replace).not.toHaveBeenCalled()
     })
 

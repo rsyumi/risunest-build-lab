@@ -98,6 +98,14 @@ export const languageEnglish = {
         restored: 'Selected backup areas restored.',
     
         "invalidInlaysConfirm": (count: number) => `Damaged inlay entries (${count}) will not be restored. Continue restoring?`,
+        omittedRestoreData: {
+            data: (count: number) => `Unsupported saved data (${count}) will not be restored.`,
+            remote: (count: number) => `Data stored outside this backup (${count}) will not be restored.`,
+            missing: (count: number) => `Missing saved data (${count}) will not be restored.`,
+            values: (count: number) => `Unsupported saved values (${count}) will not be restored.`,
+            pluginStorage: (count: number) => `Unsupported plugin storage (${count}) will not be restored.`,
+            inlays: (count: number) => `Unsupported inlay entries (${count}) will not be restored.`,
+        },
         "recovery": {
             "dismiss": 'Dismiss attempt',
             "later": 'Keep for later',
@@ -1976,6 +1984,8 @@ export const languageEnglish = {
         
             "archiveFailed": 'The character could not be archived.',
             "restoreFailed": 'The character could not be restored.',
+            "archiveTooLarge": 'The character data is too large to archive.',
+            "restoreTooLarge": 'The character data is too large to restore.',
             "archiveRefreshFailed": 'The character was archived, but the list could not be refreshed. Please restart the app.',
             "restoreRefreshFailed": 'The character was restored, but the list could not be refreshed. Please restart the app.',
             "archiveRemoteAssetUnavailable": 'Files kept only on the server or external storage could not be fetched, so the character was not archived. Check the connection and try again.',
@@ -2767,6 +2777,9 @@ export const languageEnglish = {
             stagePreparingAttachments: 'Preparing attachments',
             stageReadingDatabase: 'Reading database',
             stageDecodingDatabase: 'Decoding database',
+            stageRequestingBackupKey: 'Requesting the backup key',
+            stageDecryptingDatabase: 'Decrypting the backup',
+            stageCleaningUp: 'Data restored. Removing temporary files',
             stageFinalizingStaging: 'Saving settings and presets',
             stageAssignPluginValues: 'Assign plugin values',
             stageActivating: 'Applying data',
@@ -2800,6 +2813,7 @@ export const languageEnglish = {
             resultFailed: 'Import failed. Your existing data is unchanged.',
             resultFailedAfterCommit:
                 'The data was imported, but the screen could not be refreshed. Select Refresh screen before making more changes.',
+            resultActivationUnresolved: 'The restore result could not be confirmed. Select Refresh screen to check it before making more changes.',
             errorDetails: 'Error details',
             errorDetailsHide: 'Hide error details',
             copyDetails: 'Copy',
@@ -2814,8 +2828,11 @@ export const languageEnglish = {
             reasonStoreError: 'A storage error stopped the import.',
             reasonUnknown: 'An unknown error occurred.',
             reasonTooLarge: '{0} is too large to import.',
+            reasonExportTooLarge: '{0} is too large to export.',
+            reasonCompatibleDatabaseTooLarge: 'The data is too large to export as a compatible backup. Use a RisuNest backup.',
             tooLargeItems: {
                 root: 'Settings data', preset: 'A preset', character: 'A character', conversation: 'A chat', message: 'A message', 'plugin-value': 'Plugin data',
+                record: 'A data item', backup: 'Backup data', 'backup-entry': 'A backup entry', card: 'The character card', module: 'The module', content: 'The card or module', 'owner-manifest': 'The additional asset list', 'compatible-database': 'The data',
             },
             warningCleanupFailed:
                 'A temporary file could not be cleaned up. It will be retried at startup.',
@@ -2848,7 +2865,7 @@ export const languageEnglish = {
             "reasonCompatibilityImport": 'Select the backup file again to import this format.',
             "reasonBackupEncryptionInvalid": 'The backup encryption information could not be read. Create the backup again.',
             "reasonBackupKeyRequest": 'The backup decryption key could not be retrieved from the RisuAI server. Check your internet connection and try again.',
-            "reasonBackupKeyHttp": 'The RisuAI server returned an error for the backup decryption key request. Check the HTTP status code in the error details.',
+            "reasonBackupKeyHttp": 'The RisuAI server returned an error for the backup decryption key request. Try again later.',
             "reasonBackupKeyInvalid": 'The RisuAI server did not return a valid backup decryption key. Try again later.',
             "reasonBackupDecryption": 'The backup could not be decrypted. Check the backup file.',
             "reasonBackupDatabase": 'The backup database could not be read. Check the backup file.',

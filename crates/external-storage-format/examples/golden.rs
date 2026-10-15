@@ -6,7 +6,7 @@ use risunest_external_storage_format::{
     },
     crypto, pack,
     section::{
-        hypa_entry_key, local_plugin_entry_key, HypaValue, InlineOrObject, LocalPluginValue,
+        hypa_entry_key, local_plugin_entry_key, HypaValue, InlineOrObject, LocalPluginValue, PluginValue,
         LocalSettingValue, ObjectReference, PluginSpace, SectionEntry, SectionEntryVersion,
         SectionKind, SectionValue, ValueOrObject, SECTION_CODEC,
     },
@@ -141,7 +141,7 @@ fn section_entries() -> Vec<Vec<u8>> {
             local_plugin_entry_key("provider-manager", "json", "settings").unwrap(),
             SectionValue::LocalPlugin(LocalPluginValue {
                 space: PluginSpace::Json,
-                value: ValueOrObject::Inline(serde_json::json!({ "zeta": [1, 2], "alpha": null })),
+                value: PluginValue::Inline(serde_json::json!({ "zeta": [1, 2], "alpha": null })),
             }),
             version(4, "writer-a"),
         )
@@ -151,7 +151,7 @@ fn section_entries() -> Vec<Vec<u8>> {
             local_plugin_entry_key("yumi-translator", "string", "cache:index").unwrap(),
             SectionValue::LocalPlugin(LocalPluginValue {
                 space: PluginSpace::String,
-                value: ValueOrObject::Inline(serde_json::Value::String("kept verbatim".into())),
+                value: PluginValue::Inline(serde_json::Value::String("kept verbatim".into())),
             }),
             None,
         )
@@ -170,7 +170,7 @@ fn section_entries() -> Vec<Vec<u8>> {
             local_plugin_entry_key("provider-manager", "json", "history").unwrap(),
             SectionValue::LocalPlugin(LocalPluginValue {
                 space: PluginSpace::Json,
-                value: ValueOrObject::Object(ObjectReference {
+                value: PluginValue::Object(ObjectReference {
                     content_sha256: [9; 32],
                     byte_length: 70_000,
                 }),

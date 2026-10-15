@@ -172,17 +172,32 @@ path = "main.rs"
         $env:CARGO_TARGET_DIR = $priorTarget
         Pop-Location
     }
-    $generatedRoot = Join-Path $sharedTarget 'release/nsis/x64'
+    # Tauri bundles for the host architecture, so the fixtures follow it on x64 and ARM64 runners.
+    $bundleRoot = Join-Path $sharedTarget 'release/bundle/nsis'
+    $fixtureInstallers = @(Get-ChildItem -LiteralPath $bundleRoot -Filter "${product}_1.0.4_*-setup.exe")
+    if ($fixtureInstallers.Count -ne 1) { throw "Expected one generated installer for $product, found $($fixtureInstallers.Count)." }
+    $fixtureInstaller = $fixtureInstallers[0].FullName
+    $arch = [regex]::Match($fixtureInstallers[0].Name, '_1\.0\.4_(x64|arm64)-setup\.exe$').Groups[1].Value
+    if (!$arch) { throw "Unexpected generated installer name: $($fixtureInstallers[0].Name)." }
+    $generatedRoot = Join-Path $sharedTarget "release/nsis/$arch"
     $generated = [IO.File]::ReadAllText((Join-Path $generatedRoot 'installer.nsi'))
     $installed = Join-Path $testRoot 'manual upgrade with spaces'
     $uninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$product"
     $productKey = "HKCU:\Software\$publisher\$product"
-    $fixtureInstaller = Join-Path $sharedTarget "release/bundle/nsis/${product}_1.0.4_x64-setup.exe"
-    function Run-Installer([string]$executable, [string[]]$arguments, [int]$expected) {
+    function Set-Architecture([string]$source, [string]$value) {
+        $define = "!define ARCH `"$arch`""
+        if (!$source.Contains($define)) { throw 'The generated template does not define its package architecture.' }
+        return $source.Replace($define, "!define ARCH `"$value`"")
+    }
+    function Run-Installer([string]$executable, [string[]]$arguments, [int]$expected, [int]$timeoutSeconds = 30) {
+        $elapsed = [Diagnostics.Stopwatch]::StartNew()
         $process = Start-Process -FilePath $executable -ArgumentList $arguments -PassThru -WindowStyle Hidden
-        if (!$process.WaitForExit(30000)) {
+        if (!$process.WaitForExit($timeoutSeconds * 1000)) {
             $process.Kill()
-            throw "Synthetic NSIS invocation waited unexpectedly: $executable $arguments; previous=$previous."
+            throw "Synthetic NSIS invocation exceeded $timeoutSeconds seconds: $executable $arguments."
+        }
+        if ($timeoutSeconds -gt 30) {
+            Write-Output "Released-bundle NSIS invocation completed in $($elapsed.ElapsedMilliseconds) ms with exit $($process.ExitCode): $executable $arguments"
         }
         if ($process.ExitCode -ne $expected) {
             $failureFile = Join-Path $testRoot 'failure.txt'
@@ -261,16 +276,33 @@ path = "main.rs"
         }
         Remove-Item Env:RISUNEST_NSIS_CONFIRM
         Set-ItemProperty $uninstallKey DisplayVersion '1.0.3'
-        $otherArch = Compile-Template 'wrong-architecture' ($generated.Replace('!define ARCH "x64"', '!define ARCH "arm64"'))
+        $otherArch = Compile-Template 'wrong-architecture' (Set-Architecture $generated $(if ($arch -eq 'x64') { 'arm64' } else { 'x64' }))
         Run-Installer $otherArch @('/S', '/NS') 1
         if ((Get-ItemProperty $uninstallKey).DisplayVersion -ne '1.0.3') { throw 'Architecture rejection occurred after changing the installation.' }
         # Substitute only native-architecture detection to exercise ARM64-host decisions on x64 CI.
         $armHost = $generated.Replace('${If} ${IsNativeAMD64}', '${If} 0 = 1').Replace('${ElseIf} ${IsNativeARM64}', '${ElseIf} 1 = 1')
-        $x64OnArm = Compile-Template 'x64-on-arm64' $armHost
+        $x64OnArm = Compile-Template 'x64-on-arm64' (Set-Architecture $armHost 'x64')
         Run-Installer $x64OnArm @('/S', '/NS') 1
-        $armOnArm = Compile-Template 'arm64-on-arm64' ($armHost.Replace('!define ARCH "x64"', '!define ARCH "arm64"'))
+        # x64 builds installed on ARM64 before the architecture check keep receiving x64 updates.
+        Run-Installer $x64OnArm @('/S', '/NS', '/UPDATE') 0
+        if ((Get-ItemProperty $uninstallKey).DisplayVersion -ne '1.0.4') { throw 'An x64 update of an existing ARM64 installation was refused.' }
+        $armOnArm = Compile-Template 'arm64-on-arm64' (Set-Architecture $armHost 'arm64')
         Run-Installer $armOnArm @('/S', '/NS') 0
         if (!(Test-Path $keep)) { throw 'Architecture migration removed unowned data.' }
+        # Reinstalling a registered installation whose folder was deleted recreates it in place.
+        $deleted = Join-Path $testRoot 'deleted installation'
+        Move-Item -LiteralPath $installed -Destination $deleted
+        try {
+            Run-Installer $fixtureInstaller @('/S', '/NS', "/D=$relocated") 1
+            Run-Installer $modeInstaller @('/P', '/NS', "/D=$relocated") 1
+            if (Test-Path $relocated) { throw 'A missing installation folder allowed relocation.' }
+            Run-Installer $fixtureInstaller @('/S', '/NS') 0
+            if (!(Test-Path (Join-Path $installed "$fixtureName.exe"))) { throw 'Reinstalling did not recreate the missing installation folder.' }
+            if ((Get-Item $productKey).GetValue('') -ne $installed) { throw 'Reinstalling relocated the missing installation folder.' }
+        } finally {
+            if (Test-Path -LiteralPath $installed) { Remove-Item -LiteralPath $installed -Recurse -Force }
+            Move-Item -LiteralPath $deleted -Destination $installed
+        }
         $permissions = Get-Acl -LiteralPath $installed
         $denied = Get-Acl -LiteralPath $installed
         $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
@@ -284,6 +316,8 @@ path = "main.rs"
         Run-Installer (Join-Path $installed 'uninstall.exe') @('/S', "_?=$installed") 0
         if (Test-Path (Join-Path $installed "$fixtureName.exe")) { throw 'The updated installation could not be removed.' }
         if (!(Test-Path $keep)) { throw 'Removal deleted an unowned file.' }
+        Run-Installer $x64OnArm @('/S', '/NS', '/UPDATE', "/D=$installed") 1
+        if (Test-Path $uninstallKey) { throw 'An x64 update without an existing installation was accepted on ARM64.' }
         foreach ($displayLanguage in @(1042, 1033, 1041)) {
             $languageLog = Join-Path $testRoot "language-$displayLanguage.txt"
             $probe = @"
@@ -307,11 +341,17 @@ path = "main.rs"
         Write-Output 'Generated Tauri NSIS upgrade, architecture, relocation, version and removal tests passed.'
 
         if ($ReleasedBundle) {
+            # The real manager allows 45 seconds to prepare, 100 for server health, and 30 to finish.
+            # Keep process startup and file-copy overhead outside those product budgets.
+            $releasedInstallerTimeoutSeconds = 240
             if (!(Test-Path -LiteralPath $ManagerBinary) -or !(Test-Path -LiteralPath $BackgroundBinary)) {
                 throw 'Released-bundle verification requires both newly built manager executables.'
             }
             $released = Join-Path $testRoot 'released'
             Expand-Archive -LiteralPath $ReleasedBundle -DestinationPath $released
+            $releasedVersion = [string](Get-Content (Join-Path $released 'risunest-sync-bundle.json') -Raw | ConvertFrom-Json).version
+            if ($releasedVersion -notmatch '^(\d+)\.(\d+)\.(\d+)$') { throw "Unexpected released Sync version: $releasedVersion." }
+            $nextVersion = "$($Matches[1]).$($Matches[2]).$([int]$Matches[3] + 1)"
             $syncInstall = Join-Path $testRoot 'released Sync installation'
             Copy-Item $released $syncInstall -Recurse
             Copy-Item $fake (Join-Path $syncInstall 'uninstall.exe')
@@ -341,7 +381,7 @@ path = "main.rs"
                 Set-Item -Path $productKey -Value $syncInstall
                 New-Item -Path $uninstallKey -Force | Out-Null
                 Set-ItemProperty $uninstallKey UninstallString "`"$syncInstall\uninstall.exe`""
-                Set-ItemProperty $uninstallKey DisplayVersion '1.0.3'
+                Set-ItemProperty $uninstallKey DisplayVersion $releasedVersion
 
                 $next = Join-Path $project 'next-bundle'
                 Copy-Item $released $next -Recurse
@@ -358,6 +398,7 @@ path = "main.rs"
                 $syncHook = "!define SYNC_INSTALLER_MANAGER `"$ManagerBinary`"`n!define SYNC_INSTALLER_BACKGROUND `"$BackgroundBinary`"`n" + $syncHook
                 $syncHookPath = Join-Path $project 'sync-hooks.nsh'
                 $syncHook | Set-Content -Encoding utf8 $syncHookPath
+                $config.version = $nextVersion
                 $config.bundle.windows.nsis.installerHooks = $syncHookPath
                 $config.bundle.windows.nsis.compression = 'zlib'
                 $resources = @{}
@@ -382,24 +423,43 @@ Function un.onUninstFailed
 FunctionEnd
 "@
                 $syncFixture = Compile-Template 'released-upgrade' $syncGenerated
-                Run-Installer $syncFixture @('/S', '/NS') 0
+                # Archive updates leave DisplayVersion behind, so setup compares against the installed bundle marker.
+                $installedMarker = Join-Path $syncInstall 'risunest-sync-bundle.json'
+                $markerText = [IO.File]::ReadAllText($installedMarker)
+                [IO.File]::WriteAllText($installedMarker, ([regex]'"version":\s*"[^"]*"').Replace($markerText, '"version": "9.0.0"', 1))
+                try {
+                    Run-Installer $syncFixture @('/S', '/NS') 1 $releasedInstallerTimeoutSeconds
+                } finally { [IO.File]::WriteAllText($installedMarker, $markerText) }
+                if ((Get-ItemProperty $uninstallKey).DisplayVersion -ne $releasedVersion) { throw 'A refused downgrade changed the installation.' }
+                Run-Installer $syncFixture @('/S', '/NS') 0 $releasedInstallerTimeoutSeconds
                 if ((Get-FileHash (Join-Path $data 'risunest-sync-instance.json')).Hash -ne $before) { throw 'Upgrade changed instance ownership.' }
                 Invoke-Manager @('status')
                 Invoke-Manager @('uninstall', '--dry-run')
-                Run-Installer (Join-Path $syncInstall 'uninstall.exe') @('/S', "_?=$syncInstall") 0
+                Run-Installer (Join-Path $syncInstall 'uninstall.exe') @('/S', "_?=$syncInstall") 0 $releasedInstallerTimeoutSeconds
                 if (Test-Path $oldManager) { throw 'Updated released bundle could not be removed normally.' }
                 if (!(Test-Path (Join-Path $data 'metadata.sqlite'))) { throw 'Normal removal deleted server data.' }
-                Write-Output 'Released Sync 1.0.3 running-server upgrade and normal removal passed.'
-                Run-Installer $syncFixture @('/S', '/NS', "/D=$syncInstall") 0
+                Write-Output "Released Sync $releasedVersion running-server upgrade and normal removal passed."
+                Run-Installer $syncFixture @('/S', '/NS', "/D=$syncInstall") 0 $releasedInstallerTimeoutSeconds
                 Invoke-Manager @('installer', 'forget-removal')
                 $unowned = Join-Path $syncInstall 'user-owned.txt'
                 'synthetic unowned file' | Set-Content $unowned
                 Invoke-Manager @('uninstall', '--dry-run', '--force', '--delete-data')
-                Run-Installer (Join-Path $syncInstall 'uninstall.exe') @('/S', '/FORCE', '/DELETEAPPDATA', "_?=$syncInstall") 0
+                Run-Installer (Join-Path $syncInstall 'uninstall.exe') @('/S', '/FORCE', '/DELETEAPPDATA', "_?=$syncInstall") 0 $releasedInstallerTimeoutSeconds
                 if (Test-Path $oldManager) { throw 'Forced removal left an owned manager.' }
                 if (!(Test-Path $unowned) -or !(Test-Path (Join-Path $data 'metadata.sqlite'))) { throw 'Forced removal deleted unowned files or unregistered data.' }
                 Write-Output 'Generated Sync forced removal preserves unowned files and unregistered data.'
                 Remove-Item -LiteralPath $unowned
+                # Data deletion runs right after the installer guard is released, and the manager alone
+                # decides which GUI profiles go. The template's own profile folder must survive.
+                Run-Installer $syncFixture @('/S', '/NS', "/D=$syncInstall") 0 $releasedInstallerTimeoutSeconds
+                $appProfile = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) "test.risunest.$fixtureName"
+                New-Item -ItemType Directory -Path $appProfile | Out-Null
+                'synthetic profile' | Set-Content (Join-Path $appProfile 'keep.txt')
+                Run-Installer (Join-Path $syncInstall 'uninstall.exe') @('/S', '/DELETEAPPDATA', "_?=$syncInstall") 0 $releasedInstallerTimeoutSeconds
+                if (Test-Path $oldManager) { throw 'Removal with data deletion left program files.' }
+                if (Test-Path $data) { throw 'Removal with data deletion kept the registered server data.' }
+                if (!(Test-Path (Join-Path $appProfile 'keep.txt'))) { throw 'Sync removal deleted a profile folder the manager did not choose.' }
+                Write-Output 'Generated Sync removal deletes registered data and leaves profile decisions to the manager.'
                 foreach ($removalMode in @('normal', 'force')) {
                     if (!(Test-Path $data)) {
                         $seedServer = Join-Path $released 'risunest-sync-server.exe'
@@ -414,7 +474,7 @@ FunctionEnd
                         & $ManagerBinary --data-dir $data --server $server update policy off | Out-Null
                         if ($LASTEXITCODE -ne 0) { throw 'Synthetic update policy configuration failed.' }
                     }
-                    Run-Installer $syncFixture @('/S', '/NS', "/D=$syncInstall") 0
+                    Run-Installer $syncFixture @('/S', '/NS', "/D=$syncInstall") 0 $releasedInstallerTimeoutSeconds
                     Invoke-Manager @('uninstall', 'lock-held')
                     if ($removalMode -eq 'force') { Invoke-Manager @('installer', 'forget-removal') }
                     $syntheticData = [IO.Path]::GetFullPath($data)
@@ -423,7 +483,7 @@ FunctionEnd
                     }
                     Remove-Item -LiteralPath $syntheticData -Recurse -Force
                     $removeArgs = if ($removalMode -eq 'force') { @('/S', '/FORCE', "_?=$syncInstall") } else { @('/S', "_?=$syncInstall") }
-                    Run-Installer (Join-Path $syncInstall 'uninstall.exe') $removeArgs 0
+                    Run-Installer (Join-Path $syncInstall 'uninstall.exe') $removeArgs 0 $releasedInstallerTimeoutSeconds
                     if (Test-Path $oldManager) { throw "$removalMode removal without a data directory left program files." }
                     if (Test-Path $data) { throw "$removalMode removal recreated the absent data directory." }
                 }
@@ -434,13 +494,15 @@ FunctionEnd
                     & $oldManager --data-dir $data --server $server installer forget-removal | Out-Null
                 }
                 $env:LOCALAPPDATA = $priorLocal
+                if ($appProfile -and (Test-Path -LiteralPath $appProfile)) { Remove-Item -LiteralPath $appProfile -Recurse -Force }
             }
         }
     } finally {
         foreach ($key in @($uninstallKey, $productKey)) {
             if (Test-Path -LiteralPath $key) { Remove-Item -LiteralPath $key -Recurse }
         }
-        Remove-Item -LiteralPath $fixtureBinary, $fixtureInstaller -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $fixtureBinary -ErrorAction SilentlyContinue
+        Get-ChildItem -LiteralPath $bundleRoot -Filter "${product}_*-setup.exe" -ErrorAction SilentlyContinue | Remove-Item -ErrorAction SilentlyContinue
     }
 }
 finally {

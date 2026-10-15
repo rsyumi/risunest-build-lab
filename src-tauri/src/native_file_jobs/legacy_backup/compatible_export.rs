@@ -9,6 +9,28 @@ use crate::persistent_store::{ReadTarget, StoreError};
 use rusqlite::{params, Connection};
 use std::path::Path;
 const COMPRESSED_MAGIC: &[u8] = b"\0RISUSAVE\0\x08";
+const DATABASE_TOO_LARGE: &str = "compatible export database exceeds the decoded size limit; use a RisuNest backup";
+
+struct DecodedSizeWriter<W> { inner: W, bytes: u64, limit: u64 }
+impl<W: Write> Write for DecodedSizeWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() as u64 > self.limit.saturating_sub(self.bytes) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, DATABASE_TOO_LARGE));
+        }
+        let written = self.inner.write(bytes)?;
+        self.bytes += written as u64;
+        Ok(written)
+    }
+    fn flush(&mut self) -> io::Result<()> { self.inner.flush() }
+}
+
+fn io_job_error(error: io::Error) -> NativeJobError {
+    if error.kind() == io::ErrorKind::InvalidData && error.to_string() == DATABASE_TOO_LARGE {
+        NativeJobError::too_large("compatible-database", DATABASE_TOO_LARGE)
+    } else {
+        super::io_job_error(error)
+    }
+}
 
 pub(crate) fn export_compatible_local_backup(
     target: CompatibilityTarget,
@@ -16,8 +38,22 @@ pub(crate) fn export_compatible_local_backup(
     expected_revision: i64,
     owned_directory: &Path,
     handoff_directory: &Path,
+    store: PersistentStore,
+    job: &JobControl,
+) -> Result<JobResultSummary, NativeJobError> {
+    export_compatible_local_backup_with_limit(target, destination_path, expected_revision,
+        owned_directory, handoff_directory, store, job, restore::RestoreLimits::default().max_decoded_block_bytes)
+}
+
+fn export_compatible_local_backup_with_limit(
+    target: CompatibilityTarget,
+    destination_path: Option<&Path>,
+    expected_revision: i64,
+    owned_directory: &Path,
+    handoff_directory: &Path,
     mut store: PersistentStore,
     job: &JobControl,
+    max_decoded_bytes: u64,
 ) -> Result<JobResultSummary, NativeJobError> {
     job.start(JobPhase::WritingExport)
         .map_err(job_state_error)?;
@@ -137,6 +173,7 @@ pub(crate) fn export_compatible_local_backup(
             &attachments.inlay_replacements,
             &database,
             &cancellation,
+            max_decoded_bytes,
         )?;
         validate_database(&database, &cancellation)?;
         attachments.entries.push(LegacyBackupWriteEntry {
@@ -361,6 +398,7 @@ fn write_database(
     inlays: &HashMap<String, String>,
     path: &Path,
     cancel: &dyn CancellationProbe,
+    max_decoded_bytes: u64,
 ) -> Result<(u64, u64, u64), NativeJobError> {
     let generation = &read.generation;
     let orphans=count(connection,"SELECT count(*) FROM conversations c LEFT JOIN characters p ON p.generation=c.generation AND p.character_id=c.character_id WHERE c.generation=?1 AND p.character_id IS NULL",&[generation])?
@@ -417,7 +455,7 @@ fn write_database(
     let root = projector.project("DataBase", &root)?;
     let mut file = File::create(path).map_err(io_job_error)?;
     file.write_all(COMPRESSED_MAGIC).map_err(io_job_error)?;
-    let mut writer = GzEncoder::new(file, Compression::default());
+    let mut writer = DecodedSizeWriter { inner: GzEncoder::new(file, Compression::default()), bytes: 0, limit: max_decoded_bytes };
     map_header(&mut writer, root.as_object().unwrap().len() as u64 + 3)?;
     write_pairs(&mut writer, &root)?;
     string(&mut writer, "characters")?;
@@ -538,11 +576,11 @@ fn write_database(
             "plugin cursor count changed",
         ));
     }
-    let file = writer.finish().map_err(io_job_error)?;
+    let file = writer.inner.finish().map_err(io_job_error)?;
     file.sync_all().map_err(io_job_error)?;
     if file.metadata().map_err(io_job_error)?.len() > u32::MAX as u64 {
-        return Err(NativeJobError::new(
-            "unsupported-format",
+        return Err(NativeJobError::too_large(
+            "compatible-database",
             "target .bin database entry exceeds 4 GiB limit; use a RisuNest backup",
         ));
     }
@@ -732,8 +770,8 @@ fn array_header(writer: &mut dyn Write, len: u64) -> Result<(), NativeJobError> 
 }
 fn length_header(writer: &mut dyn Write, len: u64, tag: u8) -> Result<(), NativeJobError> {
     let length = u32::try_from(len).map_err(|_| {
-        NativeJobError::new(
-            "unsupported-format",
+        NativeJobError::too_large(
+            "compatible-database",
             "target MessagePack collection exceeds 32-bit limit",
         )
     })?;
@@ -1075,6 +1113,18 @@ mod tests {
                     )
                 }).collect::<Vec<_>>();
             assert_eq!(durable_ids.len(), durable_ids.iter().collect::<HashSet<_>>().len());
+            let limited_owned = directory.path().join("limited-owned");
+            std::fs::create_dir(&limited_owned).unwrap();
+            let limited_job = JobRegistry::default().create(JobKind::ExportCompatibleLocalBackup).unwrap();
+            let error = export_compatible_local_backup_with_limit(
+                target, Some(&output), revision, &limited_owned, &handoff,
+                PersistentStore::open(directory.path()).unwrap(), &limited_job, 64,
+            ).unwrap_err();
+            assert_eq!(error.code, "payload-too-large");
+            assert!(error.message.contains("use a RisuNest backup"));
+            assert!(!output.exists());
+            assert_eq!(std::fs::read_dir(&handoff).unwrap().count(), 0);
+            assert_eq!(store.revision().unwrap(), revision);
             export_compatible_local_backup(
                 target,
                 Some(&output),

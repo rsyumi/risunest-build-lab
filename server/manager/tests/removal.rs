@@ -228,6 +228,21 @@ mod windows {
         assert!(String::from_utf8_lossy(&blocked.stderr).contains("removal-registration-missing"));
         let copied = base.join("removal-helper.exe");
         fs::copy(&manager, &copied).unwrap();
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let _held = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&server)
+                .unwrap();
+            let interrupted = invoke(&copied, &["installer", "remove-files", "force"]);
+            assert!(!interrupted.status.success());
+            assert!(String::from_utf8_lossy(&interrupted.stderr).contains("removal-file-failed"));
+            assert!(
+                manager.exists() && marker.exists(),
+                "A retried uninstall needs the manager and its marker"
+            );
+        }
         let removed = invoke(&copied, &["installer", "remove-files", "force"]);
         assert!(
             removed.status.success(),

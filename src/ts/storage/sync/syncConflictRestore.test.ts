@@ -19,12 +19,16 @@ const mocks = vi.hoisted(() => ({
     capturePersistentMutationToken: vi.fn(),
     runtime: { store: {}, revision: 7, flushPendingData: vi.fn() },
     native: { enabled: false },
+    nativeRestore: vi.fn(),
+    nativeSource: vi.fn(),
     characters: vi.fn(),
     beginReplacement: vi.fn(),
     confirmReplacement: vi.fn(),
     release: vi.fn(),
     hold: vi.fn(),
 }))
+vi.mock('@tauri-apps/api/core', async original => ({...await original<typeof import('@tauri-apps/api/core')>(),invoke:mocks.nativeSource}))
+vi.mock('../portableBackupFileRouteProduction.svelte', () => ({restoreBackupFromNativeSource:mocks.nativeRestore}))
 vi.mock('../../platform', async () => (await import('../../platform.testSupport')).platformModule(() => ({ runtime: mocks.native.enabled ? 'tauri' : 'web', os: 'windows' })))
 vi.mock('../libraryCharacters', () => ({ hasLibraryCharacters: mocks.characters }))
 vi.mock('./serverSyncProduction', () => ({
@@ -62,6 +66,8 @@ describe('openSyncConflictBackups', () => {
     beforeEach(() => {
         vi.resetModules()
         mocks.native.enabled = false
+        mocks.nativeSource.mockReset().mockResolvedValue({type:"desktopPath",path:"synthetic-conflict.risudat"})
+        mocks.nativeRestore.mockReset().mockImplementation(async source => {await source({signal:new AbortController().signal});return {warningCodes:[]}})
         mocks.beginReplacement.mockReset().mockResolvedValue(mocks.release)
         mocks.confirmReplacement.mockReset().mockResolvedValue(undefined)
         mocks.release.mockReset()
@@ -149,86 +155,40 @@ describe('openSyncConflictBackups', () => {
         expect(mocks.installLocalBackup).not.toHaveBeenCalled()
     })
 
-    it.each(['applied', 'refresh-required'])('holds native sync immediately after a committed %s replacement', async (status) => {
+    it('ends a stalled native saved backup lookup without replacing the library', async () => {
         mocks.native.enabled = true
-        mocks.replacePersistentDatabase.mockResolvedValue({ status, revision: 8 })
-        const followup = vi.fn()
-        mocks.installLocalBackup.mockImplementation(async (database, dependencies) => {
-            await dependencies.replaceDatabase(database, 'local-backup')
-            followup()
-        })
-        await (await import('./syncConflictRestore')).openSyncConflictBackups()
-        const order = [mocks.beginReplacement, mocks.confirmReplacement, mocks.flushPendingData, mocks.replacePersistentDatabase, mocks.hold, followup, mocks.release]
-            .map((mock) => mock.mock.invocationCallOrder[0])
-        expect(order).toEqual([...order].sort((a, b) => a - b))
-        expect(mocks.hold).toHaveBeenCalledOnce()
+        mocks.nativeSource.mockReturnValue(new Promise(() => {}))
+        const { openSyncConflictBackups } = await import('./syncConflictRestore')
+        vi.useFakeTimers()
+        try {
+            const work = openSyncConflictBackups()
+            await vi.waitFor(() => expect(mocks.nativeSource).toHaveBeenCalled())
+            await vi.advanceTimersByTimeAsync(30_000)
+            await work
+            expect(mocks.alertError).toHaveBeenCalledWith(language.risuNest.backup.actionFailed)
+            expect(mocks.backupStore.read).not.toHaveBeenCalled()
+            expect(mocks.replacePersistentDatabase).not.toHaveBeenCalled()
+        } finally { vi.useRealTimers() }
     })
 
-    it('restores a bound device whose pull advances the revision after one checkbox confirmation', async () => {
+    it('restores a native saved conflict backup by ID without loading the database in JavaScript', async () => {
         mocks.native.enabled = true
-        let revision = 7
-        const replacementConfirm = vi.fn(async () => true)
-        mocks.installLocalBackup.mockImplementation(async (database, dependencies) => {
-            await dependencies.replaceDatabase(database, 'local-backup', {
-                publishOfficial: true,
-                upstreamImport: true,
-                ...(dependencies.upstreamImportWarnings ? { upstreamImportWarnings: dependencies.upstreamImportWarnings } : {}),
-            })
-        })
-        // The bound replacement path pulls available changes, asks once, then pauses
-        // writes and compares any pinned revision against the post-pull revision.
-        mocks.replacePersistentDatabase.mockImplementation(async (_database, _reason, options) => {
-            revision = 8
-            if (!await replacementConfirm()) throw new Error('Import cancelled')
-            if (options.expectedRevision !== undefined && options.expectedRevision !== revision) {
-                throw new Error('persistent mutation fenced')
-            }
-            return { status: 'applied', revision: 9 }
-        })
-
         await (await import('./syncConflictRestore')).openSyncConflictBackups()
-
-        expect(mocks.alertError).not.toHaveBeenCalled()
+        expect(mocks.nativeSource).toHaveBeenCalledWith('native_conflict_backup_source', {backupId:'backup'})
+        expect(mocks.nativeRestore).toHaveBeenCalledWith(expect.any(Function), {confirmationWarnings:[language.syncConflictRestoreScope]})
+        expect(mocks.backupStore.read).not.toHaveBeenCalled()
+        expect(mocks.decodeRisuSave).not.toHaveBeenCalled()
+        expect(mocks.replacePersistentDatabase).not.toHaveBeenCalled()
         expect(mocks.alertConfirm).not.toHaveBeenCalled()
-        expect(replacementConfirm).toHaveBeenCalledOnce()
-        expect(mocks.installLocalBackup).toHaveBeenCalledWith(
-            expect.anything(),
-            expect.objectContaining({
-                upstreamImportWarnings: [language.syncConflictRestoreScope],
-            }),
-        )
-        expect(mocks.hold).toHaveBeenCalledOnce()
-        expect(mocks.release).toHaveBeenCalledOnce()
     })
 
-    it('leaves the library unchanged without an error when the one restore dialog is cancelled', async () => {
+    it.each(['cancelled','sync-unavailable','restore-failed'])('preserves native %s outcomes', async code => {
         mocks.native.enabled = true
-        mocks.replacePersistentDatabase.mockRejectedValue(new DOMException('Import cancelled', 'AbortError'))
+        mocks.nativeRestore.mockRejectedValue(code === 'cancelled' ? new DOMException('Cancelled','AbortError') : Object.assign(new Error('Synthetic failure'),{code}))
         await (await import('./syncConflictRestore')).openSyncConflictBackups()
-        expect(mocks.alertConfirm).not.toHaveBeenCalled()
-        expect(mocks.alertError).not.toHaveBeenCalled()
-        expect(mocks.hold).not.toHaveBeenCalled()
-        expect(mocks.release).toHaveBeenCalledOnce()
-    })
-
-    it('asks the user to connect when the bound sync target is unavailable', async () => {
-        mocks.native.enabled = true
-        mocks.replacePersistentDatabase.mockRejectedValue(
-            Object.assign(new Error('Sync is unavailable for library replacement'), { code: 'sync-unavailable' }),
-        )
-        await (await import('./syncConflictRestore')).openSyncConflictBackups()
-        expect(mocks.alertError).toHaveBeenCalledWith(language.risuNest.backup.syncUnavailable)
-        expect(mocks.hold).not.toHaveBeenCalled()
-        expect(mocks.release).toHaveBeenCalledOnce()
-    })
-
-    it.each(['confirm', 'replace'])('releases admission without installing a hold after %s refuses', async (failure) => {
-        mocks.native.enabled = true
-        if (failure === 'confirm') mocks.confirmReplacement.mockRejectedValue({ code: 'resolve-pending-operation-first' })
-        else mocks.replacePersistentDatabase.mockRejectedValue(new Error('failed'))
-        await (await import('./syncConflictRestore')).openSyncConflictBackups()
-        expect(mocks.hold).not.toHaveBeenCalled()
-        expect(mocks.release).toHaveBeenCalledOnce()
-        expect(mocks.alertError).toHaveBeenCalledWith(language.risuNest.backup.actionFailed)
+        if (code === 'cancelled') expect(mocks.alertError).not.toHaveBeenCalled()
+        else expect(mocks.alertError).toHaveBeenCalledWith(code === 'sync-unavailable' ? language.risuNest.backup.syncUnavailable : language.risuNest.backup.actionFailed)
+        expect(mocks.backupStore.read).not.toHaveBeenCalled()
+        expect(mocks.installLocalBackup).not.toHaveBeenCalled()
     })
 })

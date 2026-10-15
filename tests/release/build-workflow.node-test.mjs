@@ -8,6 +8,18 @@ const stableWorkflow = readFileSync(new URL("../../.github/workflows/stable-rele
 const cacheWorkflow = readFileSync(new URL("../../.github/workflows/release-cache.yml", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 const referenceAction = readFileSync(new URL("../../.github/actions/test-references/action.yml", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 
+test("all app distribution builds receive the mobile-forwarded key and mandatory native key validation", () => {
+  const environment = workflow.slice(workflow.indexOf("\nenv:\n"), workflow.indexOf("\njobs:\n"));
+  assert.match(environment, /TAURI_RISUNEST_UPDATE_PUBLIC_KEY: \$\{\{ secrets\.RISUNEST_UPDATE_PUBLIC_KEY \}\}/);
+  for (const job of ["app-desktop", "app-android", "app-ios"]) {
+    const block = new RegExp(`\\n  ${job}:\\n([\\s\\S]*?)(?=\\n  [\\w-]+:\\n|$)`).exec(workflow)?.[1];
+    assert(block, `Missing ${job} job`);
+    assert.match(block, /node scripts\/release\/tauri-config\.mjs --release-input release-input\.json --output "\$RUNNER_TEMP\/release-tauri\.json"/);
+    assert.match(block, /pnpm exec -- tauri (?:android |ios )?build [^\n]*--config "\$RUNNER_TEMP\/release-tauri\.json"/);
+    assert.doesNotMatch(block, /^\s+(?:TAURI_RISUNEST_UPDATE_PUBLIC_KEY|RISUNEST_UPDATE_PUBLIC_KEY):/m);
+  }
+});
+
 test("README updates follow successful production publication and share its serialization group", () => {
   const block = /\n  update-readme:\n([\s\S]*?)(?=\n  [\w-]+:\n|$)/.exec(workflow)?.[1];
   assert(block);
@@ -80,31 +92,36 @@ test("failed, cancelled or skipped mandatory checks cannot publish or recover ei
   }
 });
 
-test("stable tags publish automatically only from commits contained in main", () => {
+test("stable tag pushes publish the triggering commit with an explicit tag", () => {
   assert.match(stableWorkflow, /tags:\n\s+- "app-v\*"\n\s+- "sync-v\*"/);
   assert.match(stableWorkflow, /source_ref: \$\{\{ github\.sha \}\}/);
   assert.match(stableWorkflow, /publish: true/);
+  assert.match(stableWorkflow, /tag: \$\{\{ github\.ref_name \}\}/);
   assert.match(workflow, /fetch-depth: 0/);
-  assert.match(workflow, /if \[\[ "\$GITHUB_EVENT_NAME" == "push" \]\]/);
-  assert.match(workflow, /test "\$GITHUB_REF_TYPE" = "tag"/);
-  assert.match(workflow, /git merge-base --is-ancestor "\$source_commit" refs\/remotes\/origin\/main/);
-  assert.match(workflow, /git rev-parse "\$TAG\^\{commit\}"/);
 });
 
-test("every release run builds only a commit contained in main", () => {
-  const identity = workflow.slice(workflow.indexOf("      - id: identity"), workflow.indexOf("      - uses: pnpm/action-setup"));
-  const ancestor = identity.indexOf('git merge-base --is-ancestor "$source_commit" refs/remotes/origin/main');
-  assert.ok(ancestor > 0);
-  assert.ok(ancestor < identity.indexOf('if [[ "$GITHUB_EVENT_NAME" == "push" ]]'));
-  assert.match(identity, /elif tagged=\$\(git rev-parse -q --verify "refs\/tags\/\$TAG\^\{commit\}"\); then\n\s+test "\$tagged" = "\$source_commit"/);
-  assert.match(identity, /else\n\s+test "\$PUBLISH" != "true"\n\s+fi/);
+test("source validation and downstream builds use the resolved tag and checked commit", () => {
+  const source = workflow.slice(workflow.indexOf("\n  source:\n"), workflow.indexOf("\n  release-tooling-tests:\n"));
+  const ancestry = source.indexOf('git merge-base --is-ancestor "$(git rev-parse HEAD)" refs/remotes/origin/main');
+  assert.ok(ancestry > 0 && ancestry < source.indexOf("      - uses: pnpm/action-setup"),
+    "Reject sources outside main before executing checkout-owned tooling");
+  const identity = source.slice(source.indexOf("      - id: identity"), source.indexOf("      - name: Validate source release inputs"));
+  assert.match(identity, /PRODUCT: \$\{\{ inputs\.product \}\}/);
+  assert.match(identity, /TAG: \$\{\{ inputs\.tag \}\}/);
   assert.match(identity, /PUBLISH: \$\{\{ inputs\.publish \}\}/);
+  assert.match(source, /tag: \$\{\{ steps\.identity\.outputs\.tag \}\}/);
+  assert.match(source, /source_commit: \$\{\{ steps\.identity\.outputs\.source_commit \}\}/);
+  const validation = source.slice(source.indexOf("      - name: Validate source release inputs"));
+  assert.match(validation, /TAG: \$\{\{ steps\.identity\.outputs\.tag \}\}/);
+  assert.match(validation, /SOURCE_COMMIT: \$\{\{ steps\.identity\.outputs\.source_commit \}\}/);
 });
 
 test("manual release runs default to a non-publishing main rehearsal", () => {
   const dispatch = workflow.slice(workflow.indexOf("  workflow_dispatch:"), workflow.indexOf("\npermissions:"));
   assert.match(dispatch, /source_ref:\n\s+description:[^\n]+\n\s+type: string\n\s+default: main/);
   assert.match(dispatch, /publish:\n\s+description:[^\n]+\n\s+type: boolean\n\s+default: false/);
+  assert.match(dispatch, /tag:\n\s+description:[^\n]+\n\s+type: string\n\s+required: false/);
+  assert.match(workflow, /tag: \{ type: string, required: false \}/);
 });
 
 test("private signing material is scoped to signing steps", () => {

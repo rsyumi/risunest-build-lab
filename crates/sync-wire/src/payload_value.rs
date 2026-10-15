@@ -2,7 +2,7 @@
 use crate::{Result, WireError};
 use serde::{de::{self, MapAccess, SeqAccess, Visitor}, Deserialize, Deserializer};
 use serde_json::{Map, Value};
-use std::{cmp::Ordering, fmt};
+use std::{cmp::Ordering, fmt, io::Write};
 
 struct Strict(Value);
 impl<'de> Deserialize<'de> for Strict {
@@ -48,8 +48,24 @@ pub fn parse(bytes: &[u8]) -> Result<Value> {
 }
 pub fn encode(value: &Value) -> Result<Vec<u8>> {
     let mut out = Vec::new();
-    write(value, &mut out)?;
+    write(value, &mut out, 0)?;
     Ok(out)
+}
+/// Compare without retaining a second encoded body. Parsing still rejects
+/// duplicate keys, invalid numbers, and values beyond the JSON nesting limit.
+pub fn is_canonical(bytes: &[u8]) -> bool {
+    struct Compare<'a>(&'a [u8]);
+    impl Write for Compare<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if !self.0.starts_with(bytes) { return Err(std::io::ErrorKind::InvalidData.into()); }
+            self.0 = &self.0[bytes.len()..];
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    let Ok(value) = parse(bytes) else { return false; };
+    let mut compare = Compare(bytes);
+    write(&value, &mut compare, 0).is_ok() && compare.0.is_empty()
 }
 fn array_index(key: &str) -> Option<u32> {
     let value = key.parse::<u32>().ok()?;
@@ -61,29 +77,36 @@ fn key_order(a: &str, b: &str) -> Ordering {
         (None, Some(_)) => Ordering::Greater, _ => a.encode_utf16().cmp(b.encode_utf16()),
     }
 }
-fn write(value: &Value, out: &mut Vec<u8>) -> Result<()> {
+fn write(value: &Value, out: &mut impl Write, depth: usize) -> Result<()> {
+    let io = |_| WireError("invalid-payload-json");
+    if matches!(value, Value::Object(_) | Value::Array(_)) && depth >= 127 {
+        return Err(WireError("invalid-payload-json"));
+    }
     match value {
         Value::Object(values) => {
             let mut keys: Vec<_> = values.keys().collect();
             keys.sort_by(|a, b| key_order(a, b));
-            out.push(b'{');
+            out.write_all(b"{").map_err(io)?;
             for (i, key) in keys.into_iter().enumerate() {
-                if i > 0 { out.push(b','); }
-                out.extend(serde_json::to_vec(key).map_err(|_| WireError("invalid-payload-json"))?);
-                out.push(b':'); write(&values[key], out)?;
+                if i > 0 { out.write_all(b",").map_err(io)?; }
+                serde_json::to_writer(&mut *out, key).map_err(|_| WireError("invalid-payload-json"))?;
+                out.write_all(b":").map_err(io)?; write(&values[key], out, depth + 1)?;
             }
-            out.push(b'}');
+            out.write_all(b"}").map_err(io)?;
         }
         Value::Array(values) => {
-            out.push(b'[');
-            for (i, value) in values.iter().enumerate() { if i > 0 { out.push(b','); } write(value, out)?; }
-            out.push(b']');
+            out.write_all(b"[").map_err(io)?;
+            for (i, value) in values.iter().enumerate() {
+                if i > 0 { out.write_all(b",").map_err(io)?; }
+                write(value, out, depth + 1)?;
+            }
+            out.write_all(b"]").map_err(io)?;
         }
         Value::Number(number) => {
             let number = number.as_f64().filter(|v| v.is_finite()).ok_or(WireError("unsupported-payload-number"))?;
-            out.extend(ryu_js::Buffer::new().format(if number == 0.0 { 0.0 } else { number }).as_bytes());
+            out.write_all(ryu_js::Buffer::new().format(if number == 0.0 { 0.0 } else { number }).as_bytes()).map_err(io)?;
         }
-        _ => out.extend(serde_json::to_vec(value).map_err(|_| WireError("invalid-payload-json"))?),
+        _ => serde_json::to_writer(out, value).map_err(|_| WireError("invalid-payload-json"))?,
     }
     Ok(())
 }

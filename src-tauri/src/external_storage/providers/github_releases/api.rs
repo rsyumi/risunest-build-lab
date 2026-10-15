@@ -23,7 +23,10 @@ pub(super) const MAX_ASSETS_PER_RELEASE: usize = 100;
 pub(super) const ASSET_PAGE_SIZE: usize = 100;
 pub(super) const RELEASE_PAGE_SIZE: usize = 30;
 /// Release listing is page numbered, so locating one tag is a bounded scan.
+#[cfg(not(test))]
 pub(super) const MAX_RELEASE_SCAN_PAGES: u32 = 20;
+#[cfg(test)]
+pub(super) const MAX_RELEASE_SCAN_PAGES: u32 = 2;
 /// Assets of one release, at the service limit rather than the adapter's.
 pub(super) const MAX_ASSET_SCAN_PAGES: u32 = 10;
 /// Bounds the requests a single `list_objects` page may spend skipping over

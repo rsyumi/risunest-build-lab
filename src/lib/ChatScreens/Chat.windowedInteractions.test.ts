@@ -310,17 +310,20 @@ it.each([
     disposeToggleObserver = undefined
 
     db.togglePresets = [{ name: 'Synthetic off', values: { toggle_probe: '0' }, promptPresetName: db.botPresets[db.botPresetsId]?.name }]
-    const presetsButton = await vi.waitFor(() => {
-        const button = target.querySelector<HTMLButtonElement>(`button[title="${language.togglePresets}"]`)!
-        expect(button.disabled).toBe(false)
-        return button
-    })
-    presetsButton.click()
-    await current.svelte.tick()
-    target.querySelector<HTMLButtonElement>(`[role="dialog"] button[title="${language.apply}"]`)!.click()
-    await vi.waitFor(() => expect(get(current.stores.alertStore).type).toBe('ask'))
-    current.stores.alertStore.set({ type: 'none', msg: 'yes' })
-    await vi.waitFor(() => expect(target.querySelector('[role="dialog"]')).toBeNull())
+    const applyPreset = async () => {
+        const presetsButton = await vi.waitFor(() => {
+            const button = target.querySelector<HTMLButtonElement>(`button[title="${language.togglePresets}"]`)!
+            expect(button.disabled).toBe(false)
+            return button
+        })
+        presetsButton.click()
+        await current.svelte.tick()
+        target.querySelector<HTMLButtonElement>(`[role="dialog"] button[title="${language.apply}"]`)!.click()
+        await vi.waitFor(() => expect(get(current.stores.alertStore).type).toBe('ask'))
+        current.stores.alertStore.set({ type: 'none', msg: 'yes' })
+        await vi.waitFor(() => expect(target.querySelector('[role="dialog"]')).toBeNull())
+    }
+    await applyPreset()
     expect(save().disabled).toBe(false)
     expect(db.globalChatVariables.toggle_probe).toBe('1')
     await current.runtime.flushPendingData('sidebar-preset-draft')
@@ -344,6 +347,23 @@ it.each([
     save().click()
     await finishedEdit('chat-binding')
     expect((await savedChat())?.GLGlobalVariables?.toggle_probe).toBeUndefined()
+    await vi.waitFor(() => expect(save().disabled).toBe(true))
+
+    // Applying a preset replaces a local override the same way.
+    await toggleSwitch(language.localToggles)
+    await finishedEdit('local-toggle-mode')
+    await toggleSwitch('Probe toggle')
+    await finishedEdit('toggle-value')
+    await toggleSwitch(language.localToggles)
+    await finishedEdit('local-toggle-mode')
+    expect(selectedChat().GLGlobalVariables?.toggle_probe).toBe('1')
+    await applyPreset()
+    expect(save().disabled).toBe(false)
+    expect(selectedChat().GLGlobalVariables?.toggle_probe).toBe('1')
+    save().click()
+    await finishedEdit('chat-binding')
+    expect((await savedChat())?.GLGlobalVariables?.toggle_probe).toBeUndefined()
+    expect((await savedChat())?.savedToggleValues).toEqual({ toggle_probe: '0' })
     await vi.waitFor(() => expect(save().disabled).toBe(true))
 
     await toggleSwitch(language.ToggleHypaMemory)

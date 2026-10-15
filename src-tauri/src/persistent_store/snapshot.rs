@@ -606,8 +606,7 @@ pub(super) fn collect_device_plugin_asset_roots(store: &super::PersistentStore) 
     let roots = std::cell::RefCell::new(AssetRootSet::default());
     let mut units = std::collections::BTreeMap::new();
     let fence = store.device_store()?.visit_plugin_gc_values(|_, _, _, raw| {
-        let value = serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_owned()));
-        observe_json_value(&value, None, &mut roots.borrow_mut());
+        plugin_text::scan(raw, &mut roots.borrow_mut())?;
         Ok(())
     }, |key, value| {
         match value {
@@ -625,13 +624,28 @@ pub(super) fn collect_device_plugin_asset_roots(store: &super::PersistentStore) 
     let mut roots = roots.into_inner();
     // Plugin-local units are device units, so their large bodies live in the device store.
     for value in units.values() {
-        match super::lww::json_value_resolved(store.device_store()?.connection(), value) {
-            Ok(Some(value)) => observe_json_value(&value, None, &mut roots),
-            Ok(None) => {}
-            Err(_) => { roots.retain_all_objects = true; roots.blockers.insert("plugin-local-unscannable".into()); }
-        }
+        let UnitValue::Object { descriptor, .. } = value else { continue };
+        let result = (|| -> StoreResult<()> {
+            let db = store.device_store()?.connection();
+            let (rowid, length) = super::device_store::plugin_values::text_value::object_row(db, &descriptor.object_hash)?;
+            if length <= super::device_store::plugin_values::text_value::PART_BYTES as u64 {
+                if let Some(value) = super::lww::json_value_resolved(db, value)? { observe_json_value(&value, None, &mut roots); }
+                return Ok(());
+            }
+            let input = db.blob_open(rusqlite::MAIN_DB, "message_page_objects", "body", rowid, true)?;
+            let info = plugin_text::scan_encoded(input, &mut roots, super::device_store::plugin_values::text_value::MAX_VALUE_BYTES)?;
+            if info.hash != descriptor.object_hash { return Err(validation("plugin object hash mismatch")); }
+            Ok(())
+        })();
+        if result.is_err() { roots.retain_all_objects = true; roots.blockers.insert("plugin-local-unscannable".into()); }
     }
     Ok((fence, roots))
+}
+
+mod plugin_text;
+
+pub(super) fn observe_encoded_text(input: impl std::io::Read, roots: &mut AssetRootSet) -> StoreResult<super::device_store::plugin_values::text_value::TextInfo> {
+    plugin_text::scan_encoded(input, roots, u64::MAX)
 }
 
 pub(super) fn merge_asset_roots(target: &mut AssetRootSet, source: AssetRootSet) {

@@ -9,6 +9,7 @@ import { PayloadTooLargeError } from './nativePersistenceValue'
 
 import {
     NativeFileJobActivationCommittedError,
+    NativeFileJobActivationUnresolvedError,
     NativeFileJobError,
     resolveNativeFileJobStage,
     portableBodyRetryRequest,
@@ -137,8 +138,18 @@ function mergeWarningCodes(...groups: string[][]): string[] {
     return [...new Set(groups.flat())]
 }
 
+function backgroundTaskPercent({ kind, phase, progress, detail }: NativeFileJobStatus): number | null {
+    if (kind.startsWith('restore-')) {
+        if (detail) return measuredTaskPercent(detail.stageCompleted, detail.stageTotal)
+        return phase === 'reading-source' ? measuredTaskPercent(progress.completedBytes, progress.totalBytes) : null
+    }
+    const percent = measuredTaskPercent(progress.completedBytes, progress.totalBytes)
+    return percent === null && detail?.stage === 'copying-source' && detail.stageUnit === 'bytes'
+        ? measuredTaskPercent(detail.stageCompleted, detail.stageTotal) : percent
+}
+
 function outcomeError(kind: NativeFileOperationKind, error: unknown): NativeFileOperationError {
-    if (error instanceof NativeFileJobActivationCommittedError) {
+    if (error instanceof NativeFileJobActivationCommittedError || error instanceof NativeFileJobActivationUnresolvedError) {
         const cause = error.cause
         return {
             code: error.code,
@@ -154,7 +165,8 @@ function outcomeError(kind: NativeFileOperationKind, error: unknown): NativeFile
         'code' in error && typeof error.code === 'string' &&
         'message' in error && typeof error.message === 'string'
     ) {
-        return { code: error.code, message: error.message, recoveryRequired: false }
+        return { code: error.code, message: error.message, recoveryRequired: false,
+            ...('itemKind' in error && typeof error.itemKind === 'string' ? { itemKind: error.itemKind } : {}) }
     }
     return {
         code: `${kind}-error`,
@@ -354,7 +366,7 @@ function runSharedNativeFileOperationWithAdmission<T>(
             signal: task.signal ?? context.signal,
             onStatus: status => {
                 recordStatus(status)
-                task.progress(measuredTaskPercent(status.progress.completedBytes, status.progress.totalBytes))
+                task.progress(backgroundTaskPercent(status))
             },
             })
         }, controller.signal, options.userInitiated ?? true).then(

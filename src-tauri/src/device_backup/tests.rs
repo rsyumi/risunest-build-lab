@@ -109,12 +109,22 @@ fn journaled_restore_carries_large_device_values_in_source_and_rollback_spools()
     use crate::local_backup::NeverCancelled;
     use crate::persistent_store::device_store::plugin_values::PluginDeviceMutation;
     fn write_large(store: &mut crate::persistent_store::PersistentStore, label: &str) -> (String, String, String) {
-        let string = format!("{label}\n{}", "가".repeat(25_000));
+        let string = format!("{label}\n{}{}", "가".repeat(25_000), "x".repeat(8 * 1024 * 1024));
         let json = format!("{{ \"label\": \"{label}\", \"n\": 1.0e1,\n \"pad\": \"{}\" }}", "p".repeat(70_000));
         let setting = serde_json::json!({ "label": label, "pad": "q".repeat(70_000) });
         let device = store.device_store_mut().unwrap();
+        let opened = device.open_plugin_device_write("owner-large", "string", "value",
+            crate::persistent_store::device_store::plugin_values::text_value::encoded_length(&string)).unwrap();
+        let session = serde_json::to_value(opened).unwrap()["sessionId"].as_str().unwrap().to_owned();
+        let mut offset = 0;
+        while offset < string.len() {
+            let mut end = (offset + 1024 * 1024).min(string.len());
+            while !string.is_char_boundary(end) { end -= 1; }
+            device.append_plugin_device_write("owner-large", &session, offset as u64, &string[offset..end]).unwrap();
+            offset = end;
+        }
         device.write_plugin_device_values("owner-large", &[
-            PluginDeviceMutation::Set { space: "string".into(), key: "value".into(), value: string.clone() },
+            PluginDeviceMutation::Staged { session_id: session },
             PluginDeviceMutation::Set { space: "json".into(), key: "value".into(), value: json.clone() },
         ]).unwrap();
         device.write_setting("risuNestDeviceSettings", &setting).unwrap();
@@ -123,8 +133,8 @@ fn journaled_restore_carries_large_device_values_in_source_and_rollback_spools()
     fn objects(sections: &[PreparedDeviceSection]) -> std::collections::BTreeSet<Vec<u8>> {
         let mut objects = std::collections::BTreeSet::new();
         for section in sections {
-            section.rows().visit_entries(|_, object| {
-                objects.extend(object.map(<[u8]>::to_vec));
+            section.rows().visit_entries(|entry, object| {
+                for reference in entry.value.object_references() { objects.insert(object(reference)?); }
                 Ok(())
             }).unwrap();
         }
@@ -152,9 +162,10 @@ fn journaled_restore_carries_large_device_values_in_source_and_rollback_spools()
     coordinator.source_ready(&id).unwrap();
     journal_prepared_native_sections(&coordinator, &id, Spool::Rollback, &rollback).unwrap();
     coordinator.prepared(&id).unwrap();
-    let held_bodies = [&held.0, &held.1, &held.2].map(|text| text.as_bytes().to_vec());
+    let held_bodies = [&held.0, &held.1, &held.2].into_iter()
+        .flat_map(|text| text.as_bytes().chunks(8 * 1024 * 1024).map(<[u8]>::to_vec)).collect::<std::collections::BTreeSet<_>>();
     let journaled = archive::prepare_journaled_native_sections(&coordinator, &id, Spool::Rollback, &selected).unwrap();
-    assert_eq!(objects(&journaled), held_bodies.into_iter().collect());
+    assert_eq!(objects(&journaled), held_bodies);
     resume_journaled_native_restore(&coordinator, &id, &mut store).unwrap();
     let device = store.device_store().unwrap();
     assert_eq!(device.read_plugin_device_value("owner-large", "string", "value").unwrap(), Some(restored.0));

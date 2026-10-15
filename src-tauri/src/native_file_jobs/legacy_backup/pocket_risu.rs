@@ -3,17 +3,20 @@
 use super::{
     check_cancelled, invalid, open_staged, to_alias_size, AssetAlias,
     CancellationProbe, CancellationReader, HashMap,
-    LocalBackupError, LocalBackupErrorCode, Map,
+    LocalBackupError, Map,
     StagedLocalBackupEntry, Value, MAX_METADATA_BYTES,
 };
 use serde::Deserialize;
 use std::io::{BufReader, Read};
+mod legacy;
 
 pub(super) enum Entry<'a> {
     Payload { id: &'a str, ext: &'a str },
+    Legacy { id: &'a str },
     Metadata { id: &'a str },
     Provenance { id: &'a str },
     Cache,
+    Skipped,
 }
 
 pub(super) fn classify(name: &str) -> Result<Option<Entry<'_>>, LocalBackupError> {
@@ -27,9 +30,7 @@ pub(super) fn classify(name: &str) -> Result<Option<Entry<'_>>, LocalBackupError
         return Ok(None);
     }
     if rest.is_empty() || rest.contains(['/', '\\']) {
-        return Err(invalid(
-            "PocketRisu Inlay entry must have a single filename",
-        ));
+        return Ok(Some(Entry::Skipped));
     }
     Ok(Some(match namespace {
         "inlay" => {
@@ -37,10 +38,7 @@ pub(super) fn classify(name: &str) -> Result<Option<Entry<'_>>, LocalBackupError
                 .rsplit_once('.')
                 .filter(|(id, ext)| !id.is_empty() && !ext.is_empty())
             else {
-                return Err(LocalBackupError::new(
-                    LocalBackupErrorCode::CompatibilityImportRequired,
-                    "PocketRisu legacy JSON Inlays require the compatibility importer",
-                ));
+                return Ok(Some(Entry::Legacy { id: rest }));
             };
             Entry::Payload { id, ext }
         }
@@ -105,7 +103,7 @@ pub(super) fn prepare(
         // original character/chat ownership instead of discarding user metadata.
         retained_metadata.insert("pocketRisu".to_owned(), Value::Object(value));
     }
-    let mut metadata = if let Some(sidecar) = metadata.sidecars.get(id) {
+    let metadata = if let Some(sidecar) = metadata.sidecars.get(id) {
         read_metadata::<Metadata>(sidecar, cancellation)?
     } else {
         let normalized = normalize_extension(ext);
@@ -119,6 +117,10 @@ pub(super) fn prepare(
             height: None,
         }
     };
+    finish_alias(id, &entry.sha256, entry.byte_length, metadata, retained_metadata)
+}
+
+fn finish_alias(id: &str, hash: &str, size: u64, mut metadata: Metadata, retained_metadata: Map<String, Value>) -> Result<AssetAlias, LocalBackupError> {
     metadata.ext = normalize_extension(&metadata.ext);
     if !matches!(
         metadata.inlay_type.as_str(),
@@ -137,9 +139,9 @@ pub(super) fn prepare(
     };
     Ok(AssetAlias {
         key: id.to_owned(),
-        object_hash: Some(entry.sha256.clone()),
+        object_hash: Some(hash.to_owned()),
         kind: "inlay".to_owned(),
-        size: to_alias_size(entry.byte_length)?,
+        size: to_alias_size(size)?,
         mime: mime.to_owned(),
         name: metadata.name,
         ext: metadata.ext,
@@ -150,20 +152,29 @@ pub(super) fn prepare(
     })
 }
 
+pub(super) fn prepare_legacy(
+    entry: &StagedLocalBackupEntry, id: &str, metadata: &MetadataIndex<'_>,
+    cas: &super::PayloadCas, durable: &mut super::DurableCasJob,
+    cancellation: &dyn CancellationProbe,
+) -> Result<AssetAlias, LocalBackupError> {
+    legacy::prepare(entry, id, metadata, cas, durable, cancellation)
+}
+
 fn read_metadata<T: serde::de::DeserializeOwned>(
     entry: &StagedLocalBackupEntry,
     cancellation: &dyn CancellationProbe,
 ) -> Result<T, LocalBackupError> {
     if entry.byte_length > u64::from(MAX_METADATA_BYTES) {
-        return Err(invalid("PocketRisu Inlay metadata is too large"));
+        return Err(LocalBackupError::new(super::LocalBackupErrorCode::RecordTooLarge, "PocketRisu Inlay metadata is too large"));
     }
     let reader = CancellationReader::new(open_staged(entry)?, cancellation)
         .take(u64::from(MAX_METADATA_BYTES) + 1);
-    serde_json::from_reader(BufReader::new(reader)).map_err(|_| {
+    let value: Value = serde_json::from_reader(BufReader::new(reader)).map_err(|_| {
         check_cancelled(cancellation)
             .err()
-            .unwrap_or_else(|| invalid("PocketRisu Inlay metadata is invalid"))
-    })
+            .unwrap_or_else(|| LocalBackupError::new(super::LocalBackupErrorCode::UnsupportedFormat, "PocketRisu Inlay metadata is unreadable"))
+    })?;
+    serde_json::from_value(value).map_err(|_| invalid("PocketRisu Inlay metadata is invalid"))
 }
 
 fn normalize_extension(ext: &str) -> String {

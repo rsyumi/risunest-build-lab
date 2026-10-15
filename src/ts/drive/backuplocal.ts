@@ -25,7 +25,7 @@ import {
 } from "./backupAssets";
 import { classifyPocketRisuEntry, PocketRisuInlayImporter } from "./pocketRisuBackup";
 import { createLegacyBackupAttachments } from './legacyBackupAttachments';
-import { isTauri, isTauriDesktop, isTauriMobile } from "src/ts/platform"
+import { isTauri, isTauriDesktop } from "src/ts/platform"
 import { decodeRisuSave } from "../storage/risuSave";
 import { relaunch } from "../desktopRelaunch";
 import { decryptBuffer, encryptBuffer, sleep } from "../util";
@@ -366,6 +366,7 @@ async function savePartialLocalBackupSnapshot(blobStore: BlobStore, pinned: Pinn
 }
 
 export function LoadLocalBackup(confirmationTitle = language.backupLoadConfirm): Promise<void> {
+    if (isTauri) return import('../storage/portableBackupFileRouteProduction.svelte').then(module => module.restoreBackupFromSystemPicker()).then(() => undefined, handleLegacyImportFailure)
     return runSharedNativeFileOperation(
         'import',
         'legacy-local-backup-import',
@@ -421,11 +422,7 @@ export async function importLegacyBackupWithWebView(
     lifecycle: { firstRun?: boolean; beforeActivation?(): Promise<void>; onCommitted?(): void } = {},
     confirmationTitle = language.backupLoadConfirm,
 ): Promise<{ warningCodes: string[], upstreamLosses: { coldMissing: number, invalidInlays: number, pocketInlays: number } } | null> {
-    if (isTauriMobile) {
-        const { withNativeSelectedFile } = await import('../storage/nativeFileSelection')
-        return withNativeSelectedFile({ accept: '.bin', signal: context.signal },
-            (file, release) => importLegacyBackupFile(file, context, lifecycle, confirmationTitle, release))
-    }
+    if (isTauri) throw new NativeFileJobError('native-required', 'Use the native backup source picker')
     const file = await pickWebBackupFile(context.signal)
     return file ? importLegacyBackupFile(file, context, lifecycle, confirmationTitle) : null
 }
@@ -581,11 +578,11 @@ async function importLegacyBackupFile(
                     sawEncryption = true
                     try {
                         const meta = JSON.parse(new TextDecoder().decode(data))
-                        if (meta?.type === 'account' && Number.isSafeInteger(meta.time) && meta.time > 0) {
+                        // Only account metadata marks an encrypted database, as in the native importer.
+                        if (meta?.type === 'account') {
+                            if (!Number.isSafeInteger(meta.time) || meta.time <= 0) throw new Error('Invalid account encryption time')
                             encryptionMeta.type = 'account'
                             encryptionMeta.time = meta.time
-                        } else if (meta?.type !== 'none') {
-                            throw new Error('Invalid encryption metadata')
                         }
                     } catch (error) {
                         throw backupFailure('backup-encryption-invalid', 'The backup has invalid encryption metadata', error)
