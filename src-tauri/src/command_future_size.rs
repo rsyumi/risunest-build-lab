@@ -159,6 +159,10 @@ async_commands![
     android_commit_transport::pds_commit_android_finish,
     #[cfg(target_os = "android")]
     android_commit_transport::pds_replace_android_finish,
+    #[cfg(target_os = "android")]
+    android_commit_transport::pds_plugin_part_android_finish,
+    #[cfg(target_os = "android")]
+    android_commit_transport::pds_plugin_write_android_finish,
     #[cfg(windows)]
     persistent_commit_transport::pds_commit_shared_open,
     #[cfg(windows)]

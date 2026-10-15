@@ -651,7 +651,9 @@ impl LwwClient {
             self.cancelled.clone(),
         );
         for hash in &objects {
-            if cache.stat_object(hash)?.is_none() {
+            if cache.stat_object(hash)?.is_none()
+                && !store.lww_copy_large_object_to_cas(hash, &cache.cas, super::cache::SMALL_OBJECT_BYTES)?
+            {
                 if let Some(body) = store.lww_object_body(hash)? {
                     cache.put(&body)?;
                 } else {
@@ -1413,8 +1415,9 @@ impl LwwClient {
         }
         transfer.download_with_hints(&required_large, &[], &hints)?;
         for hash in required_large {
-            let body = read_whole(&cache, &hash)?;
-            store.lww_put_object(&hash, &body)?;
+            let mut body = cache.open_object(&hash)?.ok_or_else(|| SyncError::new("cached-object-missing", 409))?;
+            let length = body.len()?;
+            store.lww_put_object_reader(&hash, &mut body, length)?;
         }
         if !remote.is_empty() {
             let cas = crate::asset_repository::PayloadCas::new(store.repository_root())?;
@@ -1520,7 +1523,9 @@ fn delta_bases(
         if base == target {
             continue;
         }
-        if cache.stat_object(&base)?.is_none() {
+        if cache.stat_object(&base)?.is_none()
+            && !store.lww_copy_large_object_to_cas(&base, &cache.cas, super::cache::SMALL_OBJECT_BYTES)?
+        {
             let Some(body) = store.lww_object_body(&base)? else { continue };
             if cache.put(&body)? != base {
                 continue;

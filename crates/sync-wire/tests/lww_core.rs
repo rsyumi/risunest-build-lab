@@ -83,6 +83,22 @@ fn payload_matches_javascript_keys_numbers_escaping_and_rejects_invalid_json() {
     let unicode = "{\"\":1,\"😀\":2}";
     assert_eq!(String::from_utf8(payload_value::canonicalize(unicode.as_bytes()).unwrap()).unwrap(), "{\"😀\":2,\"\":1}");
     for bytes in [br#"{"a":1,"a":2}"#.as_slice(), b"NaN", b"1e400", b"undefined", b"[1,]"] { assert!(payload_value::canonicalize(bytes).is_err()); }
+    for value in [json!(null), json!(true), json!("가😀\n\u{0}"), json!([1, 1.0, -0.0, 9007199254740993u64]),
+        json!({"10": 1e21, "2": 1e-7, "01": -9223372036854775808i64})] {
+        let previous = payload_value::canonicalize(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(payload_value::encode(&value).unwrap(), previous);
+        assert!(payload_value::is_canonical(&previous));
+        let mut trailing = previous.clone(); trailing.push(b' ');
+        assert!(!payload_value::is_canonical(&trailing));
+    }
+    let mut nested = json!(0);
+    for _ in 0..129 {
+        nested = json!([nested]);
+        assert_eq!(payload_value::encode(&nested), payload_value::canonicalize(&serde_json::to_vec(&nested).unwrap()));
+    }
+    for bytes in [br#"{"a":1,"a":2}"#.as_slice(), b"1.0", b"-0", b"[1,]", br#""\u0061""#] {
+        assert!(!payload_value::is_canonical(bytes));
+    }
     assert!(canonical::encode(&json!({"n":1})).is_err());
 }
 

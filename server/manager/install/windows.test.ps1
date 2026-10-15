@@ -189,11 +189,15 @@ path = "main.rs"
         if (!$source.Contains($define)) { throw 'The generated template does not define its package architecture.' }
         return $source.Replace($define, "!define ARCH `"$value`"")
     }
-    function Run-Installer([string]$executable, [string[]]$arguments, [int]$expected) {
+    function Run-Installer([string]$executable, [string[]]$arguments, [int]$expected, [int]$timeoutSeconds = 30) {
+        $elapsed = [Diagnostics.Stopwatch]::StartNew()
         $process = Start-Process -FilePath $executable -ArgumentList $arguments -PassThru -WindowStyle Hidden
-        if (!$process.WaitForExit(30000)) {
+        if (!$process.WaitForExit($timeoutSeconds * 1000)) {
             $process.Kill()
-            throw "Synthetic NSIS invocation waited unexpectedly: $executable $arguments; previous=$previous."
+            throw "Synthetic NSIS invocation exceeded $timeoutSeconds seconds: $executable $arguments."
+        }
+        if ($timeoutSeconds -gt 30) {
+            Write-Output "Released-bundle NSIS invocation completed in $($elapsed.ElapsedMilliseconds) ms with exit $($process.ExitCode): $executable $arguments"
         }
         if ($process.ExitCode -ne $expected) {
             $failureFile = Join-Path $testRoot 'failure.txt'
@@ -337,6 +341,9 @@ path = "main.rs"
         Write-Output 'Generated Tauri NSIS upgrade, architecture, relocation, version and removal tests passed.'
 
         if ($ReleasedBundle) {
+            # The real manager allows 45 seconds to prepare, 100 for server health, and 30 to finish.
+            # Keep process startup and file-copy overhead outside those product budgets.
+            $releasedInstallerTimeoutSeconds = 240
             if (!(Test-Path -LiteralPath $ManagerBinary) -or !(Test-Path -LiteralPath $BackgroundBinary)) {
                 throw 'Released-bundle verification requires both newly built manager executables.'
             }
@@ -421,34 +428,34 @@ FunctionEnd
                 $markerText = [IO.File]::ReadAllText($installedMarker)
                 [IO.File]::WriteAllText($installedMarker, ([regex]'"version":\s*"[^"]*"').Replace($markerText, '"version": "9.0.0"', 1))
                 try {
-                    Run-Installer $syncFixture @('/S', '/NS') 1
+                    Run-Installer $syncFixture @('/S', '/NS') 1 $releasedInstallerTimeoutSeconds
                 } finally { [IO.File]::WriteAllText($installedMarker, $markerText) }
                 if ((Get-ItemProperty $uninstallKey).DisplayVersion -ne $releasedVersion) { throw 'A refused downgrade changed the installation.' }
-                Run-Installer $syncFixture @('/S', '/NS') 0
+                Run-Installer $syncFixture @('/S', '/NS') 0 $releasedInstallerTimeoutSeconds
                 if ((Get-FileHash (Join-Path $data 'risunest-sync-instance.json')).Hash -ne $before) { throw 'Upgrade changed instance ownership.' }
                 Invoke-Manager @('status')
                 Invoke-Manager @('uninstall', '--dry-run')
-                Run-Installer (Join-Path $syncInstall 'uninstall.exe') @('/S', "_?=$syncInstall") 0
+                Run-Installer (Join-Path $syncInstall 'uninstall.exe') @('/S', "_?=$syncInstall") 0 $releasedInstallerTimeoutSeconds
                 if (Test-Path $oldManager) { throw 'Updated released bundle could not be removed normally.' }
                 if (!(Test-Path (Join-Path $data 'metadata.sqlite'))) { throw 'Normal removal deleted server data.' }
                 Write-Output "Released Sync $releasedVersion running-server upgrade and normal removal passed."
-                Run-Installer $syncFixture @('/S', '/NS', "/D=$syncInstall") 0
+                Run-Installer $syncFixture @('/S', '/NS', "/D=$syncInstall") 0 $releasedInstallerTimeoutSeconds
                 Invoke-Manager @('installer', 'forget-removal')
                 $unowned = Join-Path $syncInstall 'user-owned.txt'
                 'synthetic unowned file' | Set-Content $unowned
                 Invoke-Manager @('uninstall', '--dry-run', '--force', '--delete-data')
-                Run-Installer (Join-Path $syncInstall 'uninstall.exe') @('/S', '/FORCE', '/DELETEAPPDATA', "_?=$syncInstall") 0
+                Run-Installer (Join-Path $syncInstall 'uninstall.exe') @('/S', '/FORCE', '/DELETEAPPDATA', "_?=$syncInstall") 0 $releasedInstallerTimeoutSeconds
                 if (Test-Path $oldManager) { throw 'Forced removal left an owned manager.' }
                 if (!(Test-Path $unowned) -or !(Test-Path (Join-Path $data 'metadata.sqlite'))) { throw 'Forced removal deleted unowned files or unregistered data.' }
                 Write-Output 'Generated Sync forced removal preserves unowned files and unregistered data.'
                 Remove-Item -LiteralPath $unowned
                 # Data deletion runs right after the installer guard is released, and the manager alone
                 # decides which GUI profiles go. The template's own profile folder must survive.
-                Run-Installer $syncFixture @('/S', '/NS', "/D=$syncInstall") 0
+                Run-Installer $syncFixture @('/S', '/NS', "/D=$syncInstall") 0 $releasedInstallerTimeoutSeconds
                 $appProfile = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) "test.risunest.$fixtureName"
                 New-Item -ItemType Directory -Path $appProfile | Out-Null
                 'synthetic profile' | Set-Content (Join-Path $appProfile 'keep.txt')
-                Run-Installer (Join-Path $syncInstall 'uninstall.exe') @('/S', '/DELETEAPPDATA', "_?=$syncInstall") 0
+                Run-Installer (Join-Path $syncInstall 'uninstall.exe') @('/S', '/DELETEAPPDATA', "_?=$syncInstall") 0 $releasedInstallerTimeoutSeconds
                 if (Test-Path $oldManager) { throw 'Removal with data deletion left program files.' }
                 if (Test-Path $data) { throw 'Removal with data deletion kept the registered server data.' }
                 if (!(Test-Path (Join-Path $appProfile 'keep.txt'))) { throw 'Sync removal deleted a profile folder the manager did not choose.' }
@@ -467,7 +474,7 @@ FunctionEnd
                         & $ManagerBinary --data-dir $data --server $server update policy off | Out-Null
                         if ($LASTEXITCODE -ne 0) { throw 'Synthetic update policy configuration failed.' }
                     }
-                    Run-Installer $syncFixture @('/S', '/NS', "/D=$syncInstall") 0
+                    Run-Installer $syncFixture @('/S', '/NS', "/D=$syncInstall") 0 $releasedInstallerTimeoutSeconds
                     Invoke-Manager @('uninstall', 'lock-held')
                     if ($removalMode -eq 'force') { Invoke-Manager @('installer', 'forget-removal') }
                     $syntheticData = [IO.Path]::GetFullPath($data)
@@ -476,7 +483,7 @@ FunctionEnd
                     }
                     Remove-Item -LiteralPath $syntheticData -Recurse -Force
                     $removeArgs = if ($removalMode -eq 'force') { @('/S', '/FORCE', "_?=$syncInstall") } else { @('/S', "_?=$syncInstall") }
-                    Run-Installer (Join-Path $syncInstall 'uninstall.exe') $removeArgs 0
+                    Run-Installer (Join-Path $syncInstall 'uninstall.exe') $removeArgs 0 $releasedInstallerTimeoutSeconds
                     if (Test-Path $oldManager) { throw "$removalMode removal without a data directory left program files." }
                     if (Test-Path $data) { throw "$removalMode removal recreated the absent data directory." }
                 }

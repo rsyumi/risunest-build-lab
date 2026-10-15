@@ -2,13 +2,21 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { assetName } from "../../scripts/release/common.mjs";
-import { loadReadmeCatalog, renderReadme, updateReadmeDownloads } from "../../scripts/release/readme.mjs";
+import { loadReadmeCatalog, parseIosConfiguration, renderAltSource, renderReadme, updateReadmeDownloads }
+  from "../../scripts/release/readme.mjs";
 import { catalogFixture, entryFixture } from "./fixtures.mjs";
 import { createSigner } from "./signing.mjs";
 
-const readmes = Object.fromEntries(["README.md", "README.ko.md"].map(path =>
-  [path, readFileSync(new URL(`../../${path}`, import.meta.url), "utf8")]));
+const read = path => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
+const readmes = Object.fromEntries(["README.md", "README.ko.md"].map(path => [path, read(path)]));
 const locale = path => path === "README.md" ? "en" : "ko";
+const altSource = read("alt-source.json");
+const managedFiles = [...Object.keys(readmes), "alt-source.json"];
+const iosPaths = { plist: "src-tauri/gen/apple/risunest_iOS/Info.plist",
+  entitlements: "src-tauri/gen/apple/risunest_iOS/risunest_iOS.entitlements",
+  project: "src-tauri/gen/apple/project.yml" };
+const iosSources = Object.fromEntries(Object.entries(iosPaths).map(([name, path]) => [name, read(path)]));
+const ios = parseIosConfiguration(iosSources);
 
 function catalogFor(app = "1.2.0", sync = "1.1.0") {
   const catalog = catalogFixture();
@@ -36,9 +44,13 @@ function fixture() {
   };
   const initial = Object.fromEntries(Object.entries(readmes).map(([path, text]) =>
     [path, renderReadme(text, catalogFor("1.0.0", "1.0.0"), locale(path))]));
+  const source = JSON.parse(altSource);
+  source.apps[0].versions = [];
+  initial["alt-source.json"] = renderAltSource(JSON.stringify(source), catalogFor("1.0.0", "1.0.0"), ios);
   initial["unrelated.txt"] = "keep this file";
   const state = { signer, writes: [], patches: 0, beforePatch: null,
     head: saveCommit(saveTree(initial), []), releases: new Map(),
+    sources: new Map([["a".repeat(40), iosSources]]),
     contents() { return trees.get(commits.get(state.head).tree.sha).contents; },
     advance(changes) {
       state.head = saveCommit(saveTree({ ...state.contents(), ...changes }), [state.head]);
@@ -71,9 +83,16 @@ function fixture() {
         if (path.startsWith("/git/commits/")) return commits.get(sha);
         if (path.startsWith("/git/trees/")) return { tree: trees.get(sha).tree, truncated: false };
         if (path.startsWith("/git/blobs/")) return { encoding: "base64", content: Buffer.from(blobs.get(sha)).toString("base64") };
+        const file = /^\/contents\/(.+)\?ref=([a-f0-9]{40})$/.exec(path);
+        const name = file && Object.keys(iosPaths).find(key => iosPaths[key] === file[1]);
+        const text = name && state.sources.get(file[2])?.[name];
+        if (file) {
+          if (text === undefined) throw new Error("github-get-404");
+          return { type: "file", encoding: "base64", content: Buffer.from(text).toString("base64") };
+        }
       }
       if (path === "/git/trees" && method === "POST") {
-        assert(body.tree.every(entry => Object.hasOwn(readmes, entry.path)));
+        assert(body.tree.every(entry => managedFiles.includes(entry.path)));
         return { sha: saveTree({ ...trees.get(body.base_tree).contents,
           ...Object.fromEntries(body.tree.map(entry => [entry.path, entry.content])) }) };
       }
@@ -126,6 +145,59 @@ test("the current package names reproduce both README download sections exactly"
   for (const [path, text] of Object.entries(readmes)) assert.equal(renderReadme(text, catalog, locale(path)), text);
 });
 
+test("the iOS source retains version history, puts the newest app first and exposes legacy download fields", () => {
+  const source = JSON.parse(altSource);
+  source.apps[0].versions = [];
+  const first = renderAltSource(JSON.stringify(source), catalogFor(), ios);
+  const catalog = catalogFor("1.3.0");
+  const release = catalog.products.app.release;
+  release.localizedNotes.en = "New iOS release notes";
+  release.pub_date = "2026-10-13T17:09:48.862Z";
+  const newer = { entitlements: ["com.apple.developer.associated-domains"],
+    privacy: { NSMicrophoneUsageDescription: "Record a message." }, minOSVersion: "17.0" };
+  const updated = renderAltSource(first, catalog, newer);
+  const app = JSON.parse(updated).apps[0];
+  const ipa = release.downloads.find(download => download.os === "ios");
+  assert.deepEqual(app.versions, [{ version: "1.3.0", buildVersion: "1.3.0", date: "2026-10-13T17:09:48Z",
+    localizedDescription: "New iOS release notes", downloadURL: ipa.url, size: ipa.size, sha256: ipa.sha256,
+    minOSVersion: "17.0" }, JSON.parse(first).apps[0].versions[0]]);
+  assert.equal(JSON.parse(first).apps[0].versions[0].minOSVersion, ios.minOSVersion);
+  assert.equal(app.version, "1.3.0");
+  assert.equal(app.downloadURL, ipa.url);
+  assert.equal(app.size, ipa.size);
+  assert.equal(app.versionDate, "2026-10-13T17:09:48Z");
+  assert.equal(app.versionDescription, "New iOS release notes");
+  assert.deepEqual(app.appPermissions, { entitlements: newer.entitlements, privacy: newer.privacy });
+  assert.equal(renderAltSource(updated, catalog, newer), updated);
+  const sync = catalogFor("1.3.0", "1.2.0");
+  sync.products.app = catalog.products.app;
+  sync.publicationTag = "sync-v1.2.0";
+  assert.equal(renderAltSource(updated, sync, newer), updated);
+  const older = JSON.parse(renderAltSource(updated, catalogFor("1.1.0"), ios)).apps[0];
+  assert.deepEqual(older.versions.map(item => item.version), ["1.3.0", "1.2.0", "1.1.0"]);
+  assert.equal(older.versions[2].minOSVersion, ios.minOSVersion);
+  assert.equal(older.downloadURL, ipa.url);
+  assert.deepEqual(older.appPermissions, app.appPermissions);
+  delete release.localizedNotes.en;
+  assert.throws(() => renderAltSource(updated, catalog, newer), /alt-source-english-notes-missing/);
+});
+
+test("the shipped iOS configuration parses into the source bundle identity, permissions and minimum OS", () => {
+  const app = JSON.parse(altSource).apps[0];
+  assert.equal(app.bundleIdentifier, /PRODUCT_BUNDLE_IDENTIFIER: (\S+)/.exec(iosSources.project)[1]);
+  assert.equal(ios.minOSVersion, JSON.parse(read("src-tauri/tauri.ios.conf.json")).bundle.iOS.minimumSystemVersion);
+  const declared = Object.fromEntries([...iosSources.project.matchAll(/^\s+(NS\w+UsageDescription): (.+)$/gm)]
+    .map(([, key, description]) => [key, description]));
+  assert.deepEqual(ios.privacy, declared);
+  const changed = parseIosConfiguration({ ...iosSources,
+    plist: iosSources.plist.replace(/<\/dict>\s*<\/plist>/,
+      "<key>NSMicrophoneUsageDescription</key>\n<string>Record &amp; send &lt;voice&gt;</string>\n</dict>\n</plist>"),
+    project: iosSources.project.replace(/iOS: [\d.]+/, "iOS: \"17.0\"") });
+  assert.equal(changed.privacy.NSMicrophoneUsageDescription, "Record & send <voice>");
+  assert.equal(changed.minOSVersion, "17.0");
+  assert.throws(() => parseIosConfiguration({ ...iosSources, project: "name: risunest\n" }), /alt-source-min-os-missing/);
+});
+
 test("missing, repeated, reversed and overlapping markers fail without replacing arbitrary text", () => {
   const text = readmes["README.md"];
   for (const broken of [
@@ -148,11 +220,13 @@ test("invalid signatures, catalog identities, unpublished products and missing a
     state => { state.latest.assets[0].size++; },
     state => { state.latest.assets[0].state = "new"; },
     state => { const catalog = catalogFor(); catalog.products.sync = null; state.publish(catalog); },
+    state => { state.sources.clear(); },
+    state => { state.sources.set("a".repeat(40), { ...iosSources, project: "name: risunest\n" }); },
   ];
   for (const corrupt of corruptions) {
     const { state, options } = fixture();
     corrupt(state);
-    await assert.rejects(updateReadmeDownloads(options), /signature|catalog-tag|readme-/);
+    await assert.rejects(updateReadmeDownloads(options), /signature|catalog-tag|readme-|github-get-404|alt-source-/);
     assert.equal(state.writes.length, 0);
   }
 });
@@ -164,23 +238,29 @@ test("a valid signature does not make an incomplete download matrix acceptable",
   await assert.rejects(loadReadmeCatalog(options.github, options.publicKey), /incomplete-downloads/);
 });
 
-test("both languages are validated before any Git object or branch write", async () => {
-  const { state, options } = fixture();
-  state.advance({ "README.ko.md": "No automatic sections here." });
-  const head = state.head;
-  await assert.rejects(updateReadmeDownloads(options), /invalid-readme-markers/);
-  assert.equal(state.head, head);
-  assert.equal(state.writes.length, 0);
+test("both languages and the source are validated before any Git object or branch write", async () => {
+  for (const changes of [{ "README.ko.md": "No automatic sections here." },
+    { "alt-source.json": "invalid json" }, { "alt-source.json": '{"apps": []}' }]) {
+    const { state, options } = fixture();
+    state.advance(changes);
+    const head = state.head;
+    await assert.rejects(updateReadmeDownloads(options), /invalid-readme-markers|JSON|alt-source-app-missing/);
+    assert.equal(state.head, head);
+    assert.equal(state.writes.length, 0);
+  }
 });
 
-test("commits both READMEs together, preserves other files and makes repeat runs a no-op", async () => {
+test("commits both READMEs and the iOS source together, preserves other files and makes repeat runs a no-op", async () => {
   const { state, options } = fixture();
   const result = await updateReadmeDownloads(options);
   assert.deepEqual(result, { status: "updated", commit: state.head });
   assert.equal(state.patches, 1);
   const treeWrite = state.writes.find(write => write.path === "/git/trees");
-  assert.deepEqual(treeWrite.body.tree.map(entry => entry.path).sort(), ["README.ko.md", "README.md"]);
+  assert.deepEqual(treeWrite.body.tree.map(entry => entry.path).sort(), ["README.ko.md", "README.md", "alt-source.json"]);
   assert.equal(state.contents()["unrelated.txt"], "keep this file");
+  const app = JSON.parse(state.contents()["alt-source.json"]).apps[0];
+  assert.deepEqual(app.versions.map(item => item.version), ["1.2.0", "1.0.0"]);
+  assert.equal(app.downloadURL, state.catalog.products.app.release.downloads.find(item => item.os === "ios").url);
   for (const path of Object.keys(readmes)) {
     assert.match(state.contents()[path], /RisuNest v1\.2\.0/);
     assert.match(state.contents()[path], /RisuNest Sync v1\.1\.0/);
@@ -188,6 +268,22 @@ test("commits both READMEs together, preserves other files and makes repeat runs
   const writeCount = state.writes.length;
   assert.equal((await updateReadmeDownloads(options)).status, "unchanged");
   assert.equal(state.writes.length, writeCount);
+});
+
+test("iOS permissions and minimum OS come from the published App source commit, not from main", async () => {
+  const { state, options } = fixture();
+  const catalog = catalogFor();
+  const commit = "b".repeat(40);
+  catalog.products.app.release.sourceCommit = commit;
+  state.publish(catalog);
+  state.sources = new Map([[commit, { ...iosSources,
+    plist: iosSources.plist.replace(/<\/dict>\s*<\/plist>/,
+      "<key>NSMicrophoneUsageDescription</key>\n<string>Record a message.</string>\n</dict>\n</plist>"),
+    project: iosSources.project.replace(/iOS: [\d.]+/, "iOS: 17.0") }]]);
+  assert.equal((await updateReadmeDownloads(options)).status, "updated");
+  const app = JSON.parse(state.contents()["alt-source.json"]).apps[0];
+  assert.deepEqual(app.appPermissions.privacy, { ...ios.privacy, NSMicrophoneUsageDescription: "Record a message." });
+  assert.deepEqual(app.versions.map(item => [item.version, item.minOSVersion]), [["1.2.0", "17.0"], ["1.0.0", ios.minOSVersion]]);
 });
 
 test("a concurrent main edit retries from the new tree and refreshes the published catalog", async () => {
@@ -202,6 +298,7 @@ test("a concurrent main edit retries from the new tree and refreshes the publish
   assert.equal(state.patches, 2);
   assert.match(state.contents()["README.md"], /New user documentation\./);
   assert.equal(state.contents()["unrelated.txt"], "concurrent content");
+  assert.deepEqual(JSON.parse(state.contents()["alt-source.json"]).apps[0].versions.map(item => item.version), ["1.3.0", "1.0.0"]);
   for (const path of Object.keys(readmes)) {
     assert.match(state.contents()[path], /RisuNest v1\.3\.0/);
     assert.match(state.contents()[path], /RisuNest Sync v1\.2\.0/);

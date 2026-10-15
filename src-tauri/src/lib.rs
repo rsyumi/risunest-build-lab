@@ -909,6 +909,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         native_file_jobs::native_snapshot_restore_bodies_status,
         native_file_jobs::native_plugin_values_assign,
         native_file_jobs::native_backup_source_format,
+        native_file_jobs::native_conflict_backup_source,
         native_file_jobs::native_portable_source_discard,
         native_file_jobs::native_portable_source_cleanup_orphans,
         native_file_jobs::native_legacy_backup_handoff_cleanup,
@@ -966,6 +967,10 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         android_commit_transport::pds_commit_android_cancel,
         #[cfg(target_os = "android")]
         android_commit_transport::pds_replace_android_finish,
+        #[cfg(target_os = "android")]
+        android_commit_transport::pds_plugin_part_android_finish,
+        #[cfg(target_os = "android")]
+        android_commit_transport::pds_plugin_write_android_finish,
         #[cfg(any(windows, target_os = "linux", target_os = "ios", target_os = "macos"))]
         persistent_commit_raw::pds_commit_raw,
         persistent_store::lww_commands::pds_lww_read_outbox,
@@ -1028,6 +1033,10 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_clear_plugin_permissions,
         persistent_store::commands::pds_hydrate_plugin_device_storage,
         persistent_store::commands::pds_read_plugin_device_value,
+        persistent_store::commands::pds_read_plugin_device_range,
+        persistent_store::commands::pds_open_plugin_device_write,
+        persistent_store::commands::pds_append_plugin_device_write,
+        persistent_store::commands::pds_abort_plugin_device_write,
         persistent_store::commands::pds_list_plugin_device_keys,
         persistent_store::commands::pds_list_plugin_device_storage,
         persistent_store::commands::pds_write_plugin_device_values,

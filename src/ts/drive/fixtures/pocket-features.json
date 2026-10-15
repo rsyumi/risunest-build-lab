@@ -276,7 +276,28 @@
             "swipes": ["ok", 4],
             "swipeId": 0
         },
-        "invalid": true
+        "expected": {
+            "role": "char",
+            "data": "ok",
+            "swipes": ["ok", 4],
+            "swipeId": 0,
+            "chatId": "fallback",
+            "responseVariants": {
+                "groupId": "fallback",
+                "selectedId": "fallback:0",
+                "candidates": [
+                    {
+                        "id": "fallback:0",
+                        "messages": [
+                            {
+                                "role": "char",
+                                "data": "ok"
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
     },
     {
         "input": {
@@ -285,7 +306,29 @@
             "swipes": ["ok"],
             "swipeId": "0"
         },
-        "invalid": true
+        "expected": {
+            "role": "char",
+            "data": "ok",
+            "swipes": ["ok"],
+            "swipeId": "0",
+            "chatId": "fallback",
+            "responseVariants": {
+                "groupId": "fallback",
+                "selectedId": "fallback:0",
+                "candidates": [
+                    {
+                        "id": "fallback:0",
+                        "messages": [
+                            {
+                                "role": "char",
+                                "data": "ok"
+                            }
+                        ]
+                    }
+                ]
+            },
+            "pocketRisuImportWarnings": ["invalid-swipe-index"]
+        }
     },
     {
         "input": {
@@ -294,6 +337,104 @@
             "swipes": ["ok"],
             "swipeId": 0.5
         },
-        "invalid": true
+        "expected": {
+            "role": "char",
+            "data": "ok",
+            "swipes": ["ok"],
+            "swipeId": 0.5,
+            "chatId": "fallback",
+            "responseVariants": {
+                "groupId": "fallback",
+                "selectedId": "fallback:0",
+                "candidates": [
+                    {
+                        "id": "fallback:0",
+                        "messages": [
+                            {
+                                "role": "char",
+                                "data": "ok"
+                            }
+                        ]
+                    }
+                ]
+            },
+            "pocketRisuImportWarnings": ["invalid-swipe-index"]
+        }
+    },
+    {
+        "input": {
+            "role": "char",
+            "data": "b",
+            "swipes": ["a", null, "b"],
+            "swipeId": 2
+        },
+        "expected": {
+            "role": "char",
+            "data": "b",
+            "swipes": ["a", null, "b"],
+            "swipeId": 2,
+            "chatId": "fallback",
+            "responseVariants": {
+                "groupId": "fallback",
+                "selectedId": "fallback:1",
+                "candidates": [
+                    {
+                        "id": "fallback:0",
+                        "messages": [
+                            {
+                                "role": "char",
+                                "data": "a"
+                            }
+                        ]
+                    },
+                    {
+                        "id": "fallback:1",
+                        "messages": [
+                            {
+                                "role": "char",
+                                "data": "b"
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+    },
+    {
+        "input": {
+            "role": "char",
+            "swipes": ["first", "second"]
+        },
+        "expected": {
+            "role": "char",
+            "swipes": ["first", "second"],
+            "data": "first",
+            "chatId": "fallback",
+            "responseVariants": {
+                "groupId": "fallback",
+                "selectedId": "fallback:0",
+                "candidates": [
+                    {
+                        "id": "fallback:0",
+                        "messages": [
+                            {
+                                "role": "char",
+                                "data": "first"
+                            }
+                        ]
+                    },
+                    {
+                        "id": "fallback:1",
+                        "messages": [
+                            {
+                                "role": "char",
+                                "data": "second"
+                            }
+                        ]
+                    }
+                ]
+            },
+            "pocketRisuImportWarnings": ["invalid-swipe-index"]
+        }
     }
 ]

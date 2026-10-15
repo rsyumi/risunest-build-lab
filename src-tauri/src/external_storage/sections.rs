@@ -235,8 +235,9 @@ fn capture_prepared_section(
     let mut bodies = SectionBodySpool::new(spool)?;
     prepared.visit_entries_mapped(|entry, object| {
         cancel.check()?;
-        if let Some(bytes) = object {
-            let (digest, path, offset) = bodies.push(bytes)?;
+        for reference in entry.value.object_references() {
+            let bytes = object(reference).map_err(preparation_error)?;
+            let (digest, path, offset) = bodies.push(&bytes)?;
             sources.push(SectionSource {
                 kind: wire::CatalogEntryKind::SectionObject,
                 key: format!("object/{digest}"), content_sha256: digest,
@@ -394,32 +395,24 @@ fn prepare_section_source_rows(
         if entry.kind != source.kind || entry.key != file.key {
             return Err(corrupt("section entry names another section or key"));
         }
-        let mut object = match entry.value.object_reference() {
-            Some(reference) => {
-                let digest = hex::encode(reference.content_sha256);
-                let file = objects.get(&digest).ok_or_else(|| corrupt("section object is missing"))?;
-                if file.byte_length != reference.byte_length {
-                    return Err(corrupt("section object length differs"));
-                }
-                used_objects.insert(digest);
-                Some(read_source_bytes(file, cancel)?)
+        if entry.version.is_some() != versioned { return Err(corrupt("section entry version differs")); }
+        let mut source_failure = None;
+        let prepared = spool.push_entry(entry, |reference| {
+            let digest = hex::encode(reference.content_sha256);
+            let file = objects.get(&digest).ok_or_else(|| crate::persistent_store::StoreError::Validation {
+                message: "Section object is missing".into(),
+            })?;
+            if file.byte_length != reference.byte_length {
+                return Err(crate::persistent_store::StoreError::Validation { message: "Section object length differs".into() });
             }
-            None => None,
-        };
-        if versioned {
-            let row = SectionRow::from_entry(entry, true, |_| {
-                object.take().ok_or_else(|| crate::persistent_store::StoreError::Validation {
-                    message: "Section object is missing".into(),
-                })
-            }).map_err(corrupt)?;
-            spool.push(row, &file.key, &digest).map_err(preparation_error)?;
-        } else {
-            spool.push_backup_entry(entry, |_| {
-                object.take().ok_or_else(|| crate::persistent_store::StoreError::Validation {
-                    message: "Section object is missing".into(),
-                })
-            }).map_err(preparation_error)?;
-        }
+            used_objects.insert(digest);
+            read_source_bytes(file, cancel).map_err(|failure| {
+                source_failure = Some(failure);
+                crate::persistent_store::StoreError::Validation { message: "Section object is unreadable".into() }
+            })
+        });
+        if let Some(failure) = source_failure { return Err(failure); }
+        prepared.map_err(preparation_error)?;
     }
     // Extra catalog objects are not installed, but corrupt ones must not be
     // hidden merely because this section has no entry that references them.

@@ -270,7 +270,7 @@ mod tests {
 
             assert_eq!(
                 error.code,
-                if cancel { "cancelled" } else { "invalid-input" }
+                if cancel { "cancelled" } else { "payload-too-large" }
             );
             assert_eq!(fs::read(destination).unwrap(), b"previous JSON");
         }
@@ -444,7 +444,8 @@ mod tests {
             mime: "application/octet-stream".to_owned(),
         })];
         let error = validate_asset_source_sizes(&sources, maximum_bytes).unwrap_err();
-        assert_eq!(error.code, "invalid-input");
+        assert_eq!(error.code, "payload-too-large");
+        assert_eq!(error.item_kind.as_deref(), Some("card"));
         assert!(error.message.contains("importer limit"));
     }
 }
@@ -712,9 +713,7 @@ fn validate_asset_source_sizes(
             JsonAssetSource::FallbackPortrait => FALLBACK_PORTRAIT.len() as u64,
         };
         if size > maximum_bytes {
-            return Err(invalid_input(
-                "JSON card embedded asset exceeds the importer limit",
-            ));
+            return Err(NativeJobError::too_large("card", "JSON card embedded asset exceeds the importer limit"));
         }
     }
     Ok(())
@@ -1132,7 +1131,7 @@ fn destination_error(error: destination::DestinationWriteError) -> NativeJobErro
 
 fn json_serde_error(error: serde_json::Error) -> NativeJobError {
     if error.to_string().contains(JSON_LIMIT_MESSAGE) {
-        invalid_input(JSON_LIMIT_MESSAGE)
+        NativeJobError::too_large("card", JSON_LIMIT_MESSAGE)
     } else {
         NativeJobError::new("store-error", error.to_string())
     }
@@ -1140,7 +1139,7 @@ fn json_serde_error(error: serde_json::Error) -> NativeJobError {
 
 fn json_io_error(error: io::Error) -> NativeJobError {
     if error.to_string().contains(JSON_LIMIT_MESSAGE) {
-        invalid_input(JSON_LIMIT_MESSAGE)
+        NativeJobError::too_large("card", JSON_LIMIT_MESSAGE)
     } else {
         io_error(error)
     }

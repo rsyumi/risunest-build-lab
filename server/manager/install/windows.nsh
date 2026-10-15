@@ -419,21 +419,13 @@ Var SyncPreviousInstall
     Goto sync_uninstall_finished
   ${EndIf}
   StrCmp $R7 "" sync_uninstall_guard_done
-  CreateDirectory "$R9\manager-update"
-  ClearErrors
-  FileOpen $0 "$R9\manager-update\installer-$R7.release" w
-  IfErrors sync_uninstall_guard_failed
-  FileWrite $0 '{"release":true}'
-  FileClose $0
   DetailPrint "$(SyncRemoveFinish)"
-  StrCpy $R6 300
-  sync_uninstall_wait_guard:
-  IfFileExists "$R9\manager-update\installer-$R7.ready" 0 sync_uninstall_guard_done
-  Sleep 100
-  IntOp $R6 $R6 - 1
-  IntCmp $R6 0 sync_uninstall_guard_failed sync_uninstall_guard_failed sync_uninstall_wait_guard
-  sync_uninstall_guard_failed:
+  nsExec::ExecToStack '"$PLUGINSDIR\risunest-sync-remove.exe" --data-dir "$R9" --server "$INSTDIR\risunest-sync-server.exe" installer finish "$R7"'
+  Pop $0
+  Pop $1
+  StrCmp $0 "0" sync_uninstall_guard_done
   StrCpy $SyncFailureMessage "$(SyncRemoveFinishFailed)"
+  Call un.SyncCommandError
   DetailPrint "$SyncFailureMessage"
   IfSilent +2
     MessageBox MB_OK|MB_ICONSTOP "$SyncFailureMessage"

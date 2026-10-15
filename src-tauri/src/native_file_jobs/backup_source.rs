@@ -27,6 +27,9 @@ pub(crate) fn detect(mut file: File) -> Result<BackupSourceFormat, NativeJobErro
     {
         return Ok(BackupSourceFormat::BlockRisuSave);
     }
+    if count >= 2 && super::restore::is_zlib_header(&prefix[..count]) {
+        return Ok(BackupSourceFormat::BlockRisuSave);
+    }
     if prefix[..count].starts_with(b"PK\x03\x04") {
         let mut entry = zip::read::read_zipfile_from_stream(&mut file)
             .map_err(|_| unsupported())?
@@ -44,9 +47,7 @@ pub(crate) fn detect(mut file: File) -> Result<BackupSourceFormat, NativeJobErro
         }
         return Err(unsupported());
     }
-    if count < 4 {
-        return Err(unsupported());
-    }
+    if count < 4 { return Err(unsupported()); }
     let size = u32::from_le_bytes(prefix[..4].try_into().unwrap()) as usize;
     if size == 0 || size > 1024 * 1024 {
         return Err(unsupported());
@@ -82,9 +83,66 @@ pub(crate) fn native_backup_source_format(
     } else { detect(open_job_source(&state.root,&source)?.file) })())
 }
 
+#[tauri::command(async)]
+pub(crate) fn native_conflict_backup_source(app: AppHandle, backup_id: String) -> Result<JobSource, NativeJobError> {
+    if backup_id.is_empty() || backup_id.len() > 256 || backup_id.contains(['/', '\\', '\0']) {
+        return Err(invalid_source_error("Invalid conflict backup ID"));
+    }
+    crate::persistent_store::commands::with_store(app.state(), |store| conflict_backup_source(store, &backup_id))
+        .map_err(restore::store_error)
+}
+
+fn conflict_backup_source(store: &crate::persistent_store::PersistentStore, backup_id: &str) -> crate::persistent_store::StoreResult<JobSource> {
+        let missing = || crate::persistent_store::StoreError::Validation { message: "Saved conflict backup is unavailable".to_owned() };
+        let index = store.device_store()?.read_setting("sync-conflict-backups.index.v1")?.ok_or_else(missing)?;
+        if !index.as_array().is_some_and(|entries| entries.iter().any(|entry| entry.get("id").and_then(Value::as_str) == Some(backup_id))) {
+            return Err(missing());
+        }
+        let key = format!("sync-conflict-backups/{backup_id}.risudat");
+        let alias = store.read_asset_alias("asset", &key, None)?.ok_or_else(missing)?.value;
+        let hash = alias.object_hash.ok_or_else(missing)?;
+        let cas = crate::asset_repository::PayloadCas::new(store.repository_root())?;
+        let path = cas.object_path(&hash)?.ok_or_else(missing)?;
+        Ok(JobSource::DesktopPath { path: path.to_string_lossy().into_owned() })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn saved_conflict_sources_resolve_both_sides_without_replacing_the_library() {
+        use crate::persistent_store::{AssetAlias, PersistentStore};
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = PersistentStore::open(directory.path()).unwrap();
+        let stage = store.replace_begin().unwrap().staging_id;
+        store.replace_put_root(&stage, &serde_json::json!({"username":"Existing synthetic library"})).unwrap();
+        store.replace_put_presets(&stage, &[]).unwrap();
+        store.replace_commit(&stage, Some(0)).unwrap();
+        let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
+        for side in ["local", "remote"] {
+            let payload = cas.prepare_bytes(format!("synthetic {side} backup bytes").as_bytes()).unwrap();
+            store.commit_asset_alias(&AssetAlias {
+                key: format!("sync-conflict-backups/{side}.risudat"), object_hash: Some(payload.content_hash),
+                kind: "asset".into(), size: payload.byte_size as i64, mime: "application/octet-stream".into(),
+                name: side.into(), ext: "risudat".into(), inlay_type: None, width: None, height: None,
+                metadata: serde_json::json!({}),
+            }, store.revision().unwrap()).unwrap();
+        }
+        store.device_store().unwrap().write_setting("sync-conflict-backups.index.v1", &serde_json::json!([
+            {"id":"local","side":"local"},{"id":"remote","side":"remote"},{"id":"missing","side":"remote"}
+        ])).unwrap();
+        let revision = store.revision().unwrap();
+        for side in ["local", "remote"] {
+            let JobSource::DesktopPath {path} = conflict_backup_source(&store, side).unwrap() else { panic!("Native path descriptor required") };
+            assert_eq!(fs::read(path).unwrap(), format!("synthetic {side} backup bytes").as_bytes());
+        }
+        assert!(conflict_backup_source(&store, "missing").is_err());
+        store.device_store().unwrap().remove_setting("sync-conflict-backups.index.v1").unwrap();
+        assert!(conflict_backup_source(&store, "local").is_err());
+        assert_eq!(store.revision().unwrap(), revision);
+        assert_eq!(store.read_root(None).unwrap().value["username"], "Existing synthetic library");
+    }
+
     #[test]
     fn android_pocket_backups_probe_and_claim_the_kotlin_spool() {
         for bytes in [
@@ -130,6 +188,7 @@ mod tests {
             ),
             (&b"\x04\0\0\0t"[..], None),
             (&b"PK\x03\x04"[..], None),
+            (&b"\x81\x00\x00\x00"[..], None),
         ] {
             fs::write(&path, bytes).unwrap();
             assert_eq!(detect(File::open(&path).unwrap()).ok(), expected);

@@ -3,8 +3,10 @@ import { invoke } from '@tauri-apps/api/core'
 import { getAndroidSafExportSourceId } from './androidSafBridge'
 import { releaseCasJob } from './nativeAssetRepository'
 import { isTerminalJob as isTerminal, type NativeFileJobStatus } from './nativeFileJobs'
+import { nativeRestoreDeadline, type NativeRestoreClock } from './nativeRestoreDeadline'
 
 export interface NativeFileJobRecoveryDependencies {
+    restoreClock?: NativeRestoreClock
     invoke(command: string, args?: Record<string, unknown>): Promise<unknown>
     wait(milliseconds: number): Promise<void>
     androidSafExportId?(): string | null | Promise<string | null>
@@ -66,7 +68,7 @@ async function reconcileRestore(
     dependencies: NativeFileJobRecoveryDependencies,
 ): Promise<NativeFileJobStatus> {
     let status = initial
-    if (!isTerminal(status) && status.phase !== 'activating-database') {
+    if (!isTerminal(status) && !['activating-database', 'cleaning-up'].includes(status.phase)) {
         await dependencies.invoke('native_file_job_cancel', { jobId: status.jobId })
     }
     while (!isTerminal(status)) {
@@ -185,6 +187,8 @@ export async function reconcileNativeFileJobsBeforeBootstrap(
     dependencies: NativeFileJobRecoveryDependencies = productionDependencies,
     options: NativeFileJobRecoveryOptions = {},
 ): Promise<NativeFileJobRecoveryResult> {
+    const original = dependencies
+    dependencies = { ...original, invoke: (command, args) => nativeRestoreDeadline(args === undefined ? original.invoke(command) : original.invoke(command, args), command, original.restoreClock) }
     const jobs = await dependencies.invoke('native_file_job_list') as NativeFileJobStatus[]
     const pendingRestoreAcknowledgements: string[] = []
     const pendingOfficialPublications: string[] = []

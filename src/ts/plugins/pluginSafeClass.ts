@@ -58,7 +58,8 @@ export class SafeLocalPluginStorage {
         }
     }
     async setItem<T>(key: string, value: T): Promise<void> {
-        const serialized = JSON.stringify(value);
+        // Avoid V8's fast-stringifier Zone allocation limit for large flat strings.
+        const serialized = JSON.stringify(value, null);
         if (typeof serialized !== 'string') {
             throw new TypeError('getLocalPluginStorage values must be JSON-serializable');
         }

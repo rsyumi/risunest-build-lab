@@ -169,7 +169,7 @@ pub(crate) fn validate_archive_catalog(
             fingerprint
                 .push(&entry.key, &content_hash(&payload))
                 .map_err(section_codec_error)?;
-            if let Some(reference) = object_reference(&entry) {
+            for reference in entry.value.object_references() {
                 validate_native_object_reference(db, kind, reference)?;
             }
             spool::start_record_hash(&mut transport_hash, ordinal as u64, payload.len() as u64);
@@ -211,10 +211,6 @@ fn parse_native_header(metadata: &[u8], kind: SectionKind) -> Result<NativeSecti
         "Native backup section header is invalid",
     )?;
     Ok(header)
-}
-
-fn object_reference(entry: &SectionEntry) -> Option<&ObjectReference> {
-    entry.value.object_reference()
 }
 
 fn native_object_key(kind: SectionKind, reference: &ObjectReference) -> String {
@@ -406,41 +402,17 @@ pub(crate) fn write_native_section(
                     "Native backup entry count is exhausted",
                 )
             })?;
-            match (object_reference(entry), object) {
-                (None, None) => {}
-                (Some(reference), Some(bytes)) => {
-                    require(
-                        reference.byte_length == bytes.len() as u64
-                            && reference.content_sha256 == content_hash(bytes),
-                        "Native backup object differs from its section entry",
-                    )?;
-                    let digest = hex::encode(reference.content_sha256);
-                    match object_lengths.insert(digest.clone(), reference.byte_length) {
-                        Some(length) => require(
-                            length == reference.byte_length,
-                            "Native backup object hash has conflicting lengths",
-                        )?,
-                        None => {
-                            let mut reader = Cursor::new(bytes);
-                            catalog
-                                .add_reader(
-                                    "device",
-                                    &native_object_key(kind, reference),
-                                    "{}",
-                                    &mut reader,
-                                    reference.byte_length,
-                                    &digest,
-                                    probe,
-                                )
-                                .map_err(archive_error)?;
-                        }
+            for reference in entry.value.object_references() {
+                let bytes = object(reference).map_err(device_store_error)?;
+                require(reference.byte_length == bytes.len() as u64 && reference.content_sha256 == content_hash(&bytes),
+                    "Native backup object differs from its section entry")?;
+                let digest = hex::encode(reference.content_sha256);
+                match object_lengths.insert(digest.clone(), reference.byte_length) {
+                    Some(length) => require(length == reference.byte_length, "Native backup object hash has conflicting lengths")?,
+                    None => {
+                        catalog.add_reader("device", &native_object_key(kind, reference), "{}", &mut Cursor::new(bytes),
+                            reference.byte_length, &digest, probe).map_err(archive_error)?;
                     }
-                }
-                _ => {
-                    return Err(error(
-                        "device-metadata-invalid",
-                        "Native backup object presence differs from its section entry",
-                    ))
                 }
             }
             Ok(())
@@ -592,17 +564,15 @@ pub(crate) fn prepare_native_sections(
             )?;
             let payload: Vec<u8> = row.get(1)?;
             let entry = SectionEntry::decode(&payload).map_err(section_codec_error)?;
-            let mut object = match object_reference(&entry) {
-                Some(reference) => Some(read_native_object(archive, reference, probe)?),
-                None => None,
-            };
-            builder
-                .push_backup_entry(entry, |_| {
-                    object.take().ok_or_else(|| StoreError::Validation {
-                        message: "Native backup object is missing".into(),
-                    })
+            let mut source_failure = None;
+            let prepared = builder.push_backup_entry(entry, |reference| {
+                read_native_object(archive, reference, probe).map_err(|failure| {
+                    source_failure = Some(failure);
+                    StoreError::Validation { message: "Native backup object is missing or invalid".into() }
                 })
-                .map_err(device_store_error)?;
+            });
+            if let Some(failure) = source_failure { return Err(failure); }
+            prepared.map_err(device_store_error)?;
             observed += 1;
         }
         require(
@@ -680,7 +650,8 @@ pub(crate) fn journal_prepared_native_sections(
         let mut callback_failure = None;
         let visited = rows.visit_entries(|entry, object| {
             let result = (|| -> Result<()> {
-                if let (Some(reference), Some(bytes)) = (object_reference(entry), object) {
+                for reference in entry.value.object_references() {
+                    let bytes = object(reference).map_err(device_store_error)?;
                     let digest = hex::encode(reference.content_sha256);
                     if stored_objects.insert(digest.clone()) {
                         state.blob_begin(id, spool, &digest)?;
@@ -690,16 +661,9 @@ pub(crate) fn journal_prepared_native_sections(
                             offset += chunk.len() as u64;
                         }
                         let manifest = state.blob_finish(id, spool, &digest)?;
-                        require(
-                            manifest.bytes == reference.byte_length && manifest.sha256 == digest,
-                            "Native recovery object differs from its section entry",
-                        )?;
+                        require(manifest.bytes == reference.byte_length && manifest.sha256 == digest,
+                            "Native recovery object differs from its section entry")?;
                     }
-                } else {
-                    require(
-                        object_reference(entry).is_none() && object.is_none(),
-                        "Native recovery object presence differs from its section entry",
-                    )?;
                 }
                 let payload = entry.encode().map_err(section_codec_error)?;
                 if payload.len() <= MAX_CHUNK_BYTES {
@@ -832,38 +796,26 @@ pub(crate) fn prepare_journaled_native_sections(
                     }
                 };
                 let entry = SectionEntry::decode(&payload).map_err(section_codec_error)?;
-                let mut object = match object_reference(&entry) {
-                    Some(reference) => {
-                        let capacity = usize::try_from(reference.byte_length).map_err(|_| {
-                            error(
-                                "device-metadata-invalid",
-                                "Native recovery object exceeds the addressable range",
-                            )
-                        })?;
-                        let digest = hex::encode(reference.content_sha256);
-                        let mut bytes = Vec::with_capacity(capacity);
-                        while bytes.len() < capacity {
-                            let chunk = state.blob_read(
-                                id,
-                                spool,
-                                &digest,
-                                bytes.len() as u64,
-                                MAX_CHUNK_BYTES,
-                            )?;
-                            require(!chunk.is_empty(), "Native recovery object ended early")?;
-                            bytes.extend_from_slice(&chunk);
-                        }
-                        Some(bytes)
+                let mut source_failure = None;
+                let prepared = builder.push_backup_entry(entry, |reference| {
+                    let capacity = usize::try_from(reference.byte_length).map_err(|_| StoreError::Validation {
+                        message: "Native recovery object exceeds the addressable range".into(),
+                    })?;
+                    let digest = hex::encode(reference.content_sha256);
+                    let mut bytes = Vec::with_capacity(capacity);
+                    while bytes.len() < capacity {
+                        let chunk = state.blob_read(id, spool, &digest, bytes.len() as u64, MAX_CHUNK_BYTES)
+                            .map_err(|failure| {
+                                source_failure = Some(failure);
+                                StoreError::Validation { message: "Native recovery object is unreadable".into() }
+                            })?;
+                        if chunk.is_empty() { return Err(StoreError::Validation { message: "Native recovery object ended early".into() }); }
+                        bytes.extend_from_slice(&chunk);
                     }
-                    None => None,
-                };
-                builder
-                    .push_backup_entry(entry, |_| {
-                        object.take().ok_or_else(|| StoreError::Validation {
-                            message: "Native recovery object is missing".into(),
-                        })
-                    })
-                    .map_err(device_store_error)?;
+                    Ok(bytes)
+                });
+                if let Some(failure) = source_failure { return Err(failure); }
+                prepared.map_err(device_store_error)?;
                 after = Some(row.ordinal);
                 observed += 1;
             }

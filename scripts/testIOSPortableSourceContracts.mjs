@@ -40,10 +40,14 @@ try {
     run('PortableSourceCustodyTests')
     const original = readFileSync(source, 'utf8')
     for (const [before, after, test, occurrence = 0, count = 1] of [
-        ['source.copyCancelled = true', 'source.copyCancelled = false', 'testCopyCancelledBeforeOrDuringTheCopyRemovesPartialFiles'],
+        ['source.copyCancelled = true', 'source.copyCancelled = false', 'testCopyCancelledBeforeOrDuringTheCopyRemovesPartialFiles', 0, 2],
         ['time - previous < 0.25', 'time - previous < 0.0', 'testCopyProgressThrottlesLargeByteCountsAndAlwaysSendsCompletion'],
         ['progress.report(copied: copied, total: source.bytes)', '_ = progress', 'testOnlyConfirmedUpstreamSourceCanCopyTheHeldDescriptor'],
-        ['guard !source.copying else { lock.unlock(); throw PortableSourceError.busy }', '', 'testCopyFailuresReportStableCodes'],
+        ['guard !source.copying, source.copiedFolder == nil else { lock.unlock(); throw PortableSourceError.busy }', '', 'testCopyFailuresReportStableCodes'],
+        ['if !waitForCleanup && jobId == nil && (copying || probe != nil)', 'if false', 'testReleaseReturnsWhileCopyIsStalledAndRemovesTheLateCopy'],
+        ['do { try FileManager.default.removeItem(at: folder) }', 'do { throw PortableSourceError.writeFailed }', 'testOwnerResetRemovesItsDeliveredCopyAndPreservesTheSelectedSource'],
+        ['return cleaned', 'return true', 'testReleaseReportsCopyCleanupFailureAfterReleasingTheSource'],
+        ['if case .writeFailed = failure, isFullStorage(error as NSError)', 'if false', 'testFullStorageDuringCopyDoesNotPublishAndRemovesItsPartialFile'],
         // The loop, post-loop and post-synchronize checks share one line; each mutation removes one of them.
         ...[
             'testCopyCancelledBeforeOrDuringTheCopyRemovesPartialFiles',

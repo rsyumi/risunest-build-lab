@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { open, save } from './fileSelection'
 import { language } from 'src/lang'
 import { alertCheckboxConfirm, alertConfirm, alertNormal } from '../alert'
-import { pickIOSBackupSource, materializeIOSBackupSource, discardIOSFile } from './iosFiles'
+import { pickIOSBackupSource, materializeIOSBackupSource } from './iosFiles'
 import { isTauriIOS, isTauri, isTauriAndroid } from '../platform'
 import { loadPluginsAfterAuthoritativeRestore } from '../plugins/plugins.svelte'
 import {
@@ -33,9 +33,7 @@ import {
 import { describeDesktopSource } from './nativeFileSourceInfo'
 import { formatPreservationReport } from './preservationReportMessage'
 import { getPersistentDataRuntime } from './persistentDataRuntime.svelte'
-import {
-    holdServerSyncAfterRestore,
-} from './sync/serverSyncProduction'
+import { nativeRestoreDeadline } from './nativeRestoreDeadline'
 
 type SourceInfo = { name: string; bytes?: number }
 export interface BackupPickerContext {
@@ -46,7 +44,7 @@ export interface BackupPickerContext {
 export type BackupSourceFactory = (
     context: BackupPickerContext,
 ) => Promise<NativeFileJobSource | null>
-export type BackupRestoreResult = NativeFileJobResult | { warningCodes: string[] }
+export type BackupRestoreResult = NativeFileJobResult
 export interface BackupRestoreOptions extends NativeFileRestoreJobOptions {
     onSource?(source: SourceInfo): void
 }
@@ -60,6 +58,7 @@ function combineSignals(...signals: (AbortSignal | undefined)[]) {
     }
     return {
         signal: controller.signal,
+        cancel,
         dispose() {
             for (const signal of signals)
                 signal?.removeEventListener('abort', cancel)
@@ -173,7 +172,6 @@ export function restoreBackupFromSystemPicker(
             ],
         })
         if (typeof path !== 'string') return null
-        context.onSource(await describeDesktopSource(path))
         return { type: 'desktopPath', path }
     }, options)
 }
@@ -194,7 +192,18 @@ export async function restoreBackupFromNativeSource(
             const joined = combineSignals(context.signal, options.signal)
             let input: NativeFileJobSource | null = null
             let selectedCustody: NativeFileJobSource | undefined
-            let materializedIOSPath: string | undefined
+            let completedResult: NativeFileJobResult | undefined
+            const cleanupSource = () => {
+                const cleanup: Promise<unknown>[] = []
+                if (input?.type === 'androidSpool') cleanup.push(discardAndroidSafSource(input.token))
+                if (selectedCustody) cleanup.push(invoke('native_portable_source_discard', { source: selectedCustody }))
+                return Promise.allSettled(cleanup)
+            }
+            const onPageHide = () => {
+                joined.cancel()
+                void cleanupSource()
+            }
+            window.addEventListener('pagehide', onPageHide, { once: true })
             let report: NativeFileJobStatus['preservationReport']
             const onStatus = (status: NativeFileJobStatus) => {
                 context.onStatus(status)
@@ -219,13 +228,13 @@ export async function restoreBackupFromNativeSource(
                 if (!input) return null
                 if (input.type === 'androidSeekable' || input.type === 'iosScoped') selectedCustody = input
                 if (input.type === 'desktopPath')
-                    onSource(await describeDesktopSource(input.path))
+                    onSource(await nativeRestoreDeadline(describeDesktopSource(input.path), 'source metadata', undefined, undefined, undefined, joined.signal))
                 checkSignal(joined.signal)
-                const format = await invoke<
+                const format = await nativeRestoreDeadline(invoke<
                     | 'portable'
                     | 'block-risu-save'
                     | 'local-backup'
-                >('native_backup_source_format', { source: input })
+                >('native_backup_source_format', { source: input }), 'source format', undefined, undefined, undefined, joined.signal)
                 checkSignal(joined.signal)
                 if (format !== 'portable') {
                     if (input.type === 'androidSeekable') input = await materializeAndroidBackupSource(input.token, {
@@ -249,13 +258,11 @@ export async function restoreBackupFromNativeSource(
                                 { stageUnit: 'bytes', stageCompleted: progress.copiedBytes, stageTotal: progress.totalBytes },
                             )),
                         })
-                        materializedIOSPath = materialized.path
                         input = { type: 'desktopPath', path: materialized.path }
                     }
                     checkSignal(joined.signal)
                 }
                 const runtime = getPersistentDataRuntime()
-                let replacesLibrary = format !== 'portable'
                 const restoreOptions: NativeFileRestoreJobOptions = {
                     ...options,
                     signal: joined.signal,
@@ -296,8 +303,6 @@ export async function restoreBackupFromNativeSource(
                                                         false,
                                                 },
                                             )
-                                        replacesLibrary =
-                                            selection?.library ?? false
                                         return selection
                                     },
                                 },
@@ -309,26 +314,7 @@ export async function restoreBackupFromNativeSource(
                                 restoreOptions,
                             )
                         if (format === 'local-backup') {
-                            try {
-                                return await runNativeLegacyLocalBackupRestore(runtime, selectedInput, restoreOptions)
-                            } catch (error) {
-                                if (!(error instanceof NativeFileJobError) || error.code !== 'compatibility-import-required') throw error
-                                checkSignal(joined.signal)
-                                onStatus(syntheticNativeFileJobStatus({ kind: 'restore-legacy-local-backup' }, 'awaiting-reselect'))
-                                const { importLegacyBackupWithWebView } = await import('../drive/backuplocal')
-                                return importLegacyBackupWithWebView({
-                                    signal: joined.signal,
-                                    onStatus,
-                                    setSource: onSource,
-                                    setPartialWritesPossible: context.setPartialWritesPossible,
-                                }, {
-                                    firstRun: options.firstRun,
-                                    beforeActivation: async () => {
-                                        await restoreOptions.beforeActivation?.()
-                                    },
-                                    onCommitted: holdServerSyncAfterRestore,
-                                })
-                            }
+                            return runNativeLegacyLocalBackupRestore(runtime, selectedInput, restoreOptions)
                         }
                         throw new NativeFileJobError(
                             'unsupported-format',
@@ -336,15 +322,23 @@ export async function restoreBackupFromNativeSource(
                         )
                     })()
                     if (report) alertNormal(formatPreservationReport(report))
+                    completedResult = result
                     return result
             } finally {
+                window.removeEventListener('pagehide', onPageHide)
                 joined.dispose()
                 // A claimed token has already moved to native ownership, so this only removes an
                 // unclaimed picker result when confirmation, format probing, or admission failed.
-                if (input?.type === 'androidSpool')
-                    await discardAndroidSafSource(input.token)
-                if (selectedCustody) await invoke('native_portable_source_discard',{source:selectedCustody})
-                if (materializedIOSPath) await discardIOSFile(materializedIOSPath)
+                const settled = cleanupSource()
+                if (joined.signal.aborted) void settled
+                else {
+                    try {
+                        const outcomes = await nativeRestoreDeadline(settled, 'source cleanup')
+                        if (outcomes.some(outcome => outcome.status === 'rejected' || outcome.value === false)) throw new Error('Source cleanup failed')
+                    } catch {
+                        if (completedResult && !completedResult.warningCodes.includes('cleanup-failed')) completedResult.warningCodes.push('cleanup-failed')
+                    }
+                }
             }
         },
         { presentation: 'dialog', format: 'library-backup' },

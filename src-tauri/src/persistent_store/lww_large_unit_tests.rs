@@ -150,6 +150,38 @@ fn large_plugin_local_values_keep_bodies_in_the_device_store() {
     let value = published(&target, &body);
     receive(&mut target, Change { key: unit_key(&PLUGIN_KEY).unwrap(), stamp: stamp(1), value });
     assert_eq!(plugin_value(&target), Some(large));
+
+    use device_store::plugin_values::text_value;
+    let large = format!("{}가😀\"\\", "x".repeat(text_value::PART_BYTES));
+    let device = store.device_store_mut().unwrap();
+    let opened = device.open_plugin_device_write(PLUGIN_KEY[1], PLUGIN_KEY[2], PLUGIN_KEY[3], text_value::encoded_length(&large)).unwrap();
+    let id = serde_json::to_value(opened).unwrap()["sessionId"].as_str().unwrap().to_owned();
+    for (offset, part) in [(0, &large[..text_value::PART_BYTES-8]), (text_value::PART_BYTES-8, &large[text_value::PART_BYTES-8..])] {
+        device.append_plugin_device_write(PLUGIN_KEY[1], &id, offset as u64, part).unwrap();
+    }
+    device.write_plugin_device_values(PLUGIN_KEY[1], &[PluginDeviceMutation::Staged { session_id: id }]).unwrap();
+    let entry = outbox_value(&store, &PLUGIN_KEY);
+    let expected = canonical(&Value::String(large.clone()));
+    let hash = object_hash(&entry.value);
+    assert_eq!(hash, risunest_sync_wire::hash(&expected));
+    let mut source = store.lww_native_object(hash).unwrap().unwrap();
+    target.lww_put_object_reader(hash, &mut source, expected.len() as u64).unwrap();
+    target.lww_put_object_reader(hash, expected.as_slice(), expected.len() as u64).unwrap();
+    receive(&mut target, Change { key: unit_key(&PLUGIN_KEY).unwrap(), stamp: stamp(2), value: entry.value.clone() });
+    assert_eq!(plugin_value(&target), Some(large.clone()));
+    use device_store::plugin_values::{PluginDeviceRead, PluginDeviceRange};
+    let Some(PluginDeviceRead::Ranges { version, .. }) = target.device_store().unwrap()
+        .read_plugin_device_transfer(PLUGIN_KEY[1], PLUGIN_KEY[2], PLUGIN_KEY[3]).unwrap() else { panic!("expected ranged value"); };
+    let mut replacement = large;
+    replacement.replace_range(..1, "y");
+    let value = published(&target, &canonical(&Value::String(replacement.clone())));
+    receive(&mut target, Change { key: unit_key(&PLUGIN_KEY).unwrap(), stamp: stamp(3), value });
+    assert!(matches!(target.device_store().unwrap()
+        .read_plugin_device_range(PLUGIN_KEY[1], PLUGIN_KEY[2], PLUGIN_KEY[3], &version, 0).unwrap(), PluginDeviceRange::Changed));
+    assert_eq!(plugin_value(&target), Some(replacement));
+    let invalid_hash = "e".repeat(64);
+    assert!(target.lww_put_object_reader(&invalid_hash, expected.as_slice(), expected.len() as u64).is_err());
+    assert!(target.lww_native_object(&invalid_hash).unwrap().is_none());
 }
 
 #[test]

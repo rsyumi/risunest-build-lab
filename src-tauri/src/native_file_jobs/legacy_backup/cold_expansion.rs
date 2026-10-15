@@ -119,7 +119,8 @@ fn expand_character(
         object.remove("coldstorage");
         object.remove("coldStoragedChats");
     }
-    pocket_features::character(character, fallback)
+    pocket_features::character(character, fallback);
+    Ok(())
 }
 
 /// Returns the rewritten batch, or `None` when no record referenced a payload.

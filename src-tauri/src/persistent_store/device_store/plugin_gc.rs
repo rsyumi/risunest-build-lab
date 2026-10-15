@@ -63,18 +63,20 @@ impl DeviceStore {
 
     pub(crate) fn visit_plugin_gc_values(
         &self,
-        mut visit: impl FnMut(&str, &str, &str, &str) -> StoreResult<()>,
+        mut visit: impl FnMut(&str, &str, &str, &mut rusqlite::blob::Blob<'_>) -> StoreResult<()>,
         mut visit_unit: impl FnMut(&UnitKey, &UnitValue) -> StoreResult<()>,
     ) -> StoreResult<PluginGcFence> {
         let snapshot = crate::sqlite_open::open_with_flags(self.plugin_gc_path()?, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
         snapshot.execute_batch("PRAGMA query_only=ON; PRAGMA mmap_size=0; BEGIN")?;
         let fence = read_fence(&snapshot)?;
         {
-            let mut statement = snapshot.prepare("SELECT owner,space,key,value FROM plugin_device_storage WHERE tombstone=0 ORDER BY owner,space,key")?;
+            let mut statement = snapshot.prepare("SELECT owner,space,key,rowid,typeof(value) FROM plugin_device_storage WHERE tombstone=0 ORDER BY owner,space,key")?;
             let mut rows = statement.query([])?;
             while let Some(row) = rows.next()? {
-                let (owner, space, key, value): (String, String, String, String) = (row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?);
-                visit(&owner, &space, &key, &value)?;
+                let (owner, space, key, rowid, kind): (String, String, String, i64, String) = (row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?);
+                if kind != "text" { return Err(invalid("Plugin GC value is not text")); }
+                let mut value = snapshot.blob_open(rusqlite::MAIN_DB, "plugin_device_storage", "value", rowid, true)?;
+                visit(&owner, &space, &key, &mut value)?;
             }
         }
         {
@@ -134,7 +136,8 @@ mod tests {
     fn collect(store: &DeviceStore) -> (PluginGcFence, Vec<(String,String,String,String)>) {
         let mut rows = Vec::new();
         let fence = store.visit_plugin_gc_values(|owner,space,key,value| {
-            rows.push((owner.into(),space.into(),key.into(),value.into())); Ok(())
+            let mut text = String::new(); std::io::Read::read_to_string(value, &mut text)?;
+            rows.push((owner.into(),space.into(),key.into(),text)); Ok(())
         }, |_,_| Ok(())).unwrap();
         (fence,rows)
     }
@@ -181,7 +184,8 @@ mod tests {
         let writer = Connection::open(dir.path().join(super::super::DEVICE_DATABASE_FILE)).unwrap();
         let mut values=Vec::new(); let mut changed=false;
         let fence = store.visit_plugin_gc_values(|_,_,key,value| {
-            values.push((key.to_owned(),value.to_owned()));
+            let mut text = String::new(); std::io::Read::read_to_string(value, &mut text)?;
+            values.push((key.to_owned(),text));
             if !changed {
                 writer.execute("UPDATE plugin_device_storage SET value='after-b' WHERE key='b'",[])?;
                 insert(&writer,"json","c","after-c")?;

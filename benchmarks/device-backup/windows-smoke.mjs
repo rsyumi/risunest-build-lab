@@ -1,13 +1,16 @@
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { copyFile, lstat, mkdir, readFile, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { REALM_BLOCKED_URL_PATTERNS } from "../../scripts/realmBlocklist.mjs";
 import { sharedCargoTarget } from "../../scripts/testNative.mjs";
+import { measureEntryCount } from "../legacy-restore/entry-count.mjs";
+import { measurePluginValue } from './plugin-value-driver.mjs';
+import { measurePluginSync, syntheticPluginSyncServer } from './plugin-sync-driver.mjs';
 
 const root = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -97,6 +100,19 @@ async function command(executable, args, options = {}) {
   return { code, stdout, stderr };
 }
 
+async function stopOwnedApp(app) {
+  if (!app || app.exitCode !== null) return;
+  await command("taskkill.exe", ["/PID", String(app.pid), "/T"]);
+  const gracefulDeadline = Date.now() + 10_000;
+  while (app.exitCode === null && Date.now() < gracefulDeadline) await delay(100);
+  if (app.exitCode === null) {
+    await command("taskkill.exe", ["/PID", String(app.pid), "/T", "/F"]);
+    const forcedDeadline = Date.now() + 10_000;
+    while (app.exitCode === null && Date.now() < forcedDeadline) await delay(100);
+  }
+  if (app.exitCode === null) throw new Error("Synthetic measurement process did not stop");
+}
+
 async function evaluate(page, expression) {
   const result = await page.call("Runtime.evaluate", {
     expression,
@@ -126,10 +142,28 @@ async function absent(candidate) {
 async function sourceHashes() {
   const files = [
     "benchmarks/device-backup/main.ts",
+    "benchmarks/device-backup/vite.config.ts",
+    "benchmarks/device-backup/windows-smoke.mjs",
     "src/ts/storage/nativeFileJobs.ts",
     "src/ts/storage/deviceBackup/entry.ts",
     "src-tauri/src/native_file_jobs/portable.rs",
     "src-tauri/src/device_backup/mod.rs",
+    "src-tauri/src/local_backup.rs",
+    "src-tauri/src/native_file_jobs/legacy_backup.rs",
+    "src-tauri/src/native_file_jobs/legacy_backup/account_encryption.rs",
+    "src-tauri/src/native_file_jobs/restore/historical.rs",
+    "src-tauri/src/native_file_jobs/restore_receipts.rs",
+    "src-tauri/src/asset_repository/import_payloads.rs",
+    "src-tauri/src/native_file_jobs/restore.rs",
+    "benchmarks/legacy-restore/entry-count.mjs",
+    "benchmarks/device-backup/plugin-values.ts",
+    "benchmarks/device-backup/plugin-value-driver.mjs",
+    "benchmarks/device-backup/plugin-sync-driver.mjs",
+    "src/ts/plugins/pluginDeviceTransfer.ts",
+    "src/ts/plugins/pluginSafeClass.ts",
+    "src-tauri/src/persistent_store/device_store/plugin_values.rs",
+    "src-tauri/src/persistent_store/device_store/plugin_values/text_value.rs",
+    "src-tauri/src/persistent_store/device_store/sections/large_plugin.rs",
   ];
   return Object.fromEntries(
     await Promise.all(
@@ -162,7 +196,7 @@ async function memory(page, browser, appPid, includeProcesses) {
       "-NoProfile",
       "-NonInteractive",
       "-Command",
-      `Get-Process -Id ${pids.join(",")} -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ pid=$_.Id; workingSetBytes=$_.WorkingSet64; privateBytes=$_.PrivateMemorySize64 } } | ConvertTo-Json -Compress`,
+      `Get-Process | Where-Object { $_.Id -in @(${pids.join(",")}) } | ForEach-Object { [pscustomobject]@{ pid=$_.Id; workingSetBytes=$_.WorkingSet64; peakWorkingSetBytes=$_.PeakWorkingSet64; privateBytes=$_.PrivateMemorySize64 } } | ConvertTo-Json -Compress`,
     ]);
     if (result.code !== 0) throw new Error("synthetic-memory-query-failed");
     const rows = result.stdout.trim() ? JSON.parse(result.stdout) : [];
@@ -176,7 +210,10 @@ async function memory(page, browser, appPid, includeProcesses) {
       0,
     );
     const native = value.processes.find((row) => row.pid === appPid);
+    if (!native || !Number.isFinite(native.workingSetBytes) || !Number.isFinite(native.peakWorkingSetBytes))
+      throw new Error("synthetic-native-memory-sample-missing");
     value.nativeWorkingSetBytes = native?.workingSetBytes;
+    value.nativePeakWorkingSetBytes = native?.peakWorkingSetBytes;
     value.nativePrivateBytes = native?.privateBytes;
   }
   return value;
@@ -191,6 +228,8 @@ function within(candidate, parent) {
 
 async function reuseRun() {
   if (process.argv.length === 2) return null;
+  if (process.argv.length === 3 && /^--legacy-entries=(all|20000|50000|100000|200001)$/.test(process.argv[2])) return null;
+  if (process.argv.length === 3 && /^--plugin-values=(all|json|64-string|64-json|256-string|256-json|512-string|512-json)$/.test(process.argv[2])) return null;
   const values = Object.fromEntries(
     process.argv.slice(2).map((argument) => {
       const separator = argument.indexOf("=");
@@ -218,6 +257,7 @@ async function reuseRun() {
   if (
     !previous.passed ||
     !previous.identityVerified ||
+    !previous.profileName ||
     previous.state?.stage !== "done" ||
     previous.directory !== directory ||
     path.basename(directory) !== `device-windows-smoke-${previous.runId}` ||
@@ -286,11 +326,15 @@ async function reuseRun() {
 async function run() {
   if (process.platform !== "win32") throw new Error("Windows is required");
   const reuse = await reuseRun();
+  const entryCountArgument = process.argv.find(argument => argument.startsWith('--legacy-entries='));
+  const pluginValueArgument = process.argv.find(argument => argument.startsWith('--plugin-values='));
+  if (entryCountArgument && reuse) throw new Error('Entry measurements require a fresh synthetic profile');
   const runId = reuse?.previous.runId ?? randomUUID();
   const directory =
     reuse?.previous.directory ??
     path.join(root, ".tmp", `device-windows-smoke-${runId}`);
   const identifier = `io.github.rsyumi.risunest.devicebackupsynthetic.s${runId.replaceAll("-", "")}`;
+  const profileName = `smoke-${runId.replaceAll("-", "").slice(0, 24)}`;
   if (!reuse) await mkdir(directory, { recursive: true });
   const reservation = net.createServer();
   reservation.listen(reuse?.previous.port ?? 0, "127.0.0.1");
@@ -299,6 +343,7 @@ async function run() {
   const report = {
     runId,
     identifier,
+    profileName,
     directory,
     port,
     startedAt: new Date().toISOString(),
@@ -330,22 +375,20 @@ async function run() {
   let browser;
   let appOutput = "";
   try {
-    const roaming = path.join(directory, "roaming");
-    const local = path.join(directory, "local");
-    const webview = path.join(directory, "webview");
-    if (!reuse)
-      await Promise.all([roaming, local, webview].map((item) => mkdir(item)));
     const knownFolder = await command("powershell.exe", [
       "-NoProfile",
       "-NonInteractive",
       "-Command",
-      "[Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)",
+      "[Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)",
     ]);
     if (knownFolder.code !== 0 || !path.isAbsolute(knownFolder.stdout.trim())) {
       throw new Error("synthetic-known-folder-unavailable");
     }
-    const nativeRoot = path.join(knownFolder.stdout.trim(), identifier);
-    if (!reuse && !(await absent(nativeRoot)))
+    const profilesRoot = path.join(knownFolder.stdout.trim(), 'RisuNestProfiles-agent');
+    const profileDirectory = path.join(profilesRoot, profileName);
+    const nativeRoot = path.join(profileDirectory, 'data');
+    const webview = path.join(profileDirectory, 'webview');
+    if (!reuse && !(await absent(profileDirectory)))
       throw new Error("synthetic-native-profile-already-exists");
     if (reuse && nativeRoot !== reuse.previous.nativeRoot)
       throw new Error("synthetic-prior-native-profile-mismatch");
@@ -357,6 +400,7 @@ async function run() {
       );
       const frontend = path.join(directory, "frontend");
       config.identifier = identifier;
+      config.plugins = { ...config.plugins, risunest: { ...config.plugins?.risunest, agent: true } };
       config.bundle.active = false;
       config.build = {
         ...config.build,
@@ -391,7 +435,7 @@ async function run() {
           configPath,
         ],
         {
-          env: { ...process.env, CARGO_TARGET_DIR: target },
+          env: { ...process.env, CARGO_TARGET_DIR: target, RISUNEST_SMOKE_ROOT: nativeRoot },
         },
       );
       report.buildMs = Date.now() - buildStarted;
@@ -415,12 +459,11 @@ async function run() {
     }
     reservation.close();
     await once(reservation, "close");
-    if (!reuse && !(await absent(nativeRoot)))
+    if (!reuse && !(await absent(profileDirectory)))
       throw new Error("synthetic-native-profile-created-before-launch");
     async function launch() {
-      app = spawn(executable, [], {
+      app = spawn(executable, [`--profile=${profileName}`], {
         cwd: directory,
-        env: { ...process.env, APPDATA: roaming, LOCALAPPDATA: local },
         windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -478,7 +521,7 @@ async function run() {
       await page.call("Runtime.enable");
       const identity = await evaluate(
         page,
-        `(async()=>{if(document.title!==${JSON.stringify(title)})throw new Error('wrong-synthetic-title');return {identifier:await globalThis.__TAURI_INTERNALS__.invoke('plugin:app|identifier'),nativeRoot:await globalThis.__TAURI_INTERNALS__.invoke('plugin:path|resolve_directory',{directory:14})}})()`,
+        `(async()=>{if(document.title!==${JSON.stringify(title)})throw new Error('wrong-synthetic-title');return {identifier:await globalThis.__TAURI_INTERNALS__.invoke('plugin:app|identifier'),nativeRoot:(await globalThis.__TAURI_INTERNALS__.invoke('app_paths_roots')).data}})()`,
       );
       if (
         identity.identifier !== identifier ||
@@ -496,6 +539,103 @@ async function run() {
       process.stdout.write(`synthetic-windows-identity-verified ${runId}\n`);
     }
     await launch();
+    if (pluginValueArgument) {
+      const selected = pluginValueArgument.split('=')[1];
+      const cases = selected === 'all' ? [64, 256, 512].flatMap(size => ['string', 'json'].map(kind => `${size}-${kind}`))
+        : selected === 'json' ? [64, 256, 512].map(size => `${size}-json`) : [selected];
+      report.pluginValues = [];
+      async function retainProfile(suffix) {
+        try { await browser.call('Browser.close'); } catch {}
+        page.close(); browser.close();
+        await stopOwnedApp(app);
+        if (path.dirname(profileDirectory) !== profilesRoot || path.basename(profileDirectory) !== profileName
+          || !within(nativeRoot, profileDirectory) || !within(webview, profileDirectory)) throw new Error('Synthetic profile boundary mismatch');
+        const retainedProfile = `${profileDirectory}.plugin-${suffix}`;
+        await rename(profileDirectory, retainedProfile);
+        return path.join(retainedProfile, 'data');
+      }
+      for (const name of cases) {
+        const [size, kind] = name.split('-');
+        const measurementDirectory = path.join(directory, `plugin-${name}`);
+        await mkdir(measurementDirectory);
+        const measured = await measurePluginValue({
+          mebibytes: Number(size), kind, directory: measurementDirectory,
+          evaluate: expression => evaluate(page, expression),
+          memory: () => memory(page, browser, app.pid, true),
+          save: async value => { report.pluginValue = value; await writeFile(resultPath, JSON.stringify(report, null, 2)); },
+        });
+        report.pluginValues.push(measured);
+        const server = await syntheticPluginSyncServer(process.env.RISUNEST_PLUGIN_SYNC_SERVER ?? path.join(target, 'release', 'risunest-sync-server.exe'), path.join(measurementDirectory, 'sync'));
+        try {
+          measured.sync = [];
+          for (const sender of [true, false]) {
+            const synchronized = await measurePluginSync({
+              config: server.configs[sender ? 0 : 1], sender,
+              evaluate: expression => evaluate(page, expression), memory: () => memory(page, browser, app.pid, true),
+              save: async value => { measured.syncProgress = value; await writeFile(resultPath, JSON.stringify(report, null, 2)); },
+            });
+            measured.sync.push(synchronized);
+            if (sender) {
+              measured.retainedNativeRoot = await retainProfile(`${name}-sender`);
+              await launch();
+            }
+          }
+          const descriptor = { kind, hash: measured.state.hash, codeUnits: measured.state.codeUnits };
+          await evaluate(page, `void globalThis.__pluginValueMeasurement.expect(${JSON.stringify(descriptor)}); true`);
+          measured.peerReadMemory = [];
+          let peer;
+          const deadline = Date.now() + 30 * 60_000;
+          do {
+            peer = await evaluate(page, 'globalThis.__pluginValueMeasurement.state()');
+            measured.peerReadMemory.push(await memory(page, browser, app.pid, true));
+            if (peer.phase === 'failed' || Date.now() > deadline) throw new Error('Synthetic synced plugin verification failed');
+            if (peer.busy) await delay(500);
+          } while (peer.busy);
+          if (peer.phase !== 'verified') throw new Error('Synthetic synced plugin verification incomplete');
+          measured.syncedHash = peer.hash;
+          measured.retainedPeerRoot = await retainProfile(`${name}-receiver`);
+          await writeFile(path.join(measurementDirectory, 'result.json'), JSON.stringify(measured, null, 2));
+          await writeFile(resultPath, JSON.stringify(report, null, 2));
+        } finally { await server.stop(); }
+        if (name !== cases.at(-1)) {
+          await launch();
+        }
+      }
+      report.passed = report.pluginValues.every(result => result.phase === 'verified');
+      return;
+    }
+    if (entryCountArgument) {
+      const selected = entryCountArgument.split('=')[1];
+      const counts = selected === 'all' ? [20_000, 50_000, 100_000, 200_001] : [Number(selected)];
+      report.entryCounts = [];
+      for (const count of counts) {
+        const measurementDirectory = path.join(directory, `entries-${count}`);
+        await mkdir(measurementDirectory);
+        report.entryCount = await measureEntryCount({
+          count, directory: measurementDirectory,
+          evaluate: expression => evaluate(page, expression),
+          memory: () => memory(page, browser, app.pid, true),
+          save: async result => {
+            report.entryCount = result;
+            await writeFile(resultPath, JSON.stringify(report, null, 2));
+          },
+        });
+        report.entryCounts.push(report.entryCount);
+        if (count !== counts.at(-1)) {
+          try { await browser.call('Browser.close'); } catch {}
+          page.close(); browser.close();
+          await stopOwnedApp(app);
+          if (path.dirname(profileDirectory) !== profilesRoot || path.basename(profileDirectory) !== profileName
+            || !within(nativeRoot, profileDirectory) || !within(webview, profileDirectory)) throw new Error('Synthetic profile boundary mismatch');
+          const retainedProfile = `${profileDirectory}.entries-${count}`;
+          await rename(profileDirectory, retainedProfile);
+          report.entryCount.retainedNativeRoot = path.join(retainedProfile, 'data');
+          await launch();
+        }
+      }
+      report.passed = report.entryCounts.every(result => result.phase === 'verified');
+      return;
+    }
     let stage = "ready";
     let stageStarted = Date.now();
     let started = !!reuse?.recoveryReport;
@@ -764,9 +904,7 @@ async function run() {
     }
     page?.close();
     browser?.close();
-    if (app && app.exitCode === null) {
-      await command("taskkill.exe", ["/PID", String(app.pid), "/T", "/F"]);
-    }
+    await stopOwnedApp(app);
     report.completedAt = new Date().toISOString();
     await writeFile(resultPath, JSON.stringify(report, null, 2));
     // This executable and native identifier were generated for this run only.
