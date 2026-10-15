@@ -21,10 +21,10 @@ use crate::persistent_store::{
 use crate::server_sync::residency::RemotePayloadAccess;
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
-use serde_json::{Map, Value};
-use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
 use std::fmt;
+use serde_json::{Map, Value};
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
 use std::sync::Mutex;
@@ -1023,28 +1023,16 @@ fn prepare_cold_with_limits(
         return Err(LocalBackupError::new(LocalBackupErrorCode::DecodedBlockTooLarge, "decoded block limit exceeded for cold payload"));
     }
     let source = CancellationReader::observed(file, cancellation, observer);
-    let record_bytes = restore::RecordBudget::new(limits.max_record_bytes);
-    record_bytes.set(Some(0));
-    let source = restore::RecordLimitReader { inner: BufReader::new(source), bytes: &record_bytes };
-    let mut deserializer = serde_json::Deserializer::from_reader(source);
-    if !serde::de::Deserializer::deserialize_any(&mut deserializer, ColdRootVisitor(&record_bytes)).map_err(
-        |error| {
-            if cancellation.is_cancelled() {
-                LocalBackupError::new(
-                    LocalBackupErrorCode::Cancelled,
-                    "legacy backup job was cancelled",
-                )
-            } else if error.to_string().contains("restore record limit exceeded") {
-                LocalBackupError::new(LocalBackupErrorCode::RecordTooLarge, "legacy backup cold payload exceeds the record limit")
-            } else {
-                invalid("legacy backup cold payload is invalid")
-            }
-        },
-    )? {
-        return Err(invalid(
-            "legacy backup cold payload has an unsupported root",
-        ));
-    }
+    // Cold plugin values may be any JSON. Apply record limits only when a character
+    // or conversation references the payload, through the common restore reader.
+    let mut deserializer = serde_json::Deserializer::from_reader(BufReader::new(source));
+    <IgnoredAny as serde::Deserialize>::deserialize(&mut deserializer).map_err(|_| {
+        if cancellation.is_cancelled() {
+            LocalBackupError::new(LocalBackupErrorCode::Cancelled, "legacy backup job was cancelled")
+        } else {
+            invalid("legacy backup cold payload is invalid")
+        }
+    })?;
     deserializer
         .end()
         .map_err(|_| invalid("legacy backup cold payload has trailing data"))?;
@@ -1054,6 +1042,15 @@ fn prepare_cold_with_limits(
         .staged_path
         .clone()
         .ok_or_else(|| invalid("legacy backup cold payload is not staged"))
+}
+
+fn validate_referenced_cold_records<R: Read>(source: R, max_record_bytes: u64) -> Result<(), serde_json::Error> {
+    let record_bytes = restore::RecordBudget::new(max_record_bytes);
+    record_bytes.set(Some(0));
+    let source = restore::RecordLimitReader { inner: BufReader::new(source), bytes: &record_bytes };
+    let mut deserializer = serde_json::Deserializer::from_reader(source);
+    serde::de::Deserializer::deserialize_any(&mut deserializer, ColdRootVisitor(&record_bytes))?;
+    deserializer.end()
 }
 
 struct ColdRootVisitor<'a>(&'a restore::RecordBudget);
@@ -1268,6 +1265,7 @@ mod tests {
         character_json_export::export_character_json, JobKind, JobRegistry, JobState,
     };
     use sha2::{Digest, Sha256};
+    use std::cell::Cell;
     use std::fs;
     use std::io::Cursor;
 
@@ -1303,10 +1301,10 @@ mod tests {
     }
 
     #[test]
-    fn cold_preparation_bounds_values_keys_and_scalar_dispatch_before_reading_the_whole_record() {
-        struct ObservedBytes(Cell<u64>);
+    fn cold_preparation_streams_opaque_values_without_applying_chat_record_limits() {
+        struct ObservedBytes { total: Cell<u64>, largest: Cell<u64> }
         impl LegacyPrepareObserver for ObservedBytes {
-            fn item_bytes(&self, bytes: u64) { self.0.set(self.0.get() + bytes); }
+            fn item_bytes(&self, bytes: u64) { self.total.set(self.total.get() + bytes); self.largest.set(self.largest.get().max(bytes)); }
         }
         for (prefix, suffix) in [
             (br#"[{"role":"user","data":""#.as_slice(), b"\"}]".as_slice()),
@@ -1323,11 +1321,12 @@ mod tests {
             output.write_all(suffix).unwrap();
             drop(output);
             let entry = StagedLocalBackupEntry { logical_name:"coldstorage/large.json".to_owned(), byte_length:fs::metadata(&path).unwrap().len(), sha256:String::new(), staged_path:Some(path) };
-            let observed = ObservedBytes(Cell::new(0));
-            let error = prepare_cold_with_limits(&entry, &NeverCancelled, &observed, restore::RestoreLimits { max_record_bytes: 64 * 1024, ..Default::default() }).unwrap_err();
-            assert!(error.message.contains("cold payload exceeds the record limit"), "{error:?}");
-            assert!(observed.0.get() <= 2 * 64 * 1024);
-            assert!(observed.0.get() < entry.byte_length);
+            let observed = ObservedBytes { total: Cell::new(0), largest: Cell::new(0) };
+            prepare_cold_with_limits(&entry, &NeverCancelled, &observed, restore::RestoreLimits { max_record_bytes: 64 * 1024, ..Default::default() }).unwrap();
+            assert_eq!(observed.total.get(), entry.byte_length);
+            assert!(observed.largest.get() <= 64 * 1024);
+            let error = cold_expansion::load_with_limits(entry.staged_path.as_ref().unwrap(), entry.byte_length, 64 * 1024).unwrap_err();
+            assert!(error.contains("restore record limit exceeded"), "{error}");
         }
     }
 

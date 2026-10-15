@@ -212,6 +212,21 @@ describe('native restore response deadlines', () => {
         expect(host.commands()).not.toContain('native_file_job_forget')
     })
 
+    it('finishes with the committed result and a warning when plugin follow-up stops responding', async () => {
+        const restoreClock = clock()
+        let followingUp = false
+        const committed = {revision:9,sourceBytes:128,sourceFingerprintKind:'whole-file-sha256' as const,sourceSha256:'e'.repeat(64),characterCount:1,presetCount:0,warningCodes:[]}
+        const host = createNativeJobHost([{...status('waitingForInput'),phase:'awaiting-activation'},status('succeeded',committed)])
+        const operation = runNativeBlockRisuSaveRestore(restoreRuntime(8), {type:'desktopPath',path:'synthetic.risudat'}, {
+            afterRefresh: async () => { followingUp = true; await new Promise(() => {}) },
+        }, {...host.dependencies,restoreClock})
+        await vi.waitFor(() => expect(followingUp).toBe(true))
+        restoreClock.expire()
+        await expect(operation).resolves.toEqual({...committed,warningCodes:['post-refresh-followup-failed']})
+        expect(host.commands().filter(command => command === 'native_file_job_finalize')).toHaveLength(1)
+        expect(host.commands()).toContain('native_file_job_forget')
+    })
+
     it('releases a write pause acquired after its response deadline without activating', async () => {
         const restoreClock = clock()
         let admit!: () => void

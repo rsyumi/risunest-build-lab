@@ -4,7 +4,7 @@ use super::super::restore::pocket_features;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::io::Read;
+use std::io::{Read, Seek};
 
 const COLD_STORAGE_HEADER: &str = "\u{ef01}COLDSTORAGE\u{ef01}";
 
@@ -37,11 +37,18 @@ fn load(path: &Path) -> Result<Value, String> {
 }
 
 fn load_with_limit(path: &Path, limit: u64) -> Result<Value, String> {
-    let file = std::fs::File::open(path)
+    load_with_limits(path, limit, super::restore::RESTORE_RECORD_BYTES)
+}
+
+pub(super) fn load_with_limits(path: &Path, limit: u64, record_limit: u64) -> Result<Value, String> {
+    let mut file = std::fs::File::open(path)
         .map_err(|error| format!("staged cold payload cannot be opened: {error}"))?;
     if file.metadata().map_err(|error| error.to_string())?.len() > limit {
         return Err("decoded block limit exceeded for staged cold payload".to_owned());
     }
+    super::validate_referenced_cold_records(&mut file, record_limit)
+        .map_err(|error| format!("staged cold payload cannot be parsed: {error}"))?;
+    file.rewind().map_err(|error| error.to_string())?;
     serde_json::from_reader(std::io::BufReader::new(file.take(limit.saturating_add(1))))
         .map_err(|error| format!("staged cold payload cannot be parsed: {error}"))
 }

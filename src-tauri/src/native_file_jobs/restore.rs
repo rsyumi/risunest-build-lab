@@ -876,9 +876,11 @@ fn finish_legacy_database<R: Read>(
     if root.kind("pluginCustomStorage").map_err(store_error)?.is_none() {
         root.begin("pluginCustomStorage",FieldKind::Object).map_err(|error|legacy_staging_error(job,error))?;
     }
-    if root.member("pluginCustomStorage", "_coldplugin").map_err(store_error)?.is_some() {
-        root.remove_member("pluginCustomStorage", "_coldplugin").map_err(store_error)?;
-        job.record_restore_omission("pluginStorage", 1).map_err(|error| job_error(job, error))?;
+    for marker in ["_coldplugin", "_coldpluginIndex"] {
+        if root.member("pluginCustomStorage", marker).map_err(store_error)?.is_some() {
+            root.remove_member("pluginCustomStorage", marker).map_err(store_error)?;
+            job.record_restore_omission("pluginStorage", 1).map_err(|error| job_error(job, error))?;
+        }
     }
     reader.counts.presets = preset_count;
 
@@ -1519,8 +1521,10 @@ fn parse_and_stage<R: Read>(
         root.insert(key.to_owned(), value);
     }
     if let Some(Value::Object(storage)) = root.get_mut("pluginCustomStorage") {
-        if storage.shift_remove("_coldplugin").is_some() {
-            job.record_restore_omission("pluginStorage", 1).map_err(|error| job_error(job, error))?;
+        for marker in ["_coldplugin", "_coldpluginIndex"] {
+            if storage.shift_remove(marker).is_some() {
+                job.record_restore_omission("pluginStorage", 1).map_err(|error| job_error(job, error))?;
+            }
         }
     }
     if let Some(meta) = plugin_storage_meta {
@@ -3692,16 +3696,74 @@ mod tests {
     }
 
     #[test]
-    fn cold_streaming_container_rejects_oversized_records_during_preparation() {
-        for nested in [false, true] {
+    fn cold_plugin_payloads_are_omitted_without_rejecting_readable_backups() {
+        for marker in ["_coldplugin", "_coldpluginIndex"] {
+            for corrupt in [false, true] {
+                let (directory, mut sink) = fixture();
+                let mut blocks = valid_blocks();
+                let mut storage = json!({"inline":{"enabled":true}});
+                storage[marker] = if marker == "_coldplugin" { json!({"plugin":"value"}) } else { json!("index") };
+                blocks[5] = block(11, false, "pluginStorage", &storage);
+                let database = directory.path().join("database.risudat");
+                fs::write(&database, save_bytes(blocks)).unwrap();
+                let archive = directory.path().join("plugins.bin");
+                let mut output = File::create(&archive).unwrap();
+                write_container_entry(&mut output, "database.risudat", &database);
+                for (index, value) in [
+                    json!(null), json!(true), json!(42), json!("synthetic"),
+                    json!({"type":"risu-plugin-storage-index","version":1,"entries":[{"k":"plugin","l":"value"}],"trash":[]}),
+                    json!({"character":"x".repeat(192 * 1024)}),
+                    json!([{"message":"x".repeat(192 * 1024)}]),
+                ].into_iter().enumerate() {
+                    let path = directory.path().join(format!("payload-{index}.json"));
+                    fs::write(&path, if corrupt && index == 0 { b"{broken".to_vec() } else { serde_json::to_vec(&value).unwrap() }).unwrap();
+                    let key = match index { 4 => "index".to_owned(), 5 => "value".to_owned(), _ => format!("payload-{index}") };
+                    write_container_entry(&mut output, &format!("coldstorage/{key}.json"), &path);
+                }
+                drop(output);
+                let job = JobRegistry::default().create(JobKind::RestoreLegacyLocalBackup).unwrap();
+                let outcome = restore_container_payloads_with_limits(&archive, directory.path(), &mut sink, &job, RestoreLimits { max_record_bytes: 64 * 1024, ..Default::default() });
+                if corrupt {
+                    assert!(outcome.unwrap_err().message.contains("cold payload is invalid"));
+                    assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 1);
+                    continue;
+                }
+                let result = outcome.unwrap().0;
+                assert_eq!(result.warning_codes, vec!["skipped-plugin-storage:1"]);
+                assert_eq!(job.status().incomplete_restore_preview.unwrap().warning_codes(), result.warning_codes);
+                let restored = sink.store.lock().unwrap().materialize(None).unwrap();
+                assert_eq!(restored["pluginCustomStorage"], json!({"inline":{"enabled":true}}));
+                assert_eq!(restored["characters"][0]["chats"][0]["message"][0]["data"], "hello");
+            }
+
+            let (directory, sink) = fixture();
+            let mut database = json!({"characters":[],"botPresets":[],"pluginCustomStorage":{"inline":true}});
+            database["pluginCustomStorage"][marker] = if marker == "_coldplugin" { json!({"plugin":"value"}) } else { json!("index") };
+            let wire = legacy_wire(7, &super::legacy_stream_tests::messagepack_bytes(&super::legacy_stream_tests::messagepack_from_json(&database)));
+            let source = directory.path().join("legacy.risudat");
+            fs::write(&source, wire).unwrap();
+            let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+            let result = restore_risu_save(&source, 1, &job, &sink).unwrap();
+            assert_eq!(result.warning_codes, vec!["skipped-plugin-storage:1"]);
+            assert_eq!(sink.store.lock().unwrap().materialize(None).unwrap()["pluginCustomStorage"], json!({"inline":true}));
+        }
+    }
+
+    #[test]
+    fn cold_streaming_container_rejects_oversized_referenced_records_before_activation() {
+        for (nested, prefix, suffix) in [
+            (false, br#"[{"role":"user","data":""#.as_slice(), b"\"}]".as_slice()),
+            (true, br#"{"character":{"chaId":"char-1","chats":[{"message":[{"data":""#.as_slice(), b"\"}]}]}}".as_slice()),
+            (false, br#"{"savedToggleValues":{"toggle_large":""#.as_slice(), b"\"},\"message\":[]}".as_slice()),
+            (true, br#"{"character":""#.as_slice(), b"\",\"message\":[]}".as_slice()),
+            (false, br#"{""#.as_slice(), b"\":0,\"message\":[]}".as_slice()),
+        ] {
             let (directory, mut sink) = fixture();
             let payload = directory.path().join("oversized.json");
             let mut output = File::create(&payload).unwrap();
-            if nested { output.write_all(br#"{"character":{"chaId":"char-1","chats":[{"message":"#).unwrap(); }
-            output.write_all(br#"[{"role":"user","data":""#).unwrap();
+            output.write_all(prefix).unwrap();
             for _ in 0..3 { output.write_all(&[b'x';64*1024]).unwrap(); }
-            output.write_all(b"\"}]").unwrap();
-            if nested { output.write_all(b"}]}}").unwrap(); }
+            output.write_all(suffix).unwrap();
             drop(output);
             let character = if nested { json!({"chaId":"char-1","chats":[],"coldstorage":"large"}) }
                 else { json!({"chaId":"char-1","chats":[cold_chat("large")]}) };
@@ -3713,9 +3775,8 @@ mod tests {
             drop(output);
             let job = JobRegistry::default().create(JobKind::RestoreLegacyLocalBackup).unwrap();
             let error = restore_container_payloads_with_limits(&archive, directory.path(), &mut sink, &job, RestoreLimits { max_record_bytes: 64 * 1024, ..Default::default() }).unwrap_err();
-            assert!(error.message.contains("cold payload exceeds the record limit"), "{error:?}");
-            assert_eq!(sink.abort_calls.load(Ordering::Acquire), 0, "preparation must reject before replacement staging begins");
-            assert_eq!(sink.incremental_character_calls.load(Ordering::Acquire), 0);
+            assert!(error.message.contains("restore record limit exceeded"), "{error:?}");
+            assert_eq!(sink.abort_calls.load(Ordering::Acquire), 1, "failed staging must be discarded before activation");
             assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 1);
         }
     }
