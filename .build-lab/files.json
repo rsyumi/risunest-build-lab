@@ -507,8 +507,8 @@
     {
       "path": "benchmarks/macos/contracts.ts",
       "mode": "100644",
-      "bytes": 7866,
-      "sha256": "c6dd64b5558da7917e7345d36587ab3008b8b0964ebd2ce46e335f2598506778"
+      "bytes": 8117,
+      "sha256": "e45a62137fd429295c811f31f53cb1535d8e1f6bba8a599dbbcddd1b043805ff"
     },
     {
       "path": "benchmarks/macos/externalStorage.ts",
