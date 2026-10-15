@@ -208,10 +208,34 @@ pub(crate) fn published_json_asset_roots(bytes:&[u8])->StoreResult<crate::asset_
 
 /// A large unit body is the canonical JSON of the value its unit names.
 pub(crate) fn verified_large_unit_body(bytes:&[u8])->StoreResult<()> {
-    if risunest_sync_wire::payload_value::canonicalize(bytes).ok().as_deref()!=Some(bytes) {
+    if !risunest_sync_wire::payload_value::is_canonical(bytes) {
         return Err(invalid("Large unit body is not canonical JSON"));
     }
     Ok(())
+}
+
+/// Checks a large string control without allocating its encoded or decoded value.
+/// Other control shapes retain their existing decoder.
+pub(crate) fn verified_string_control(input: &mut (impl std::io::Read + std::io::Seek), hash: &str, length: u64, domain: &'static str) -> StoreResult<bool> {
+    use std::io::SeekFrom;
+    if length <= super::device_store::plugin_values::text_value::PART_BYTES as u64 { return Ok(false); }
+    let mut first = [0]; input.read_exact(&mut first)?; input.seek(SeekFrom::Start(0))?;
+    if first[0] != b'"' { return Ok(false); }
+    let info = super::device_store::plugin_values::text_value::decode(&mut *input, std::io::sink(), u64::MAX)?;
+    #[cfg(test)] super::hash_work::observe(domain, info.encoded_length as usize);
+    #[cfg(not(test))] let _ = domain;
+    if info.hash != hash || info.encoded_length != length { return Err(invalid("Control body identity differs")); }
+    input.seek(SeekFrom::Start(0))?;
+    Ok(true)
+}
+
+pub(crate) fn published_string_asset_roots(input: &mut (impl std::io::Read + std::io::Seek), hash: &str, length: u64) -> StoreResult<Option<crate::asset_repository::migration_gc::AssetRootSet>> {
+    if !verified_string_control(input, hash, length, "native_published_string_identity")? { return Ok(None); }
+    let mut roots = crate::asset_repository::migration_gc::AssetRootSet::default();
+    let info = super::snapshot::observe_encoded_text(&mut *input, &mut roots)?;
+    if info.hash != hash || info.encoded_length != length { return Err(invalid("Control body identity differs")); }
+    input.seek(std::io::SeekFrom::Start(0))?;
+    Ok(Some(roots))
 }
 
 /// A control above the metadata bound is either one indivisible message page
@@ -319,7 +343,18 @@ pub(crate) fn original_unit_dependency_inventory(
     copy_bodies: bool,
     emit: &mut dyn FnMut(&str,&[u8],BackupBodyRole) -> StoreResult<()>,
 ) -> StoreResult<BackupDependencyInventory> {
-    dependency_inventory(units.iter().map(Ok),read_body,payload_size,None,probe,copy_bodies,emit)
+    dependency_inventory(units.iter().map(Ok),read_body,payload_size,None,None,probe,copy_bodies,emit)
+}
+
+pub(crate) fn original_unit_dependency_inventory_with_ranges(
+    units: &BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>,
+    read_body: &dyn Fn(&str) -> StoreResult<Option<Vec<u8>>>,
+    payload_size: &dyn Fn(&str) -> StoreResult<Option<u64>>,
+    ranged: &mut dyn FnMut(&str) -> StoreResult<Option<u64>>,
+    probe: &dyn CancellationProbe,
+    emit: &mut dyn FnMut(&str,&[u8],BackupBodyRole) -> StoreResult<()>,
+) -> StoreResult<BackupDependencyInventory> {
+    dependency_inventory(units.iter().map(Ok),read_body,payload_size,None,Some(ranged),probe,false,emit)
 }
 
 /// The inventory of units read one at a time instead of held in a map.
@@ -331,7 +366,7 @@ pub(crate) fn streamed_unit_dependency_inventory(
     copy_bodies: bool,
     emit: &mut dyn FnMut(&str,&[u8],BackupBodyRole) -> StoreResult<()>,
 ) -> StoreResult<BackupDependencyInventory> {
-    dependency_inventory(units,read_body,payload_size,None,probe,copy_bodies,emit)
+    dependency_inventory(units,read_body,payload_size,None,None,probe,copy_bodies,emit)
 }
 
 /// The inventory without reading any control above the metadata bound.
@@ -344,7 +379,7 @@ pub(crate) fn original_unit_control_lengths(
     large_length: &dyn Fn(&str) -> StoreResult<Option<u64>>,
     probe: &dyn CancellationProbe,
 ) -> StoreResult<BackupDependencyInventory> {
-    dependency_inventory(units,read_body,payload_size,Some(large_length),probe,false,&mut |_,_,_| Ok(()))
+    dependency_inventory(units,read_body,payload_size,Some(large_length),None,probe,false,&mut |_,_,_| Ok(()))
 }
 
 fn dependency_inventory<K: std::borrow::Borrow<risunest_sync_wire::unit::UnitKey>, V: std::borrow::Borrow<risunest_sync_wire::unit::UnitValue>>(
@@ -352,6 +387,7 @@ fn dependency_inventory<K: std::borrow::Borrow<risunest_sync_wire::unit::UnitKey
     read_body: &dyn Fn(&str) -> StoreResult<Option<Vec<u8>>>,
     payload_size: &dyn Fn(&str) -> StoreResult<Option<u64>>,
     large_length: Option<&dyn Fn(&str) -> StoreResult<Option<u64>>>,
+    mut ranged: Option<&mut dyn FnMut(&str) -> StoreResult<Option<u64>>>,
     probe: &dyn CancellationProbe,
     copy_bodies: bool,
     emit: &mut dyn FnMut(&str,&[u8],BackupBodyRole) -> StoreResult<()>,
@@ -391,10 +427,14 @@ fn dependency_inventory<K: std::borrow::Borrow<risunest_sync_wire::unit::UnitKey
             inventory.controls.insert(descriptor.object_hash.clone(),length);
         } else if is_large_unit(key) {
             check(probe)?;
-            let body = read_body(&descriptor.object_hash)?.ok_or_else(|| invalid("Pinned backup large unit body is unavailable"))?;
-            if hash_backup_body(&body,"native_backup_large_unit_source") != descriptor.object_hash {return Err(invalid("Pinned backup large unit body identity differs"))}
-            verified_large_unit_body(&body)?;
-            control(&mut inventory,emit,&descriptor.object_hash,&body)?;
+            let length = match ranged.as_mut() { Some(read) => read(&descriptor.object_hash)?, None => None };
+            if let Some(length) = length { inventory.controls.insert(descriptor.object_hash.clone(), length); }
+            else {
+                let body = read_body(&descriptor.object_hash)?.ok_or_else(|| invalid("Pinned backup large unit body is unavailable"))?;
+                if hash_backup_body(&body,"native_backup_large_unit_source") != descriptor.object_hash {return Err(invalid("Pinned backup large unit body identity differs"))}
+                verified_large_unit_body(&body)?;
+                control(&mut inventory,emit,&descriptor.object_hash,&body)?;
+            }
         } else if super::lww::lww_known_unit_key(key) {
             let body = load(&descriptor.object_hash)?.ok_or_else(|| invalid("Pinned backup control is unavailable"))?;
             if kind[0] == "messages" {

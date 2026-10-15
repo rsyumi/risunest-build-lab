@@ -23,6 +23,8 @@ pub(crate) enum LocalBackupErrorCode {
     DuplicateDatabase,
     MissingDatabase,
     LengthOverflow,
+    RecordTooLarge,
+    DecodedBlockTooLarge,
     TruncatedInput,
     SourceLengthMismatch,
     Cancelled,
@@ -31,7 +33,6 @@ pub(crate) enum LocalBackupErrorCode {
     UnsupportedEncryption,
     UnsupportedFormat,
     CompatibilityImportRequired,
-    MetadataLimit,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -123,6 +124,7 @@ pub(crate) struct StagedLocalBackupEntry {
 }
 
 pub(crate) trait StrictLocalBackupDatabaseRestore {
+    fn source_validated(&mut self, _bytes: u64, _sha256: &str) {}
     fn restore_database(
         &mut self,
         entry: &StagedLocalBackupEntry,
@@ -158,12 +160,6 @@ pub(crate) fn parse_legacy_local_backup_v1(
     )
 }
 
-#[derive(Clone, Copy)]
-struct EntryMetadataBudget { entries: usize, name_bytes: u64 }
-impl Default for EntryMetadataBudget {
-    fn default() -> Self { Self { entries: 200_000, name_bytes: 64 * 1024 * 1024 } }
-}
-
 pub(crate) fn parse_legacy_local_backup_v1_observed(
     reader: &mut impl Read,
     job_staging_root: &Path,
@@ -172,24 +168,11 @@ pub(crate) fn parse_legacy_local_backup_v1_observed(
     cancellation: &dyn CancellationProbe,
     observer: &dyn LocalBackupParseObserver,
 ) -> Result<LegacyLocalBackupParseReport, LocalBackupError> {
-    parse_legacy_local_backup_with_budget(reader, job_staging_root, _payload_target, database_restore, cancellation, observer, EntryMetadataBudget::default())
-}
-
-fn parse_legacy_local_backup_with_budget(
-    reader: &mut impl Read,
-    job_staging_root: &Path,
-    _payload_target: PayloadTarget,
-    database_restore: &mut dyn StrictLocalBackupDatabaseRestore,
-    cancellation: &dyn CancellationProbe,
-    observer: &dyn LocalBackupParseObserver,
-    budget: EntryMetadataBudget,
-) -> Result<LegacyLocalBackupParseReport, LocalBackupError> {
     check_cancelled(cancellation)?;
     let staging_directory = prepare_staging_directory(job_staging_root)?;
-    let mut staging_ownership = ParseStagingOwnership::default();
+    let mut staging_ownership = ParseStagingOwnership { directory: Some(staging_directory.clone()) };
     let mut source = TrackedReader::new(reader);
     let mut entries = Vec::new();
-    let mut name_bytes = 0_u64;
     let mut normalized_names = HashSet::new();
     let mut database_index = None;
 
@@ -197,10 +180,6 @@ fn parse_legacy_local_backup_with_budget(
         let Some(name_length) = read_entry_name_length(&mut source, cancellation)? else {
             break;
         };
-        name_bytes = name_bytes.checked_add(u64::from(name_length)).ok_or_else(|| LocalBackupError::new(LocalBackupErrorCode::MetadataLimit, "legacy backup name metadata exceeds limit"))?;
-        if entries.len() >= budget.entries || name_bytes > budget.name_bytes {
-            return Err(LocalBackupError::new(LocalBackupErrorCode::MetadataLimit, "legacy backup entry metadata exceeds limit"));
-        }
         if name_length > MAX_NAME_BYTES {
             return Err(name_length_error());
         }
@@ -254,7 +233,6 @@ fn parse_legacy_local_backup_with_budget(
             byte_length,
             cancellation,
             observer,
-            &mut staging_ownership,
         )?;
         if is_database {
             database_index = Some(entries.len());
@@ -269,13 +247,16 @@ fn parse_legacy_local_backup_with_budget(
         )
     })?;
     check_cancelled(cancellation)?;
+    drop(normalized_names);
     observer.entries_complete(entries.len());
+    let source_sha256 = hex::encode(source.hasher.clone().finalize());
+    database_restore.source_validated(source.bytes_read, &source_sha256);
     database_restore.restore_database(&entries[database_index], &entries)?;
     staging_ownership.release();
 
     Ok(LegacyLocalBackupParseReport {
         source_bytes: source.bytes_read,
-        source_sha256: hex::encode(source.hasher.finalize()),
+        source_sha256,
         entries,
     })
 }
@@ -289,7 +270,7 @@ fn prepare_staging_directory(job_staging_root: &Path) -> Result<PathBuf, LocalBa
         ));
     }
     let staging = root.join("local-backup-v1");
-    fs::create_dir_all(&staging).map_err(LocalBackupError::io)?;
+    fs::create_dir(&staging).map_err(LocalBackupError::io)?;
     let staging = fs::canonicalize(staging).map_err(LocalBackupError::io)?;
     if !staging.starts_with(&root) {
         return Err(LocalBackupError::new(
@@ -307,7 +288,6 @@ fn stage_entry(
     byte_length: u64,
     cancellation: &dyn CancellationProbe,
     observer: &dyn LocalBackupParseObserver,
-    staging_ownership: &mut ParseStagingOwnership,
 ) -> Result<StagedLocalBackupEntry, LocalBackupError> {
     let staged_path = staging_directory.join(format!("{}.entry", uuid::Uuid::new_v4()));
     let mut guard = IncompleteFile::new(staged_path.clone());
@@ -343,7 +323,6 @@ fn stage_entry(
     check_cancelled(cancellation)?;
     output.flush().map_err(LocalBackupError::io)?;
     drop(output);
-    staging_ownership.track(staged_path.clone());
     guard.keep();
     Ok(StagedLocalBackupEntry {
         logical_name,
@@ -376,25 +355,20 @@ impl Drop for IncompleteFile {
     }
 }
 
-#[derive(Default)]
 struct ParseStagingOwnership {
-    paths: Vec<PathBuf>,
+    directory: Option<PathBuf>,
 }
 
 impl ParseStagingOwnership {
-    fn track(&mut self, path: PathBuf) {
-        self.paths.push(path);
-    }
-
     fn release(&mut self) {
-        self.paths.clear();
+        self.directory = None;
     }
 }
 
 impl Drop for ParseStagingOwnership {
     fn drop(&mut self) {
-        for path in self.paths.iter().rev() {
-            let _ = fs::remove_file(path);
+        if let Some(directory) = &self.directory {
+            let _ = fs::remove_dir_all(directory);
         }
     }
 }
@@ -816,19 +790,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_entry_metadata_before_creating_the_over_budget_file() {
-        for budget in [EntryMetadataBudget { entries: 1, name_bytes: 100 }, EntryMetadataBudget { entries: 10, name_bytes: 2 }] {
-            let bytes = archive(&[(b"aa", b""), (b"bb", b"")]);
-            let directory = tempfile::tempdir().unwrap();
-            let mut restore = RestoreSpy::default();
-            let error = parse_legacy_local_backup_with_budget(&mut Cursor::new(bytes), directory.path(), PayloadTarget::JobStaging, &mut restore, &NeverCancelled, &NoopParseObserver, budget).unwrap_err();
-            assert_eq!(error.code, LocalBackupErrorCode::MetadataLimit);
-            let staging = directory.path().join("local-backup-v1");
-            assert_eq!(std::fs::read_dir(staging).unwrap().count(), 0);
-        }
-    }
-
-    #[test]
     fn parses_arbitrary_boundaries_and_defers_database_restore_until_clean_eof() {
         let bytes = archive(&[
             (b"nested/images/avatar.PNG", b"opaque-asset"),
@@ -990,12 +951,7 @@ mod tests {
 
         assert_eq!(error.code, LocalBackupErrorCode::TruncatedInput);
         assert_eq!(restore.calls, 0);
-        assert_eq!(
-            fs::read_dir(&staging).expect("read job staging").count(),
-            0,
-            "all completed parser-owned files must be removed",
-        );
-        fs::remove_dir(staging).expect("staging directory has no leaked file descriptors");
+        assert!(!staging.exists(), "all parser-owned staging must be removed");
     }
 
     #[test]
@@ -1032,12 +988,7 @@ mod tests {
         .expect_err("strict restore rejection must fail");
 
         assert_eq!(error.code, LocalBackupErrorCode::DatabaseRestore);
-        assert_eq!(
-            fs::read_dir(&staging).expect("read job staging").count(),
-            0,
-            "restore failure must remove every parser-owned file",
-        );
-        fs::remove_dir(staging).expect("staging directory has no leaked file descriptors");
+        assert!(!staging.exists(), "restore failure must remove all parser-owned staging");
     }
 
     #[test]

@@ -26,6 +26,8 @@ mod external_storage;
 pub mod import_export_jobs;
 #[cfg(target_os = "ios")]
 mod ios_lifecycle;
+#[cfg_attr(not(desktop), allow(dead_code))]
+mod launch_profile;
 #[cfg(target_os = "linux")]
 mod linux_session;
 #[cfg(target_os = "linux")]
@@ -316,11 +318,12 @@ fn ipc_read_guard_script() -> String {
 /// Product initialization shared by native entry points. An alternative entry
 /// manages its own [`AppPaths`] before building.
 pub fn builder() -> tauri::Builder<tauri::Wry> {
-    builder_with_main_window(None)
+    builder_with_main_window(None, None)
 }
 
 fn builder_with_main_window(
-    main_window: Option<(tauri::utils::config::WindowConfig, std::path::PathBuf)>,
+    main_window: Option<app_paths::MainWindow>,
+    #[cfg_attr(mobile, allow(unused_variables))] instance_id: Option<String>,
 ) -> tauri::Builder<tauri::Wry> {
     native_log::install_panic_hook();
     let native_log_state = native_log::global_state();
@@ -338,16 +341,20 @@ fn builder_with_main_window(
     #[cfg(desktop)]
     {
         // Reject a second process before plugins with startup side effects run.
+        let mut single_instance = tauri_plugin_single_instance::Builder::new().callback(|app, args, cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+            opened_files::deliver_single_instance_arguments(app, &args, &cwd);
+        });
+        if let Some(instance_id) = instance_id {
+            single_instance = single_instance.instance_id(instance_id);
+        }
         builder = builder
             .manage(opened_files::OpenedFilesState::from_launch_arguments())
-            .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.unminimize();
-                    let _ = window.set_focus();
-                }
-                opened_files::deliver_single_instance_arguments(app, &args, &cwd);
-            }));
+            .plugin(single_instance.build());
     }
     #[cfg(target_os = "ios")]
     {
@@ -588,11 +595,17 @@ fn builder_with_main_window(
                 let persistent_gate = app.state::<persistent_store::PersistentStoreState>().acquire_device_maintenance().ok();
                 setup_native_startup_state.record_failure(error, persistent_gate, native_file_gate);
             }
-            if let Some((config, data_directory)) = &main_window {
-                let window_builder = tauri::WebviewWindowBuilder::from_config(app, config)?
-                    .data_directory(data_directory.clone());
+            if let Some(main_window) = &main_window {
+                let mut window_builder = tauri::WebviewWindowBuilder::from_config(app, &main_window.config)?;
+                if let Some(data_directory) = &main_window.data_directory {
+                    window_builder = window_builder.data_directory(data_directory.clone());
+                }
+                #[cfg(target_os = "macos")]
+                if let Some(data_store) = main_window.data_store {
+                    window_builder = window_builder.data_store_identifier(data_store);
+                }
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
-                let window_builder = startup_appearance::configure(app.handle(), config, window_builder);
+                let window_builder = startup_appearance::configure(app.handle(), &main_window.config, window_builder);
                 window_builder.build()?;
             }
             let setup_result = (|| -> Result<(), String> {
@@ -896,6 +909,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         native_file_jobs::native_snapshot_restore_bodies_status,
         native_file_jobs::native_plugin_values_assign,
         native_file_jobs::native_backup_source_format,
+        native_file_jobs::native_conflict_backup_source,
         native_file_jobs::native_portable_source_discard,
         native_file_jobs::native_portable_source_cleanup_orphans,
         native_file_jobs::native_legacy_backup_handoff_cleanup,
@@ -953,6 +967,10 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         android_commit_transport::pds_commit_android_cancel,
         #[cfg(target_os = "android")]
         android_commit_transport::pds_replace_android_finish,
+        #[cfg(target_os = "android")]
+        android_commit_transport::pds_plugin_part_android_finish,
+        #[cfg(target_os = "android")]
+        android_commit_transport::pds_plugin_write_android_finish,
         #[cfg(any(windows, target_os = "linux", target_os = "ios", target_os = "macos"))]
         persistent_commit_raw::pds_commit_raw,
         persistent_store::lww_commands::pds_lww_read_outbox,
@@ -1015,6 +1033,10 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_clear_plugin_permissions,
         persistent_store::commands::pds_hydrate_plugin_device_storage,
         persistent_store::commands::pds_read_plugin_device_value,
+        persistent_store::commands::pds_read_plugin_device_range,
+        persistent_store::commands::pds_open_plugin_device_write,
+        persistent_store::commands::pds_append_plugin_device_write,
+        persistent_store::commands::pds_abort_plugin_device_write,
         persistent_store::commands::pds_list_plugin_device_keys,
         persistent_store::commands::pds_list_plugin_device_storage,
         persistent_store::commands::pds_write_plugin_device_values,
@@ -1107,32 +1129,57 @@ fn cancel_incomplete_boot(app: &tauri::AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     native_log::install_panic_hook();
+    // The profile decides every root and identity, so it is settled before any
+    // of them is resolved. A malformed option never falls back to the default.
+    #[cfg(desktop)]
+    let (profile, arguments) = match launch_profile::split(std::env::args_os().skip(1)) {
+        Ok(selection) => selection,
+        Err(error) => {
+            launch_profile::report_rejected_option(&error);
+            std::process::exit(2);
+        }
+    };
     let mut context = tauri::generate_context!();
+    #[cfg(desktop)]
+    let profiles = app_paths::DesktopProfiles::new(context.config());
     #[cfg(desktop)]
     if let Some(window) = context.config_mut().app.windows.iter_mut().find(|window| window.label == "main") {
         window.visible = false;
+        if let Some(profile) = &profile {
+            window.title = launch_profile::window_title(&window.title, profile);
+        }
     }
     #[cfg(desktop)]
-    let paths = app_paths::AppPaths::desktop(context.config())
+    let paths = profiles.manifest(profile.as_ref())
         .expect("application data roots unavailable");
     #[cfg(desktop)]
-    if let Some(code) = app_cleanup::run_cli(&paths) {
+    if let Some(code) = app_cleanup::run_cli(&arguments, &profiles, profile.as_ref()) {
         std::process::exit(code);
     }
+    #[cfg(target_os = "macos")]
+    let data_store = profile.as_ref().map(|profile| launch_profile::webview_store(profiles.agent(), profile));
+    #[cfg(all(desktop, not(target_os = "macos")))]
+    let data_store = None;
     #[cfg(desktop)]
-    let main_window = app_paths::take_main_window_with_webview_root(&mut context, &paths)
+    let main_window = app_paths::take_main_window(&mut context, &paths, data_store)
         .expect("desktop WebView data directory unavailable");
     #[cfg(not(desktop))]
     let main_window = None;
+    #[cfg(desktop)]
+    let instance_id = launch_profile::instance_id(profiles.identifier(), profiles.agent(), profile.as_ref());
+    #[cfg(not(desktop))]
+    let instance_id = None;
     #[allow(unused_mut)]
-    let mut builder = builder_with_main_window(main_window);
+    let mut builder = builder_with_main_window(main_window, instance_id);
     #[cfg(desktop)]
     {
         builder = builder.plugin(window_state_plugin(&paths.data));
     }
     #[cfg(desktop)]
     {
-        builder = builder.manage(paths.prepared().expect("application data root unavailable"));
+        builder = builder
+            .manage(paths.prepared().expect("application data root unavailable"))
+            .manage(launch_profile::LaunchProfile(profile));
     }
     match builder.build(context) {
         Ok(app) => app.run(handle_run_event),

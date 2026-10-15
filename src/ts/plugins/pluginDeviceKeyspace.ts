@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { isTauri } from '../platform'
 import { pluginDeviceStorage, pluginDevicePrefix } from './pluginDeviceStorage'
+import { readNativePluginDeviceValue, writeNativePluginDeviceValues } from './pluginDeviceTransfer'
 
 export type PluginDeviceSpace = 'string' | 'json'
 
@@ -156,20 +157,13 @@ export function createNativePluginDeviceBackend(): PluginDeviceBackend {
             space: PluginDeviceSpace,
             key: string,
         ): Promise<string | null> {
-            return (
-                (await invoke<string | null>('pds_read_plugin_device_value', {
-                    owner,
-                    space,
-                    key,
-                })) ?? null
-            )
+            return await readNativePluginDeviceValue(owner, space, key)
         },
         async keys(owner: string, space: PluginDeviceSpace): Promise<string[]> {
             return await invoke<string[]>('pds_list_plugin_device_keys', { owner, space })
         },
         async write(owner: string, mutations: readonly PluginDeviceMutation[]): Promise<void> {
-            if (mutations.length === 0) return
-            await invoke('pds_write_plugin_device_values', { owner, mutations })
+            await writeNativePluginDeviceValues(owner, mutations)
         },
     }
 }

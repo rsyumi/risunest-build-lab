@@ -180,4 +180,21 @@ fn oversized_large_unit_controls_are_spooled_and_scanned() {
     let mut visited = Vec::new();
     spool.visit(&mut |hash, bytes, role| { visited.push((hash.to_owned(), bytes.len(), role)); Ok(()) }).unwrap();
     assert_eq!(visited, vec![(hash, body.len(), BackupBodyRole::Control)]);
+    use crate::persistent_store::external_capture::published_string_asset_roots;
+    let text = format!("{} assets/objects/{}/{}", "x".repeat(8 * 1024 * 1024), &asset[..2], &asset[2..]);
+    let body = serde_json::to_vec(&text).unwrap();
+    let hash = risunest_sync_wire::hash(&body);
+    let mut spool = super::capture::BackupDependencySpool::new(directory.path()).unwrap();
+    assert!(spool.push_ranged_control(&hash, &mut std::io::Cursor::new(&body), body.len() as u64).unwrap());
+    assert!(spool.push_ranged_control(&hash, &mut std::io::Cursor::new(&body), body.len() as u64).unwrap());
+    spool.seal().unwrap();
+    let mut source = spool.control_reader(&hash).unwrap().unwrap();
+    let roots = published_string_asset_roots(&mut source, &hash, body.len() as u64).unwrap().unwrap();
+    assert!(roots.object_hashes.contains(&asset));
+    let mut content = super::content_store::ContentStore::open(&directory.path().join("streamed")).unwrap();
+    spool.visit_ranged(&mut |digest, input, length, role| {
+        assert_eq!(role, BackupBodyRole::Control);
+        content.put_reader(digest, input, length)
+    }).unwrap();
+    assert_eq!(content.read_all(&hash).unwrap(), body);
 }

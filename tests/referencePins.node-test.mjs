@@ -32,5 +32,21 @@ test('CI fetches the same approved source revisions without running reference ap
     assert(action.includes(`path: .tmp/test-references/${target}`))
   }
   assert.equal((action.match(/persist-credentials: false/g) ?? []).length, 2)
-  assert.doesNotMatch(action, /^\s+run:/m)
+  // The only commands install the harness libraries in isolated directories, never either reference checkout.
+  const lines = action.split(/\r?\n/)
+  const commands = []
+  lines.forEach((line, index) => {
+    const run = line.match(/^(\s+(?:-\s+)?)run:(.*)$/)
+    if (!run) return
+    assert.equal(run[2], ' |')
+    for (const next of lines.slice(index + 1)) {
+      if (next.trim() && next.search(/\S/) <= run[1].length) break
+      if (next.trim()) commands.push(next.trim())
+    }
+  })
+  assert.deepEqual(commands, [
+    'node scripts/compatibleExportDependencies.mjs --prepare',
+    'pnpm --dir .tmp/test-reference-dependencies/risuai install --no-frozen-lockfile',
+    'pnpm --dir .tmp/test-reference-dependencies/pocket install --no-frozen-lockfile',
+  ])
 })

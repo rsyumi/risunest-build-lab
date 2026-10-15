@@ -153,10 +153,10 @@ final class PortableSourceCustodyTests: XCTestCase {
         try custody.confirm(token: unconfirmed, format: "portable")
         assertCopyFails(custody, unconfirmed, with: .ownership)
         try custody.confirm(token: unconfirmed, format: "local-backup")
-        let copied = try custody.materialize(token: unconfirmed, staging: root)
+        _ = try custody.materialize(token: unconfirmed, staging: root)
         assertCopyFails(custody, unconfirmed, with: .busy)
         XCTAssertTrue(custody.release(token: unconfirmed, jobId: nil))
-        try FileManager.default.removeItem(at: URL(fileURLWithPath: copied["path"] as! String).deletingLastPathComponent())
+        try assertOnlySourceRemains()
 
         let changed = try select(custody, owner: "owner")
         try custody.confirm(token: changed, format: "local-backup")
@@ -168,9 +168,74 @@ final class PortableSourceCustodyTests: XCTestCase {
 
         // JavaScript maps these codes to the same dialog reasons on Android and iOS.
         XCTAssertEqual(
-            [PortableSourceError.ownership, .busy, .changed, .cancelled, .readFailed, .writeFailed].map { $0.copyFailureCode },
-            ["source-reselect-required", "source-busy", "source-changed", "cancelled", "source-read-failed", "spool-write-failed"]
+            [PortableSourceError.ownership, .busy, .changed, .cancelled, .readFailed, .writeFailed, .storageFull].map { $0.copyFailureCode },
+            ["source-reselect-required", "source-busy", "source-changed", "cancelled", "source-read-failed", "spool-write-failed", "storage-full"]
         )
+    }
+
+    func testFullStorageDuringCopyDoesNotPublishAndRemovesItsPartialFile() throws {
+        for error in [NSError(domain: NSPOSIXErrorDomain, code: Int(ENOSPC)),
+                      NSError(domain: NSCocoaErrorDomain, code: NSFileWriteOutOfSpaceError)] {
+            let custody = PortableSourceCustody(synchronizeCopy: { _ in throw error })
+            let token = try select(custody, owner: "owner")
+            try custody.confirm(token: token, format: "local-backup")
+            assertCopyFails(custody, token, with: .storageFull)
+            XCTAssertTrue(custody.release(token: token, jobId: nil))
+            try assertOnlySourceRemains()
+        }
+    }
+
+    func testReleaseReturnsWhileCopyIsStalledAndRemovesTheLateCopy() throws {
+        let stalled = expectation(description: "copy waiting for provider")
+        let settled = expectation(description: "cancelled copy cleaned")
+        let unblock = DispatchSemaphore(value: 0)
+        let custody = PortableSourceCustody(synchronizeCopy: { _ in stalled.fulfill(); unblock.wait() })
+        let token = try select(custody, owner: "owner")
+        try custody.confirm(token: token, format: "local-backup")
+        let staging = root!
+        DispatchQueue.global().async {
+            XCTAssertThrowsError(try custody.materialize(token: token, staging: staging)) { error in
+                XCTAssertEqual(error as? PortableSourceError, .cancelled)
+            }
+            settled.fulfill()
+        }
+        wait(for: [stalled], timeout: 5)
+        let released = expectation(description: "release does not wait for provider")
+        DispatchQueue.global().async {
+            XCTAssertTrue(custody.release(token: token, jobId: nil))
+            released.fulfill()
+        }
+        wait(for: [released], timeout: 5)
+        unblock.signal()
+        wait(for: [settled], timeout: 5)
+        try assertOnlySourceRemains()
+    }
+
+    func testOwnerResetRemovesItsDeliveredCopyAndPreservesTheSelectedSource() throws {
+        let custody = PortableSourceCustody()
+        let token = try select(custody, owner: "old-page")
+        try custody.confirm(token: token, format: "block-risu-save")
+        _ = try custody.materialize(token: token, staging: root)
+        custody.retireUnclaimed(owner: "unrelated-page")
+        XCTAssertTrue(custody.orphanReceipts().isEmpty)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path).count, 2)
+        XCTAssertThrowsError(try custody.confirm(token: token, format: "portable"))
+        XCTAssertThrowsError(try custody.beginProbe(token: token, probeId: UUID().uuidString))
+        custody.retireUnclaimed(owner: "old-page")
+        XCTAssertEqual(custody.orphanReceipts().map { $0.token }, [token])
+        try assertOnlySourceRemains()
+    }
+
+    func testReleaseReportsCopyCleanupFailureAfterReleasingTheSource() throws {
+        let custody = PortableSourceCustody()
+        let token = try select(custody, owner: "owner")
+        try custody.confirm(token: token, format: "local-backup")
+        _ = try custody.materialize(token: token, staging: root)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: root.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path) }
+        XCTAssertFalse(custody.release(token: token, jobId: nil))
+        XCTAssertThrowsError(try custody.descriptor(token: token, jobId: nil))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("synthetic.risunest").path))
     }
 
     func testCopyProgressThrottlesLargeByteCountsAndAlwaysSendsCompletion() {

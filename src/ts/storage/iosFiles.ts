@@ -1,7 +1,7 @@
 import { withLibraryFileSelection } from './libraryFileOperation'
 import { Channel, invoke } from '@tauri-apps/api/core'
 import { join } from '@tauri-apps/api/path'
-import { iosStagingPath } from './nativePaths'
+import { iosStagingPath, nativeRoots } from './nativePaths'
 import { mkdir, remove, writeFile } from '@tauri-apps/plugin-fs'
 import { isTauriIOS } from '../platform'
 import { backupSourceCopyFailure } from './backupSourceCopyFailure'
@@ -69,7 +69,7 @@ export async function materializeIOSBackupSource(
     token: string,
     options: { signal?: AbortSignal; onProgress?(progress: IOSBackupCopyProgress): void } = {},
 ): Promise<IOSPickedFile> {
-    if (options.signal?.aborted) throw cancelled()
+    await ensureDataRoot(options.signal)
     let copiedBytes = 0
     const onProgress = options.onProgress ? new Channel<IOSBackupCopyProgress>(progress => {
         if (options.signal?.aborted || !progress || !Number.isSafeInteger(progress.copiedBytes)
@@ -106,12 +106,18 @@ export async function materializeIOSBackupSource(
 }
 const cancelled = () =>
     new DOMException('File operation cancelled', 'AbortError')
+/** The native side rejects staged-file work until it holds the data root, which it receives on first use. */
+async function ensureDataRoot(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw cancelled()
+    await nativeRoots()
+    if (signal?.aborted) throw cancelled()
+}
 
 export async function pickIOSFile(
     signal?: AbortSignal,
 ): Promise<IOSPickedFile | null> {
     return withLibraryFileSelection(async () => {
-        if (signal?.aborted) throw cancelled()
+        await ensureDataRoot(signal)
         const result = await invoke<IOSPickedFile & { cancelled: boolean }>(
             'plugin:ios-native|pick_file',
         )
@@ -134,7 +140,7 @@ export async function exportIOSFile(request: {
     requestId?: string
 }): Promise<{ bytes: number; warningCodes?: string[] }> {
     return withLibraryFileSelection(async () => {
-        if (request.signal?.aborted) throw cancelled()
+        await ensureDataRoot(request.signal)
         const requestId = request.requestId ?? crypto.randomUUID()
         const result = await invoke<{ cancelled: boolean; bytes: number }>(
             'plugin:ios-native|export_file',
@@ -154,12 +160,15 @@ export async function exportIOSFile(request: {
     })
 }
 
-export const acknowledgeIOSPublication = (id: string) =>
-    invoke<void>('plugin:ios-native|acknowledge_publication', { id })
+export async function acknowledgeIOSPublication(id: string): Promise<void> {
+    await ensureDataRoot()
+    await invoke<void>('plugin:ios-native|acknowledge_publication', { id })
+}
 
 export async function getIOSPublication(
     requestId: string,
 ): Promise<{ bytes: number } | null> {
+    await ensureDataRoot()
     const result = await invoke<{ state: string; bytes?: number }>(
         'plugin:ios-native|publication',
         { id: requestId },

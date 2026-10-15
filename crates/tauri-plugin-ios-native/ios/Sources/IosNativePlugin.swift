@@ -510,7 +510,8 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
         let args = try invoke.parseArgs(PortableSourceArgs.self)
         // Signal a running copy before queueing the descriptor and scope cleanup.
         _ = portableSources.cancelCopy(token: args.token, jobId: args.jobId)
-        fileQueue.async { invoke.resolve(self.portableSources.release(token: args.token, jobId: args.jobId)) }
+        if args.jobId == nil { invoke.resolve(portableSources.release(token: args.token, jobId: nil)) }
+        else { fileQueue.async { invoke.resolve(self.portableSources.release(token: args.token, jobId: args.jobId)) } }
     }
 
     @objc func portableSourceOrphans(_ invoke: Invoke) {
@@ -533,7 +534,7 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
     @objc func discardBackupSource(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(PortableSourceArgs.self)
         _ = portableSources.cancelCopy(token: args.token, jobId: nil)
-        fileQueue.async { invoke.resolve(self.portableSources.release(token: args.token, jobId: nil)) }
+        invoke.resolve(portableSources.release(token: args.token, jobId: nil))
     }
 
     @objc func confirmPortableSourceFormat(_ invoke: Invoke) throws {

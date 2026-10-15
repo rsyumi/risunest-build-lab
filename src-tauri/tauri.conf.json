@@ -83,7 +83,7 @@
   },
   "productName": "RisuNest",
   "mainBinaryName": "RisuNest",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "identifier": "io.github.rsyumi.risunest",
   "plugins": {
     "updater": {

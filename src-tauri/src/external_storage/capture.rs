@@ -204,6 +204,61 @@ impl BackupDependencySpool {
         self.sealed = true;
         Ok(())
     }
+    pub(crate) fn push_ranged_control(&mut self, hash: &str, input: &mut (impl std::io::Read + std::io::Seek), length: u64) -> Result<bool> {
+        use crate::persistent_store::external_capture::verified_string_control;
+        if self.sealed { return Err(invalid("Backup spool was already sealed")); }
+        if !verified_string_control(input, hash, length, "native_backup_spool_write")? { return Ok(false); }
+        let length = i64::try_from(length).map_err(|_| invalid("Backup control length is invalid"))?;
+        let existing: Option<(i64, i64)> = self.db.query_row("SELECT rowid,role FROM bodies WHERE hash=?1", [hash], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+        if let Some((rowid, role)) = existing {
+            let mut stored = self.db.blob_open(rusqlite::MAIN_DB, "bodies", "body", rowid, true)?;
+            if role != 3 || stored.len() as i64 != length || hex::encode(hash_reader(&mut stored, length as u64).map_err(|_| invalid("Backup spool body is unreadable"))?) != hash {
+                return Err(invalid("Backup spool body identity or role differs"));
+            }
+            return Ok(true);
+        }
+        self.db.execute("INSERT INTO bodies(hash,body,role) VALUES(?1,zeroblob(?2),3)", params![hash, length])?;
+        let (rowid, role): (i64, i64) = self.db.query_row("SELECT rowid,role FROM bodies WHERE hash=?1", [hash], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        if role != 3 { return Err(invalid("Backup spool body role differs")); }
+        let mut output = self.db.blob_open(rusqlite::MAIN_DB, "bodies", "body", rowid, false)?;
+        if output.len() as i64 != length || io::copy(input, &mut output)? != length as u64 { return Err(invalid("Backup spool body length differs")); }
+        output.close()?;
+        let mut stored = self.db.blob_open(rusqlite::MAIN_DB, "bodies", "body", rowid, true)?;
+        if hex::encode(hash_reader(&mut stored, length as u64).map_err(|_| invalid("Backup spool body is unreadable"))?) != hash { return Err(invalid("Backup spool body identity differs")); }
+        Ok(true)
+    }
+
+    pub(crate) fn control_reader(&self, hash: &str) -> Result<Option<rusqlite::blob::Blob<'_>>> {
+        if !self.sealed { return Err(invalid("Backup dependency spool is not sealed")); }
+        let row: Option<i64> = self.db.query_row("SELECT rowid FROM bodies WHERE hash=?1 AND role IN(1,3)", [hash], |row| row.get(0)).optional()?;
+        row.map(|row| self.db.blob_open(rusqlite::MAIN_DB, "bodies", "body", row, true).map_err(Into::into)).transpose()
+    }
+
+    pub(crate) fn visit_ranged(&self, visitor: &mut dyn FnMut(&str, &mut rusqlite::blob::Blob<'_>, u64, crate::persistent_store::external_capture::BackupBodyRole) -> Result<()>) -> Result<()> {
+        use std::io::{Read, Seek, SeekFrom};
+        if !self.sealed { return Err(invalid("Backup dependency spool is not sealed")); }
+        let mut statement = self.db.prepare("SELECT hash,rowid,role FROM bodies ORDER BY hash")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let hash: String = row.get(0)?; let stored_role: i64 = row.get(2)?;
+            let mut input = self.db.blob_open(rusqlite::MAIN_DB, "bodies", "body", row.get(1)?, true)?;
+            let length = input.len() as u64;
+            let role = match stored_role {
+                1 | 3 => crate::persistent_store::external_capture::BackupBodyRole::Control,
+                2 => crate::persistent_store::external_capture::BackupBodyRole::Payload,
+                _ => return Err(invalid("Backup dependency role is invalid")),
+            };
+            if stored_role != 3 && length > risunest_sync_wire::MAX_METADATA_BYTES as u64 { return Err(invalid("Backup dependency spool body exceeds its bound")); }
+            if !crate::persistent_store::external_capture::verified_string_control(&mut input, &hash, length, "native_backup_spool_read")? {
+                let mut bytes = Vec::new(); input.read_to_end(&mut bytes)?;
+                if crate::persistent_store::external_capture::hash_backup_body(&bytes, "native_backup_spool_read") != hash { return Err(invalid("Backup dependency spool integrity failed")); }
+                if stored_role == 3 { crate::persistent_store::external_capture::verified_oversized_control(&bytes)?; }
+            }
+            input.seek(SeekFrom::Start(0))?;
+            visitor(&hash, &mut input, length, role)?;
+        }
+        Ok(())
+    }
     pub(crate) fn count(&self) -> Result<u64> {
         let count: i64 = self.db.query_row("SELECT COUNT(*) FROM bodies", [], |row| row.get(0))?;
         u64::try_from(count).map_err(|_| invalid("Backup dependency spool count is invalid"))
@@ -295,6 +350,13 @@ impl CaptureCatalog {
     /// same store would not see it yet.
     pub(crate) fn content(&self) -> &ContentStore {
         &self.content
+    }
+
+    pub(crate) fn object_reader(&mut self, hash: &str, input: impl std::io::Read, length: u64) -> Result<()> {
+        self.require_writing()?;
+        self.content.put_reader(hash, input, length)?;
+        self.db.execute("INSERT OR IGNORE INTO generated VALUES(?1,?2)", params![hash, length as i64])?;
+        Ok(())
     }
 
     fn require_writing(&self) -> Result<()> {

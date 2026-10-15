@@ -174,7 +174,7 @@ where
         .checked_add(2)
         .ok_or_else(|| invalid_input("character CharX entry count overflowed"))?;
     if entry_count > limits.max_entries {
-        return Err(invalid_input(format!(
+        return Err(NativeJobError::too_large("card", format!(
             "character CharX has {entry_count} entries, limit is {}",
             limits.max_entries
         )));
@@ -476,7 +476,7 @@ fn create_appended_jpeg_source(
             let size = u64::try_from(alias.size)
                 .map_err(|_| invalid_input("pinned character portrait size is invalid"))?;
             if size > limits.max_entry_decoded_bytes {
-                return Err(invalid_input(format!(
+                return Err(NativeJobError::too_large("card", format!(
                     "character JPEG portrait exceeds the per-entry decoded limit of {} bytes",
                     limits.max_entry_decoded_bytes
                 )));
@@ -534,9 +534,7 @@ fn bounded_jpeg_portrait(
     job: &JobControl,
 ) -> Result<Vec<u8>, NativeJobError> {
     if bytes.len() as u64 > maximum_bytes {
-        return Err(invalid_input(
-            "character JPEG portrait exceeds the per-entry decoded limit",
-        ));
+        return Err(NativeJobError::too_large("card", "character JPEG portrait exceeds the per-entry decoded limit"));
     }
     let mut image_reader = image::ImageReader::new(BufReader::new(Cursor::new(bytes)))
         .with_guessed_format()
@@ -551,16 +549,15 @@ fn bounded_jpeg_portrait(
     image_reader.limits(image_limits);
     let decoder = image_reader
         .into_decoder()
-        .map_err(|error| invalid_input(format!("character portrait is invalid: {error}")))?;
+        .map_err(portrait_decode_error)?;
     let (width, height) = image::ImageDecoder::dimensions(&decoder);
     let pixels = u64::from(width).saturating_mul(u64::from(height));
-    if width == 0 || height == 0 || pixels > MAX_JPEG_PORTRAIT_PIXELS {
-        return Err(invalid_input(
-            "character portrait dimensions exceed their limit",
-        ));
+    if width == 0 || height == 0 { return Err(invalid_input("character portrait dimensions are invalid")); }
+    if pixels > MAX_JPEG_PORTRAIT_PIXELS {
+        return Err(NativeJobError::too_large("card", "character portrait dimensions exceed their limit"));
     }
     let decoded = image::DynamicImage::from_decoder(decoder)
-        .map_err(|error| invalid_input(format!("character portrait is invalid: {error}")))?;
+        .map_err(portrait_decode_error)?;
     if job.is_cancel_requested() {
         return Err(cancelled(
             "appended CharX JPEG export cancelled while encoding the portrait",
@@ -577,11 +574,17 @@ fn bounded_jpeg_portrait(
         .encode_image(&decoded)
         .map_err(|error| invalid_input(format!("character portrait cannot be encoded: {error}")))?;
     if jpeg.len() as u64 > maximum_bytes {
-        return Err(invalid_input(
-            "encoded character JPEG portrait exceeds its byte limit",
-        ));
+        return Err(NativeJobError::too_large("card", "encoded character JPEG portrait exceeds its byte limit"));
     }
     Ok(jpeg)
+}
+
+fn portrait_decode_error(error: image::ImageError) -> NativeJobError {
+    if matches!(error, image::ImageError::Limits(_)) {
+        NativeJobError::too_large("card", "character portrait exceeds the JPEG decode limit")
+    } else {
+        invalid_input(format!("character portrait is invalid: {error}"))
+    }
 }
 
 fn copy_cancellable(
@@ -822,7 +825,7 @@ fn reserve_decoded_entry(
     limits: CharXLimits,
 ) -> Result<(), NativeJobError> {
     if entry_bytes > limits.max_entry_decoded_bytes {
-        return Err(invalid_input(format!(
+        return Err(NativeJobError::too_large("card", format!(
             "{description} exceeds the CharX per-entry limit"
         )));
     }
@@ -830,9 +833,7 @@ fn reserve_decoded_entry(
         .checked_add(entry_bytes)
         .ok_or_else(|| invalid_input("character CharX decoded size overflowed"))?;
     if next > limits.max_total_decoded_bytes {
-        return Err(invalid_input(
-            "character CharX exceeds the aggregate decoded size limit",
-        ));
+        return Err(NativeJobError::too_large("card", "character CharX exceeds the aggregate decoded size limit"));
     }
     *total = next;
     Ok(())
@@ -930,15 +931,13 @@ fn write_module_overlay(
         .map(|byte| RPACK_MAP[byte as usize])
         .collect();
     let encoded_len = u32::try_from(encoded.len())
-        .map_err(|_| invalid_input("module overlay exceeds RISUM V0 size"))?;
+        .map_err(|_| NativeJobError::too_large("card", "module overlay exceeds RISUM V0 size"))?;
     let entry_bytes = u64::try_from(encoded.len())
         .ok()
         .and_then(|bytes| bytes.checked_add(7))
         .ok_or_else(|| invalid_input("module overlay size overflowed"))?;
     if entry_bytes > limits.max_metadata_bytes {
-        return Err(invalid_input(
-            "module overlay exceeds the configured metadata limit",
-        ));
+        return Err(NativeJobError::too_large("card", "module overlay exceeds the configured metadata limit"));
     }
     reserve_decoded_entry(
         decoded_bytes,
@@ -978,9 +977,7 @@ fn write_card_metadata(
     let metadata = serde_json::to_vec_pretty(card)
         .map_err(|error| invalid_input(format!("CCv3 metadata is invalid: {error}")))?;
     if metadata.len() as u64 > limits.max_metadata_bytes {
-        return Err(invalid_input(
-            "CCv3 metadata exceeds the configured metadata limit",
-        ));
+        return Err(NativeJobError::too_large("card", "CCv3 metadata exceeds the configured metadata limit"));
     }
     reserve_decoded_entry(
         decoded_bytes,
@@ -1692,7 +1689,7 @@ mod tests {
             )
             .unwrap_err();
 
-            assert_eq!(error.code, "invalid-input");
+            assert_eq!(error.code, "payload-too-large");
             assert!(
                 error.message.contains(expected_message),
                 "{}",
@@ -1700,6 +1697,14 @@ mod tests {
             );
             assert_eq!(fs::read(destination).unwrap(), b"previous CharX");
         }
+        let mut portrait = Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(64, 64).write_to(&mut portrait, image::ImageFormat::Png).unwrap();
+        let portrait = portrait.into_inner();
+        let job = JobRegistry::default().create(JobKind::ExportCharacterCharx).unwrap();
+        let error = bounded_jpeg_portrait(&portrait, portrait.len() as u64 + 1, &job).unwrap_err();
+        assert_eq!(error.code, "payload-too-large");
+        assert_eq!(error.item_kind.as_deref(), Some("card"));
+        assert_eq!(bounded_jpeg_portrait(b"invalid", 1024, &job).unwrap_err().code, "invalid-input");
     }
 
     #[test]

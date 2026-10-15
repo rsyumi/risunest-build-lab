@@ -12,6 +12,7 @@ function harness() {
     const exportFile = vi.fn(async (): Promise<{ cancelled: boolean; bytes: number }> => ({ cancelled: false, bytes }))
     bridge.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
         switch (command) {
+            case 'app_paths_roots': return { data: '/synthetic/RisuNest' }
             case 'native_file_job_screenshot_output_start': return { jobId: 'screenshot-1' }
             case 'native_file_job_screenshot_output_append': {
                 bytes += (args!.chunk as number[]).length

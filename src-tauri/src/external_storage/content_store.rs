@@ -383,6 +383,32 @@ impl ContentStore {
     /// The shared immutable file path, kept for bodies above the threshold.
     fn write_file(&self, expected: &str, bytes: &[u8]) -> Result<()> {
         use std::io::Write as _;
+        self.write_file_with(expected, bytes.len() as u64, |file| Ok(file.write_all(bytes)?))
+    }
+
+    pub(crate) fn put_reader(&mut self, expected: &str, mut input: impl std::io::Read, length: u64) -> Result<()> {
+        use sha2::{Digest, Sha256};
+        use std::io::{Read, Write};
+        if length <= SMALL_OBJECT_BYTES as u64 {
+            let mut bytes = Vec::new(); input.take(length + 1).read_to_end(&mut bytes)?;
+            if bytes.len() as u64 != length { return Err(invalid("Capture object length differs")); }
+            return self.put(expected, &bytes);
+        }
+        self.write_file_with(expected, length, |file| {
+            let mut buffer = [0; 64 * 1024]; let mut digest = Sha256::new(); let mut copied = 0u64;
+            loop {
+                let count = input.read(&mut buffer)?; if count == 0 { break; }
+                copied += count as u64;
+                if copied > length { return Err(invalid("Capture object length differs")); }
+                file.write_all(&buffer[..count])?; digest.update(&buffer[..count]);
+            }
+            #[cfg(test)] crate::persistent_store::hash_work::observe("external_content_put_verify", copied as usize);
+            if copied != length || hex::encode(digest.finalize()) != expected { return Err(invalid("Capture object identity differs")); }
+            Ok(())
+        })
+    }
+
+    fn write_file_with(&self, expected: &str, length: u64, write: impl FnOnce(&mut File) -> Result<()>) -> Result<()> {
         let path = self.objects.join(expected);
         let staging_path = self
             .objects
@@ -392,7 +418,7 @@ impl ContentStore {
             .create_new(true)
             .open(&staging_path)?;
         let mut staging = super::capture::OwnedCaptureFile::new(staging_path.clone(), &self.objects);
-        staging_file.write_all(bytes)?;
+        write(&mut staging_file)?;
         staging_file.sync_all()?;
         drop(staging_file);
         let _ = sync_directory(&self.objects)?;
@@ -409,7 +435,7 @@ impl ContentStore {
                     return Err(invalid("Capture object must not be a link"));
                 }
                 let mut file = File::open(&path)?;
-                let actual = hash_reader(&mut file, bytes.len() as u64)
+                let actual = hash_reader(&mut file, length)
                     .map_err(|_| invalid("Existing capture object differs"))?;
                 if hex::encode(actual) != expected {
                     return Err(invalid("Existing capture object differs"));

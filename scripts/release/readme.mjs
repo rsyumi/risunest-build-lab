@@ -1,11 +1,23 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { CATALOG_LIMIT, REPOSITORY, validateCatalog } from "./contracts.mjs";
+import { CATALOG_LIMIT, REPOSITORY, compareVersions, validateCatalog } from "./contracts.mjs";
 import { GitHubReleases } from "./github.mjs";
 import { renderDownloadTable } from "./download-table.mjs";
 import { verifiedJson } from "./publication.mjs";
 
-const files = [["README.md", "en"], ["README.ko.md", "ko"]];
+const files = [
+  ["README.md", (contents, catalog) => renderReadme(contents, catalog, "en")],
+  ["README.ko.md", (contents, catalog) => renderReadme(contents, catalog, "ko")],
+  ["alt-source.json", renderAltSource],
+];
+const iosFiles = {
+  plist: "src-tauri/gen/apple/risunest_iOS/Info.plist",
+  entitlements: "src-tauri/gen/apple/risunest_iOS/risunest_iOS.entitlements",
+  project: "src-tauri/gen/apple/project.yml",
+};
+const xmlEntities = { amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'" };
+const xmlText = value => value.replace(/&(amp|lt|gt|quot|apos);/g, (_, name) => xmlEntities[name]);
+
 function downloadSection(release, locale) {
   const { product, version, releasePage } = release;
   const link = `[RisuNest${product === "sync" ? " Sync" : ""} v${version}](${releasePage})`;
@@ -39,6 +51,46 @@ export function renderReadme(contents, catalog, locale) {
   return contents;
 }
 
+export function parseIosConfiguration({ plist, entitlements, project }) {
+  const privacy = Object.fromEntries([...plist.matchAll(/<key>([^<]*UsageDescription)<\/key>\s*<string>([^<]*)<\/string>/g)]
+    .map(([, key, description]) => [key, xmlText(description)]));
+  const minOSVersion = /deploymentTarget:\s*\n\s*iOS: "?(\d+(?:\.\d+){1,2})"?\s*$/m.exec(project)?.[1];
+  if (!minOSVersion) throw new Error("alt-source-min-os-missing");
+  return { entitlements: [...entitlements.matchAll(/<key>([^<]+)<\/key>/g)].map(([, key]) => xmlText(key)),
+    privacy, minOSVersion };
+}
+
+export async function loadIosConfiguration(github, ref) {
+  const entries = await Promise.all(Object.entries(iosFiles).map(async ([name, path]) => {
+    const file = await github.request(`/contents/${path}?ref=${ref}`);
+    if (file?.type !== "file" || file.encoding !== "base64") throw new Error(`alt-source-file-unreadable:${path}`);
+    return [name, new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(file.content, "base64"))];
+  }));
+  return parseIosConfiguration(Object.fromEntries(entries));
+}
+
+export function renderAltSource(contents, catalog, ios) {
+  validateCatalog(catalog);
+  const release = catalog.products.app?.release;
+  if (!release) throw new Error("readme-product-unpublished:app");
+  const notes = release.localizedNotes.en;
+  if (!notes) throw new Error("alt-source-english-notes-missing");
+  const source = JSON.parse(contents);
+  const app = source.apps.find(item => item.bundleIdentifier === "io.github.rsyumi.risunest");
+  if (!app) throw new Error("alt-source-app-missing");
+  const download = release.downloads.find(item => item.os === "ios" && item.format === "ipa");
+  const version = { version: release.version, buildVersion: release.version,
+    date: release.pub_date.replace(/\.\d{3}Z$/, "Z"), localizedDescription: notes,
+    downloadURL: download.url, size: download.size, sha256: download.sha256, minOSVersion: ios.minOSVersion };
+  app.versions = [version, ...app.versions.filter(item => item.version !== version.version)]
+    .sort((left, right) => compareVersions(right.version, left.version));
+  const latest = app.versions[0];
+  if (latest === version) app.appPermissions = { entitlements: ios.entitlements, privacy: ios.privacy };
+  Object.assign(app, { version: latest.version, versionDate: latest.date,
+    versionDescription: latest.localizedDescription, downloadURL: latest.downloadURL, size: latest.size });
+  return JSON.stringify(source, null, 2) + "\n";
+}
+
 export async function loadReadmeCatalog(github, publicKey) {
   const latest = await github.getLatest();
   if (!latest || latest.draft !== false || latest.prerelease !== false) throw new Error("readme-stable-release-missing");
@@ -69,19 +121,20 @@ export async function loadReadmeCatalog(github, publicKey) {
 export async function updateReadmeDownloads({ github, publicKey }) {
   for (let attempt = 0; attempt < 3; attempt++) {
     const catalog = await loadReadmeCatalog(github, publicKey);
+    const ios = await loadIosConfiguration(github, catalog.products.app.release.sourceCommit);
     const head = await github.request("/git/ref/heads/main");
     const parent = head.object.sha;
     const commit = await github.request(`/git/commits/${parent}`);
     const tree = await github.request(`/git/trees/${commit.tree.sha}`);
     if (tree.truncated) throw new Error("readme-tree-truncated");
     const changes = [];
-    for (const [path, locale] of files) {
+    for (const [path, render] of files) {
       const entry = tree.tree.find(item => item.path === path);
       if (!entry || entry.type !== "blob" || entry.mode !== "100644") throw new Error(`readme-file-missing:${path}`);
       const blob = await github.request(`/git/blobs/${entry.sha}`);
       if (blob.encoding !== "base64") throw new Error("readme-blob-encoding");
       const contents = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(blob.content, "base64"));
-      const content = renderReadme(contents, catalog, locale);
+      const content = render(contents, catalog, ios);
       if (content !== contents) changes.push({ path, mode: entry.mode, type: "blob", content });
     }
     if (!changes.length) return { status: "unchanged", commit: parent };
@@ -89,7 +142,7 @@ export async function updateReadmeDownloads({ github, publicKey }) {
       method: "POST", body: { base_tree: commit.tree.sha, tree: changes },
     });
     const updatedCommit = await github.request("/git/commits", {
-      method: "POST", body: { message: "docs: update README download links for published releases",
+      method: "POST", body: { message: "docs: update README downloads and iOS source for published releases",
         tree: updatedTree.sha, parents: [parent] },
     });
     try {

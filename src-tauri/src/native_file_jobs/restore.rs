@@ -2,6 +2,7 @@
 mod upstream_import;
 #[path = "pocket_features.rs"]
 pub(super) mod pocket_features;
+mod historical;
 use super::{
     ImportCounts, JobControl, JobDetail, JobPhase, JobProgress, JobResultSummary, JobStage,
     NativeJobError, OpenedJobSource, StageUnit,
@@ -29,11 +30,13 @@ const CHARACTER_BATCH_COUNT: usize = 16;
 const CHARACTER_BATCH_BYTES: usize = 8 * 1024 * 1024;
 const MESSAGE_PAGE_COUNT: usize = 128;
 const MESSAGE_PAGE_BYTES: u64 = 8 * 1024 * 1024;
+pub(super) const RESTORE_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 pub(crate) struct RestoreLimits {
     pub(crate) max_encoded_block_bytes: u64,
     pub(crate) max_decoded_block_bytes: u64,
+    pub(crate) max_record_bytes: u64,
 }
 
 impl Default for RestoreLimits {
@@ -41,11 +44,14 @@ impl Default for RestoreLimits {
         Self {
             max_encoded_block_bytes: u32::MAX as u64,
             max_decoded_block_bytes: 1024 * 1024 * 1024,
+            max_record_bytes: RESTORE_RECORD_BYTES,
         }
     }
 }
 
 pub(crate) trait ReplacementSink: Send + Sync {
+    fn prepare_activation_receipt(&self, _staging_id: &str, _job: &JobControl, _result: &JobResultSummary) -> StoreResult<Option<String>> { Ok(None) }
+    fn activation_receipt(&self, _staging_id: &str, _authority: &str) -> StoreResult<Option<i64>> { Ok(None) }
     fn begin(&self) -> StoreResult<StagingResult>;
     fn put_root(&self, staging_id: &str, root: &Value) -> StoreResult<()>;
     fn put_presets(&self, staging_id: &str, presets: &[Value]) -> StoreResult<()>;
@@ -131,9 +137,13 @@ pub(crate) trait RestoreControl {
     fn set_phase(&self, phase: JobPhase) -> Result<(), String>;
     fn set_progress(&self, progress: JobProgress) -> Result<(), String>;
     fn set_detail(&self, detail: JobDetail) -> Result<(), String>;
+    fn record_restore_omission(&self, kind: &str, count: u64) -> Result<(), String>;
 }
 
 impl RestoreControl for JobControl {
+    fn record_restore_omission(&self, kind: &str, count: u64) -> Result<(), String> {
+        JobControl::record_restore_omission(self, kind, count)
+    }
     fn is_cancel_requested(&self) -> bool {
         JobControl::is_cancel_requested(self)
     }
@@ -157,6 +167,7 @@ impl RestoreControl for JobControl {
 /// so it offsets the database bytes and keeps the archive's entry count.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RestoreProgressScale {
+    pub(crate) result_source: Option<(u64, String)>,
     pub(crate) spool_directory: Option<PathBuf>,
     pub(crate) reject_cold_references: bool,
     /// Bytes already counted before the database read started.
@@ -326,7 +337,7 @@ fn restore_risu_save_reader<R: Read>(
 }
 
 fn restore_risu_save_reader_controlled<R: Read>(
-    source: R,
+    mut source: R,
     total_bytes: u64,
     expected_revision: i64,
     job: &JobControl,
@@ -347,8 +358,12 @@ fn restore_risu_save_reader_controlled<R: Read>(
     }
     let spool_directory = scale.spool_directory.clone();
     let reject_cold_references = scale.reject_cold_references;
-    let mut reader = TrackedReader::new_with_scale(source, total_bytes, job, scale);
-    let format = read_risu_save_format(&mut reader)?;
+    let mut prefix = [0; 2];
+    source.read_exact(&mut prefix).map_err(|_| invalid_source("could not read database header"))?;
+    let unframed = if is_zlib_header(&prefix) { Some(RisuSaveFormat::HistoricalCompressed) }
+        else { None };
+    let mut reader = TrackedReader::new_with_scale(io::Cursor::new(prefix).chain(source), total_bytes, job, scale);
+    let format = match unframed { Some(format) => format, None => read_risu_save_format(&mut reader)? };
 
     let staging_id = sink.begin().map_err(store_error)?.staging_id;
     let outcome = (|| {
@@ -364,6 +379,9 @@ fn restore_risu_save_reader_controlled<R: Read>(
                 parse_and_stage_compressed_legacy(&mut reader, &staging_id, job, sink, limits)?
             }
             RisuSaveFormat::LegacyStream => {
+                parse_and_stage_compressed_legacy(&mut reader, &staging_id, job, sink, limits)?
+            }
+            RisuSaveFormat::HistoricalCompressed => {
                 parse_and_stage_compressed_legacy(&mut reader, &staging_id, job, sink, limits)?
             }
         };
@@ -391,8 +409,9 @@ fn restore_risu_save_reader_controlled<R: Read>(
         job.set_plugin_value_preview(&staging_id, preview)
             .map_err(|error| job_error(job, error))?;
         let incomplete = sink.incomplete_restore_preview().map_err(store_error)?;
-        let warning_codes = incomplete.warning_codes();
         job.set_incomplete_restore_preview(incomplete).map_err(|error| job_error(job, error))?;
+        let warning_codes = job.status()
+            .incomplete_restore_preview.map(|preview| preview.warning_codes()).unwrap_or_default();
         let activation_revision = job
             .wait_for_restore_finalization()
             .map_err(|error| job_error(job, error))?
@@ -401,25 +420,42 @@ fn restore_risu_save_reader_controlled<R: Read>(
             sink.preserve_active_repositories(&staging_id, activation_revision)
                 .map_err(store_error)?;
         }
-        let revision = sink
-            .commit(&staging_id, activation_revision)
-            .map_err(store_error)?
-            .revision;
-        Ok(JobResultSummary {
+        let mut result = JobResultSummary {
             export_exclusions: None,
-            revision,
-            source_bytes: reader.completed,
-            source_sha256: hex::encode(reader.hasher.finalize()),
+            revision: 0,
+            source_bytes: reader.scale.result_source.as_ref().map_or(reader.completed, |source| source.0),
+            source_sha256: reader.scale.result_source.as_ref().map(|source| source.1.clone()).unwrap_or_else(|| hex::encode(reader.hasher.clone().finalize())),
             source_fingerprint_kind: crate::native_file_jobs::SourceFingerprintKind::WholeFileSha256,
             character_count: parsed.character_count,
             preset_count: parsed.preset_count,
             warning_codes,
             handoff_path: None,
             publication: None,
-        })
+        };
+        let authority = sink.prepare_activation_receipt(&staging_id, job, &result).map_err(store_error)?;
+        result.revision = match sink.commit(&staging_id, activation_revision) {
+            Ok(committed) => committed.revision,
+            Err(error) => {
+                if let Some(authority) = authority.as_deref() {
+                    match sink.activation_receipt(&staging_id, authority) {
+                        Ok(Some(revision)) => {
+                            result.warning_codes.push("cleanup-failed".to_owned());
+                            revision
+                        },
+                        Ok(None) => return Err(store_error(error)),
+                        Err(_) => return Err(NativeJobError::new("activation-outcome-unresolved", "Backup activation requires recovery")),
+                    }
+                } else { return Err(store_error(error)); }
+            }
+        };
+        if let Some(authority) = authority {
+            job.publish_file_activation(&result, authority).map_err(|error| job_error(job, error))?;
+        }
+        Ok(result)
     })();
     match outcome {
         Ok(result) => Ok(result),
+        Err(error) if error.code == "activation-outcome-unresolved" => Err(error),
         Err(error) => match sink.abort(&staging_id) {
             Ok(()) => Err(error),
             Err(StoreError::Validation { message })
@@ -439,6 +475,12 @@ enum RisuSaveFormat {
     LegacyCompressed,
     LegacyStream,
     HistoricalPrefixed,
+    HistoricalCompressed,
+}
+
+pub(super) fn is_zlib_header(bytes: &[u8]) -> bool {
+    bytes.len() >= 2 && bytes[0] & 15 == 8 && bytes[0] >> 4 <= 7
+        && u16::from_be_bytes([bytes[0], bytes[1]]) % 31 == 0
 }
 
 fn read_risu_save_format<R: Read>(
@@ -500,7 +542,7 @@ fn parse_and_stage_legacy<R: Read>(
 ) -> Result<ParsedCounts, NativeJobError> {
     let remaining = reader.total.saturating_sub(reader.completed);
     if remaining > limits.max_decoded_block_bytes {
-        return Err(invalid("decoded legacy RisuSave limit exceeded"));
+        return Err(limit_error("decoded legacy RisuSave limit exceeded"));
     }
     reader.set_stage(JobStage::DecodingDatabase)?;
     let spool_directory=reader.scale.spool_directory.clone();
@@ -526,13 +568,20 @@ fn parse_and_stage_compressed_legacy<R: Read>(
 ) -> Result<ParsedCounts, NativeJobError> {
     let remaining = reader.total.saturating_sub(reader.completed);
     if remaining > limits.max_encoded_block_bytes {
-        return Err(invalid("encoded legacy RisuSave limit exceeded"));
+        return Err(limit_error("encoded legacy RisuSave limit exceeded"));
     }
     reader.set_stage(JobStage::DecodingDatabase)?;
     let spool_directory=reader.scale.spool_directory.clone();
     let source = RemainingSourceReader { reader, remaining };
-    let buffered = BufReader::with_capacity(READ_CHUNK_BYTES, source);
-    let decoder = GzDecoder::new(buffered);
+    let mut buffered = BufReader::with_capacity(READ_CHUNK_BYTES, source);
+    let prefix = buffered.fill_buf().map_err(|error| messagepack_io_error(error, job))?;
+    let decoder = if prefix.starts_with(&[0x1f, 0x8b]) {
+        historical::CompressionReader::Gzip(GzDecoder::new(buffered))
+    } else if is_zlib_header(prefix) {
+        historical::CompressionReader::Zlib(flate2::bufread::ZlibDecoder::new(buffered))
+    } else {
+        historical::CompressionReader::Deflate(flate2::bufread::DeflateDecoder::new(buffered))
+    };
     let decoded = DecodedLimitReader::new(
         decoder,
         limits.max_decoded_block_bytes,
@@ -540,7 +589,12 @@ fn parse_and_stage_compressed_legacy<R: Read>(
         "legacy RisuSave",
     );
     let mut input = BufReader::with_capacity(READ_CHUNK_BYTES, decoded);
-    let database = stream_legacy_database(&mut input, staging_id, job, sink, spool_directory.as_deref())?;
+    let prefix = input.fill_buf().map_err(|error| messagepack_error(rmpv::decode::Error::InvalidMarkerRead(error), job))?;
+    let database = if prefix.first() == Some(&b'{') {
+        historical::json_database(&mut input, staging_id, job, sink, spool_directory.as_deref())?
+    } else {
+        stream_legacy_database(&mut input, staging_id, job, sink, spool_directory.as_deref())?
+    };
     let compressed = input.get_ref().inner.get_ref();
     if !compressed.buffer().is_empty() || compressed.get_ref().remaining != 0 {
         return Err(corrupt("trailing data in legacy RisuSave gzip stream"));
@@ -640,7 +694,7 @@ fn stream_legacy_root_entry<S: TrackedSource>(
             } else { index.to_string() };
             let packed = rmpv::decode::read_value_with_max_depth(input,LEGACY_ROOT_ENTRY_DEPTH-2)
                 .map_err(|error|messagepack_error(error,job))?;
-            let value = match messagepack_to_json(packed)? {
+            let value = match messagepack_to_json(packed, job)? {
                 JsonSlot::Value(value) => Some(value),
                 JsonSlot::Undefined if kind == FieldKind::Array => Some(Value::Null),
                 JsonSlot::Undefined => None,
@@ -651,7 +705,7 @@ fn stream_legacy_root_entry<S: TrackedSource>(
         let prefix = [marker.to_u8()];
         let packed = rmpv::decode::read_value_with_max_depth(&mut prefix.as_slice().chain(&mut *input),LEGACY_ROOT_ENTRY_DEPTH)
             .map_err(|error|messagepack_error(error,job))?;
-        let value = match messagepack_to_json(packed)? { JsonSlot::Value(value)=>Some(value), JsonSlot::Undefined=>None };
+        let value = match messagepack_to_json(packed, job)? { JsonSlot::Value(value)=>Some(value), JsonSlot::Undefined=>None };
         root.put(key,value.as_ref()).map_err(|error|legacy_staging_error(job,error))?;
     }
     Ok(())
@@ -684,6 +738,7 @@ fn stream_legacy_characters<S: TrackedSource>(
     let mut retained = 0;
     let mut batch = Vec::new();
     let mut batch_bytes = 0u64;
+    let mut character_ids = HashSet::new();
     for index in 0..total {
         if job.is_cancel_requested() {
             return Err(cancelled("restore cancelled while staging legacy database"));
@@ -692,17 +747,18 @@ fn stream_legacy_characters<S: TrackedSource>(
         let packed = rmpv::decode::read_value_with_max_depth(input, LEGACY_CHARACTER_DEPTH)
             .map_err(|error| messagepack_error(error, job))?;
         let bytes = decoded_position(input) - start;
-        let mut character = match messagepack_to_json(packed)? {
+        let mut character = match messagepack_to_json(packed, job)? {
             JsonSlot::Value(value) => value,
             JsonSlot::Undefined => Value::Null,
         };
         if upstream_import::exclude_record(&character, excluded) { continue; }
         character = sink.prepare_character(character).map_err(store_error)?;
+        if !sink.expands_cold_payloads() { omit_unavailable_cold(&mut character, job)?; }
         if upstream_import::exclude_record(&character, excluded) { continue; }
+        if !prepare_legacy_character(&mut character, &mut character_ids) { continue; }
         retained += 1;
-        pocket_features::character(&mut character, &format!("character:{index}"))
-            .map_err(invalid)?;
-        assign_legacy_chat_ids(std::slice::from_mut(&mut character))?;
+        pocket_features::character(&mut character, &format!("character:{index}"));
+        assign_legacy_chat_ids(std::slice::from_mut(&mut character));
         if !batch.is_empty() && batch_bytes.saturating_add(bytes) > CHARACTER_BATCH_BYTES as u64 {
             sink.add_characters(staging_id, &batch)
                 .map_err(store_error)?;
@@ -739,7 +795,7 @@ fn decode_legacy_non_map<B: Read>(
     let packed = rmpv::decode::read_value(&mut marker.as_slice().chain(&mut *input))
         .map_err(|error| messagepack_error(error, job))?;
     require_legacy_end(input, job)?;
-    match messagepack_to_json(packed)? {
+    match messagepack_to_json(packed, job)? {
         JsonSlot::Value(_) => Ok(LegacyDatabase::NotAnObject),
         JsonSlot::Undefined => Err(invalid("legacy MessagePack database cannot be undefined")),
     }
@@ -791,6 +847,11 @@ fn finish_legacy_database<R: Read>(
             return Err(invalid("legacy MessagePack database must be an object"))
         }
     };
+    for key in NULLABLE_ROOT_COLLECTIONS {
+        if root.scalar(key).map_err(store_error)? == Some(Value::Null) {
+            root.remove(key).map_err(|error|legacy_staging_error(job,error))?;
+        }
+    }
     let preset_count = match root.kind("botPresets").map_err(store_error)? {
         Some(FieldKind::Array) => root.count("botPresets").map_err(store_error)?,
         Some(_) => return Err(invalid("legacy MessagePack botPresets must be an array")),
@@ -815,6 +876,10 @@ fn finish_legacy_database<R: Read>(
     if root.kind("pluginCustomStorage").map_err(store_error)?.is_none() {
         root.begin("pluginCustomStorage",FieldKind::Object).map_err(|error|legacy_staging_error(job,error))?;
     }
+    if root.member("pluginCustomStorage", "_coldplugin").map_err(store_error)?.is_some() {
+        root.remove_member("pluginCustomStorage", "_coldplugin").map_err(store_error)?;
+        job.record_restore_omission("pluginStorage", 1).map_err(|error| job_error(job, error))?;
+    }
     reader.counts.presets = preset_count;
 
     job.set_phase(JobPhase::StagingDatabase)
@@ -834,39 +899,30 @@ fn finish_legacy_database<R: Read>(
     })
 }
 
+// PocketRisu stores a root field that became undefined as null, and upstream
+// RisuAI loads a null collection as absent.
+const NULLABLE_ROOT_COLLECTIONS: [&str; 5] = ["botPresets", "pluginCustomStorage", "modules", "loadouts", "plugins"];
+
+// Streamed counterpart of pocket_features::root.
 fn prepare_legacy_root(root: &RootSpool, excluded: &HashSet<String>) -> StoreResult<()> {
-    let validation = |message: String| StoreError::Validation { message };
-    if root.kind("disableToggleBinding")?.is_some() {
-        if !root.scalar("disableToggleBinding")?.is_some_and(|value|value.is_boolean()) {
-            return Err(validation("PocketRisu disableToggleBinding must be boolean".into()));
-        }
+    if root.kind("disableToggleBinding")?.is_some()
+        && !root.scalar("disableToggleBinding")?.is_some_and(|value|value.is_boolean()) {
+        root.remove("disableToggleBinding")?;
     }
-    if let Some(kind)=root.kind("defaultToggleValues")? {
-        if kind != FieldKind::Object { return Err(validation("PocketRisu toggle values must be a record".into())); }
-        root.visit("defaultToggleValues",|key,value| {
-            if !key.starts_with("toggle_") || !value.is_string() {
-                return Err(validation("PocketRisu toggle values must be toggle_ strings".into()));
-            }
-            Ok(())
-        })?;
+    match root.kind("defaultToggleValues")? {
+        Some(FieldKind::Object) => root.visit("defaultToggleValues",|key,value| {
+            if pocket_features::toggle_entry(key,&value) { Ok(()) } else { root.remove_member("defaultToggleValues",key) }
+        })?,
+        Some(_) => root.remove("defaultToggleValues")?,
+        None => {}
     }
-    if let Some(kind) = root.kind("togglePresets")? {
-        if kind != FieldKind::Array { return Err(validation("PocketRisu toggle presets must be an array".into())); }
-        root.visit("togglePresets",|_,value| {
-            let mut entry=Map::new(); entry.insert("togglePresets".into(),Value::Array(vec![value]));
-            pocket_features::root(&entry).map_err(&validation)
-        })?;
-    }
-    if root.kind("personas")? == Some(FieldKind::Array) {
-        root.visit("personas",|_,value| {
-            if let Some(id) = value.get("id") {
-                let id=id.as_str().ok_or_else(||validation("PocketRisu persona IDs must be strings".into()))?;
-                if !id.is_empty() && !root.remember_id("pocket-personas",id)? {
-                    return Err(validation("PocketRisu persona IDs must be unique".into()));
-                }
-            }
-            Ok(())
-        })?;
+    match root.kind("togglePresets")? {
+        Some(FieldKind::Array) => root.visit("togglePresets",|key,mut value| {
+            if pocket_features::toggle_preset(&mut value) { root.put_member("togglePresets",key,Some(&value)) }
+            else { root.remove_member("togglePresets",key) }
+        })?,
+        Some(_) => root.remove("togglePresets")?,
+        None => {}
     }
     root.remove("account")?;
     for field in ["characterOrder","loadouts"] {
@@ -899,40 +955,79 @@ enum JsonSlot {
 }
 
 // PocketRisu and upstream RisuAI assign absent/duplicate chat IDs when loading
-// legacy saves. Do that before staging; the persistent store remains strict.
-fn assign_legacy_chat_ids(characters: &mut [Value]) -> Result<(), NativeJobError> {
+// legacy saves, and PocketRisu skips chat entries that are not objects. Do that
+// before staging; the persistent store remains strict.
+fn assign_legacy_chat_ids(characters: &mut [Value]) {
     for character in characters {
         let Some(chats) = character.get_mut("chats").and_then(Value::as_array_mut) else {
             continue;
         };
+        chats.retain(Value::is_object);
         let mut reserved: HashSet<String> = chats
             .iter()
-            .filter_map(|chat| chat.get("id").and_then(Value::as_str).map(str::to_owned))
+            .filter_map(|chat| legacy_chat_id(chat.get("id")))
             .collect();
         let mut seen = HashSet::new();
-        for chat in chats {
-            let chat = chat
-                .as_object_mut()
-                .ok_or_else(|| invalid("legacy chat must be an object"))?;
-            match chat.get("id") {
-                Some(Value::String(id)) if !id.is_empty() && seen.insert(id.clone()) => continue,
-                None | Some(Value::Null) | Some(Value::String(_)) => {}
-                _ => return Err(invalid("legacy chat ID must be a string when present")),
-            }
+        for chat in chats.iter_mut().filter_map(Value::as_object_mut) {
+            let id = match legacy_chat_id(chat.get("id")) {
+                Some(id) if !id.is_empty() && seen.insert(id.clone()) => id,
+                _ => {
+                    let id = loop {
+                        let candidate = uuid::Uuid::new_v4().to_string();
+                        if reserved.insert(candidate.clone()) {
+                            break candidate;
+                        }
+                    };
+                    seen.insert(id.clone());
+                    id
+                }
+            };
+            chat.insert("id".to_owned(), Value::String(id));
+            default_name(chat);
+        }
+    }
+}
+
+// Upstream RisuAI skips empty character entries and fills a missing character
+// ID and name when it loads a save. A repeated ID gets a new one, since lookups
+// take the first character with that ID.
+fn prepare_legacy_character(value: &mut Value, seen_ids: &mut HashSet<String>) -> bool {
+    let Some(character) = value.as_object_mut() else {
+        return false;
+    };
+    match character.get("chaId").and_then(Value::as_str) {
+        Some(id) if !id.is_empty() && seen_ids.insert(id.to_owned()) => {}
+        _ => {
             let id = loop {
                 let candidate = uuid::Uuid::new_v4().to_string();
-                if reserved.insert(candidate.clone()) {
+                if seen_ids.insert(candidate.clone()) {
                     break candidate;
                 }
             };
-            seen.insert(id.clone());
-            chat.insert("id".to_owned(), Value::String(id));
+            character.insert("chaId".to_owned(), Value::String(id));
         }
     }
-    Ok(())
+    default_name(character);
+    true
 }
 
-fn messagepack_to_json(value: MessagePackValue) -> Result<JsonSlot, NativeJobError> {
+// The persistent store requires a name, which upstream RisuAI shows as empty when absent.
+fn default_name(record: &mut Map<String, Value>) {
+    if !record.get("name").is_some_and(Value::is_string) {
+        record.insert("name".to_owned(), Value::String(String::new()));
+    }
+}
+
+// A numeric chat ID keeps its text form, as it does as a JavaScript object key.
+fn legacy_chat_id(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(id) => Some(id.clone()),
+        Value::Number(id) => Some(id.to_string()),
+        _ => None,
+    }
+}
+
+fn messagepack_to_json(value: MessagePackValue, job: &JobControl) -> Result<JsonSlot, NativeJobError> {
     match value {
         MessagePackValue::Nil => Ok(JsonSlot::Value(Value::Null)),
         MessagePackValue::Boolean(value) => Ok(JsonSlot::Value(Value::Bool(value))),
@@ -952,33 +1047,41 @@ fn messagepack_to_json(value: MessagePackValue) -> Result<JsonSlot, NativeJobErr
             .into_str()
             .map(|value| JsonSlot::Value(Value::String(value)))
             .ok_or_else(|| corrupt("invalid UTF-8 legacy MessagePack string")),
-        MessagePackValue::Binary(_) => Err(invalid(
-            "binary values are unsupported in a legacy MessagePack database",
-        )),
+        MessagePackValue::Binary(bytes) => Ok(JsonSlot::Value(Value::Object(bytes.into_iter()
+            .enumerate().map(|(index, byte)| (index.to_string(), Value::from(byte))).collect()))),
         MessagePackValue::Array(values) => {
             let mut output = Vec::with_capacity(values.len());
             for value in values {
-                output.push(match messagepack_to_json(value)? {
+                output.push(match messagepack_to_json(value, job)? {
                     JsonSlot::Value(value) => value,
                     JsonSlot::Undefined => Value::Null,
                 });
             }
             Ok(JsonSlot::Value(Value::Array(output)))
         }
-        MessagePackValue::Map(entries) => messagepack_map_to_json(entries),
+        MessagePackValue::Map(entries) => messagepack_map_to_json(entries, job),
         MessagePackValue::Ext(kind, bytes) if kind == 0 && bytes == [0] => Ok(JsonSlot::Undefined),
         MessagePackValue::Ext(-1, bytes) if bytes == [0xff] => Ok(JsonSlot::Value(Value::Null)),
         MessagePackValue::Ext(-1, bytes) => {
-            Ok(JsonSlot::Value(Value::String(timestamp_to_iso(&bytes)?)))
+            match timestamp_to_iso(&bytes) {
+                Ok(value) => Ok(JsonSlot::Value(Value::String(value))),
+                Err(error) if error.code == "unsupported-format" => {
+                    job.record_restore_omission("values", 1).map_err(|error| job_error(job, error))?;
+                    Ok(JsonSlot::Undefined)
+                }
+                Err(error) => Err(error),
+            }
         }
-        MessagePackValue::Ext(kind, _) => Err(unsupported(format!(
-            "unsupported legacy MessagePack extension {kind}"
-        ))),
+        MessagePackValue::Ext(_, _) => {
+            job.record_restore_omission("values", 1).map_err(|error| job_error(job, error))?;
+            Ok(JsonSlot::Undefined)
+        }
     }
 }
 
 fn messagepack_map_to_json(
     entries: Vec<(MessagePackValue, MessagePackValue)>,
+    job: &JobControl,
 ) -> Result<JsonSlot, NativeJobError> {
     let mut indexed = BTreeMap::<u32, (String, Option<Value>)>::new();
     let mut ordinary = serde_json::Map::new();
@@ -993,7 +1096,7 @@ fn messagepack_map_to_json(
         } else {
             key
         };
-        let value = messagepack_to_json(value)?;
+        let value = messagepack_to_json(value, job)?;
         if let Some(index) = javascript_array_index(&key) {
             indexed.insert(
                 index,
@@ -1170,6 +1273,22 @@ fn has_cold_references(character: &Value) -> bool {
         chat.get("message").and_then(Value::as_array).and_then(|messages| messages.first()).and_then(|message| message.get("data")).and_then(Value::as_str).is_some_and(|data| data.starts_with("\u{ef01}COLDSTORAGE\u{ef01}"))))
 }
 
+fn omit_unavailable_cold(character: &mut Value, job: &dyn RestoreControl) -> Result<(), NativeJobError> {
+    let mut missing = 0;
+    if let Some(object) = character.as_object_mut() {
+        if object.remove("coldstorage").and_then(|value| value.as_str().map(|key| !key.is_empty())).unwrap_or(false) { missing += 1; }
+        object.remove("coldStoragedChats");
+        if let Some(chats) = object.get_mut("chats").and_then(Value::as_array_mut) {
+            for chat in chats {
+                let cold = chat.get("message").and_then(Value::as_array).and_then(|messages| messages.first()).and_then(|message| message.get("data")).and_then(Value::as_str).is_some_and(|data| data.starts_with("\u{ef01}COLDSTORAGE\u{ef01}"));
+                if cold { chat["message"] = Value::Array(vec![]); missing += 1; }
+            }
+        }
+    }
+    if missing > 0 { job.record_restore_omission("missing", missing).map_err(|error| job_error(job, error))?; }
+    Ok(())
+}
+
 fn parse_and_stage<R: Read>(
     reader: &mut TrackedReader<'_, R>,
     staging_id: &str,
@@ -1216,7 +1335,7 @@ fn parse_and_stage<R: Read>(
         reader.read_exact_checked(&mut length_bytes)?;
         let encoded_length = u32::from_le_bytes(length_bytes) as u64;
         if encoded_length > limits.max_encoded_block_bytes {
-            return Err(invalid(format!("encoded block limit exceeded for {name}")));
+            return Err(limit_error(format!("encoded block limit exceeded for {name}")));
         }
         if encoded_length > reader.total.saturating_sub(reader.completed) {
             return Err(truncated(format!("truncated block body for {name}")));
@@ -1256,6 +1375,19 @@ fn parse_and_stage<R: Read>(
             continue;
         }
 
+        let interpreted = matches!((block_type, name.as_str()),
+            (0, "config") | (1, "root") | (4, "preset") | (5, "modules") |
+            (9, "plugins") | (10, "loadouts") | (11, "pluginStorage") | (12, "pluginStorageMeta"))
+            || matches!(block_type, 2 | 7);
+        if !interpreted {
+            skip_block(reader, &name, compression, encoded_length, limits, job)?;
+            let kind = if block_type == 6 { "remote" } else if block_type == 12 && name.starts_with("kv:") { "pluginStorage" } else { "data" };
+            job.record_restore_omission(kind, 1).map_err(|error| job_error(job, error))?;
+            reader.counts.blocks += 1;
+            reader.complete_item()?;
+            continue;
+        }
+
         let (mut value, decoded_bytes) = read_block_value(
             reader,
             &name,
@@ -1276,7 +1408,9 @@ fn parse_and_stage<R: Read>(
                 let Value::Object(mut object) = value else {
                     return Err(invalid("root block must be a JSON object"));
                 };
-                directory = Some(parse_directory(object.shift_remove("__directory"))?);
+                if let Some(value) = object.shift_remove("__directory") {
+                    directory = Some(parse_directory(Some(value))?);
+                }
                 root = Some(object);
             }
             2 | 7 => {
@@ -1301,10 +1435,10 @@ fn parse_and_stage<R: Read>(
                     continue;
                 }
                 if reject_cold_references && has_cold_references(&value) { return Err(cold_expansion_required()); }
-                assign_legacy_chat_ids(std::slice::from_mut(&mut value))?;
+                if !sink.expands_cold_payloads() { omit_unavailable_cold(&mut value, job)?; }
+                assign_legacy_chat_ids(std::slice::from_mut(&mut value));
                 character_batch_bytes = character_batch_bytes.saturating_add(decoded_bytes);
-                pocket_features::character(&mut value, &format!("character:{character_count}"))
-                    .map_err(invalid)?;
+                pocket_features::character(&mut value, &format!("character:{character_count}"));
                 character_batch.push(value);
                 character_count += 1;
                 reader.counts.characters = character_count;
@@ -1354,16 +1488,7 @@ fn parse_and_stage<R: Read>(
                 }
                 plugin_storage_meta = Some(value);
             }
-            3 | 6 | 8 => {
-                return Err(unsupported(format!(
-                    "block type {block_type} for {name} requires the compatibility parser"
-                )))
-            }
-            _ => {
-                return Err(invalid(format!(
-                    "unsupported block type {block_type} for {name}"
-                )))
-            }
+            _ => unreachable!("uninterpreted blocks were skipped above"),
         }
         reader.counts.blocks += 1;
         reader.complete_item()?;
@@ -1373,59 +1498,43 @@ fn parse_and_stage<R: Read>(
         sink.add_characters(staging_id, &character_batch)
             .map_err(store_error)?;
     }
-    let required = [
-        "preset",
-        "modules",
-        "loadouts",
-        "plugins",
-        "pluginStorage",
-        "config",
-    ];
-    let directory = directory.ok_or_else(|| invalid("missing required block root"))?;
-    for name in required {
-        if !directory.contains(name) || !loaded.contains(name) {
-            return Err(invalid(format!("missing required block {name}")));
+    if let Some(directory) = directory {
+        let missing = directory.difference(&loaded).count() as u64;
+        if missing != 0 {
+            job.record_restore_omission("missing", missing).map_err(|error| job_error(job, error))?;
         }
-    }
-    for name in &directory {
-        if !loaded.contains(name) {
-            return Err(invalid(format!("missing required block {name}")));
-        }
-    }
-    if loaded
-        .iter()
-        .any(|name| name != "root" && !directory.contains(name))
-    {
-        return Err(invalid(
-            "file contains a block not listed by root directory",
-        ));
     }
 
     job.set_phase(JobPhase::StagingDatabase)
         .map_err(|error| job_error(job, error))?;
     reader.report_stage_items(JobStage::FinalizingStaging, 0, None)?;
     let mut root = root.ok_or_else(|| invalid("missing required block root"))?;
-    root.insert(
-        "modules".to_owned(),
-        modules.ok_or_else(|| invalid("missing required block modules"))?,
-    );
-    root.insert(
-        "loadouts".to_owned(),
-        loadouts.ok_or_else(|| invalid("missing required block loadouts"))?,
-    );
-    root.insert(
-        "plugins".to_owned(),
-        plugins.ok_or_else(|| invalid("missing required block plugins"))?,
-    );
-    root.insert(
-        "pluginCustomStorage".to_owned(),
-        plugin_storage.ok_or_else(|| invalid("missing required block pluginStorage"))?,
-    );
+    for (key, separate, default) in [
+        ("modules", modules, Value::Array(Vec::new())),
+        ("loadouts", loadouts, Value::Array(Vec::new())),
+        ("plugins", plugins, Value::Array(Vec::new())),
+        ("pluginCustomStorage", plugin_storage, Value::Object(Map::new())),
+    ] {
+        let value = separate.or_else(|| root.shift_remove(key)).filter(|v| !v.is_null()).unwrap_or(default);
+        root.insert(key.to_owned(), value);
+    }
+    if let Some(Value::Object(storage)) = root.get_mut("pluginCustomStorage") {
+        if storage.shift_remove("_coldplugin").is_some() {
+            job.record_restore_omission("pluginStorage", 1).map_err(|error| job_error(job, error))?;
+        }
+    }
     if let Some(meta) = plugin_storage_meta {
         root.insert("pluginStorageMeta".to_owned(), meta);
     }
-    let mut presets = presets.ok_or_else(|| invalid("missing required block preset"))?;
-    pocket_features::root(&root).map_err(invalid)?;
+    let mut presets = match presets {
+        Some(presets) => presets,
+        None => match root.shift_remove("botPresets") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(values)) => values,
+            _ => return Err(invalid("root botPresets must be an array")),
+        },
+    };
+    pocket_features::root(&mut root);
     root.shift_remove("account");
     upstream_import::prepare_root(&mut root, &excluded);
     upstream_import::prepare_presets(&mut presets);
@@ -1459,6 +1568,22 @@ fn parse_directory(value: Option<Value>) -> Result<HashSet<String>, NativeJobErr
     Ok(directory)
 }
 
+fn skip_block<R: Read>(reader: &mut TrackedReader<'_, R>, name: &str, compression: u8, encoded_length: u64, limits: RestoreLimits, job: &dyn RestoreControl) -> Result<(), NativeJobError> {
+    let block = EncodedBlockReader { reader, remaining: encoded_length };
+    let mut buffer = [0u8; READ_CHUNK_BYTES];
+    if compression == 0 {
+        let mut decoded = DecodedLimitReader::new(block, limits.max_decoded_block_bytes, job, name);
+        while decoded.read(&mut buffer).map_err(|error| gzip_io_error(name, error, job))? != 0 {}
+    } else {
+        let decoder = GzDecoder::new(BufReader::with_capacity(READ_CHUNK_BYTES, block));
+        let mut decoded = DecodedLimitReader::new(decoder, limits.max_decoded_block_bytes, job, name);
+        while decoded.read(&mut buffer).map_err(|error| gzip_io_error(name, error, job))? != 0 {}
+        let buffered = decoded.into_inner().into_inner();
+        if !buffered.buffer().is_empty() || buffered.get_ref().remaining != 0 { return Err(corrupt(format!("trailing data in gzip block {name}"))); }
+    }
+    Ok(())
+}
+
 fn read_block_value<R: Read>(
     reader: &mut TrackedReader<'_, R>,
     name: &str,
@@ -1474,7 +1599,7 @@ fn read_block_value<R: Read>(
     };
     if compression == 0 {
         if encoded_length > limits.max_decoded_block_bytes {
-            return Err(invalid(format!("decoded block limit exceeded for {name}")));
+            return Err(limit_error(format!("decoded block limit exceeded for {name}")));
         }
         let decoded = DecodedLimitReader::new(block, limits.max_decoded_block_bytes, job, name);
         let mut buffered = BufReader::with_capacity(READ_CHUNK_BYTES, decoded);
@@ -1555,7 +1680,7 @@ fn read_character_block<R: Read>(
         remaining: encoded_length,
     };
     let staging_error = RefCell::new(None);
-    let record_bytes = Cell::new(None);
+    let record_bytes = RecordBudget::new(limits.max_record_bytes);
     let retained = Cell::new(true);
     let seed = CharacterSeed {
         retained: &retained,
@@ -1574,7 +1699,7 @@ fn read_character_block<R: Read>(
     };
     if compression == 0 {
         if encoded_length > limits.max_decoded_block_bytes {
-            return Err(invalid(format!("decoded block limit exceeded for {name}")));
+            return Err(limit_error(format!("decoded block limit exceeded for {name}")));
         }
         let decoded = DecodedLimitReader::new(block, limits.max_decoded_block_bytes, job, name);
         let mut buffered = BufReader::with_capacity(READ_CHUNK_BYTES, decoded);
@@ -1615,9 +1740,20 @@ fn read_character_block<R: Read>(
     Ok(retained.get())
 }
 
+pub(super) struct RecordBudget {
+    bytes: Cell<Option<u64>>,
+    limit: u64,
+}
+
+impl RecordBudget {
+    pub(super) fn new(limit: u64) -> Self { Self { bytes: Cell::new(None), limit } }
+    pub(super) fn set(&self, bytes: Option<u64>) { self.bytes.set(bytes); }
+    fn get(&self) -> Option<u64> { self.bytes.get() }
+}
+
 pub(super) struct RecordLimitReader<'a, R> {
     pub(super) inner: R,
-    pub(super) bytes: &'a Cell<Option<u64>>,
+    pub(super) bytes: &'a RecordBudget,
 }
 
 impl<R: Read> Read for RecordLimitReader<'_, R> {
@@ -1626,7 +1762,7 @@ impl<R: Read> Read for RecordLimitReader<'_, R> {
         if let Some(bytes) = self.bytes.get() {
             let bytes = bytes.saturating_add(read as u64);
             self.bytes.set(Some(bytes));
-            if bytes > MESSAGE_PAGE_BYTES {
+            if bytes > self.bytes.limit {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "restore record limit exceeded"));
             }
         }
@@ -1634,8 +1770,8 @@ impl<R: Read> Read for RecordLimitReader<'_, R> {
     }
 }
 
-pub(super) struct BoundedValueSeed<'a>(pub(super) &'a Cell<Option<u64>>);
-pub(super) struct BoundedStringSeed<'a>(pub(super) &'a Cell<Option<u64>>);
+pub(super) struct BoundedValueSeed<'a>(pub(super) &'a RecordBudget);
+pub(super) struct BoundedStringSeed<'a>(pub(super) &'a RecordBudget);
 
 impl<'de> DeserializeSeed<'de> for BoundedStringSeed<'_> {
     type Value = String;
@@ -1658,34 +1794,26 @@ impl<'de> DeserializeSeed<'de> for BoundedValueSeed<'_> {
     }
 }
 
-fn retained_json_bytes<E: de::Error>(value: &impl serde::Serialize) -> Result<u64, E> {
-    struct SizeWriter(u64);
+fn retained_json_bytes<E: de::Error>(value: &impl serde::Serialize, limit: u64) -> Result<u64, E> {
+    struct SizeWriter(u64, u64);
     impl Write for SizeWriter {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
             self.0 = self.0.saturating_add(bytes.len() as u64);
-            if self.0 > MESSAGE_PAGE_BYTES {
+            if self.0 > self.1 {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "restore record limit exceeded"));
             }
             Ok(bytes.len())
         }
         fn flush(&mut self) -> io::Result<()> { Ok(()) }
     }
-    let mut size = SizeWriter(0);
+    let mut size = SizeWriter(0, limit);
     serde_json::to_writer(&mut size, value).map_err(E::custom)?;
     Ok(size.0)
 }
 
-fn check_detail_size<E: de::Error>(detail: &Map<String, Value>) -> Result<(), E> {
-    retained_json_bytes::<E>(detail).map(|_| ())
-}
-
-fn insert_detail<E: de::Error>(detail: &mut Map<String, Value>, bytes: &mut u64, key: String, value: Value) -> Result<(), E> {
-    if let Some(previous) = detail.get(&key) {
-        *bytes = bytes.saturating_sub(retained_json_bytes::<E>(&key)? + retained_json_bytes::<E>(previous)? + 2);
-    }
-    *bytes = bytes.saturating_add(retained_json_bytes::<E>(&key)?)
-        .saturating_add(retained_json_bytes::<E>(&value)?).saturating_add(2);
-    if *bytes > MESSAGE_PAGE_BYTES { return Err(E::custom("restore record limit exceeded")); }
+fn insert_detail<E: de::Error>(detail: &mut Map<String, Value>, limit: u64, key: String, value: Value) -> Result<(), E> {
+    retained_json_bytes::<E>(&key, limit)?;
+    retained_json_bytes::<E>(&value, limit)?;
     detail.insert(key, value);
     Ok(())
 }
@@ -1702,7 +1830,7 @@ struct CharacterMetadata {
 
 struct CharacterMetadataSeed<'a> {
     wrapped: bool,
-    record_bytes: &'a Cell<Option<u64>>,
+    record_bytes: &'a RecordBudget,
 }
 
 impl<'de> DeserializeSeed<'de> for CharacterMetadataSeed<'_> {
@@ -1795,7 +1923,7 @@ fn read_character_json<R: Read>(reader: &mut R, seed: CharacterSeed<'_>) -> Resu
     let mut chats_to_skip = metadata.chats_count.saturating_sub(1);
     let mut envelope_occurrence = 0;
     let mut wrapped = false;
-    if let Some(key) = metadata.cold_key.filter(|_| seed.sink.expands_cold_payloads()) {
+    if let Some(key) = metadata.cold_key {
         seed.cold_detected.set(true);
         if let Some(path) = seed.sink.cold_payload_path(&key) {
             let mut payload = File::open(path).map_err(|error| staging_io(error, seed.staging_error))?;
@@ -1812,6 +1940,7 @@ fn read_character_json<R: Read>(reader: &mut R, seed: CharacterSeed<'_>) -> Resu
             }
         }
         if !wrapped {
+            if !seed.sink.expands_cold_payloads() { seed.job.record_restore_omission("missing", 1).map_err(<serde_json::Error as de::Error>::custom)?; }
             seed.sink.unavailable_cold_payload(&key, &name).map_err(|error| {
                 *seed.staging_error.borrow_mut() = Some(error);
                 <serde_json::Error as de::Error>::custom("cold payload preview failed")
@@ -1859,8 +1988,14 @@ impl IgnoredJsonValue for i64 {
     }
 }
 
+impl IgnoredJsonValue for bool {
+    fn ignored<E: de::Error>() -> Result<Self, E> {
+        Ok(false)
+    }
+}
+
 macro_rules! ignored_visits {
-    ($value:ty) => {
+    (@scalars $value:ty) => {
         fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E>
         where
             E: de::Error,
@@ -1924,6 +2059,9 @@ macro_rules! ignored_visits {
             IgnoredAny::deserialize(deserializer)?;
             <$value as IgnoredJsonValue>::ignored()
         }
+    };
+    ($value:ty) => {
+        ignored_visits!(@scalars $value);
 
         fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
         where
@@ -1939,7 +2077,7 @@ struct CharacterSeed<'a> {
     retained: &'a Cell<bool>,
     chats_to_skip: u64,
     limits: RestoreLimits,
-    record_bytes: &'a Cell<Option<u64>>,
+    record_bytes: &'a RecordBudget,
     character_name: &'a str,
     cold_detected: &'a Cell<bool>,
     spool_directory: &'a Path,
@@ -1976,7 +2114,6 @@ impl<'de> Visitor<'de> for CharacterVisitor<'_> {
         A: MapAccess<'de>,
     {
         let mut detail = Map::new();
-        let mut detail_bytes = 2;
         let mut conversation_count = 0i64;
         let mut saw_chats = false;
         let mut chats_to_skip = self.0.chats_to_skip;
@@ -2009,14 +2146,12 @@ impl<'de> Visitor<'de> for CharacterVisitor<'_> {
                 })?;
             } else {
                 let value = map.next_value_seed(BoundedValueSeed(self.0.record_bytes))?;
-                insert_detail::<A::Error>(&mut detail, &mut detail_bytes, key, value)?;
+                insert_detail::<A::Error>(&mut detail, self.0.record_bytes.limit, key, value)?;
             }
         }
         if detail.get("coldstorage").and_then(Value::as_str).is_some_and(|key| !key.is_empty()) { self.0.cold_detected.set(true); }
-        if self.0.sink.expands_cold_payloads() {
-            detail.remove("coldstorage");
-            detail.remove("coldStoragedChats");
-        }
+        detail.remove("coldstorage");
+        detail.remove("coldStoragedChats");
         let character_id = detail
             .get("chaId")
             .and_then(Value::as_str)
@@ -2026,6 +2161,7 @@ impl<'de> Visitor<'de> for CharacterVisitor<'_> {
                 "character block name does not match chaId",
             ));
         }
+        default_name(&mut detail);
         self.0.sink.put_character_detail(
             self.0.staging_id,
             &Value::Object(detail),
@@ -2040,7 +2176,7 @@ impl<'de> Visitor<'de> for CharacterVisitor<'_> {
 
 struct ChatsSeed<'a> {
     limits: RestoreLimits,
-    record_bytes: &'a Cell<Option<u64>>,
+    record_bytes: &'a RecordBudget,
     character_name: &'a str,
     cold_detected: &'a Cell<bool>,
     spool_directory: &'a Path,
@@ -2078,7 +2214,7 @@ impl<'de> Visitor<'de> for ChatsVisitor<'_> {
     {
         let mut count = 0i64;
         let seen_ids = RefCell::new(HashSet::new());
-        while sequence
+        while let Some(staged) = sequence
             .next_element_seed(ConversationSeed {
                 limits: self.0.limits,
                 record_bytes: self.0.record_bytes,
@@ -2097,9 +2233,8 @@ impl<'de> Visitor<'de> for ChatsVisitor<'_> {
                 sink: self.0.sink,
                 staging_error: self.0.staging_error,
             })?
-            .is_some()
         {
-            count += 1;
+            count += i64::from(staged);
         }
         Ok(count)
     }
@@ -2109,7 +2244,7 @@ impl<'de> Visitor<'de> for ChatsVisitor<'_> {
 
 struct ConversationSeed<'a> {
     limits: RestoreLimits,
-    record_bytes: &'a Cell<Option<u64>>,
+    record_bytes: &'a RecordBudget,
     character_name: &'a str,
     cold_detected: &'a Cell<bool>,
     spool_directory: &'a Path,
@@ -2123,32 +2258,42 @@ struct ConversationSeed<'a> {
     staging_error: &'a RefCell<Option<StoreError>>,
 }
 
+// Stages one conversation; a chat entry that is not an object is skipped, as in PocketRisu.
 impl<'de> DeserializeSeed<'de> for ConversationSeed<'_> {
-    type Value = ();
+    type Value = bool;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
         D: de::Deserializer<'de>,
     {
-        deserializer.deserialize_map(ConversationVisitor(self))
+        deserializer.deserialize_any(ConversationVisitor(self))
     }
 }
 
 struct ConversationVisitor<'a>(ConversationSeed<'a>);
 
 impl<'de> Visitor<'de> for ConversationVisitor<'_> {
-    type Value = ();
+    type Value = bool;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("a conversation object")
     }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while sequence.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(false)
+    }
+
+    ignored_visits!(@scalars bool);
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
     where
         A: MapAccess<'de>,
     {
         let mut detail = Map::new();
-        let mut detail_bytes = 2;
         let mut messages = MessageSpool::empty();
         let mut saw_messages = false;
         while let Some(key) = map.next_key_seed(BoundedStringSeed(self.0.record_bytes))? {
@@ -2169,10 +2314,10 @@ impl<'de> Visitor<'de> for ConversationVisitor<'_> {
                 })?;
             } else {
                 let value = map.next_value_seed(BoundedValueSeed(self.0.record_bytes))?;
-                insert_detail::<A::Error>(&mut detail, &mut detail_bytes, key, value)?;
+                insert_detail::<A::Error>(&mut detail, self.0.record_bytes.limit, key, value)?;
             }
         }
-        if self.0.sink.expands_cold_payloads() {
+        {
             if let Some(key) = messages.cold_key.take() {
                 let payload = match self.0.sink.cold_payload_path(&key) {
                     Some(path) => read_cold_chat(&path, &self.0).map_err(de::Error::custom)?,
@@ -2189,8 +2334,8 @@ impl<'de> Visitor<'de> for ConversationVisitor<'_> {
                             if let Some(value) = fields.remove(field) { detail.insert(field.to_owned(), value); }
                         }
                     }
-                    check_detail_size::<A::Error>(&detail)?;
                 } else {
+                    if !self.0.sink.expands_cold_payloads() { self.0.job.record_restore_omission("missing", 1).map_err(de::Error::custom)?; }
                     self.0.sink.unavailable_cold_payload(&key, self.0.character_name).map_err(|error| {
                         *self.0.staging_error.borrow_mut() = Some(error);
                         de::Error::custom("cold payload preview failed")
@@ -2199,21 +2344,17 @@ impl<'de> Visitor<'de> for ConversationVisitor<'_> {
                 }
             }
         }
-        let conversation_id = match detail.get("id") {
-            Some(Value::String(id)) if !id.is_empty() && self.0.seen_ids.borrow_mut().insert(id.clone()) => id.clone(),
-            None | Some(Value::Null) | Some(Value::String(_)) => {
-                let id = loop {
-                    let id = uuid::Uuid::new_v4().to_string();
-                    if self.0.seen_ids.borrow_mut().insert(id.clone()) { break id; }
-                };
-                detail.insert("id".into(), Value::String(id.clone()));
-                id
-            }
-            _ => return Err(de::Error::custom("legacy chat ID must be a string when present")),
+        let conversation_id = match legacy_chat_id(detail.get("id")) {
+            Some(id) if !id.is_empty() && self.0.seen_ids.borrow_mut().insert(id.clone()) => id,
+            _ => loop {
+                let id = uuid::Uuid::new_v4().to_string();
+                if self.0.seen_ids.borrow_mut().insert(id.clone()) { break id; }
+            },
         };
+        detail.insert("id".into(), Value::String(conversation_id.clone()));
+        default_name(&mut detail);
         let mut normalized_detail = Value::Object(detail);
-        pocket_features::chat(&mut normalized_detail, &self.0.fallback)
-            .map_err(de::Error::custom)?;
+        pocket_features::chat(&mut normalized_detail, &self.0.fallback);
         let recent_at = normalized_detail
             .get("lastDate")
             .and_then(Value::as_i64)
@@ -2240,7 +2381,8 @@ impl<'de> Visitor<'de> for ConversationVisitor<'_> {
                 self.0.sink,
                 self.0.staging_error,
             )
-            .map_err(de::Error::custom)
+            .map_err(de::Error::custom)?;
+        Ok(true)
     }
 }
 
@@ -2273,13 +2415,12 @@ impl<'de> Visitor<'de> for ColdChatVisitor<'_> {
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut messages = None;
         let mut fields = Map::new();
-        let mut field_bytes = 2;
         while let Some(key) = map.next_key_seed(BoundedStringSeed(self.0.record_bytes))? {
             if key == "message" {
                 messages = Some(map.next_value_seed(MessagesSeed { ..self.0 })?);
             } else if matches!(key.as_str(), "savedToggleValues" | "bindedPersona" | "hypaV2Data" | "hypaV3Data" | "scriptstate" | "localLore") {
                 let value = map.next_value_seed(BoundedValueSeed(self.0.record_bytes))?;
-                insert_detail::<A::Error>(&mut fields, &mut field_bytes, key, value)?;
+                insert_detail::<A::Error>(&mut fields, self.0.record_bytes.limit, key, value)?;
             } else { map.next_value::<IgnoredAny>()?; }
         }
         Ok(messages.filter(|messages| messages.is_array).map(|messages| (messages, Some(fields))))
@@ -2292,6 +2433,7 @@ struct MessageSpool {
     last_time: Option<i64>,
     cold_key: Option<String>,
     is_array: bool,
+    record_limit: u64,
 }
 
 impl IgnoredJsonValue for MessageSpool {
@@ -2302,15 +2444,16 @@ impl IgnoredJsonValue for MessageSpool {
 
 impl MessageSpool {
     fn empty() -> Self {
-        Self { file: None, count: 0, last_time: None, cold_key: None, is_array: false }
+        Self { file: None, count: 0, last_time: None, cold_key: None, is_array: false, record_limit: RESTORE_RECORD_BYTES }
     }
-    fn new(directory: &Path) -> io::Result<Self> {
+    fn new(directory: &Path, record_limit: u64) -> io::Result<Self> {
         Ok(Self {
             file: Some(tempfile::tempfile_in(directory)?),
             count: 0,
             last_time: None,
             cold_key: None,
             is_array: true,
+            record_limit,
         })
     }
 
@@ -2341,7 +2484,7 @@ impl MessageSpool {
             let mut length = [0u8; 4];
             reader.read_exact(&mut length).map_err(&spool_error)?;
             let length = u32::from_le_bytes(length) as u64;
-            if length > MESSAGE_PAGE_BYTES {
+            if length > self.record_limit {
                 return Err(spool_error(io::Error::new(io::ErrorKind::InvalidData, "message spool record limit exceeded")));
             }
             let mut bytes = vec![0u8; length as usize];
@@ -2351,8 +2494,8 @@ impl MessageSpool {
             pocket_features::message(
                 &mut message,
                 &format!("{conversation_id}:response:{index}"),
-            )?;
-            let length = retained_json_bytes::<serde_json::Error>(&message).map_err(|error| error.to_string())?;
+            );
+            let length = retained_json_bytes::<serde_json::Error>(&message, self.record_limit).map_err(|error| error.to_string())?;
             if !page.is_empty()
                 && (page.len() >= MESSAGE_PAGE_COUNT
                     || page_bytes.saturating_add(length) > MESSAGE_PAGE_BYTES)
@@ -2389,7 +2532,7 @@ impl MessageSpool {
 }
 
 struct MessagesSeed<'a> {
-    record_bytes: &'a Cell<Option<u64>>,
+    record_bytes: &'a RecordBudget,
     cold_detected: &'a Cell<bool>,
     spool_directory: &'a Path,
     staging_error: &'a RefCell<Option<StoreError>>,
@@ -2425,7 +2568,7 @@ impl<'de> Visitor<'de> for MessagesVisitor<'_> {
             *self.0.staging_error.borrow_mut() = Some(StoreError::from(error));
             de::Error::custom(message)
         };
-        let mut spool = MessageSpool::new(self.0.spool_directory).map_err(&spool_error)?;
+        let mut spool = MessageSpool::new(self.0.spool_directory, self.0.record_bytes.limit).map_err(&spool_error)?;
         let file = spool.file.as_mut().expect("created message spool");
         while let Some(message) = sequence.next_element_seed(BoundedValueSeed(self.0.record_bytes))? {
             if self.0.job.is_cancel_requested() {
@@ -2440,7 +2583,7 @@ impl<'de> Visitor<'de> for MessagesVisitor<'_> {
                 *self.0.staging_error.borrow_mut() = Some(StoreError::Store { message: error.to_string() });
                 de::Error::custom(error)
             })?;
-            if bytes.len() as u64 > MESSAGE_PAGE_BYTES { return Err(de::Error::custom("restore record limit exceeded")); }
+            if bytes.len() as u64 > self.0.record_bytes.limit { return Err(de::Error::custom("restore record limit exceeded")); }
             file.write_all(&(bytes.len() as u32).to_le_bytes()).map_err(&spool_error)?;
             file.write_all(&bytes).map_err(&spool_error)?;
             spool.count = spool.count.checked_add(1).ok_or_else(|| de::Error::custom("message count overflow"))?;
@@ -2684,7 +2827,7 @@ fn messagepack_error(error: rmpv::decode::Error, job: &JobControl) -> NativeJobE
     }
     let message = error.to_string();
     if message.contains("decoded block limit exceeded for legacy RisuSave") {
-        return invalid(message);
+        return limit_error(message);
     }
     if message.contains("source read failed") {
         return invalid_source(message);
@@ -2704,7 +2847,7 @@ fn messagepack_io_error(error: io::Error, job: &JobControl) -> NativeJobError {
     }
     let message = error.to_string();
     if message.contains("decoded block limit exceeded for legacy RisuSave") {
-        return invalid(message);
+        return limit_error(message);
     }
     if message.contains("source read failed") {
         return invalid_source(message);
@@ -2728,7 +2871,7 @@ fn json_error(
     }
     let message = error.to_string();
     if message.contains("decoded block limit exceeded") || message.contains("restore record limit exceeded") {
-        return invalid(message);
+        return limit_error(message);
     }
     if message.contains("source read failed") {
         return invalid_source(message);
@@ -2747,9 +2890,13 @@ fn gzip_io_error(name: &str, error: io::Error, job: &dyn RestoreControl) -> Nati
         return cancelled(format!("restore cancelled while decoding block {name}"));
     }
     if error.to_string().contains("decoded block limit exceeded") {
-        return invalid(error.to_string());
+        return limit_error(error.to_string());
     }
     corrupt(format!("invalid gzip in block {name}: {error}"))
+}
+
+fn limit_error(message: impl AsRef<str>) -> NativeJobError {
+    NativeJobError::too_large(if message.as_ref().contains("record limit") { "record" } else { "backup" }, message)
 }
 
 fn invalid(message: impl AsRef<str>) -> NativeJobError {
@@ -2794,7 +2941,7 @@ fn job_error(job: &dyn RestoreControl, message: String) -> NativeJobError {
 // protocol reports StoreError::Validation as "store-error" (not
 // "invalid-input") and pins its own message texts; TS restore surfaces read
 // these codes.
-fn store_error(error: StoreError) -> NativeJobError {
+pub(super) fn store_error(error: StoreError) -> NativeJobError {
     match error {
         StoreError::RevisionConflict { expected, actual } => NativeJobError::new(
             "revision-conflict",
@@ -2831,6 +2978,8 @@ mod tests {
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
+    include!("restore/resource_measurements.rs");
+
     const MSGPACKR_PARITY_FIXTURE: &str = include_str!(
         "../../../src/ts/storage/tests/roadmap14/adapters/fixtures/legacy/msgpackr-parity-v1.json"
     );
@@ -2850,6 +2999,8 @@ mod tests {
     struct StoreSink {
         store: Mutex<PersistentStore>,
         fail_character_batches: bool,
+        record_activation: bool,
+        lose_commit_reply: bool,
         abort_calls: AtomicUsize,
         preserve_calls: AtomicUsize,
         full_character_calls: AtomicUsize,
@@ -2862,6 +3013,15 @@ mod tests {
     }
 
     impl ReplacementSink for StoreSink {
+        fn prepare_activation_receipt(&self, staging_id: &str, job: &JobControl, result: &JobResultSummary) -> StoreResult<Option<String>> {
+            if !self.record_activation { return Ok(None); }
+            super::super::restore_receipts::prepare(&self.store.lock().unwrap(), job, staging_id, result)
+        }
+
+        fn activation_receipt(&self, staging_id: &str, authority: &str) -> StoreResult<Option<i64>> {
+            self.store.lock().unwrap().lww_file_restore_receipt(staging_id, staging_id, authority)
+        }
+
         fn begin(&self) -> StoreResult<StagingResult> {
             self.store.lock().unwrap().replace_begin()
         }
@@ -3004,10 +3164,12 @@ mod tests {
         }
 
         fn commit(&self, staging_id: &str, expected_revision: i64) -> StoreResult<RevisionResult> {
-            self.store
+            let result = self.store
                 .lock()
                 .unwrap()
-                .replace_commit(staging_id, Some(expected_revision))
+                .replace_commit(staging_id, Some(expected_revision))?;
+            if self.lose_commit_reply { return Err(StoreError::Store { message: "Synthetic post-commit cleanup failure".into() }); }
+            Ok(result)
         }
 
         fn abort(&self, staging_id: &str) -> StoreResult<()> {
@@ -3031,6 +3193,8 @@ mod tests {
             StoreSink {
                 store: Mutex::new(store),
                 fail_character_batches: false,
+                record_activation: false,
+                lose_commit_reply: false,
                 abort_calls: AtomicUsize::new(0),
                 preserve_calls: AtomicUsize::new(0),
                 full_character_calls: AtomicUsize::new(0),
@@ -3285,13 +3449,13 @@ mod tests {
         let path = directory.path().join("oversized.json");
         let mut file = File::create(&path).unwrap();
         file.write_all(b"[{\"role\":\"user\",\"data\":\"").unwrap();
-        for _ in 0..129 { file.write_all(&[b'x'; 64 * 1024]).unwrap(); }
+        for _ in 0..3 { file.write_all(&[b'x'; 64 * 1024]).unwrap(); }
         file.write_all(b"\"}]").unwrap();
         drop(file);
         sink.cold_payloads = Some(std::collections::HashMap::from([("chat".to_owned(), path)]));
         let source = cold_block_source(directory.path(), &serde_json::to_vec(&json!({"chaId":"char-1","chats":[cold_chat("chat")]})).unwrap(), false);
         let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
-        let error = restore_block_risu_save_path(&source, 1, &job, &sink).unwrap_err();
+        let error = restore_block_risu_save_path_with_limits(&source, 1, &job, &sink, RestoreLimits { max_record_bytes: 64 * 1024, ..Default::default() }).unwrap_err();
         assert!(error.message.contains("restore record limit exceeded"), "{error:?}");
         assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 1);
         assert_eq!(sink.max_message_page.load(Ordering::Acquire), 0);
@@ -3338,11 +3502,33 @@ mod tests {
     }
 
     #[test]
+    fn streaming_character_fields_are_bounded_individually() {
+        let (directory, sink) = fixture();
+        let character = json!({"chaId":"char-1", "name":"Synthetic", "chats":[],
+            "description":"a".repeat(40 * 1024), "creatorNotes":"b".repeat(40 * 1024)});
+        let source = cold_block_source(directory.path(), &serde_json::to_vec(&character).unwrap(), true);
+        let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+        restore_block_risu_save_path_with_limits(&source, 1, &job, &sink,
+            RestoreLimits { max_record_bytes: 64 * 1024, ..Default::default() }).unwrap();
+        let restored = sink.store.lock().unwrap().materialize(Some(2)).unwrap();
+        assert_eq!(restored["characters"][0]["description"], character["description"]);
+        assert_eq!(restored["characters"][0]["creatorNotes"], character["creatorNotes"]);
+        let padded = format!(r#"{{"chaId":"char-1","name":"Synthetic","chats":[],"description":{}"x"}}"#, " ".repeat(64 * 1024));
+        let source = cold_block_source(directory.path(), padded.as_bytes(), true);
+        let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+        let error = restore_block_risu_save_path_with_limits(&source, 2, &job, &sink,
+            RestoreLimits { max_record_bytes: 64 * 1024, ..Default::default() }).unwrap_err();
+        assert!(error.message.contains("restore record limit exceeded"));
+        assert_eq!(sink.store.lock().unwrap().materialize(Some(2)).unwrap(), restored);
+    }
+
+    #[test]
     fn cold_streaming_sequential_spool_respects_message_page_byte_limit() {
         let (directory, mut sink) = fixture();
         let messages = json!([
             {"role":"user", "data":"a".repeat(MESSAGE_PAGE_BYTES as usize / 2)},
             {"role":"char", "data":"b".repeat(MESSAGE_PAGE_BYTES as usize / 2)},
+            {"role":"user", "data":"c".repeat(MESSAGE_PAGE_BYTES as usize + 1024)},
         ]);
         sink.cold_payloads = Some(std::collections::HashMap::from([write_cold_payload(directory.path(), "chat", &messages)]));
         let source = cold_block_source(directory.path(), &serde_json::to_vec(&json!({"chaId":"char-1","name":"Synthetic","chats":[cold_chat("chat")]})).unwrap(), false);
@@ -3350,14 +3536,14 @@ mod tests {
         restore_block_risu_save_path(&source, 1, &job, &sink).unwrap();
         let restored = sink.store.lock().unwrap().materialize(Some(2)).unwrap();
         assert_eq!(restored["characters"][0]["chats"][0]["message"], messages);
-        assert_eq!(*sink.message_pages.lock().unwrap(), [1, 1]);
+        assert_eq!(*sink.message_pages.lock().unwrap(), [1, 1, 1]);
     }
 
     #[test]
     fn cold_streaming_sequential_spool_rejects_truncated_and_oversized_lengths_as_store_errors() {
-        for bytes in [vec![4, 0], vec![4, 0, 0, 0, b'{'], ((MESSAGE_PAGE_BYTES + 1) as u32).to_le_bytes().to_vec()] {
+        for bytes in [vec![4, 0], vec![4, 0, 0, 0, b'{'], (1025u32).to_le_bytes().to_vec()] {
             let (directory, sink) = fixture();
-            let mut spool = MessageSpool::new(directory.path()).unwrap();
+            let mut spool = MessageSpool::new(directory.path(), 1024).unwrap();
             spool.count = 1;
             spool.file.as_mut().unwrap().write_all(&bytes).unwrap();
             let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
@@ -3376,6 +3562,41 @@ mod tests {
         io::copy(&mut File::open(path).unwrap(), output).unwrap();
     }
 
+    #[test]
+    #[ignore = "explicit large compatible backup acceptance run"]
+    fn compatible_backup_roundtrips_large_fields_and_message() {
+        for target in [super::super::legacy_backup::CompatibilityTarget::RisuAi, super::super::legacy_backup::CompatibilityTarget::PocketRisu] {
+            let source = tempfile::tempdir().unwrap();
+            let mut store = PersistentStore::open(source.path()).unwrap();
+            let staging = store.replace_begin().unwrap().staging_id;
+            store.replace_put_upstream_root(&staging, &json!({"username":"Synthetic","plugins":[],"modules":[]})).unwrap();
+            let first = "a".repeat(33 * 1024 * 1024);
+            let second = "b".repeat(33 * 1024 * 1024);
+            let message = "c".repeat(9 * 1024 * 1024);
+            store.replace_add_characters(&staging, &[
+                json!({"chaId":"large","type":"character","name":"Synthetic","desc":first,"firstMessage":second,
+                    "chats":[{"id":"large-chat","name":"Synthetic chat","message":[{"role":"char","data":message,"chatId":"large-message"}]}]}),
+            ]).unwrap();
+            let revision = store.replace_commit(&staging, Some(0)).unwrap().revision;
+            let owned = source.path().join("owned");
+            let handoff = source.path().join("handoff");
+            fs::create_dir(&owned).unwrap();
+            fs::create_dir(&handoff).unwrap();
+            let output = source.path().join("export.bin");
+            let export_job = JobRegistry::default().create(JobKind::ExportCompatibleLocalBackup).unwrap();
+            super::super::legacy_backup::export_compatible_local_backup(target, Some(&output), revision,
+                &owned, &handoff, store, &export_job).unwrap();
+            let (directory, mut sink) = fixture();
+            let job = JobRegistry::default().create(JobKind::RestoreLegacyLocalBackup).unwrap();
+            restore_container_payloads(&output, directory.path(), &mut sink, &job).unwrap();
+            let restored = sink.store.lock().unwrap().materialize(None).unwrap();
+            let character = &restored["characters"][0];
+            assert!(character["desc"].as_str().is_some_and(|value| value == first));
+            assert!(character["firstMessage"].as_str().is_some_and(|value| value == second));
+            assert!(character["chats"][0]["message"][0]["data"].as_str().is_some_and(|value| value == message));
+        }
+    }
+
     fn restore_cold_container(source: &Path, directory: &Path, sink: &mut StoreSink, job: &JobControl) -> JobResultSummary {
         try_restore_cold_container(source, directory, sink, job).unwrap()
     }
@@ -3386,15 +3607,26 @@ mod tests {
 
     /// Restores a legacy backup container and reports its prepared asset aliases and invalid inlays.
     fn restore_container_payloads(source: &Path, directory: &Path, sink: &mut StoreSink, job: &JobControl) -> Result<(JobResultSummary, Value), crate::local_backup::LocalBackupError> {
+        restore_container_payloads_with_limits(source, directory, sink, job, RestoreLimits::default())
+    }
+
+    fn restore_container_payloads_with_limits(source: &Path, directory: &Path, sink: &mut StoreSink, job: &JobControl, limits: RestoreLimits) -> Result<(JobResultSummary, Value), crate::local_backup::LocalBackupError> {
+        restore_container_payloads_with_key(source, directory, sink, job, limits, None)
+    }
+
+    fn restore_container_payloads_with_key(source: &Path, directory: &Path, sink: &mut StoreSink, job: &JobControl, limits: RestoreLimits, key: Option<&str>) -> Result<(JobResultSummary, Value), crate::local_backup::LocalBackupError> {
         use crate::local_backup::{LocalBackupError, NeverCancelled, PayloadTarget, StagedLocalBackupEntry, StrictLocalBackupDatabaseRestore};
-        struct Restore<'a> { directory: &'a Path, sink: &'a mut StoreSink, job: &'a JobControl, result: Option<JobResultSummary>, payloads: Value }
+        struct Restore<'a> { directory: &'a Path, sink: &'a mut StoreSink, job: &'a JobControl, result: Option<JobResultSummary>, payloads: Value, limits: RestoreLimits, key: Option<&'a str> }
         impl StrictLocalBackupDatabaseRestore for Restore<'_> {
             fn restore_database(&mut self, database: &StagedLocalBackupEntry, entries: &[StagedLocalBackupEntry]) -> Result<(), LocalBackupError> {
                 use crate::asset_repository::job_pins::{CasJobKind, CasReleaseOutcome, DurableCasJob};
                 use crate::asset_repository::PayloadCas;
+                let plaintext = super::super::legacy_backup::account_encryption::prepare_with_key(entries, database, self.job, |_| {
+                    self.key.map(str::to_owned).ok_or_else(|| NativeJobError::new("fixture-key-required", "Synthetic account key required"))
+                }).map_err(|error| LocalBackupError::database_restore(error.code))?;
                 let cas = PayloadCas::new(self.directory).unwrap();
                 let mut durable = DurableCasJob::begin(self.directory, &self.job.id(), CasJobKind::LocalBackupRestore, crate::asset_repository::job_pins::CasJobOwner::for_test(), 0).unwrap();
-                let payloads = super::super::legacy_backup::prepare_legacy_restore_payloads(entries, &cas, &mut durable, &NeverCancelled)?;
+                let payloads = super::super::legacy_backup::prepare_legacy_restore_payloads_with_limits(entries, &cas, &mut durable, &NeverCancelled, &super::super::legacy_backup::NoopPrepareObserver, self.limits)?;
                 let mut cold_keys: Vec<&String> = payloads.cold_payloads.keys().collect();
                 cold_keys.sort();
                 self.payloads = json!({
@@ -3404,14 +3636,18 @@ mod tests {
                 });
                 self.sink.cold_payloads = Some(payloads.cold_payloads);
                 durable.seal(&mut self.sink.store.lock().unwrap(), 0).unwrap();
-                self.result = Some(restore_block_risu_save_path(database.staged_path.as_ref().unwrap(), 1, self.job, self.sink)
+                let path = plaintext.as_ref().map(|file| file.path()).unwrap_or_else(|| database.staged_path.as_deref().unwrap());
+                self.result = Some(restore_block_risu_save_path_with_limits(path, 1, self.job, self.sink, self.limits)
                     .map_err(|error| LocalBackupError::database_restore(error.message))?);
                 durable.release(CasReleaseOutcome::Committed).unwrap();
                 Ok(())
             }
         }
-        let mut restore = Restore { directory, sink, job, result: None, payloads: Value::Null };
-        crate::local_backup::parse_legacy_local_backup_v1(&mut File::open(source).unwrap(), directory, PayloadTarget::JobStaging, &mut restore, &NeverCancelled)?;
+        // Entries are staged in the job's private directory, the only place asset payloads may be staged from.
+        let staging = directory.join("native-file-jobs").join("jobs").join(job.id());
+        fs::create_dir_all(&staging).unwrap();
+        let mut restore = Restore { directory, sink, job, result: None, payloads: Value::Null, limits, key };
+        crate::local_backup::parse_legacy_local_backup_v1(&mut File::open(source).unwrap(), &staging, PayloadTarget::JobStaging, &mut restore, &NeverCancelled)?;
         Ok((restore.result.unwrap(), restore.payloads))
     }
 
@@ -3463,7 +3699,7 @@ mod tests {
             let mut output = File::create(&payload).unwrap();
             if nested { output.write_all(br#"{"character":{"chaId":"char-1","chats":[{"message":"#).unwrap(); }
             output.write_all(br#"[{"role":"user","data":""#).unwrap();
-            for _ in 0..144 { output.write_all(&[b'x';64*1024]).unwrap(); }
+            for _ in 0..3 { output.write_all(&[b'x';64*1024]).unwrap(); }
             output.write_all(b"\"}]").unwrap();
             if nested { output.write_all(b"}]}}").unwrap(); }
             drop(output);
@@ -3476,7 +3712,7 @@ mod tests {
             write_container_entry(&mut output, "coldstorage/large.json", &payload);
             drop(output);
             let job = JobRegistry::default().create(JobKind::RestoreLegacyLocalBackup).unwrap();
-            let error = try_restore_cold_container(&archive, directory.path(), &mut sink, &job).unwrap_err();
+            let error = restore_container_payloads_with_limits(&archive, directory.path(), &mut sink, &job, RestoreLimits { max_record_bytes: 64 * 1024, ..Default::default() }).unwrap_err();
             assert!(error.message.contains("cold payload exceeds the record limit"), "{error:?}");
             assert_eq!(sink.abort_calls.load(Ordering::Acquire), 0, "preparation must reject before replacement staging begins");
             assert_eq!(sink.incremental_character_calls.load(Ordering::Acquire), 0);
@@ -3543,13 +3779,13 @@ mod tests {
         let payload = directory.path().join("scalar.json");
         let mut output = File::create(&payload).unwrap();
         output.write_all(br#"{"character":""#).unwrap();
-        for _ in 0..144 { output.write_all(&[b'x';64*1024]).unwrap(); }
+        for _ in 0..3 { output.write_all(&[b'x';64*1024]).unwrap(); }
         output.write_all(b"\"}").unwrap();
         drop(output);
         sink.cold_payloads = Some(std::collections::HashMap::from([("scalar".to_owned(), payload)]));
         let source = cold_block_source(directory.path(), br#"{"chaId":"char-1","chats":[],"coldstorage":"scalar"}"#, true);
         let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
-        let error = restore_block_risu_save_path(&source, 1, &job, &sink).unwrap_err();
+        let error = restore_block_risu_save_path_with_limits(&source, 1, &job, &sink, RestoreLimits { max_record_bytes: 64 * 1024, ..Default::default() }).unwrap_err();
         assert!(error.message.contains("restore record limit exceeded"), "{error:?}");
         assert_eq!(sink.incremental_character_calls.load(Ordering::Acquire), 0);
         assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 1);
@@ -3700,23 +3936,33 @@ mod tests {
 
     #[test]
     fn a_failure_after_the_library_commit_keeps_the_restored_library() {
-        let (directory, sink) = fixture();
+        for lose_reply in [false, true] {
+        let (directory, mut sink) = fixture();
+        sink.record_activation = true;
+        sink.lose_commit_reply = lose_reply;
         let path = directory.path().join("committed.risudat");
         fs::write(&path, save_bytes(valid_blocks())).unwrap();
-        sink.store.lock().unwrap().device_store().unwrap().connection().execute_batch(
+        if !lose_reply { sink.store.lock().unwrap().device_store().unwrap().connection().execute_batch(
             "CREATE TRIGGER fail_completion BEFORE UPDATE OF complete ON lww_intents
              BEGIN SELECT RAISE(ABORT,'synthetic completion failure'); END;",
-        ).unwrap();
+        ).unwrap(); }
         let registry = JobRegistry::default();
         let job = registry.create(JobKind::RestoreBlockRisuSave).unwrap();
 
-        let error = restore_block_risu_save_path(&path, 1, &job, &sink).unwrap_err();
-
-        assert_ne!(error.code, "cleanup-failed", "{}", error.message);
-        assert_eq!(sink.abort_calls.load(Ordering::Acquire), 1);
+        let outcome = restore_block_risu_save_path(&path, 1, &job, &sink);
+        if lose_reply {
+            let result = outcome.unwrap();
+            assert_eq!(result.revision, 2);
+            assert!(result.warning_codes.contains(&"cleanup-failed".to_owned()));
+            assert_eq!(job.status().activation_revision, Some(2));
+        } else {
+            assert_eq!(outcome.unwrap_err().code, "activation-outcome-unresolved");
+        }
+        assert_eq!(sink.abort_calls.load(Ordering::Acquire), 0);
         let store = sink.store.lock().unwrap();
         assert_eq!(store.revision().unwrap(), 2);
         assert_eq!(store.materialize(None).unwrap()["username"], "Imported");
+        }
     }
 
     fn msgpackr_parity_fixture() -> Value {
@@ -3869,11 +4115,12 @@ mod tests {
             true,
             "char-1",
             &json!({
-                "type":"character", "chaId":"char-1", "name":"Imported",
-                "chats":[{"id":"chat-1", "name":"Chat", "message":[{
+                "type":"character", "chaId":"char-1",
+                "chats":[null, {"id":7, "name":"Chat", "message":[{
                     "role":"char", "data":"second", "chatId":"message-1",
-                    "swipes":["first", "second"], "swipeId":1
-                }]}]
+                    "swipes":["first", null, "second"], "swipeId":2
+                }]}, "not a chat", {"id":"chat-2", "bindedPersona":null,
+                    "savedToggleValues":{"toggle_a":"1", "other":"x"}, "message":[]}]
             }),
         );
         fs::write(&source, save_bytes(blocks)).unwrap();
@@ -3881,7 +4128,10 @@ mod tests {
         let job = registry.create(JobKind::RestoreBlockRisuSave).unwrap();
         restore_block_risu_save_path(&source, 1, &job, &sink).unwrap();
         let restored = sink.store.lock().unwrap().materialize(None).unwrap();
-        let message = &restored["characters"][0]["chats"][0]["message"][0];
+        let chats = restored["characters"][0]["chats"].as_array().unwrap();
+        assert_eq!(chats.len(), 2);
+        assert_eq!(chats[0]["id"], "7");
+        let message = &chats[0]["message"][0];
         assert_eq!(message["data"], "second");
         assert_eq!(
             message["responseVariants"]["candidates"]
@@ -3890,7 +4140,11 @@ mod tests {
                 .len(),
             2
         );
-        assert_eq!(message["swipes"], json!(["first", "second"]));
+        assert_eq!(message["swipes"], json!(["first", null, "second"]));
+        assert_eq!(chats[1]["savedToggleValues"], json!({"toggle_a":"1"}));
+        assert!(chats[1].get("bindedPersona").is_none());
+        assert_eq!(restored["characters"][0]["name"], "");
+        assert_eq!(chats[1]["name"], "");
     }
 
     #[test]
@@ -4099,7 +4353,7 @@ mod tests {
     #[test]
     fn legacy_restore_rejects_present_nonarray_optional_root_sections() {
         for (key, invalid_value) in [
-            ("modules", Value::Null),
+            ("modules", json!(7)),
             ("loadouts", json!({})),
             ("plugins", json!("invalid")),
         ] {
@@ -4125,17 +4379,26 @@ mod tests {
     }
 
     #[test]
-    fn strict_raw_msgpackr_restore_rejects_unknown_extensions_without_activation() {
-        use base64::Engine;
-
-        let parity = msgpackr_parity_fixture();
-        let payload = base64::engine::general_purpose::STANDARD
-            .decode(parity["unknownExtensionBase64"].as_str().unwrap())
-            .unwrap();
+    fn raw_msgpackr_restore_omits_unknown_extensions_with_warning() {
+        let payload = legacy_stream_tests::messagepack_bytes(&MessagePackValue::Map(vec![
+            ("characters".into(), MessagePackValue::Array(vec![])),
+            ("kept".into(), "readable".into()),
+            ("unknownExtension".into(), MessagePackValue::Ext(42, vec![1])),
+            ("array".into(), MessagePackValue::Array(vec![MessagePackValue::Ext(42, vec![2]), "readable".into()])),
+        ]));
         let bytes = legacy_wire(7, &payload);
 
-        let error = assert_failed_general_restore_preserves_active(&bytes, "extension 42");
-        assert_eq!(error.code, "unsupported-format");
+        let (directory, sink) = fixture();
+        let source = directory.path().join("unknown-extension.risudat");
+        fs::write(&source, bytes).unwrap();
+        let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+        let result = restore_risu_save(&source, 1, &job, &sink).unwrap();
+        assert_eq!(result.revision, 2);
+        assert!(result.warning_codes.contains(&"skipped-backup-values:2".to_owned()));
+        let restored = sink.store.lock().unwrap().materialize(Some(2)).unwrap();
+        assert!(restored.get("unknownExtension").is_none());
+        assert_eq!(restored["kept"], "readable");
+        assert_eq!(restored["array"], json!([null, "readable"]));
     }
 
     #[test]
@@ -4344,11 +4607,12 @@ mod tests {
             RestoreLimits {
                 max_encoded_block_bytes: u32::MAX as u64,
                 max_decoded_block_bytes: 64,
+                ..Default::default()
             },
         )
         .unwrap_err();
 
-        assert_eq!(error.code, "invalid-input");
+        assert_eq!(error.code, "payload-too-large");
         assert!(error.message.contains("decoded block limit"));
         assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 1);
     }
@@ -4380,11 +4644,12 @@ mod tests {
                 RestoreLimits {
                     max_encoded_block_bytes: 64,
                     max_decoded_block_bytes: 1024,
+                    ..Default::default()
                 },
             )
             .unwrap_err();
 
-            assert_eq!(error.code, "invalid-input");
+            assert_eq!(error.code, "payload-too-large");
             assert!(error
                 .message
                 .contains("encoded legacy RisuSave limit exceeded"));
@@ -4466,6 +4731,48 @@ mod tests {
     }
 
     #[test]
+    fn released_historical_writers_restore_standalone_and_inside_archives() {
+        let fixture: Value = serde_json::from_str(include_str!("legacy_backup/fixtures/historical-writers.json")).unwrap();
+        let mut projection = None;
+        for format in fixture["formats"].as_array().unwrap() {
+            let bytes = base64::engine::general_purpose::STANDARD.decode(format["bytes"].as_str().unwrap()).unwrap();
+            for mode in ["standalone", "archive", "encrypted"] {
+                let archived = mode != "standalone";
+                let encrypted = mode == "encrypted";
+                let (directory, mut sink) = self::fixture();
+                let source = directory.path().join("historical.risudat");
+                fs::write(&source, &bytes).unwrap();
+                assert_eq!(super::super::backup_source::detect(File::open(&source).unwrap()).unwrap(), super::super::backup_source::BackupSourceFormat::BlockRisuSave);
+                let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+                if archived {
+                    let archive = directory.path().join("historical.bin");
+                    let mut output = File::create(&archive).unwrap();
+                    if encrypted {
+                        let ciphertext = base64::engine::general_purpose::STANDARD.decode(format["encrypted"].as_str().unwrap()).unwrap();
+                        fs::write(&source, ciphertext).unwrap();
+                        let metadata = directory.path().join("metadata");
+                        fs::write(&metadata, br#"{"type":"account","time":1}"#).unwrap();
+                        write_container_entry(&mut output, "encryption.risudat", &metadata);
+                    }
+                    write_container_entry(&mut output, "database.risudat", &source);
+                    drop(output);
+                    restore_container_payloads_with_key(&archive, directory.path(), &mut sink, &job, RestoreLimits::default(), fixture["key"].as_str()).unwrap();
+                } else {
+                    restore_risu_save(&source, 1, &job, &sink).unwrap();
+                }
+                let restored = sink.store.lock().unwrap().materialize(Some(2)).unwrap();
+                assert_eq!(restored["username"], fixture["database"]["username"]);
+                assert_eq!(restored["characters"], fixture["database"]["characters"]);
+                assert_eq!(restored["historicalUnknown"], fixture["database"]["historicalUnknown"]);
+                assert_eq!(restored["pluginCustomStorage"], fixture["database"]["pluginCustomStorage"]);
+                assert!(restored.get("account").is_none());
+                if let Some(expected) = &projection { assert_eq!(&restored, expected, "{format}"); }
+                else { projection = Some(restored); }
+            }
+        }
+    }
+
+    #[test]
     fn strict_legacy_format_selection_rejects_ambiguous_and_near_miss_inputs() {
         use base64::Engine;
 
@@ -4474,10 +4781,6 @@ mod tests {
             .decode(parity["payloadBase64"].as_str().unwrap())
             .unwrap();
 
-        assert_failed_general_restore_preserves_active(
-            &payload,
-            "unframed RisuSave input is unsupported",
-        );
         assert_failed_general_restore_preserves_active(
             &gzip(&payload),
             "unframed RisuSave input is unsupported",
@@ -4548,6 +4851,8 @@ mod tests {
         let sink = StoreSink {
             store: Mutex::new(store),
             fail_character_batches: false,
+            record_activation: false,
+            lose_commit_reply: false,
             abort_calls: AtomicUsize::new(0),
             preserve_calls: AtomicUsize::new(0),
             full_character_calls: AtomicUsize::new(0),
@@ -4585,10 +4890,16 @@ mod tests {
     }
 
     #[test]
-    fn strict_restore_rejects_missing_and_duplicate_required_blocks() {
+    fn strict_restore_rejects_duplicate_blocks() {
         let mut missing = valid_blocks();
         missing.pop();
-        assert_failed_restore_preserves_active(&save_bytes(missing), "missing required block");
+        let (directory, sink) = fixture();
+        let source = directory.path().join("missing.risudat");
+        fs::write(&source, save_bytes(missing)).unwrap();
+        let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+        let result = restore_block_risu_save_path(&source, 1, &job, &sink).unwrap();
+        assert!(result.warning_codes.contains(&"missing-backup-data:1".to_owned()));
+        assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 2);
 
         let mut duplicate = valid_blocks();
         duplicate.push(block(4, false, "preset", &json!([])));
@@ -4596,12 +4907,19 @@ mod tests {
     }
 
     #[test]
-    fn js_compatible_subset_block_requests_structured_fallback() {
+    fn readable_uninterpreted_blocks_restore_with_warnings() {
+        for (kind, name, warning) in [
+            (3, "standalone-chat", "skipped-backup-data:1"),
+            (6, "remote", "remote-backup-data:1"),
+            (8, "custom-root-component", "skipped-backup-data:1"),
+            (12, "kv:synthetic", "skipped-plugin-storage:1"),
+            (99, "future-content", "skipped-backup-data:1"),
+        ] {
         let mut blocks = valid_blocks();
         blocks.push(block(
-            8,
-            false,
-            "custom-root-component",
+            kind,
+            true,
+            name,
             &json!({ "key": "customField", "data": { "retained": true } }),
         ));
         let (directory, sink) = fixture();
@@ -4611,10 +4929,11 @@ mod tests {
             .create(JobKind::RestoreBlockRisuSave)
             .unwrap();
 
-        let error = restore_block_risu_save_path(&source, 1, &job, &sink).unwrap_err();
-
-        assert_eq!(error.code, "unsupported-format");
-        assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 1);
+        let result = restore_block_risu_save_path(&source, 1, &job, &sink).unwrap();
+        assert!(result.warning_codes.contains(&warning.to_owned()), "{:?}", result.warning_codes);
+        assert_eq!(job.status().incomplete_restore_preview.unwrap().warning_codes(), vec![warning]);
+        assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 2);
+        }
     }
 
     #[test]
@@ -4631,6 +4950,10 @@ mod tests {
         let mut invalid_gzip = valid_blocks();
         invalid_gzip[2] = raw_block(5, 1, "modules", b"not-gzip");
         assert_failed_restore_preserves_active(&save_bytes(invalid_gzip), "invalid gzip");
+
+        let mut unreadable_unknown = valid_blocks();
+        unreadable_unknown.push(raw_block(99, 1, "future-content", b"not-gzip"));
+        assert_failed_restore_preserves_active(&save_bytes(unreadable_unknown), "invalid gzip");
 
         let mut trailing_garbage = gzip(br#"[{"name":"Module"}]"#);
         trailing_garbage.extend_from_slice(b"garbage");
@@ -4654,9 +4977,6 @@ mod tests {
         unknown_flag[2] = raw_block(5, 2, "modules", b"{}");
         assert_failed_restore_preserves_active(&save_bytes(unknown_flag), "compression flag");
 
-        let mut unknown_type = valid_blocks();
-        unknown_type[2] = raw_block(99, 0, "modules", b"{}");
-        assert_failed_restore_preserves_active(&save_bytes(unknown_type), "block type");
     }
 
     #[test]
@@ -4964,10 +5284,11 @@ mod tests {
             RestoreLimits {
                 max_encoded_block_bytes: 1024,
                 max_decoded_block_bytes: 8,
+                ..Default::default()
             },
         )
         .unwrap_err();
-        assert_eq!(error.code, "invalid-input");
+        assert_eq!(error.code, "payload-too-large");
         assert!(error.message.contains("decoded block limit"));
         assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 1);
 

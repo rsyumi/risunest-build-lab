@@ -109,6 +109,60 @@ fn start(native: tauri::webview::PlatformWebview, sender: tokio::sync::oneshot::
     unsafe { risunest_clear_webview(native.inner(), Box::into_raw(Box::new(sender)).cast(), completed); }
 }
 
+/// Removes the WebView data of a profile that no running WebView uses: a named
+/// profile's WebKit store, or the default store, on macOS. Windows and Linux
+/// keep it in the profile's roots, which the cleanup removes with the rest.
+#[cfg(desktop)]
+pub(crate) fn remove_profile_store(agent: bool, profile: Option<&crate::launch_profile::ProfileName>) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let identifier = profile.map(|profile| crate::launch_profile::webview_store(agent, profile));
+        macos::wait(move |context| unsafe {
+            match &identifier {
+                Some(identifier) => macos::risunest_remove_webview_store(identifier.as_ptr(), context, macos::completed),
+                None => macos::risunest_clear_default_webview_store(context, macos::completed),
+            }
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (agent, profile);
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use std::{ffi::c_void, sync::{atomic::{AtomicU8, Ordering}, Arc}, time::Instant};
+
+    extern "C" {
+        pub(super) fn risunest_remove_webview_store(identifier: *const u8, context: *mut c_void, completed: extern "C" fn(*mut c_void, bool));
+        pub(super) fn risunest_clear_default_webview_store(context: *mut c_void, completed: extern "C" fn(*mut c_void, bool));
+        fn risunest_run_loop_step(seconds: f64);
+    }
+
+    pub(super) extern "C" fn completed(context: *mut c_void, success: bool) {
+        let state = unsafe { Arc::from_raw(context.cast_const().cast::<AtomicU8>()) };
+        state.store(if success { 1 } else { 2 }, Ordering::Release);
+    }
+
+    /// Runs the main run loop until the operation completes. Called on the
+    /// main thread of the cleanup process, before any application starts.
+    pub(super) fn wait(start: impl FnOnce(*mut c_void)) -> Result<(), String> {
+        let state = Arc::new(AtomicU8::new(0));
+        start(Arc::into_raw(state.clone()).cast_mut().cast());
+        let deadline = Instant::now() + super::TIMEOUT;
+        loop {
+            match state.load(Ordering::Acquire) {
+                1 => return Ok(()),
+                2 => return Err("cleanup-webview-failed".into()),
+                _ if Instant::now() >= deadline => return Err("cleanup-webview-timeout".into()),
+                _ => unsafe { risunest_run_loop_step(0.1) },
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "android")]
 async fn android_call(webview: &tauri::WebviewWindow, method: &'static str) -> Result<i32, String> {
     let (sender, receiver) = tokio::sync::oneshot::channel();

@@ -1,7 +1,8 @@
 <script lang="ts">
+    import { onMount } from 'svelte'
     import { language } from 'src/lang'
     import { isTauri, isTauriAndroid, isTauriIOS } from 'src/ts/platform'
-    import { cleanupNeedsWebViewUpdate, requestAppCleanup } from 'src/ts/storage/appCleanup'
+    import { cleanupBlockedByOtherProfiles, cleanupNeedsWebViewUpdate, readAppCleanupStatus, requestAppCleanup } from 'src/ts/storage/appCleanup'
     import SettingGroup from './SettingGroup.svelte'
     import SettingRow from './SettingRow.svelte'
     import SettingToggle from './SettingToggle.svelte'
@@ -11,7 +12,17 @@
     let busy = $state(false)
     let error = $state('')
     let confirming = $state(false)
+    let profile = $state<string | null>(null)
+    let namedProfiles = $state(false)
     const text = $derived(language.risuNest.cleanup)
+    onMount(() => {
+        if (!isTauri) return
+        // Without the status the screen describes the default profile alone.
+        void readAppCleanupStatus().then(status => {
+            profile = status.profile ?? null
+            namedProfiles = status.namedProfiles === true
+        }).catch(() => {})
+    })
     async function reset() {
         if (busy) return
         busy = true
@@ -25,23 +36,25 @@
             })
             if (!requested) busy = false
         } catch (cause) {
-            error = cleanupNeedsWebViewUpdate(cause) ? text.webViewUpdateRequired : text.failed
+            error = cleanupNeedsWebViewUpdate(cause) ? text.webViewUpdateRequired
+                : cleanupBlockedByOtherProfiles(cause) ? text.otherProfilesRunning
+                : text.failed
             busy = false
         }
     }
 </script>
 
 {#if isTauri}
-    <SettingGroup title={text.title} id="risunest-reset" description={text.scope}>
+    <SettingGroup title={text.title} id="risunest-reset" description={profile ? text.scopeProfile : text.scope}>
         {#if !isTauriAndroid && !isTauriIOS}
-            <SettingRow label={text.prepareRemoval} help={text.removalHelp} inline>
+            <SettingRow label={text.prepareRemoval} help={namedProfiles ? text.removalHelpProfiles : text.removalHelp} inline>
                 <SettingToggle label={text.prepareRemoval} bind:checked={prepareRemoval} disabled={busy || confirming} />
             </SettingRow>
         {/if}
         <SettingRow help={text.resetHelp}>
             {#snippet below()}
                 {#if confirming}
-                    <p class="mt-1.5 text-sm">{prepareRemoval ? text.confirmRemoval : text.confirmReset}</p>
+                    <p class="mt-1.5 text-sm">{prepareRemoval ? namedProfiles ? text.confirmRemovalProfiles : text.confirmRemoval : text.confirmReset}</p>
                 {/if}
                 {#if error}
                     <p role="alert" class="mt-1.5 text-sm text-danger-400">{error}</p>

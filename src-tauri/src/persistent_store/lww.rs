@@ -92,7 +92,7 @@ pub(super) fn inline(value: &Value) -> StoreResult<UnitValue> {
 /// equal units on every device.
 pub(super) fn unit_value(db: &Connection, value: &Value) -> StoreResult<UnitValue> {
     use base64::Engine;
-    let canonical = wire(risunest_sync_wire::payload_value::canonicalize(&serde_json::to_vec(value)?))?;
+    let canonical = wire(risunest_sync_wire::payload_value::encode(value))?;
     if canonical.len() <= MAX_INLINE_UNIT_BYTES {
         return Ok(UnitValue::Inline {
             bytes: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(canonical),
@@ -135,7 +135,7 @@ pub(super) fn validate_large_unit(db: &Connection, value: &UnitValue) -> StoreRe
     }
     let body = large_unit_body(db, value)?.ok_or_else(|| error("invalid-large-unit"))?;
     if body.len() <= MAX_INLINE_UNIT_BYTES
-        || risunest_sync_wire::payload_value::canonicalize(&body).ok().as_ref() != Some(&body)
+        || !risunest_sync_wire::payload_value::is_canonical(&body)
     {
         return Err(error("invalid-large-unit"));
     }
@@ -879,6 +879,31 @@ impl PersistentStore {
     pub(crate) fn lww_activated_receipt(&self, request_id: &str) -> StoreResult<Option<(i64, String)>> {
         activated_receipt(&self.connection, request_id)
     }
+
+    pub(crate) fn lww_file_restore_receipt(&self, request_id: &str, staging_id: &str, authority: &str) -> StoreResult<Option<i64>> {
+        let row: Option<(String, String, String, bool)> = self.device_store()?.connection().query_row(
+            "SELECT authority,body,digest,complete FROM lww_intents WHERE request_id=?1", [request_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).optional()?;
+        let activated = activated_receipt(&self.connection, request_id)?;
+        let Some((stored_authority, body, digest, complete)) = row else {
+            return if activated.is_some() { Err(error("request-receipt-missing")) } else { Ok(None) };
+        };
+        let Intent::Replacement { staging_id: stage, base_revision, .. } = serde_json::from_str(&body)?
+            else { return Err(error("request-id-integrity")); };
+        if stored_authority != authority || stage != staging_id || risunest_sync_wire::hash(body.as_bytes()) != digest {
+            return Err(error("request-id-integrity"));
+        }
+        let Some((revision, generation)) = activated else { return Err(error("restore-activation-pending")); };
+        let applied_digest: String = self.connection.query_row(
+            "SELECT digest FROM lww_requests WHERE request_id=?1", [request_id], |row| row.get(0),
+        )?;
+        if applied_digest != digest || generation != staging_id || base_revision.checked_add(1) != Some(revision) {
+            return Err(error("request-id-integrity"));
+        }
+        if !complete { return Err(error("restore-activation-pending")); }
+        Ok(Some(revision))
+    }
     pub(crate) fn lww_device_replacement_receipt(
         &self,
         header: &Header,
@@ -988,6 +1013,22 @@ impl PersistentStore {
         Ok(Some(body))
     }
 
+    pub(crate) fn lww_native_object(&self, hash: &str) -> StoreResult<Option<rusqlite::blob::Blob<'_>>> {
+        for db in [&self.connection, self.device_store()?.connection()] {
+            let row: Option<i64> = db.query_row("SELECT rowid FROM message_page_objects WHERE hash=?1", [hash], |row| row.get(0)).optional()?;
+            if let Some(rowid) = row { return Ok(Some(db.blob_open(rusqlite::MAIN_DB, "message_page_objects", "body", rowid, true)?)); }
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn lww_copy_large_object_to_cas(&self, hash: &str, cas: &crate::asset_repository::PayloadCas, inline_limit: usize) -> StoreResult<bool> {
+        let Some(mut blob) = self.lww_native_object(hash)? else { return Ok(false); };
+        let length = blob.len() as u64;
+        if length <= inline_limit as u64 { return Ok(false); }
+        cas.prepare_reader_expected(&mut blob, hash, length)?;
+        Ok(true)
+    }
+
     pub(crate) fn lww_verified_object_present(&self, hash: &str) -> StoreResult<bool> {
         super::message_pages::retained_object_present(&self.connection, hash)
     }
@@ -1013,6 +1054,16 @@ impl PersistentStore {
             {
                 continue;
             }
+            if change.key.components()[0] == "plugin-local"
+                && device_store::plugin_values::text_value::object_row(&self.connection, &descriptor.object_hash)?.1
+                    > device_store::plugin_values::text_value::PART_BYTES as u64
+            {
+                let info = device_store::plugin_values::text_value::inspect_object(&self.connection, &descriptor.object_hash)?;
+                let tx = device.unchecked_transaction()?;
+                device_store::plugin_values::text_value::copy_object(&self.connection, &tx, &info)?;
+                tx.commit()?;
+                continue;
+            }
             let body = super::message_pages::object_body(&self.connection, &descriptor.object_hash)?
                 .ok_or_else(|| error("unit-object-body-required"))?;
             super::message_pages::put_object(device, &descriptor.object_hash, &body)?;
@@ -1021,6 +1072,52 @@ impl PersistentStore {
     }
     pub(crate) fn lww_put_object(&self, hash: &str, body: &[u8]) -> StoreResult<()> {
         super::message_pages::put_object(&self.connection, hash, body)
+    }
+    pub(crate) fn lww_put_object_reader(&self, hash: &str, mut input: impl std::io::Read, length: u64) -> StoreResult<()> {
+        use std::io::{Read, Write};
+        use sha2::{Digest, Sha256};
+        wire(risunest_sync_wire::validate_hash(hash))?;
+        let length = i32::try_from(length).map_err(|_| error("object-size-invalid"))?;
+        let db = &self.connection;
+        db.execute_batch("SAVEPOINT lww_object_stream")?;
+        let result = (|| -> StoreResult<()> {
+            let existing: Option<i64> = db.query_row("SELECT rowid FROM message_page_objects WHERE hash=?1", [hash], |row| row.get(0)).optional()?;
+            let rowid = match existing {
+                Some(rowid) => rowid,
+                None => {
+                    db.execute("INSERT INTO message_page_objects(hash,body) VALUES(?1,zeroblob(?2))", params![hash, length])?;
+                    db.last_insert_rowid()
+                }
+            };
+            let mut output = db.blob_open(rusqlite::MAIN_DB, "message_page_objects", "body", rowid, existing.is_some())?;
+            if output.len() != length as usize { return Err(error("message object identity collision")); }
+            let mut buffer = [0; 64 * 1024];
+            let mut digest = Sha256::new(); let mut copied = 0u64;
+            loop {
+                let count = input.read(&mut buffer)?;
+                if count == 0 { break; }
+                copied += count as u64;
+                if copied > length as u64 { return Err(error("message object length mismatch")); }
+                digest.update(&buffer[..count]);
+                if existing.is_none() { output.write_all(&buffer[..count])?; }
+            }
+            #[cfg(test)] super::hash_work::observe("native_page_object_verify", copied as usize);
+            if copied != length as u64 || hex::encode(digest.finalize()) != hash { return Err(error("message object hash mismatch")); }
+            output.close()?;
+            let mut stored = db.blob_open(rusqlite::MAIN_DB, "message_page_objects", "body", rowid, true)?;
+            let mut digest = Sha256::new();
+            loop { let count = stored.read(&mut buffer)?; if count == 0 { break; } digest.update(&buffer[..count]); }
+            #[cfg(test)] super::hash_work::observe("native_page_object_verify", length as usize);
+            if hex::encode(digest.finalize()) != hash { return Err(error("message object identity collision")); }
+            stored.close()?;
+            db.execute("INSERT INTO message_page_verified_objects(hash) SELECT ?1 WHERE NOT EXISTS(SELECT 1 FROM message_page_verified_objects WHERE hash=?1)", [hash])?;
+            db.execute("DELETE FROM message_page_object_marks WHERE hash=?1", [hash])?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => { db.execute_batch("RELEASE lww_object_stream")?; Ok(()) }
+            Err(failure) => { db.execute_batch("ROLLBACK TO lww_object_stream; RELEASE lww_object_stream")?; Err(failure) }
+        }
     }
     pub(crate) fn lww_put_managed_object(&mut self, hash: &str, body: &[u8]) -> StoreResult<()> {
         if {
@@ -2774,6 +2871,9 @@ impl PersistentStore {
         staging_id: &str,
         sections: &[&device_store::sections::PreparedSectionRows],
     ) -> StoreResult<RevisionResult> {
+        let tx = self.device_store_mut()?.transaction()?;
+        for section in sections { section.retain_plugin_objects(&tx)?; }
+        tx.commit()?;
         let frozen = device_store::sections::freeze_backup_sections(sections)?;
         self.lww_commit_replacement_inputs(header, staging_id, true, Some(&frozen))
     }
@@ -2788,6 +2888,9 @@ impl PersistentStore {
         if let Some(units) = source_units {
             self.stage_replacement_source(staging_id, units)?;
         }
+        let tx = self.device_store_mut()?.transaction()?;
+        for section in sections { section.retain_plugin_objects(&tx)?; }
+        tx.commit()?;
         let frozen = device_store::sections::freeze_backup_sections(sections)?;
         self.lww_commit_replacement_inputs(header, staging_id, source_units.is_some(), Some(&frozen))
     }

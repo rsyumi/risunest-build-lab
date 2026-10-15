@@ -2,6 +2,7 @@
  * Source bodies are read from the reference checkout, never a copied decoder.
  * UI/platform boundaries are explicit; unexpected I/O fails closed.
  */
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
@@ -600,6 +601,7 @@ export function createNestReimportHarness() {
   const source = [
     select("../src/ts/safeStructuredClone.ts", ["rfdcClone", "safeStructuredClone"]),
     select("../src/ts/responseVariants.ts", ["snapshotResponse"]),
+    select("../src/ts/toggleBindings.ts", ["snapshotToggleValues", "sanitizeToggleValues"]),
     select("../src/ts/drive/pocketRisuFeatures.ts"),
   ].join("\n");
   const javascript = ts.transpileModule(source, {
@@ -611,6 +613,7 @@ export function createNestReimportHarness() {
   const context = vm.createContext({
     structuredClone,
     rfdc: require("rfdc"),
+    v4: randomUUID,
     exports: {},
   });
   vm.runInContext(javascript, context, { timeout: 1000 });

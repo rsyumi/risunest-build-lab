@@ -230,6 +230,17 @@ it('replaces local overrides with the values of an applied preset', async () => 
     expect(chat().savedToggleValues).toEqual({ toggle_example: '0' })
 })
 
+it('replaces the local overrides a preset sets at once in an unbound chat', async () => {
+    chat().GLGlobalVariables = { toggle_example: '1', toggle_other: '1' }
+    await tick()
+    expect(customSwitch().checked).toBe(true)
+    toggleBind.props.onApplyPreset!({ toggle_example: '0' }, ['toggle_example'])
+    await vi.waitFor(() => expect(chat().GLGlobalVariables).toEqual({ toggle_other: '1' }))
+    await tick()
+    expect(customSwitch().checked).toBe(false)
+    expect(DBState.db.globalChatVariables.toggle_example).toBe('0')
+})
+
 it('previews replacing a local override without removing it before the binding is saved', async () => {
     chat().savedToggleValues = { toggle_example: '0' }
     chat().GLGlobalVariables = { toggle_example: '1' }

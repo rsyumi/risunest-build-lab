@@ -336,6 +336,9 @@ fn normalized_characters(characters: &[Value]) -> Vec<Value> {
         .iter()
         .cloned()
         .map(|mut character| {
+            if character.get("chaId").and_then(Value::as_str).is_some_and(|id| uuid::Uuid::parse_str(id).is_ok()) {
+                character["chaId"] = json!("generated");
+            }
             if let Some(chats) = character.get_mut("chats").and_then(Value::as_array_mut) {
                 for chat in chats {
                     if chat
@@ -679,7 +682,7 @@ fn root_slots_preserve_last_values_undefined_defaults_and_nested_key_order() {
         entry("characters",MessagePackValue::Array(Vec::new())),
     ]);
     assert_same_outcome_for_every_wire("disk slot replacements",&payload);
-    for value in [MessagePackValue::Nil,MessagePackValue::Array(Vec::new()),text("invalid")] {
+    for value in [MessagePackValue::Array(Vec::new()),text("invalid")] {
         let payload=root_bytes(vec![entry("characters",MessagePackValue::Array(Vec::new())),entry("pluginCustomStorage",value)]);
         for (reference,_) in assert_same_outcome_for_every_wire("invalid plugin root shape",&payload) {
             assert_eq!(reference.outcome.unwrap_err().code,"invalid-input");
@@ -743,40 +746,11 @@ fn legacy_restore_rejects_what_the_whole_value_decoder_rejects() {
         ("string characters", characters(text("characters"))),
         ("undefined characters", characters(undefined())),
         (
-            "binary in a character",
-            characters(MessagePackValue::Array(vec![MessagePackValue::Map(vec![
-                entry("chaId", text("binary")),
-                entry("data", MessagePackValue::Binary(vec![1, 2, 3])),
-            ])])),
-        ),
-        (
-            "unknown extension in a character",
-            characters(MessagePackValue::Array(vec![MessagePackValue::Map(vec![
-                entry("chaId", text("extension")),
-                entry("data", MessagePackValue::Ext(42, vec![1])),
-            ])])),
-        ),
-        (
             "invalid timestamp in a character",
             characters(MessagePackValue::Array(vec![MessagePackValue::Map(vec![
                 entry("chaId", text("timestamp")),
                 entry("data", MessagePackValue::Ext(-1, vec![0; 5])),
             ])])),
-        ),
-        (
-            "invalid chat ID",
-            characters(messagepack_from_json(&json!([{ "chaId": "chat-id", "chats": [{ "id": 7 }] }]))),
-        ),
-        (
-            "chat not an object",
-            characters(messagepack_from_json(&json!([{ "chaId": "chat", "chats": ["chat"] }]))),
-        ),
-        (
-            "invalid PocketRisu swipes",
-            characters(messagepack_from_json(&json!([{
-                "chaId": "swipes",
-                "chats": [{ "id": "chat", "message": [{ "data": "x", "swipes": [1] }] }]
-            }]))),
         ),
         (
             "integer key before characters",
@@ -819,21 +793,7 @@ fn legacy_restore_rejects_what_the_whole_value_decoder_rejects() {
             "modules not an array",
             root_bytes(vec![
                 entry("characters", MessagePackValue::Array(vec![character.clone()])),
-                entry("modules", MessagePackValue::Nil),
-            ]),
-        ),
-        (
-            "invalid PocketRisu root",
-            root_bytes(vec![
-                entry("characters", MessagePackValue::Array(vec![character.clone()])),
-                entry("disableToggleBinding", text("yes")),
-            ]),
-        ),
-        (
-            "unknown extension in another root entry",
-            root_bytes(vec![
-                entry("characters", MessagePackValue::Array(vec![character.clone()])),
-                entry("other", MessagePackValue::Ext(42, vec![1])),
+                entry("modules", text("modules")),
             ]),
         ),
         ("array root", messagepack_bytes(&MessagePackValue::Array(vec![character.clone()]))),
@@ -880,6 +840,74 @@ fn legacy_restore_rejects_what_the_whole_value_decoder_rejects() {
     // The store rejects these when it stages them; the decoders pass them on alike.
     for (label, element) in [("character undefined", undefined()), ("character not a map", text("character"))] {
         assert_same_outcome_for_every_wire(label, &characters(MessagePackValue::Array(vec![element])));
+    }
+}
+
+#[test]
+fn legacy_restore_normalizes_shapes_pocketrisu_stores_or_loads() {
+    let character = messagepack_from_json(&json!({
+        "chaId": "pocket", "name": "Pocket", "type": "character",
+        "chats": [
+            null,
+            {
+                "id": 7, "bindedPersona": null,
+                "savedToggleValues": { "toggle_kept": "1", "other": "x", "toggle_number": 2 },
+                "message": [{ "role": "char", "data": "kept", "swipes": ["kept", null], "swipeId": 0.5 }]
+            },
+            "not a chat",
+            { "id": "second", "savedToggleValues": null, "message": [{ "role": "char", "swipes": ["only"] }] }
+        ]
+    }));
+    let unnamed = messagepack_from_json(&json!({
+        "name": null, "type": "character", "chats": [{ "id": "unnamed", "message": [] }]
+    }));
+    let duplicate = messagepack_from_json(&json!({ "chaId": "pocket", "name": "Copy", "type": "character", "chats": [] }));
+    let mut entries = vec![entry("characters", MessagePackValue::Array(vec![MessagePackValue::Nil, character, unnamed, duplicate]))];
+    for key in ["botPresets", "modules", "loadouts", "plugins", "pluginCustomStorage", "disableToggleBinding", "defaultToggleValues", "defaultToggleUnsetKeys"] {
+        entries.push(entry(key, MessagePackValue::Nil));
+    }
+    entries.push(entry("togglePresets", messagepack_from_json(&json!([
+        { "name": "Imported", "values": { "toggle_a": "1", "custom": "2" } },
+        { "values": {} },
+        { "name": "No values" }
+    ]))));
+    entries.push(entry("personas", messagepack_from_json(&json!([{ "id": "same" }, { "id": "same" }, { "id": 3 }]))));
+    for (_, actual) in assert_same_outcome_for_every_wire("PocketRisu shapes", &root_bytes(entries)) {
+        assert!(actual.outcome.is_ok(), "{:?}", actual.outcome.as_ref().err());
+        let root: Value = serde_json::from_str(actual.sink.root.lock().unwrap().as_deref().unwrap()).unwrap();
+        assert!(root.get("disableToggleBinding").is_none());
+        assert!(root.get("defaultToggleValues").is_none());
+        assert_eq!(root["defaultToggleUnsetKeys"], Value::Null);
+        for key in ["modules", "loadouts", "plugins"] {
+            assert_eq!(root[key], json!([]), "{key}");
+        }
+        assert_eq!(root["pluginCustomStorage"], json!({}));
+        assert_eq!(*actual.sink.presets.lock().unwrap(), Some(Vec::new()));
+        assert_eq!(root["togglePresets"], json!([
+            { "name": "Imported", "values": { "toggle_a": "1" } },
+            { "name": "No values", "values": {} }
+        ]));
+        assert_eq!(root["personas"].as_array().unwrap().len(), 3);
+        let characters = actual.sink.characters.lock().unwrap();
+        assert_eq!(characters.len(), 3);
+        assert_eq!(characters[0]["chaId"], "pocket");
+        assert!(uuid::Uuid::parse_str(characters[1]["chaId"].as_str().unwrap()).is_ok());
+        assert_eq!(characters[1]["name"], "");
+        assert_eq!(characters[1]["chats"][0]["name"], "");
+        assert!(uuid::Uuid::parse_str(characters[2]["chaId"].as_str().unwrap()).is_ok());
+        assert_eq!(characters[2]["name"], "Copy");
+        let chats = characters[0]["chats"].as_array().unwrap();
+        assert_eq!(chats.len(), 2);
+        assert_eq!(chats[0]["id"], "7");
+        assert_eq!(chats[0]["savedToggleValues"], json!({ "toggle_kept": "1" }));
+        assert!(chats[0].get("bindedPersona").is_none());
+        let kept = &chats[0]["message"][0]["responseVariants"];
+        assert_eq!(kept["candidates"].as_array().unwrap().len(), 1);
+        assert_eq!(kept["candidates"][0]["messages"][0]["data"], "kept");
+        assert!(chats[1].get("savedToggleValues").is_none());
+        let only = &chats[1]["message"][0];
+        assert_eq!(only["data"], "only");
+        assert_eq!(only["responseVariants"]["selectedId"], "second:response:0:0");
     }
 }
 
@@ -992,11 +1020,12 @@ fn legacy_restore_keeps_the_decoded_size_limit() {
             let limits = RestoreLimits {
                 max_encoded_block_bytes: u32::MAX as u64,
                 max_decoded_block_bytes: limit,
+                ..Default::default()
             };
             let (expected, _) = assert_same_outcome(&format!("{kind} limit {limit}"), &wire, limits);
             assert_eq!(expected.outcome.is_ok(), accepted, "{kind} limit {limit}");
             if let Err(error) = expected.outcome {
-                assert_eq!(error.code, "invalid-input");
+                assert_eq!(error.code, "payload-too-large");
                 assert!(error.message.contains("limit exceeded"), "{error}");
             }
         }
@@ -1015,7 +1044,7 @@ fn legacy_restore_keeps_the_decoded_size_limit() {
             RecordingSink::default(),
         );
         let error = run.outcome.unwrap_err();
-        assert_eq!(error.code, "invalid-input", "{decoder:?}");
+        assert_eq!(error.code, "payload-too-large", "{decoder:?}");
         assert_eq!(error.message, "decoded legacy RisuSave limit exceeded", "{decoder:?}");
         assert_eq!(read.load(Ordering::Acquire), LEGACY_RISU_SAVE_PREFIX.len() as u64 + 1);
     }
@@ -1072,7 +1101,7 @@ fn reference_parse_and_stage_legacy<R: Read>(
 ) -> Result<ParsedCounts, NativeJobError> {
     let remaining = reader.total.saturating_sub(reader.completed);
     if remaining > limits.max_decoded_block_bytes {
-        return Err(invalid("decoded legacy RisuSave limit exceeded"));
+        return Err(limit_error("decoded legacy RisuSave limit exceeded"));
     }
     reader.set_stage(JobStage::DecodingDatabase)?;
     let source = RemainingSourceReader { reader, remaining };
@@ -1096,7 +1125,7 @@ fn reference_parse_and_stage_compressed_legacy<R: Read>(
 ) -> Result<ParsedCounts, NativeJobError> {
     let remaining = reader.total.saturating_sub(reader.completed);
     if remaining > limits.max_encoded_block_bytes {
-        return Err(invalid("encoded legacy RisuSave limit exceeded"));
+        return Err(limit_error("encoded legacy RisuSave limit exceeded"));
     }
     reader.set_stage(JobStage::DecodingDatabase)?;
     let source = RemainingSourceReader { reader, remaining };
@@ -1132,7 +1161,7 @@ fn reference_decode_messagepack<'a, R: Read>(
     if read != 0 {
         return Err(corrupt("trailing data after legacy MessagePack value"));
     }
-    let value = match messagepack_to_json(packed)? {
+    let value = match messagepack_to_json(packed, job)? {
         JsonSlot::Value(value) => value,
         JsonSlot::Undefined => {
             return Err(invalid("legacy MessagePack database cannot be undefined"))
@@ -1152,14 +1181,29 @@ fn reference_stage_legacy_database<R: Read>(
         Value::Object(root) => root,
         _ => return Err(invalid("legacy MessagePack database must be an object")),
     };
-    let mut characters = match root.shift_remove("characters") {
+    let characters = match root.shift_remove("characters") {
         Some(Value::Array(characters)) => characters,
         _ => return Err(invalid("legacy MessagePack characters must be an array")),
     };
-    for (index, character) in characters.iter_mut().enumerate() {
-        pocket_features::character(character, &format!("character:{index}")).map_err(invalid)?;
+    let character_total = characters.len() as u64;
+    let mut character_ids = HashSet::new();
+    let mut characters: Vec<Value> = characters
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, mut character)| {
+            if !prepare_legacy_character(&mut character, &mut character_ids) {
+                return None;
+            }
+            pocket_features::character(&mut character, &format!("character:{index}"));
+            Some(character)
+        })
+        .collect();
+    assign_legacy_chat_ids(&mut characters);
+    for key in NULLABLE_ROOT_COLLECTIONS {
+        if root.get(key).is_some_and(Value::is_null) {
+            root.shift_remove(key);
+        }
     }
-    assign_legacy_chat_ids(&mut characters)?;
     let presets = match root.shift_remove("botPresets") {
         Some(Value::Array(presets)) => presets,
         Some(_) => return Err(invalid("legacy MessagePack botPresets must be an array")),
@@ -1184,7 +1228,6 @@ fn reference_stage_legacy_database<R: Read>(
     root.entry("pluginCustomStorage".to_owned())
         .or_insert_with(|| Value::Object(Map::new()));
 
-    let character_total = characters.len() as u64;
     reader.counts.characters_total = Some(character_total);
     reader.counts.presets = presets.len() as u64;
     let mut start = 0;
@@ -1213,7 +1256,7 @@ fn reference_stage_legacy_database<R: Read>(
     job.set_phase(JobPhase::StagingDatabase)
         .map_err(|error| job_error(job, error))?;
     reader.report_stage_items(JobStage::FinalizingStaging, 0, None)?;
-    pocket_features::root(&root).map_err(invalid)?;
+    pocket_features::root(&mut root);
     root.shift_remove("account");
     sink.put_root(staging_id, &Value::Object(root))
         .map_err(store_error)?;

@@ -17,7 +17,7 @@
     import ToggleBind from './ToggleBind.svelte'
     import CustomSideBar from "./CustomSidebar.svelte";
     import { getGlobalChatVar, isLocallyHandledGlobalChatVar } from "src/ts/parser/chatVar.svelte";
-    import { removeLocalToggleValue, setCharacterMemory, setLocalToggleMode, setToggleValue } from 'src/ts/sidebarToggles'
+    import { applyGlobalToggleValues, removeLocalToggleValue, setCharacterMemory, setLocalToggleMode, setToggleValue } from 'src/ts/sidebarToggles'
     import { applyToggleValues, snapshotToggleValues, toggleValueChanged, type ToggleValues } from 'src/ts/toggleBindings'
     import { PinIcon } from "@lucide/svelte";
     import { doingChat } from 'src/ts/process/generationState'
@@ -166,7 +166,7 @@
     const applyTogglePreset = (values: ToggleValues, keys: readonly string[]) => {
         if (savingToggles) return
         if (savedToggles === undefined) {
-            applyToggleValues(DBState.db.globalChatVariables, values, keys)
+            void applyGlobalToggleValues(values, keys)
             return
         }
         const next = { ...toggleEditor.values }

@@ -26,6 +26,7 @@ const state = vi.hoisted(() => ({
     nativeFile: new Uint8Array([7, 8, 9]),
     openNativeFile: vi.fn(),
     nativeFileClose: vi.fn(async () => undefined),
+    nativeRestore: vi.fn(async () => null),
     fullReadFile: vi.fn(async () => new Uint8Array([99])),
     restoreEvents: [] as string[],
     replacePersistentDatabase: vi.fn(async (_database: Database, _reason: string, _options?: import('../storage/saveCoordinator').PersistentReplacementOptions) => ({
@@ -41,6 +42,7 @@ const state = vi.hoisted(() => ({
 }))
 
 vi.mock('../alert', async () => (await import('./backupRestore.testSupport')).alertModule())
+vi.mock('../storage/portableBackupFileRouteProduction.svelte', () => ({restoreBackupFromSystemPicker: state.nativeRestore}))
 vi.mock('@tauri-apps/api/core', async importOriginal => ({
     ...await importOriginal<typeof import('@tauri-apps/api/core')>(), invoke: vi.fn(async () => undefined),
 }))
@@ -118,6 +120,7 @@ describe('local backup persistent snapshot', () => {
 
     beforeEach(() => {
         state.native = true
+        state.nativeRestore.mockReset().mockResolvedValue(null)
         state.mobile = false
         delete window.RisuNativeFileSelection
         state.characters = true
@@ -136,8 +139,17 @@ describe('local backup persistent snapshot', () => {
         state.openNativeFile.mockResolvedValue({ ...readableFile(state.nativeFile, 2), close: state.nativeFileClose })
     })
 
-    it.each([false, true])('expands cold payloads into the replaced local backup database on mobile=%s', async (mobile) => {
-        state.mobile = mobile
+    it('routes native imports through the descriptor picker and refuses direct WebView decoding', async () => {
+        const {LoadLocalBackup, importLegacyBackupWithWebView} = await import('./backuplocal')
+        await LoadLocalBackup()
+        expect(state.nativeRestore).toHaveBeenCalledOnce()
+        await expect(importLegacyBackupWithWebView(state.fallbackContext)).rejects.toMatchObject({code:'native-required'})
+        expect(state.replacePersistentDatabase).not.toHaveBeenCalled()
+        expect(state.fullReadFile).not.toHaveBeenCalled()
+    })
+
+    it('expands cold payloads into the replaced browser backup database', async () => {
+        state.native = false
         const coldKey = '00000000-0000-4000-8000-00000000c01d'
         const database = structuredClone(risuSaveFixtureDatabase) as Database
         database.characters[0].coldstorage = coldKey
@@ -158,34 +170,12 @@ describe('local backup persistent snapshot', () => {
         Object.defineProperty(input, 'files', { value: [file] })
         const click = vi.spyOn(input, 'click').mockImplementation(() => {})
         const createElement = vi.spyOn(document, 'createElement').mockReturnValueOnce(input)
-        const events: string[] = []
-        const discard = vi.fn(async () => { events.push('discard') })
-        if (mobile) {
-            // Android has no process relauncher, so the restore reloads the WebView.
-            vi.spyOn(location, 'search', 'set').mockImplementation(() => { events.push('relaunch') })
-            window.RisuNativeFileSelection = {
-                pick: vi.fn(async () => ({ cancelled: false, files: [{ path: '/owned/backup', name: file.name, bytes: file.size, mimeType: '' }] })),
-                discard,
-            }
-            state.openNativeFile.mockImplementation(async () => {
-                expect(discard).not.toHaveBeenCalled()
-                return { ...readableFile(archive), close: state.nativeFileClose }
-            })
-        }
         const { LoadLocalBackup } = await import('./backuplocal')
         const { alertWait } = await import('../alert')
         const pending = LoadLocalBackup()
-        if (!mobile) {
-            await vi.waitFor(() => expect(click).toHaveBeenCalledOnce())
-            input.dispatchEvent(new Event('change'))
-        }
+        await vi.waitFor(() => expect(click).toHaveBeenCalledOnce())
+        input.dispatchEvent(new Event('change'))
         await pending
-        if (mobile) {
-            expect(click).not.toHaveBeenCalled()
-            expect(discard).toHaveBeenCalledExactlyOnceWith('/owned/backup')
-            // The app reloads without returning, so the selected copy has to go first.
-            expect(events).toEqual(['discard', 'relaunch'])
-        }
         createElement.mockRestore()
 
         expect(state.restoreEvents).toEqual(['database'])
@@ -225,7 +215,7 @@ describe('local backup persistent snapshot', () => {
         expect(JSON.stringify(context.onStatus.mock.calls)).toContain(`coldstorage_${coldKey}.json`)
     })
 
-    it.each([[true,false,false,false,true],[false,false,false,false,true],[true,true,false,false,true],[true,false,true,false,true],[true,false,true,true,true],[true,false,false,false,false]])('preflights, acknowledges, and preserves committed outcomes (%s,%s,%s, first run %s, characters %s)', async (confirmed, bodyFails, native, firstRun, characters) => {
+    it.each([[true,false,false,false,true],[false,false,false,false,true],[true,true,false,false,true],[true,false,false,true,true],[true,false,false,false,false]])('preflights, acknowledges, and preserves committed outcomes (%s,%s,%s, first run %s, characters %s)', async (confirmed, bodyFails, native, firstRun, characters) => {
         state.native = native
         state.characters = characters
         const { alertCheckboxConfirm } = await import('../alert')
@@ -325,6 +315,7 @@ describe('local backup persistent snapshot', () => {
     })
 
     it('stops a WebView import after cancellation without publishing staged attachments', async () => {
+        state.native = false
         const controller = new AbortController()
         // Cancel after reading the first entry header, before any attachment body.
         const file = backupFile('partial.bin', backupEntry('partial-asset.png', new Uint8Array([1, 2, 3])))
@@ -353,6 +344,7 @@ describe('local backup persistent snapshot', () => {
     })
 
     it('resolves to nothing when the WebView picker is closed or the operation is cancelled first', async () => {
+        state.native = false
         const controller = new AbortController()
         controller.abort()
         const { importLegacyBackupWithWebView } = await import('./backuplocal')
@@ -368,11 +360,10 @@ describe('local backup persistent snapshot', () => {
     })
 
     it('records the native failure code and reason for diagnostics without a second alert', async () => {
-        const { runSharedNativeFileOperation } = await import('../storage/nativeFileJobManager')
         const { NativeFileJobError } = await import('../storage/nativeFileJobs')
         const { alertError } = await import('../alert')
         vi.mocked(alertError).mockClear()
-        vi.mocked(runSharedNativeFileOperation).mockRejectedValueOnce(
+        state.nativeRestore.mockRejectedValueOnce(
             new NativeFileJobError('revision-conflict', 'The database changed during import'),
         )
         const { LoadLocalBackup } = await import('./backuplocal')
@@ -384,11 +375,10 @@ describe('local backup persistent snapshot', () => {
     })
 
     it('distinguishes an imported database from a failed screen refresh in diagnostics', async () => {
-        const { runSharedNativeFileOperation } = await import('../storage/nativeFileJobManager')
         const { NativeFileJobActivationCommittedError } = await import('../storage/nativeFileJobs')
         const { alertError } = await import('../alert')
         vi.mocked(alertError).mockClear()
-        vi.mocked(runSharedNativeFileOperation).mockRejectedValueOnce(
+        state.nativeRestore.mockRejectedValueOnce(
             new NativeFileJobActivationCommittedError(2, new Error('Synthetic refresh failed')),
         )
         const { LoadLocalBackup } = await import('./backuplocal')
@@ -406,10 +396,9 @@ describe('local backup persistent snapshot', () => {
     })
 
     it('stays silent for cancelled imports because the dialog already reported them', async () => {
-        const { runSharedNativeFileOperation } = await import('../storage/nativeFileJobManager')
         const { alertError } = await import('../alert')
         vi.mocked(alertError).mockClear()
-        vi.mocked(runSharedNativeFileOperation).mockRejectedValueOnce(
+        state.nativeRestore.mockRejectedValueOnce(
             new DOMException('cancelled', 'AbortError'),
         )
         const { LoadLocalBackup } = await import('./backuplocal')

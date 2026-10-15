@@ -148,6 +148,116 @@ import {
 } from './committedWorkingSetContinuation'
 import { createNativeJobHost, restoreRuntime, status } from './nativeFileJobs.testSupport'
 
+describe('native restore response deadlines', () => {
+    function clock() {
+        const pending = new Set<() => void>()
+        return {
+            schedule(_milliseconds: number, callback: () => void) {
+                pending.add(callback)
+                return () => { pending.delete(callback) }
+            },
+            expire() { const callbacks = [...pending]; pending.clear(); callbacks.forEach(callback => callback()) },
+        }
+    }
+
+    it('cancels a late start without selecting or submitting the source again', async () => {
+        const restoreClock = clock()
+        let started!: (value: {jobId: string}) => void
+        const host = createNativeJobHost([], {native_file_job_start: new Promise(resolve => { started = resolve })})
+        const operation = runNativeBlockRisuSaveRestore(restoreRuntime(8), {type:'desktopPath',path:'synthetic.risudat'}, {}, {...host.dependencies, restoreClock})
+        const outcome = expect(operation).rejects.toMatchObject({code:'restore-control-timeout'})
+        await vi.waitFor(() => expect(host.commands()).toContain('native_file_job_start'))
+        restoreClock.expire()
+        await outcome
+        started({jobId:'late-job'})
+        await vi.waitFor(() => expect(host.calls).toContainEqual(['native_file_job_cancel', {jobId:'late-job'}]))
+        expect(host.commands().filter(command => command === 'native_file_job_start')).toHaveLength(1)
+        expect(host.commands()).not.toContain('native_file_job_finalize')
+    })
+
+    it.each(['native_file_job_finalize', 'native_file_job_status'])('keeps unresolved activation fenced when %s stops responding', async blockedCommand => {
+        const restoreClock = clock()
+        let reads = 0
+        let unchanged = 0
+        const recovery: number[] = []
+        const runtime = {...restoreRuntime(8, {markRefreshRequired: revision => recovery.push(revision)}), beginActivatedLibraryGuard: () => ({complete(){},abortUnchanged:async()=>{unchanged++}})}
+        const host = createNativeJobHost([], {
+            native_file_job_status: () => ++reads === 1 ? {...status('waitingForInput'), phase:'awaiting-activation'} : new Promise(() => {}),
+            native_file_job_finalize: blockedCommand === 'native_file_job_finalize' ? new Promise(() => {}) : 'requested',
+        })
+        const operation = runNativeBlockRisuSaveRestore(runtime, {type:'desktopPath',path:'synthetic.risudat'}, {}, {...host.dependencies, restoreClock})
+        const outcome = expect(operation).rejects.toMatchObject({code:'activation-outcome-unresolved',recoveryRequired:true,cause:{code:'restore-control-timeout'}})
+        await vi.waitFor(() => expect(blockedCommand === 'native_file_job_status' ? reads : host.commands().filter(command => command === blockedCommand).length).toBe(blockedCommand === 'native_file_job_status' ? 2 : 1))
+        restoreClock.expire()
+        await outcome
+        expect(unchanged).toBe(0)
+        expect(recovery).toEqual([8])
+        expect(host.commands()).not.toContain('native_file_job_forget')
+        expect(host.commands().filter(command => command === 'native_file_job_finalize')).toHaveLength(1)
+    })
+
+    it('retains committed recovery when the working set refresh stops responding', async () => {
+        const restoreClock = clock()
+        let refreshing = false
+        const recovery: number[] = []
+        const committed = {revision:9,sourceBytes:128,sourceFingerprintKind:'whole-file-sha256' as const,sourceSha256:'f'.repeat(64),characterCount:1,presetCount:0,warningCodes:[]}
+        const host = createNativeJobHost([{...status('waitingForInput'),phase:'awaiting-activation'},status('succeeded',committed)])
+        const runtime = restoreRuntime(8, {refresh:async()=>{refreshing=true;await new Promise(()=>{})}, markRefreshRequired:revision=>recovery.push(revision)})
+        const operation = runNativeBlockRisuSaveRestore(runtime, {type:'desktopPath',path:'synthetic.risudat'}, {}, {...host.dependencies,restoreClock})
+        const outcome = expect(operation).rejects.toMatchObject({committedRevision:9,recoveryRequired:true})
+        await vi.waitFor(() => expect(refreshing).toBe(true))
+        restoreClock.expire()
+        await outcome
+        expect(recovery).toContain(9)
+        expect(host.commands()).not.toContain('native_file_job_forget')
+    })
+
+    it('releases a write pause acquired after its response deadline without activating', async () => {
+        const restoreClock = clock()
+        let admit!: () => void
+        let waiting = false
+        let paused = false
+        let released = false
+        const admission = new Promise<void>(resolve => { admit = resolve })
+        const runtime = restoreRuntime(8, {
+            acquire: async () => { waiting = true; await admission; paused = true },
+            release: () => { paused = false; released = true },
+        })
+        const host = createNativeJobHost([{...status('waitingForInput'),phase:'awaiting-activation'},status('cancelled')])
+        const operation = runNativeBlockRisuSaveRestore(runtime, {type:'desktopPath',path:'synthetic.risudat'}, {}, {...host.dependencies,restoreClock})
+        const outcome = expect(operation).rejects.toMatchObject({code:'restore-control-timeout'})
+        await vi.waitFor(() => expect(waiting).toBe(true))
+        restoreClock.expire()
+        await outcome
+        admit()
+        await vi.waitFor(() => expect(released).toBe(true))
+        expect(paused).toBe(false)
+        expect(host.commands()).not.toContain('native_file_job_finalize')
+    })
+
+    it('resumes a binding fence that settles after its response deadline', async () => {
+        const restoreClock = clock()
+        let finish!: () => void
+        let waiting = false
+        let blocked = false
+        let completed = false
+        const work = new Promise<void>(resolve => { finish = resolve })
+        binding.prepare.mockResolvedValue({bound:false,state:{targetAuthority:'1'},
+            fence:async()=>{waiting=true;await work;blocked=true;completed=true},
+            assertAuthority:async()=>{},resume:async()=>{blocked=false},
+        })
+        const host = createNativeJobHost([{...status('waitingForInput'),phase:'awaiting-activation'},status('cancelled')])
+        const operation = runNativeBlockRisuSaveRestore(restoreRuntime(8), {type:'desktopPath',path:'synthetic.risudat'}, {}, {...host.dependencies,restoreClock})
+        const outcome = expect(operation).rejects.toMatchObject({code:'restore-control-timeout'})
+        await vi.waitFor(() => expect(waiting).toBe(true))
+        restoreClock.expire()
+        await outcome
+        finish()
+        await vi.waitFor(() => { expect(completed).toBe(true); expect(blocked).toBe(false) })
+        expect(host.commands()).not.toContain('native_file_job_finalize')
+    })
+})
+
 function pluginValuePreview(keys: readonly string[]): NativeStagedPluginPreview {
     return {
         values: keys.map((key, index) => ({
@@ -3212,10 +3322,13 @@ describe('native file jobs', () => {
         ])
     })
 
-    it('acknowledges terminal failure even when translating it to an exception', async () => {
+    it.each([
+        { code: 'corrupt-input', message: 'invalid gzip data' },
+        { code: 'payload-too-large', message: 'synthetic record limit', itemKind: 'record' },
+    ])('acknowledges terminal $code failure and preserves its details', async (failure) => {
         const commands: string[] = []
         const failed = status('failed')
-        failed.error = { code: 'corrupt-input', message: 'invalid gzip data' }
+        failed.error = failure
 
         await expect(
             runNativeBlockRisuSaveRestore(
@@ -3236,11 +3349,14 @@ describe('native file jobs', () => {
                     wait: async () => undefined,
                 },
             ),
-        ).rejects.toMatchObject({ code: 'corrupt-input' })
+        ).rejects.toMatchObject(failure)
         expect(commands.at(-1)).toBe('native_file_job_forget')
     })
 
-    it('preserves structured native command errors at the facade boundary', async () => {
+    it.each([
+        { code: 'invalid-source', message: 'desktop source is unavailable' },
+        { code: 'payload-too-large', message: 'synthetic size limit', itemKind: 'backup' },
+    ])('preserves structured $code errors at the facade boundary', async (failure) => {
         await expect(
             runNativeBlockRisuSaveRestore(
                 restoreRuntime(1),
@@ -3249,18 +3365,14 @@ describe('native file jobs', () => {
                 {
                     isTauri: () => true,
                     invoke: async () => {
-                        throw {
-                            code: 'invalid-source',
-                            message: 'desktop source is unavailable',
-                        }
+                        throw failure
                     },
                     wait: async () => undefined,
                 },
             ),
         ).rejects.toMatchObject({
             name: 'NativeFileJobError',
-            code: 'invalid-source',
-            message: 'desktop source is unavailable',
+            ...failure,
         })
     })
 
@@ -4870,7 +4982,7 @@ describe('native snapshot restore', () => {
                 if (command === 'native_file_job_forget') { events.push('forgotten'); return true }
                 throw new Error(`Unexpected command: ${command}`)
             },
-        })).rejects.toThrow('synthetic lost status response')
+        })).rejects.toMatchObject({code: 'activation-outcome-unresolved', recoveryRequired: true, cause: {message: 'synthetic lost status response'}})
         expect(events).toEqual([])
         await continueCommittedWorkingSetRefresh(12, runtime, 2)
         expect(events).toEqual(['status-read', 'bodies:stage:12:1', 'forgotten'])

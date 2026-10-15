@@ -195,6 +195,10 @@ SectionEnd
         assert.match(calls, /^installer finish aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:/m);
         assert.ok(calls.indexOf('installer finish') < calls.indexOf('installer delete-data'));
       }
+      if (scenario.data && !scenario.installed && scenario.name !== 'update') {
+        assert.match(calls, /^installer finish aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:/m);
+        assert.ok(calls.indexOf('installer finish') > calls.indexOf('installer remove-files'));
+      }
       if (scenario.unregistered) {
         assert.match(calls, /installer removal-check force delete/);
         assert.match(calls, /uninstall lock-held --force/);

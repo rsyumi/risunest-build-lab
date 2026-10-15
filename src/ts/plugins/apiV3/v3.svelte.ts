@@ -1746,6 +1746,7 @@ const v3PluginInstances: V3PluginInstance[] = [];
 const pluginActivityListeners = new Set<() => void>();
 const pluginLoadMutex = new Mutex();
 let authorityReplacementFenced = false;
+let authorityReplacementFenceGeneration = 0;
 
 function notifyPluginActivity(): void {
     for (const listener of pluginActivityListeners) listener();
@@ -1773,14 +1774,25 @@ export function prepareV3PluginsForReload(interrupt = false): boolean {
     return true;
 }
 
-export async function fencePluginExecutionForAuthorityReplacement(): Promise<void> {
+export async function fencePluginExecutionForAuthorityReplacement(signal?: AbortSignal): Promise<void> {
+    const generation = ++authorityReplacementFenceGeneration;
+    const isCurrent = () => generation === authorityReplacementFenceGeneration && !signal?.aborted;
+    const cancel = () => { if (generation === authorityReplacementFenceGeneration) authorityReplacementFenced = false; };
     authorityReplacementFenced = true;
-    const { cancelPluginReloadAfterSync } = await import('../plugins.svelte');
-    cancelPluginReloadAfterSync();
-    for (const access of pluginDatabaseAccessByOwner.values()) access.expireReadBaselines?.()
-    await loadV3Plugins([])
-    for (const access of pluginDatabaseAccessByOwner.values()) access.closeReadBaselines?.()
-    pluginDatabaseAccessByOwner.clear()
+    signal?.addEventListener('abort', cancel, {once:true});
+    try {
+        const { cancelPluginReloadAfterSync } = await import('../plugins.svelte');
+        if (!isCurrent()) throw new DOMException('Plugin preparation cancelled', 'AbortError');
+        cancelPluginReloadAfterSync();
+        for (const access of pluginDatabaseAccessByOwner.values()) access.expireReadBaselines?.()
+        await loadV3Plugins([], isCurrent)
+        if (!isCurrent()) throw new DOMException('Plugin preparation cancelled', 'AbortError');
+        for (const access of pluginDatabaseAccessByOwner.values()) access.closeReadBaselines?.()
+        pluginDatabaseAccessByOwner.clear()
+    } catch (error) {
+        cancel();
+        throw error;
+    } finally { signal?.removeEventListener('abort', cancel); }
 }
 
 export async function invalidatePluginCachesAfterAuthorityReplacement(): Promise<void> {
@@ -1790,6 +1802,7 @@ export async function invalidatePluginCachesAfterAuthorityReplacement(): Promise
 }
 
 export async function restartPluginsAfterAuthorityReplacement(): Promise<void> {
+    authorityReplacementFenceGeneration++;
     authorityReplacementFenced = false;
     const {loadPluginsAfterAuthoritativeRestore} = await import('../plugins.svelte')
     await loadPluginsAfterAuthoritativeRestore()

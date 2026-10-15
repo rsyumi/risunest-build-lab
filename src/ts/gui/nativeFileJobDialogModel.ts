@@ -74,6 +74,8 @@ const STAGE_ORDER: DialogStageId[] = [
     'copying-source',
     'awaiting-reselect',
     'reading-archive',
+    'requesting-backup-key',
+    'decrypting-database',
     'preparing-attachments',
     'reading-database',
     'decoding-database',
@@ -81,6 +83,7 @@ const STAGE_ORDER: DialogStageId[] = [
     'assign-plugin-values',
     'activating',
     'copying-assets',
+    'cleaning-up',
     'refreshing-app',
     'reloading-plugins',
     'restarting-app',
@@ -131,7 +134,7 @@ const EXPECTED_STAGES: Record<NativeFileOperationFormat, DialogStageId[]> = {
 }
 
 const UNCANCELLABLE_STAGES = new Set<DialogStageId>([
-    'activating', 'refreshing-app', 'reloading-plugins', 'restarting-app',
+    'activating', 'cleaning-up', 'refreshing-app', 'reloading-plugins', 'restarting-app',
 ])
 
 const CLOSED: NativeFileJobDialogModel = {
@@ -273,12 +276,15 @@ function stageLabel(stage: NativeFileJobDialogStage): string {
         case 'copying-assets': return copy.stageCopyingSource
         case 'awaiting-reselect': return copy.stageAwaitingReselect
         case 'reading-archive': return copy.stageReadingArchive
+        case 'requesting-backup-key': return copy.stageRequestingBackupKey
+        case 'decrypting-database': return copy.stageDecryptingDatabase
         case 'preparing-attachments': return copy.stagePreparingAttachments
         case 'reading-database': return copy.stageReadingDatabase
         case 'decoding-database': return copy.stageDecodingDatabase
         case 'finalizing-staging': return copy.stageFinalizingStaging
         case 'assign-plugin-values': return copy.stageAssignPluginValues
         case 'activating': return copy.stageActivating
+        case 'cleaning-up': return copy.stageCleaningUp
         case 'refreshing-app': return copy.stageRefreshingApp
         case 'reloading-plugins': return copy.stageReloadingPlugins
         case 'restarting-app': return copy.stageRestartingApp
@@ -512,9 +518,10 @@ export function failureReason(code: string, direction: 'import' | 'export' = 'im
     const copy = language.risuNest.importDialog
     switch (code) {
         case 'payload-too-large': {
+            if (direction === 'export' && itemKind === 'compatible-database') return copy.reasonCompatibleDatabaseTooLarge
             const item = itemKind && Object.hasOwn(copy.tooLargeItems, itemKind)
                 ? copy.tooLargeItems[itemKind as keyof typeof copy.tooLargeItems] : undefined
-            return item ? copy.reasonTooLarge.replace('{0}', item) : copy.reasonUnknown
+            return item ? (direction === 'export' ? copy.reasonExportTooLarge : copy.reasonTooLarge).replace('{0}', item) : copy.reasonUnknown
         }
         case 'destination-required':
         case 'unsupported-without-destination':
@@ -630,6 +637,17 @@ function overallOf(
             overallText: total && total > 0 ? fillTemplate(copy.overall, formatBytes(total), formatBytes(total)) : '',
             indeterminate: false,
         }
+    }
+    if (status?.kind.startsWith('restore-')) {
+        const detail = status.detail
+        if (detail?.stageTotal && detail.stageTotal > 0) {
+            return {
+                overallPercent: Math.min(100, Math.round(detail.stageCompleted * 100 / detail.stageTotal)),
+                overallText: progressText(detail.stageCompleted, detail.stageTotal, detail.stageUnit),
+                indeterminate: false,
+            }
+        }
+        return { overallPercent: null, overallText: '', indeterminate: terminalState === null }
     }
     if (total && total > 0) {
         return {
@@ -765,7 +783,7 @@ export function buildNativeFileJobDialogModel(
                     : copy.resultExportCancelled
             } else {
                 summary = copy.resultExportFailed
-                reason = failureReason(outcome.error?.code ?? '', 'export')
+                reason = failureReason(outcome.error?.code ?? '', 'export', outcome.error?.itemKind)
             }
         } else if (outcome.state === 'succeeded') {
             summary = restarting ? copy.resultRestarting : copy.resultSucceeded
@@ -774,7 +792,7 @@ export function buildNativeFileJobDialogModel(
                 ? copy.resultCancelledPartial
                 : copy.resultCancelled
         } else if (outcome.error?.recoveryRequired) {
-            summary = copy.resultFailedAfterCommit
+            summary = outcome.error.code === 'activation-outcome-unresolved' ? copy.resultActivationUnresolved : copy.resultFailedAfterCommit
         } else {
             summary = copy.resultFailed
             reason = failureReason(outcome.error?.code ?? '', 'import', outcome.error?.itemKind)

@@ -5,6 +5,7 @@ import { open, SeekMode } from '@tauri-apps/plugin-fs'
 import { recordNativeLogError } from '../nativeLog'
 import { isTauriAndroid, isTauriIOS } from '../platform'
 import { withLibraryFileSelection } from './libraryFileOperation'
+import { nativeRoots } from './nativePaths'
 
 export interface NativeSelectedFile {
     path: string
@@ -86,6 +87,8 @@ async function withNativeSelection<T>(options: FileSelectionOptions, consume: (f
             for (const file of owned) await native.discard(file.path).catch(logCleanupFailure)
         }
         try {
+            if (isTauriIOS) await nativeRoots()
+            if (options.signal?.aborted) return cancelled
             const result = await native.pick(options.multiple ?? false)
             if (result.cancelled) return cancelled
             if (!Array.isArray(result.files) || !result.files.length) throw new Error('The file picker returned no document')

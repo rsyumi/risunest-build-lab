@@ -340,6 +340,8 @@ impl PersistentStore {
             let path = temporary.path().join("incoming.sqlite");
             let mut isolated = crate::sqlite_open::open(&path)?;
             schema::initialize(&mut isolated)?;
+            // A failed stage discards the scratch, so its batch commits need no sync.
+            isolated.pragma_update(None, "synchronous", "OFF")?;
             isolated.execute_batch("INSERT INTO meta VALUES('activeGeneration','\"incoming\"'),('currentRevision','0'); INSERT INTO root VALUES('incoming','{}');")?;
             let mut controls = ScratchBatches::begin(&isolated)?;
             changes.visit(false, |key, stamp, value, _| {

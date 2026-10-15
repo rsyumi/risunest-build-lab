@@ -115,7 +115,7 @@ impl crate::local_backup::CancellationProbe for PublishedProbe<'_> {
 
 fn live_published_objects(state:&PublishedState,capture:&mut super::capture::CaptureCatalog,anchor:Option<&str>,directory:&Path,cancel:&Cancellation)
     ->Result<(BTreeSet<String>,bool)> {
-    use crate::persistent_store::external_capture::{original_unit_dependency_inventory,published_json_asset_roots,BackupBodyRole};
+    use crate::persistent_store::external_capture::{original_unit_dependency_inventory_with_ranges,published_json_asset_roots,published_string_asset_roots,verified_string_control,BackupBodyRole};
     use risunest_sync_wire::unit::UnitValue;
     let mut live=BTreeSet::new();let mut conservative=false;let mut controls=BTreeMap::new();let mut emitted=BTreeSet::new();
     let mut aliases=BTreeSet::new();let mut legacy=BTreeSet::new();let mut inlays=BTreeSet::new();
@@ -137,8 +137,12 @@ fn live_published_objects(state:&PublishedState,capture:&mut super::capture::Cap
             scan(&bytes,&mut live,&mut conservative,&mut legacy,&mut inlays).map_err(error)?;
         }
         let units=BTreeMap::from([(change.key,change.value)]);
-        let inventory=original_unit_dependency_inventory(&units,&|hash|state.body_spool.control(hash),
-            &|_|Ok(None),&PublishedProbe(cancel),false,&mut |hash,bytes,role| {
+        let inventory=original_unit_dependency_inventory_with_ranges(&units,&|hash|state.body_spool.control(hash),
+            &|_|Ok(None),&mut |hash| {
+                let Some(mut input)=state.body_spool.control_reader(hash)? else { return Ok(None); };
+                let length=input.len() as u64;
+                Ok(verified_string_control(&mut input,hash,length,"native_backup_large_unit_source")?.then_some(length))
+            },&PublishedProbe(cancel),&mut |hash,bytes,role| {
                 if role!=BackupBodyRole::Control {return Err(crate::persistent_store::StoreError::Validation{message:"Published control role differs".into()})}
                 emitted.insert(hash.to_owned());capture.object(hash,bytes)?;
                 if let Some(anchor)=anchor {capture.reference(anchor,hash,bytes.len() as u64)?;}Ok(())
@@ -151,6 +155,16 @@ fn live_published_objects(state:&PublishedState,capture:&mut super::capture::Cap
     })?;
     for (hash,size) in controls {
         cancel.check()?;
+        if let Some(mut input)=state.body_spool.control_reader(&hash).map_err(error)? {
+            if let Some(roots)=published_string_asset_roots(&mut input,&hash,size).map_err(error)? {
+                capture.object_reader(&hash,&mut input,size).map_err(error)?;
+                if let Some(anchor)=anchor {capture.reference(anchor,&hash,size).map_err(error)?;}
+                live.extend(roots.object_hashes); live.extend(roots.manifest_hashes);
+                conservative|=roots.retain_all_objects || !roots.blockers.is_empty() || !roots.cold_keys.is_empty();
+                legacy.extend(roots.legacy_asset_keys); inlays.extend(roots.inlay_ids);
+                continue;
+            }
+        }
         let bytes=state.body_spool.control(&hash).map_err(error)?;
         if let Some(bytes)=bytes {
             if bytes.len() as u64!=size {return Err(segment::corrupt())}
@@ -363,11 +377,14 @@ impl ExternalLwwEngine {
     pub(crate) async fn stage_published_objects(&self,store:&mut crate::persistent_store::PersistentStore,state:&mut PublishedState,directory:&Path,cancel:&Cancellation)->Result<()> {
         let root=store.external_lww_root();
         let cas=crate::asset_repository::PayloadCas::new(&root).map_err(error)?;
-        let staged=state.body_spool.visit(&mut |hash,bytes,role| {
+        let staged=state.body_spool.visit_ranged(&mut |hash,bytes,length,role| {
             if cancel.check().is_err() {return Err(crate::persistent_store::StoreError::Validation{message:"Published source staging cancelled".into()});}
             match role {
-                crate::persistent_store::external_capture::BackupBodyRole::Control=>store.lww_put_object(hash,bytes)?,
-                crate::persistent_store::external_capture::BackupBodyRole::Payload=>if cas.stat_object(hash)?.is_none() {store.lww_put_managed_object(hash,bytes)?;},
+                crate::persistent_store::external_capture::BackupBodyRole::Control=>store.lww_put_object_reader(hash,bytes,length)?,
+                crate::persistent_store::external_capture::BackupBodyRole::Payload=>if cas.stat_object(hash)?.is_none() {
+                    let mut buffer=Vec::new(); std::io::Read::read_to_end(bytes,&mut buffer)?;
+                    store.lww_put_managed_object(hash,&buffer)?;
+                },
             }
             Ok(())
         });
@@ -486,6 +503,9 @@ impl ExternalLwwEngine {
             if proof.identity()?!=snapshot.state_identity { return Err(segment::corrupt()); }
             for object in objects {
                 cancel.check()?;
+                if !matches!(&object.source, super::content_store::ObjectSource::Captured(_) | super::content_store::ObjectSource::File(_)) { return Err(segment::corrupt()); }
+                let mut input=content.open_source(&object.source).map_err(error)?;
+                if body_spool.push_ranged_control(&object.content_hash,&mut input,object.byte_length).map_err(error)? { continue; }
                 let bytes=match object.source { super::content_store::ObjectSource::Captured(hash)=>content.read_all(&hash).map_err(error)?, super::content_store::ObjectSource::File(path)=>std::fs::read(path).map_err(error)?, _=>return Err(segment::corrupt()) };
                 if bytes.len() as u64!=object.byte_length || segment::digest(&bytes)!=object.content_hash { return Err(segment::corrupt()); }
                 body_spool.push(&object.content_hash,&bytes,crate::persistent_store::external_capture::BackupBodyRole::Control).map_err(error)?;
@@ -521,6 +541,8 @@ impl ExternalLwwEngine {
                     &directory.join(format!("s{index}")),&self.root_key,self.provider.as_ref(),&self.repository,cancel).await?;
                 for control in controls {
                     let super::content_store::ObjectSource::File(path)=control.source else {return Err(segment::corrupt());};
+                    let mut input=crate::trust_boundary::open_regular_source(&path).map_err(error)?;
+                    if body_spool.push_ranged_control(&control.content_hash,&mut input,control.byte_length).map_err(error)? { continue; }
                     let bytes=std::fs::read(path).map_err(error)?;
                     if bytes.len() as u64!=control.byte_length {return Err(segment::corrupt());}
                     body_spool.push(&control.content_hash,&bytes,crate::persistent_store::external_capture::BackupBodyRole::Control).map_err(error)?;

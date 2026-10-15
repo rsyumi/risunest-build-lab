@@ -411,19 +411,11 @@ fn pairs_early_sidecars_and_infers_missing_metadata() {
 }
 
 #[test]
-fn rejects_corrupt_metadata_duplicates_unsafe_paths_and_truncated_payloads() {
+fn rejects_corrupt_metadata_duplicates_and_truncated_payloads() {
     for entries in [
         [
             archive_entry("inlay/a.webp", b"a"),
             archive_entry("inlay_sidecar/a", b"bad JSON"),
-        ]
-        .concat(),
-        [
-            archive_entry("inlay/a.webp", b"a"),
-            archive_entry(
-                "inlay_sidecar/a",
-                br#"{"ext":"webp","name":"a","type":"invalid"}"#,
-            ),
         ]
         .concat(),
         [
@@ -436,22 +428,12 @@ fn rejects_corrupt_metadata_duplicates_unsafe_paths_and_truncated_payloads() {
             archive_entry("inlay_info/a", b"{}"),
         ]
         .concat(),
-        archive_entry("inlay/nested/a.webp", b"a"),
-        archive_entry("inlay/a.unknown", b"a"),
         archive_entry("inlay/a.webp", b"a")[..19].to_vec(),
         [
             archive_entry("inlay/a.webp", b"a"),
             archive_entry(
                 "inlay_sidecar/a",
                 &vec![b' '; MAX_METADATA_BYTES as usize + 1],
-            ),
-        ]
-        .concat(),
-        [
-            archive_entry("inlay/a.webp", b"a"),
-            archive_entry(
-                "inlay_sidecar/a",
-                br#"{"ext":"webp","name":"a","type":"image","width":-1}"#,
             ),
         ]
         .concat(),
@@ -475,6 +457,45 @@ fn cancels_before_preparing_pocket_payloads() {
             .code,
         LocalBackupErrorCode::Cancelled
     );
+}
+
+#[test]
+fn unsupported_inlay_shapes_are_counted_without_losing_readable_payloads() {
+    let payloads = plan([
+        archive_entry("inlay/good.webp", b"kept"),
+        archive_entry("inlay/a.unknown", b"uninterpreted"),
+        archive_entry("inlay/nested/a.webp", b"uninterpreted"),
+        archive_entry("inlay/b.webp", b"uninterpreted"),
+        archive_entry("inlay_sidecar/b", br#"{"ext":"webp","name":"b","type":"future"}"#),
+    ].concat(), &NeverCancelled).unwrap();
+    assert_eq!(payloads.asset_aliases.len(), 1);
+    assert_eq!(payloads.asset_aliases[0].key, "good");
+    assert_eq!(payloads.invalid_inlays.len(), 2);
+    assert_eq!(payloads.skipped_inlays, 1);
+}
+
+#[test]
+fn extensionless_inlays_preserve_base64_signature_and_raw_sidecar_bytes() {
+    use sha2::{Digest, Sha256};
+    let raw = b"{raw signature bytes";
+    let payloads = plan([
+        archive_entry("inlay/base64", br#"{"ext":"png","name":"Image","type":"image","data":"AAEC//7+"}"#),
+        archive_entry("inlay/url", br#"{"data":"data:image/png;base64,AAEC//7+","ext":"png","name":"URL","type":"image"}"#),
+        archive_entry("inlay/signature", br#"{"ext":"json","name":"Signature","type":"signature","data":"\uD83D\uDE00\ud800x\udc00\n"}"#),
+        archive_entry("inlay/raw", raw),
+        archive_entry("inlay_sidecar/raw", br#"{"ext":"json","name":"Raw","type":"signature"}"#),
+        archive_entry("inlay/duplicate", br#"{"data":"longer ignored string","ext":"json","name":"Last","type":"signature","data":"last"}"#),
+    ].concat(), &NeverCancelled).unwrap();
+    assert!(payloads.invalid_inlays.is_empty());
+    for (id, bytes) in [
+        ("base64", &[0, 1, 2, 255, 254, 254][..]),
+        ("url", &[0, 1, 2, 255, 254, 254][..]),
+        ("signature", "😀�x�\n".as_bytes()), ("raw", raw.as_slice()), ("duplicate", b"last".as_slice()),
+    ] {
+        let alias = payloads.asset_aliases.iter().find(|alias| alias.key == id).unwrap();
+        assert_eq!(alias.object_hash.as_deref(), Some(hex::encode(Sha256::digest(bytes)).as_str()), "{id}");
+        assert_eq!(alias.size, bytes.len() as i64, "{id}");
+    }
 }
 
 #[test]

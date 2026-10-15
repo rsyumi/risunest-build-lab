@@ -128,7 +128,7 @@ fn read_owner_manifest(
 ) -> Result<Vec<owner_manifest_codec::OwnerManifestEntry>, NativeJobError> {
     check_cancelled(cancellation).map_err(local_backup_error)?;
     if expected_size > MAX_OWNER_MANIFEST_BYTES {
-        return Err(invalid_source("owner manifest exceeds the decode limit"));
+        return Err(NativeJobError::too_large("owner-manifest", "owner manifest exceeds the decode limit"));
     }
     let file = cas
         .open_available_object(hash)
@@ -237,9 +237,7 @@ fn copy_verified(
     cancellation: &dyn CancellationProbe,
 ) -> Result<(), NativeJobError> {
     if expected > u64::from(u32::MAX) {
-        return Err(NativeJobError::new(
-            "length-overflow",
-            "attachment exceeds the target's 4 GiB entry limit",
+        return Err(NativeJobError::too_large("backup-entry", "attachment exceeds the target's 4 GiB entry limit",
         ));
     }
     check_cancelled(cancellation).map_err(local_backup_error)?;
@@ -518,7 +516,7 @@ pub(super) fn prepare(
             .map_err(io_job_error)?
             .ok_or_else(|| invalid_source("owner manifest is missing"))?;
         if size > MAX_OWNER_MANIFEST_BYTES {
-            return Err(invalid_source("owner manifest exceeds the decode limit"));
+            return Err(NativeJobError::too_large("owner-manifest", "owner manifest exceeds the decode limit"));
         }
         pins.pin_existing(cas, hash, size, CasObjectRole::OwnerManifest)
             .map_err(io_job_error)?;
@@ -1603,7 +1601,9 @@ mod tests {
         let manifest = cas.prepare_bytes(&bytes).unwrap();
         let never = crate::local_backup::NeverCancelled;
         assert!(read_owner_manifest(&cas, &manifest.content_hash, manifest.byte_size, &never).unwrap().is_empty());
-        assert_eq!(read_owner_manifest(&cas, &manifest.content_hash, MAX_OWNER_MANIFEST_BYTES + 1, &never).unwrap_err().code, "invalid-source");
+        let oversized = read_owner_manifest(&cas, &manifest.content_hash, MAX_OWNER_MANIFEST_BYTES + 1, &never).unwrap_err();
+        assert_eq!(oversized.code, "payload-too-large");
+        assert_eq!(oversized.item_kind.as_deref(), Some("owner-manifest"));
         assert_eq!(read_owner_manifest(&cas, &manifest.content_hash, manifest.byte_size + 1, &never).unwrap_err().code, "invalid-source");
         assert_eq!(read_owner_manifest(&cas, &manifest.content_hash, manifest.byte_size, &Cancel).unwrap_err().code, "cancelled");
         let path = cas.object_path(&manifest.content_hash).unwrap().unwrap();
