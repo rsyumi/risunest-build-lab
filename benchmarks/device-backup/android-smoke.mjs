@@ -606,13 +606,14 @@ async function main() {
   if (!peer)
     await client.evaluate("void globalThis.__deviceBackupSmoke.start()", false);
   let lastStage;
+  let lastNativeTransition;
   let observedActiveStage = false;
   let stageDeadline = Date.now() + 120_000;
   let nextMemory = 0;
   while (true) {
     assert.ok(
       Date.now() < stageDeadline,
-      "Synthetic device stage exceeded 120 seconds",
+      "Synthetic device phase did not advance within 120 seconds",
     );
     const next = await client
       .evaluate(
@@ -631,6 +632,11 @@ async function main() {
         lastStage = state.stage;
         stageDeadline = Date.now() + 120_000;
         progress(state.stage);
+      }
+      const nativeTransition = state.statusTransitions.at(-1);
+      if (nativeTransition !== lastNativeTransition) {
+        lastNativeTransition = nativeTransition;
+        stageDeadline = Date.now() + 120_000;
       }
       if (state.stage === "done") break;
     }

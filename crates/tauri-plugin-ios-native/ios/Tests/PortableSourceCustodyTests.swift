@@ -194,7 +194,10 @@ final class PortableSourceCustodyTests: XCTestCase {
         try custody.confirm(token: token, format: "local-backup")
         let staging = root!
         DispatchQueue.global().async {
-            XCTAssertThrowsError(try custody.materialize(token: token, staging: staging)) { error in
+            do {
+                _ = try custody.materialize(token: token, staging: staging)
+                XCTFail("Cancelled copy completed")
+            } catch {
                 XCTAssertEqual(error as? PortableSourceError, .cancelled)
             }
             settled.fulfill()
