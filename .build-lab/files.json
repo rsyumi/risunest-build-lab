@@ -2199,8 +2199,8 @@
     {
       "path": "crates/tauri-plugin-ios-native/ios/Tests/PortableSourceCustodyTests.swift",
       "mode": "100644",
-      "bytes": 18181,
-      "sha256": "3a184fb5ec4336509bddbcdde423ec28f34a27928fa564b7e705e831ab5b2b5c"
+      "bytes": 18247,
+      "sha256": "7df11a0b6e95620483d830f9ccbd26759813338b68c53b0807f1860582d64737"
     },
     {
       "path": "crates/tauri-plugin-ios-native/src/lib.rs",
