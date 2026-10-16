@@ -4,7 +4,7 @@ import { indexCharactersById } from '../../src/ts/characterIndex'
 export { languageEnglish as language } from '../../src/lang/en'
 
 export const DBState = $state({ db: {
-    characters: Array.from({ length: 20 }, (_, i) => ({ chaId: `bot-${i + 1}`, name: `Bot ${i + 1}`, chats: [] })),
+    characters: Array.from({ length: 20 }, (_, i) => ({ chaId: `bot-${i + 1}`, name: `Bot ${i + 1}`, image: `assets/bot-${i + 1}.png`, chats: [] })),
     characterOrder: Array.from({ length: 20 }, (_, i) => `bot-${i + 1}`),
     showFolderName: true,
 } as unknown as Database, clicks: 0, menus: 0 })
@@ -17,3 +17,5 @@ export const checkCharOrder = () => {}
 export const getCharacterIndexObject = () => indexCharactersById(DBState.db.characters)
 export const changeChar = (index: number) => { DBState.clicks++; selectedCharID.set(index) }
 export const alertSelect = async () => { DBState.menus++; return '-1' }
+
+export const getCharImage = () => ""

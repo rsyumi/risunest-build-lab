@@ -4,6 +4,9 @@ import type { ScreenshotArchiveWriter } from './chatScreenshotArchive'
 import {
     acknowledgeAndroidSafExport,
     copyNativeExportToAndroidSaf,
+    reserveAndroidSafDestination,
+    withAndroidSafDestination,
+    type AndroidSafDestinationReservation,
     getAndroidSafExportStatus,
     isAndroidSafDestinationRequestActive,
     listenAndroidSafDestinationEvents,
@@ -23,6 +26,7 @@ interface NativeScreenshotArchiveDependencies {
 }
 
 interface AndroidScreenshotArchiveDependencies {
+    reserveDestination: typeof reserveAndroidSafDestination
     invoke(command: string, args?: Record<string, unknown>): Promise<unknown>
     copyToAndroidSaf(request: AndroidSafDestinationRequest): Promise<AndroidSafDestinationResult>
     acknowledgeAndroidSafExport(requestId: string): boolean | Promise<boolean>
@@ -30,6 +34,7 @@ interface AndroidScreenshotArchiveDependencies {
 }
 
 interface MobileScreenshotArchiveDependencies {
+    destinationReservation?: AndroidSafDestinationReservation
     invoke(command: string, args?: Record<string, unknown>): Promise<unknown>
     exportFile(request: {
         sourcePath: string
@@ -56,6 +61,7 @@ const productionDependencies: NativeScreenshotArchiveDependencies = {
 }
 
 const productionAndroidDependencies: AndroidScreenshotArchiveDependencies = {
+    reserveDestination: reserveAndroidSafDestination,
     invoke: (command, args) => invoke(command, args),
     copyToAndroidSaf: (request) => copyNativeExportToAndroidSaf(request),
     acknowledgeAndroidSafExport: (requestId) => acknowledgeAndroidSafExport(requestId),
@@ -214,7 +220,7 @@ class MobileScreenshotArchiveWriter implements ScreenshotArchiveWriter {
         if (this.state === 'closed') return
         if (this.state !== 'open') throw new Error('Mobile screenshot output is being published')
         this.state = 'publishing'
-        this.publication = this.publish().catch((error) => {
+        this.publication = withAndroidSafDestination(this.dependencies.destinationReservation, () => this.publish()).catch((error) => {
             this.publicationError = error
             throw error
         })
@@ -230,7 +236,7 @@ class MobileScreenshotArchiveWriter implements ScreenshotArchiveWriter {
 
     abort(): Promise<boolean> {
         if (this.aborting) return this.aborting
-        this.aborting = this.abortOutput()
+        this.aborting = withAndroidSafDestination(this.dependencies.destinationReservation, () => this.abortOutput())
         return this.aborting
     }
 
@@ -388,6 +394,11 @@ export async function recoverAndroidScreenshotPublication(
 ): Promise<AndroidSafDestinationEvent | null> {
     const terminal = recoveredScreenshotTerminal(await dependencies.getStatus())
     if (!terminal || !terminal.exportId) return null
+    if (terminal.copyStarted === false) {
+        await dependencies.invoke('native_file_job_screenshot_output_cancel', {
+            jobId: terminal.exportId,
+        })
+    }
     await dependencies.invoke('native_file_job_screenshot_output_release', {
         jobId: terminal.exportId,
     })
@@ -455,16 +466,22 @@ export async function createNativeScreenshotArchiveWriter(
     return new NativeScreenshotArchiveWriter(started.jobId, dependencies)
 }
 
-export function createAndroidScreenshotArchiveWriter(
+export async function createAndroidScreenshotArchiveWriter(
     suggestedName: string,
     dependencies: AndroidScreenshotArchiveDependencies = productionAndroidDependencies,
 ): Promise<ScreenshotArchiveWriter> {
-    return createMobileScreenshotArchiveWriter(suggestedName, {
-        invoke: dependencies.invoke,
-        exportFile: (request) => dependencies.copyToAndroidSaf({ ...request, deferAcknowledgement: true }),
-        acknowledgePublication: dependencies.acknowledgeAndroidSafExport,
-        warn: dependencies.warn,
-    })
+    const reservation = await dependencies.reserveDestination(suggestedName, 'screenshot')
+    try {
+        return await createMobileScreenshotArchiveWriter(suggestedName, {
+            invoke: dependencies.invoke,
+            destinationReservation: reservation,
+            exportFile: (request) => dependencies.copyToAndroidSaf({ ...request, reservation, deferAcknowledgement: true }),
+            acknowledgePublication: dependencies.acknowledgeAndroidSafExport,
+            warn: dependencies.warn,
+        })
+    } catch (error) {
+        return withAndroidSafDestination(reservation, async () => { throw error })
+    }
 }
 
 export function createIOSScreenshotArchiveWriter(
@@ -483,6 +500,12 @@ async function createMobileScreenshotArchiveWriter(
     }) as { jobId?: unknown }
     if (typeof started.jobId !== 'string' || !started.jobId) {
         throw new Error('Native screenshot output returned an invalid job ID')
+    }
+    try {
+        await dependencies.destinationReservation?.bind(started.jobId)
+    } catch (error) {
+        await dependencies.invoke('native_file_job_screenshot_output_cancel', {jobId: started.jobId})
+        throw error
     }
     return new MobileScreenshotArchiveWriter(started.jobId, suggestedName, dependencies)
 }

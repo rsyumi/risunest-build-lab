@@ -53,6 +53,7 @@ export function releaseTauriConfig(releaseInput, publicKey) {
     config.bundle.iOS = { bundleVersion: releaseInput.iosBuildNumber };
   }
   if (releaseInput.product === "app") {
+    config.build = { features: ["official-distribution"] };
     config.plugins = {
       updater: {
         pubkey: publicKey,

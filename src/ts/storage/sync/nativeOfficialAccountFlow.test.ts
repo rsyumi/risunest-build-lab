@@ -10,7 +10,7 @@ import {
     createNativeOfficialAccountFlow,
     nativeOfficialAccountKeys,
 } from './nativeOfficialAccountFlow'
-import { NativeFileJobActivationCommittedError } from '../nativeFileJobs'
+import { NativeFileJobActivationCommittedError, NativeFileJobActivationUnresolvedError } from '../nativeFileJobs'
 
 function createHarness(loggedIn = false, useNativeRestore = false) {
     const events: string[] = []
@@ -51,9 +51,11 @@ function createHarness(loggedIn = false, useNativeRestore = false) {
         revision: 8,
     }))
     const completeRestoreAssets = vi.fn(async () => {})
-    const clearRestoreAssets = vi.fn(async () => {})
+    let pendingRestoreAccount: string | null = null
+    const prepareRestoreAssets = async (accountId: string) => { pendingRestoreAccount = accountId }
+    const clearRestoreAssets = vi.fn(async () => { pendingRestoreAccount = null })
     const flow = createNativeOfficialAccountFlow({
-        completeRestoreAssets, clearRestoreAssets,
+        prepareRestoreAssets, completeRestoreAssets, clearRestoreAssets,
         credentialVault: vault,
         adapter,
         initialCredential: loggedIn ? {
@@ -72,6 +74,7 @@ function createHarness(loggedIn = false, useNativeRestore = false) {
         ...(useNativeRestore ? { nativeRestore } : {}),
     })
     return {
+        get pendingRestoreAccount() { return pendingRestoreAccount },
         completeRestoreAssets, clearRestoreAssets,
         adapter,
         clearLegacyFallback,
@@ -520,11 +523,15 @@ describe('explicit native official account flow', () => {
         expect(harness.clearRestoreAssets).not.toHaveBeenCalled()
     })
 
-    it('clears the asset resume intent after pre-activation failure', async () => {
+    it.each([
+        ['pre-activation failure', new Error('offline'), null],
+        ['committed activation', new NativeFileJobActivationCommittedError(8, new Error('refresh failed')), 'account-1'],
+        ['unresolved activation', new NativeFileJobActivationUnresolvedError(new Error('status unavailable')), 'account-1'],
+    ] as const)('retains the correct asset resume intent after %s', async (_label, error, pendingAccount) => {
         const harness = createHarness(true, true)
-        harness.nativeRestore.mockRejectedValueOnce(new Error('offline'))
-        await expect(harness.flow.restore()).rejects.toThrow('offline')
-        expect(harness.clearRestoreAssets).toHaveBeenCalledOnce()
+        harness.nativeRestore.mockRejectedValueOnce(error)
+        await expect(harness.flow.restore()).rejects.toBe(error)
+        expect(harness.pendingRestoreAccount).toBe(pendingAccount)
         expect(harness.completeRestoreAssets).not.toHaveBeenCalled()
         expect(harness.restart).not.toHaveBeenCalled()
     })
@@ -536,6 +543,48 @@ describe('explicit native official account flow', () => {
         expect(harness.flow.getAccountId()).toBe('vault-account')
         await harness.flow.logout()
         expect(harness.flow.getAccountId()).toBeNull()
+    })
+
+    it('keeps native logout effective after metadata cleanup fails and retries the cleanup', async () => {
+        const harness = createHarness(true)
+        const account = { id: 'account-1', token: 'legacy-token', data: {} }
+        harness.vault.stored = account
+        let routedAccount: typeof account | null = account
+        harness.setRouting.mockImplementation(value => { routedAccount = value })
+        let metadataPresent = true
+        harness.clearMetadata.mockImplementation(async () => { metadataPresent = false })
+        harness.clearMetadata.mockRejectedValueOnce(new Error('metadata cleanup failed'))
+
+        await expect(harness.flow.logout()).rejects.toThrow('metadata cleanup failed')
+
+        expect(harness.vault.stored).toBeNull()
+        expect(harness.flow.getAccountId()).toBeNull()
+        expect(harness.flow.getToken()).toBeNull()
+        expect(routedAccount).toBeNull()
+        expect(metadataPresent).toBe(true)
+        await expect(harness.flow.publish()).rejects.toThrow('login is required')
+        await harness.flow.logout()
+        expect(metadataPresent).toBe(false)
+        expect(routedAccount).toBeNull()
+    })
+
+    it('retains native login when logout metadata flush fails before clearing the vault', async () => {
+        const harness = createHarness(true)
+        const account = { id: 'account-1', token: 'legacy-token', data: {} }
+        harness.vault.stored = account
+        let routedAccount: typeof account | null = account
+        harness.setRouting.mockImplementation(value => { routedAccount = value })
+        harness.flushMetadata.mockRejectedValueOnce(new Error('metadata flush failed'))
+
+        await expect(harness.flow.logout()).rejects.toThrow('metadata flush failed')
+
+        expect(harness.vault.stored).toEqual(account)
+        expect(harness.flow.getAccountId()).toBe(account.id)
+        expect(harness.flow.getToken()).toBe(account.token)
+        expect(routedAccount).toEqual(account)
+        await harness.flow.logout()
+        expect(harness.vault.stored).toBeNull()
+        expect(routedAccount).toBeNull()
     })
 
 })

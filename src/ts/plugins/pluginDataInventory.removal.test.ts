@@ -8,7 +8,7 @@ vi.mock('./pluginDeviceKeyspace', () => ({ invalidatePluginDeviceKeyspaces: vi.f
 import { deletePluginDataForOwner } from './pluginDataInventory'
 beforeEach(() => {
     vi.resetAllMocks()
-    mocks.owner.mockReturnValue({ mutate: mocks.mutate })
+    mocks.owner.mockReturnValue({ mutate: mocks.mutate, dispose: vi.fn() })
     mocks.list.mockResolvedValue([
         { owner: 'plugin', key: 'ordinary', valueType: 'json', byteSize: 1 },
         { owner: 'other', key: 'ordinary', valueType: 'json', byteSize: 1 },

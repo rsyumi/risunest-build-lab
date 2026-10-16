@@ -9,7 +9,7 @@
     interface Props {
         values?: ToggleValues
         unpinKeys?: string[]
-        onApplyPreset?: (values: ToggleValues, keys: readonly string[]) => void
+        onApplyPreset?: (values: ToggleValues, keys: readonly string[]) => Promise<boolean>
         saving?: boolean
     }
     let { values, unpinKeys = [], onApplyPreset, saving = $bindable(false) }: Props = $props()

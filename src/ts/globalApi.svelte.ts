@@ -1,4 +1,5 @@
 import { FetchBodyPreview, previewFetchRequest } from './network/boundedFetchPreview'
+import { observeProviderRequest } from './network/providerDiagnostics'
 import {
     writeFile,
     open as openFile,
@@ -571,6 +572,8 @@ export interface GlobalFetchArgs {
  * @property {{ [key: string]: string }} headers - The headers returned from the request.
  */
 interface GlobalFetchResult {
+    transportFailure?: boolean;
+    diagnosticStatus?: number;
     ok: boolean;
     data: any;
     headers: { [key: string]: string };
@@ -622,6 +625,13 @@ export function addFetchLog(arg: {
  * @returns {Promise<GlobalFetchResult>} - The result of the fetch request.
  */
 export async function globalFetch(url: string, arg: GlobalFetchArgs = {}): Promise<GlobalFetchResult> {
+    const { transportFailure: _transportFailure, diagnosticStatus: _diagnosticStatus, ...result } = await observeProviderRequest(
+        url, isTauri ? arg.chatId : undefined, () => performGlobalFetch(url, arg), arg.abortSignal,
+    )
+    return result
+}
+
+async function performGlobalFetch(url: string, arg: GlobalFetchArgs): Promise<GlobalFetchResult> {
     try {
         const db = getDatabase();
         if (arg.abortSignal?.aborted) { return { ok: false, data: 'aborted', headers: {}, status: 400 }; }
@@ -673,7 +683,7 @@ export async function globalFetch(url: string, arg: GlobalFetchArgs = {}): Promi
 
     } catch (error) {
         console.error(error);
-        return { ok: false, data: `${error}`, headers: {}, status: 400 };
+        return { ok: false, data: `${error}`, headers: {}, status: 400, transportFailure: true };
     }
 }
 
@@ -724,15 +734,17 @@ function addFetchLogInGlobalFetch(response: any, success: boolean, url: string, 
  * @returns {Promise<GlobalFetchResult>} - The result of the fetch request.
  */
 async function fetchWithPlainFetch(url: string, arg: GlobalFetchArgs): Promise<GlobalFetchResult> {
+    let receivedStatus: number | undefined
     try {
         const headers = { 'Content-Type': 'application/json', ...arg.headers };
         const response = await fetch(new URL(url), { body: JSON.stringify(arg.body), headers, method: arg.method ?? "POST", signal: arg.abortSignal });
+        receivedStatus = response.status
         const data = arg.rawResponse ? new Uint8Array(await response.arrayBuffer()) : await response.json();
         const ok = response.ok && response.status >= 200 && response.status < 300;
         addFetchLogInGlobalFetch(data, ok, url, arg, response.status);
         return { ok, data, headers: Object.fromEntries(response.headers), status: response.status };
     } catch (error) {
-        return { ok: false, data: `${error}`, headers: {}, status: 400 };
+        return { ok: false, data: `${error}`, headers: {}, status: 400, transportFailure: receivedStatus === undefined, diagnosticStatus: receivedStatus };
     }
 }
 
@@ -744,15 +756,17 @@ async function fetchWithPlainFetch(url: string, arg: GlobalFetchArgs): Promise<G
  * @returns {Promise<GlobalFetchResult>} - The result of the fetch request.
  */
 async function fetchWithUSFetch(url: string, arg: GlobalFetchArgs): Promise<GlobalFetchResult> {
+    let receivedStatus: number | undefined
     try {
         const headers = { 'Content-Type': 'application/json', ...arg.headers };
         const response = await userScriptFetch(url, { body: JSON.stringify(arg.body), headers, method: arg.method ?? "POST", signal: arg.abortSignal });
+        receivedStatus = response.status
         const data = arg.rawResponse ? new Uint8Array(await response.arrayBuffer()) : await response.json();
         const ok = response.ok && response.status >= 200 && response.status < 300;
         addFetchLogInGlobalFetch(data, ok, url, arg, response.status);
         return { ok, data, headers: Object.fromEntries(response.headers), status: response.status };
     } catch (error) {
-        return { ok: false, data: `${error}`, headers: {}, status: 400 };
+        return { ok: false, data: `${error}`, headers: {}, status: 400, transportFailure: receivedStatus === undefined, diagnosticStatus: receivedStatus };
     }
 }
 
@@ -764,15 +778,17 @@ async function fetchWithUSFetch(url: string, arg: GlobalFetchArgs): Promise<Glob
  * @returns {Promise<GlobalFetchResult>} - The result of the fetch request.
  */
 async function fetchWithTauri(url: string, arg: GlobalFetchArgs): Promise<GlobalFetchResult> {
+    let receivedStatus: number | undefined
     try {
         const headers = { 'Content-Type': 'application/json', ...arg.headers };
         const response = await TauriHTTPFetch(new URL(url), { dataText: JSON.stringify(arg.body), headers, method: arg.method ?? "POST", signal: arg.abortSignal });
+        receivedStatus = response.status
         const data = arg.rawResponse ? new Uint8Array(await response.arrayBuffer()) : await response.json();
         const ok = response.status >= 200 && response.status < 300;
         addFetchLogInGlobalFetch(data, ok, url, arg, response.status);
         return { ok, data, headers: Object.fromEntries(response.headers), status: response.status };
     } catch (error) {
-        return { ok: false, data: `${error}`, headers: {}, status: 400 };
+        return { ok: false, data: `${error}`, headers: {}, status: 400, transportFailure: receivedStatus === undefined, diagnosticStatus: receivedStatus };
     }
 }
 
@@ -784,6 +800,7 @@ async function fetchWithTauri(url: string, arg: GlobalFetchArgs): Promise<Global
  * @returns {Promise<GlobalFetchResult>} - The result of the fetch request.
  */
 async function fetchWithProxy(url: string, arg: GlobalFetchArgs): Promise<GlobalFetchResult> {
+    let receivedStatus: number | undefined
     try {
         const furl = getProxy2Url();
         arg.headers ??= {};
@@ -800,6 +817,7 @@ async function fetchWithProxy(url: string, arg: GlobalFetchArgs): Promise<Global
         const body = arg.body instanceof URLSearchParams ? arg.body.toString() : JSON.stringify(arg.body);
 
         const response = await fetch(furl, { body, headers, method: arg.method ?? "POST", signal: arg.abortSignal });
+        receivedStatus = response.status
         const isSuccess = response.ok && response.status >= 200 && response.status < 300;
 
         if (arg.rawResponse) {
@@ -819,7 +837,7 @@ async function fetchWithProxy(url: string, arg: GlobalFetchArgs): Promise<Global
             return { ok: false, data: errorMsg, headers: Object.fromEntries(response.headers), status: response.status };
         }
     } catch (error) {
-        return { ok: false, data: `${error}`, headers: {}, status: 400 };
+        return { ok: false, data: `${error}`, headers: {}, status: 400, transportFailure: receivedStatus === undefined, diagnosticStatus: receivedStatus };
     }
 }
 
@@ -1288,6 +1306,10 @@ export async function fetchNative(url: string, arg: {
     requestTimeoutMs?: number
     networkRoute?: 'auto' | 'local_network'
 } = {}): Promise<Response> {
+    return observeProviderRequest(url, isTauri ? arg.chatId : undefined, () => performNativeFetch(url, arg), arg.signal)
+}
+
+async function performNativeFetch(url: string, arg: NonNullable<Parameters<typeof fetchNative>[1]>): Promise<Response> {
 
     const useInterceptor = !!arg.interceptor
     console.log(arg.body, 'body')

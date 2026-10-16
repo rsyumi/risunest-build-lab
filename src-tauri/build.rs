@@ -1,4 +1,26 @@
+#[path = "src/app_update/build_key.rs"]
+mod build_update_key;
+
 fn main() {
+    // Tauri forwards TAURI_* variables through mobile IDE builds.
+    println!("cargo:rerun-if-env-changed=TAURI_RISUNEST_UPDATE_PUBLIC_KEY");
+    println!("cargo:rerun-if-env-changed=RISUNEST_UPDATE_PUBLIC_KEY");
+    println!("cargo:rerun-if-changed=src/app_update/build_key.rs");
+    let forwarded_key = std::env::var("TAURI_RISUNEST_UPDATE_PUBLIC_KEY").ok();
+    let legacy_key = std::env::var("RISUNEST_UPDATE_PUBLIC_KEY").ok();
+    let public_key = build_update_key::resolve_update_public_key(
+        forwarded_key.as_deref(),
+        legacy_key.as_deref(),
+        std::env::var_os("CARGO_FEATURE_OFFICIAL_DISTRIBUTION").is_some(),
+    )
+    .expect("invalid updater build configuration");
+    let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("missing OUT_DIR"));
+    std::fs::write(
+        output.join("update_public_key.rs"),
+        format!("const PUBLIC_KEY: &str = {public_key:?};\n"),
+    )
+    .expect("failed to write updater public key");
+
     if matches!(std::env::var("CARGO_CFG_TARGET_OS").as_deref(), Ok("macos") | Ok("ios")) {
         println!("cargo:rerun-if-changed=src/apple_startup_log.c");
         cc::Build::new().file("src/apple_startup_log.c").compile("risunest_startup_log");

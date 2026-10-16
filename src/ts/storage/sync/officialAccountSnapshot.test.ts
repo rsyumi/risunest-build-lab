@@ -141,6 +141,7 @@ interface HarnessOptions {
     nativeDatabasePublisher?: OfficialNativeDatabasePublisher
     getAccountId?: () => string | null
     flushPublicationMetadata?: () => Promise<void>
+    restoreCandidate?: OfficialAccountSnapshotDependencies['restoreCandidate']
     events?: string[]
 }
 
@@ -210,6 +211,7 @@ async function makeHarness(options: HarnessOptions = {}) {
         nativeDatabasePublisher: options.nativeDatabasePublisher,
         getAccountId: options.getAccountId,
         flushPublicationMetadata: options.flushPublicationMetadata,
+        restoreCandidate: options.restoreCandidate,
     }
     const adapter = new OfficialAccountSnapshotAdapter(dependencies)
     return {
@@ -1294,8 +1296,13 @@ describe('OfficialAccountSnapshotAdapter persisted association', () => {
         expect(replace).not.toHaveBeenCalled()
     })
 
-    it('keeps unpublished local commits across a restart instead of restoring the published snapshot', async () => {
-        const harness = await publishHarness()
+    it.each([false, true])('preserves automatic pull decisions while explicitly restoring unchanged snapshots, restore=%s', async (restore) => {
+        let activate: NonNullable<OfficialAccountSnapshotDependencies['restoreCandidate']>
+        const harness = await publishHarness({
+            restoreCandidate: restore ? (...args) => activate(...args) : undefined,
+            remoteCold: new Map([['cold-message', { message: [] }]]),
+        })
+        activate = (candidate, expectedRevision) => harness.store.replaceFromDatabase(candidate, expectedRevision)
         const root = (await harness.store.readRoot()).value
         await harness.store.commit({
             expectedRevision: harness.imported.revision,
@@ -1308,10 +1315,26 @@ describe('OfficialAccountSnapshotAdapter persisted association', () => {
         const replace = vi.spyOn(harness.store, 'replaceFromDatabase')
         const restarted = harness.restartAdapter()
 
-        await expect(restarted.pull()).resolves.toEqual({ kind: 'kept-local', conflict: false })
-        expect(replace).not.toHaveBeenCalled()
-        expect(harness.prepareCandidate).not.toHaveBeenCalled()
-        expect((await harness.store.readRoot()).value.username).toBe('Offline edit')
+        if (restore) {
+            await expect(restarted.pull()).resolves.toMatchObject({ kind: 'activated' })
+            expect((await harness.store.readRoot()).value.username).toBe(harness.database.username)
+        } else {
+            await expect(restarted.pull()).resolves.toEqual({ kind: 'kept-local', conflict: false })
+            expect(replace).not.toHaveBeenCalled()
+            expect(harness.prepareCandidate).not.toHaveBeenCalled()
+            expect((await harness.store.readRoot()).value.username).toBe('Offline edit')
+        }
+    })
+
+    it('leaves local data intact when the explicit restore activation is declined', async () => {
+        const declined = new DOMException('Import cancelled', 'AbortError')
+        const harness = await publishHarness({
+            restoreCandidate: async () => { throw declined },
+            remoteCold: new Map([['cold-message', { message: [] }]]),
+        })
+        harness.readItem.mockResolvedValue({ kind: 'value', bytes: harness.publishedBytes })
+        await expect(harness.restartAdapter().pull()).rejects.toBe(declined)
+        expect((await harness.store.readRoot()).revision).toBe(harness.imported.revision)
     })
 
     it('flags the conflict but still keeps unpublished local commits when the remote changed too', async () => {

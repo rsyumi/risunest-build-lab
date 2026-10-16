@@ -1,4 +1,7 @@
 <script lang="ts">
+    import { pluginStartupGate } from 'src/ts/plugins/pluginStartupGate'
+    import { refuseGenerationWhilePluginsWait } from 'src/ts/plugins/pluginStartupRefusal'
+    import { captureChatParserContextSeed, createChatParserContextSeed } from 'src/ts/chatParserContextSeed.svelte'
     import { ScreenshotPreparationError } from 'src/ts/chatScreenshotErrors'
     import { v4 } from 'uuid'
     import { alertConfirm } from 'src/ts/alert'
@@ -389,13 +392,14 @@
     }
 
     async function sendMain(continueResponse:boolean) {
+        const submittedComposer = captureComposerInput()
+        if (!submittedComposer.text.startsWith('/') && refuseGenerationWhilePluginsWait()) return
         if($doingChat || sending || rerollBusy){
             return
         }
         const generation = reserveChatGeneration()
         if (!generation) return
         sending = true
-        const submittedComposer = captureComposerInput()
         const submittedInput = submittedComposer.text
         const submittedFiles = [...fileInput]
         let windowed = false
@@ -559,8 +563,9 @@
         let messages = mutationTarget.conversation.message
 
         if(input.startsWith('/')){
+            const refusals = pluginStartupGate.refusalCount
             const commandProcessed = await processMultiCommand(input, undefined, { signal: generation.signal, reservation: generation })
-            if (generation.signal.aborted) return
+            if (generation.signal.aborted || refusals !== pluginStartupGate.refusalCount) return
             context.requireCurrent()
             if(commandProcessed !== false){
                 chatScreenState.clearSubmittedComposer(submittedComposer)
@@ -570,6 +575,7 @@
             messages = mutationTarget.conversation.message
         }
 
+        if (refuseGenerationWhilePluginsWait()) return
         for(const file of submittedFiles){
             input += `{{inlayed::${file}}}`
         }
@@ -641,6 +647,7 @@
     }
 
     async function rerollCandidate(expectedLastMessage?: string) {
+        if (refuseGenerationWhilePluginsWait()) return
         if ($doingChat || rerollBusy || sending) return
         const generation = reserveChatGeneration()
         if (!generation) return
@@ -833,6 +840,7 @@
     }
 
     async function sendChatMain(continued:boolean = false) {
+        if (refuseGenerationWhilePluginsWait()) return
         const generation = reserveChatGeneration()
         if (!generation) return
         try {
@@ -1212,11 +1220,21 @@
         )
     }
 
+    const liveParserStoreRevision = $derived.by(() => {
+        void viewportBindingRevision
+        return persistentRuntime.captureSelectedConversationTarget()?.storeRevision ?? null
+    })
+    const boundedLiveParserSeed = $derived.by(() => {
+        void liveParserStoreRevision
+        const current = captureCurrentParserConversation()
+        return current ? createChatParserContextSeed(createBoundedLiveParserContext(current)) : null
+    })
+
     const liveParserProjectionResolver = createSelectedConversationLiveParserProjectionResolver({
         runtime: persistentRuntime,
         maxProjectionMessages: 256,
         captureCurrent: captureCurrentParserConversation,
-        createBoundedContextSeed: createBoundedLiveParserContext,
+        createBoundedContextSeed: (current) => boundedLiveParserSeed ? captureChatParserContextSeed(boundedLiveParserSeed) : createBoundedLiveParserContext(current),
         createCompleteContext: createCompleteLiveParserContext,
         parserSource: (current) =>
             createLiveChatParserSource(DBState.db, current.character, getModuleRegexScripts()),

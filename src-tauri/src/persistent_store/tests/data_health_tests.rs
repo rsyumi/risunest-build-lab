@@ -6,6 +6,29 @@ fn healthy_fixture() -> (tempfile::TempDir, PersistentStore) {
     stored(fixture())
 }
 
+#[test]
+fn repairing_a_missing_or_stale_chat_page_selects_the_first_conversation() {
+    for missing in [true, false] {
+        let (_directory, mut store) = healthy_fixture();
+        store.connection.execute(if missing {
+            "UPDATE characters SET detail=json_remove(detail,'$.chatPage') WHERE character_id='char-a'"
+        } else {
+            "UPDATE characters SET detail=json_set(detail,'$.chatPage',999) WHERE character_id='char-a'"
+        }, []).unwrap();
+        let findings = scan(&mut store);
+        assert!(findings.items.iter().any(|finding| finding.code == codes::REFERENCE_MISSING
+            && finding.locator.as_ref().is_some_and(|locator| locator.source_path == "$.chatPage")));
+        let diagnosis = crate::data_health::ScanResult::new(store.revision().unwrap(), 1, crate::data_health::ScanDepth::Quick, findings);
+        let candidates = crate::data_health::repair::plan(&diagnosis).into_iter().filter(|candidate|
+            matches!(&candidate.action, crate::data_health::repair::RepairAction::SelectFirstConversation { character_id } if character_id == "char-a")
+        ).collect::<Vec<_>>();
+        store.apply_repair(store.revision().unwrap(), &candidates, 10).unwrap();
+        assert_eq!(store.read_character("char-a", None).unwrap().unwrap().value["chatPage"], 0);
+        assert!(scan(&mut store).items.iter().all(|finding|
+            finding.locator.as_ref().is_none_or(|locator| locator.source_path != "$.chatPage")));
+    }
+}
+
 /// The root keeps the selected preset and persona the way the app stores them, and the personas
 /// it selects from.
 fn selection_fixture(preset: Value, persona: Value) -> (tempfile::TempDir, PersistentStore) {
@@ -431,8 +454,8 @@ fn a_library_with_archived_characters_scans_clean() {
     let unreferenced = |findings: &Findings| {
         findings.items.iter().filter(|finding| finding.code == codes::OBJECT_UNREFERENCED).count()
     };
-    // The owner manifest no alias names is kept by the archive from now on.
-    assert!(unreferenced(&archived) <= unreferenced(&before));
+    assert_eq!(unreferenced(&before), 0);
+    assert_eq!(unreferenced(&archived), 0);
 }
 
 #[test]

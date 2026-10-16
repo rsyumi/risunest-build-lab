@@ -127,7 +127,7 @@ async function fetchProtectedResourceSPA(url: string, options: RequestInit = {},
                 )
 
                 accessToken = refreshedTokens.access_token!
-                const newRefresh = oauthData.refresh_token
+                const newRefresh = refreshedTokens.refresh_token
                 tokenExpiry = Date.now() + (refreshedTokens.expires_in! * 1000)
                 tokenInitalized = true
 

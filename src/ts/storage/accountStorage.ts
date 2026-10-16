@@ -94,6 +94,7 @@ export interface AccountStorageCache {
 }
 
 export interface AccountCredentialRouting {
+    getAccountId(): string | null | undefined
     getToken(): string | null | undefined
     reauthenticate(loginResult: string): Promise<void>
 }
@@ -103,6 +104,15 @@ export interface AccountStorageOptions {
     assetCache?: AccountStorageCache
     credentialRouting?: AccountCredentialRouting
 }
+
+interface ReauthenticationFlight {
+    controller: AbortController
+    promise: Promise<void>
+    waiters: number
+}
+
+const webReauthenticationFlights = new Map<string, ReauthenticationFlight>()
+const routedReauthenticationFlights = new WeakMap<AccountCredentialRouting, Map<string, ReauthenticationFlight>>()
 
 function withSignal(options: RequestInit, signal?: AbortSignal): RequestInit {
     return signal ? { ...options, signal } : options
@@ -203,6 +213,8 @@ export class AccountStorage{
         options:AccountWriteOptions = {},
     ):Promise<AccountWriteResult> {
         this.checkAuth()
+        const expectedAccountId = this.getAccountId()
+        let expectedToken = this.auth
         let da:Response|undefined
 
         while((!da) || da.status === 403){
@@ -255,7 +267,8 @@ export class AccountStorage{
                 if (da.headers.get('x-risu-status') === 'warn') {
                     return { kind: 'auth-warning' }
                 }
-                await this.reauthenticate(options.signal)
+                await this.reauthenticate(options.signal, expectedAccountId, expectedToken)
+                expectedToken = this.auth
                 continue
             }
             if(da.status < 200 || da.status >= 300){
@@ -268,7 +281,9 @@ export class AccountStorage{
                 await applyAccountReload(Boolean(json?.reloadSession))
             }
 
-            const replacementKey = await getDaText()
+            const responseText = await getDaText()
+            const replacementKey = key === 'database/database.bin' && !isJsonResponse(da)
+                && responseText.length === 0 ? key : responseText
             if(key.startsWith('assets/')){
                 await this.assetCache.setItem(key, new Uint8Array(value).buffer)
             }
@@ -286,6 +301,8 @@ export class AccountStorage{
         for (let attemptNumber = 1; attemptNumber <= maxNativeOfficialWriteAttempts; attemptNumber += 1) {
             this.checkAuth()
             if (getDeviceMarkers().getItem('ignoreRisuAuth') === 'true' || !this.auth) return null
+            const expectedAccountId = this.getAccountId()
+            const expectedToken = this.auth
 
             const result = await attempt({
                 credential: { kind: 'risu-auth', token: this.auth },
@@ -300,7 +317,7 @@ export class AccountStorage{
                 if (attemptNumber === maxNativeOfficialWriteAttempts) {
                     throw new Error('Official account reauthentication was rejected too many times')
                 }
-                await this.reauthenticate(options.signal)
+                await this.reauthenticate(options.signal, expectedAccountId, expectedToken)
                 continue
             }
             if (result.kind === 'auth-warning') return { kind: 'auth-warning' }
@@ -336,6 +353,8 @@ export class AccountStorage{
         options:AccountReadOptions = {},
     ):Promise<AccountReadResult> {
         this.checkAuth()
+        const expectedAccountId = this.getAccountId()
+        let expectedToken = this.auth
         if(key.startsWith('assets/')){
             const cached = await this.assetCache.getItem(key)
             if(cached instanceof ArrayBuffer || ArrayBuffer.isView(cached)){
@@ -359,7 +378,8 @@ export class AccountStorage{
             }, options.signal))
             if(da.status === 403){
                 await discardResponseBody(da)
-                await this.reauthenticate(options.signal)
+                await this.reauthenticate(options.signal, expectedAccountId, expectedToken)
+                expectedToken = this.auth
             }
         }
         if(da.status === 303){
@@ -432,15 +452,102 @@ export class AccountStorage{
         }
     }
 
-    private async reauthenticate(signal?: AbortSignal): Promise<void> {
+    private getAccountId() {
+        return this.credentialRouting ? this.credentialRouting.getAccountId() : getDatabase().account?.id
+    }
+
+    private getToken() {
+        return this.credentialRouting ? this.credentialRouting.getToken() : getDatabase().account?.token
+    }
+
+    private async reauthenticate(
+        signal?: AbortSignal,
+        expectedAccountId = this.getAccountId(),
+        expectedToken = this.getToken(),
+    ): Promise<void> {
+        if (signal?.aborted) throw abortReason(signal)
+        if (this.getAccountId() !== expectedAccountId) {
+            throw new Error('Official account session changed during reauthentication')
+        }
+        const currentToken = this.getToken()
+        if (expectedAccountId && currentToken && currentToken !== expectedToken) {
+            this.checkAuth()
+            return
+        }
+        let flights = webReauthenticationFlights
+        if (this.credentialRouting) {
+            flights = routedReauthenticationFlights.get(this.credentialRouting)
+            if (!flights) {
+                flights = new Map()
+                routedReauthenticationFlights.set(this.credentialRouting, flights)
+            }
+        }
+        const key = JSON.stringify([expectedAccountId, expectedToken])
+        let flight = flights.get(key)
+        if (!flight) {
+            const controller = new AbortController()
+            flight = {
+                controller,
+                waiters: 0,
+                promise: this.performReauthentication(controller.signal, expectedAccountId, expectedToken)
+                    .finally(() => {
+                        if (flights.get(key) === flight) flights.delete(key)
+                    }),
+            }
+            flights.set(key, flight)
+        }
+        flight.waiters += 1
+        try {
+            await waitForSignal(flight.promise, signal)
+            if (expectedAccountId && this.getAccountId() !== expectedAccountId) {
+                throw new Error('Official account session changed during reauthentication')
+            }
+            this.checkAuth()
+        } finally {
+            flight.waiters -= 1
+            if (flight.waiters === 0) {
+                if (flights.get(key) === flight) flights.delete(key)
+                flight.controller.abort()
+            }
+        }
+    }
+
+    private async performReauthentication(
+        signal: AbortSignal,
+        expectedAccountId: string | null | undefined,
+        expectedToken: string | null | undefined,
+    ): Promise<void> {
         const loginResult = await waitForSignal(alertLogin(), signal)
         if (signal?.aborted) throw abortReason(signal)
+        if (this.getAccountId() !== expectedAccountId || this.getToken() !== expectedToken) {
+            throw new Error('Official account session changed during reauthentication')
+        }
         if (this.credentialRouting) {
             await this.credentialRouting.reauthenticate(loginResult)
         } else {
-            localStorage.setItem("fallbackRisuToken", loginResult)
+            const database = getDatabase()
+            let parsed: Partial<NonNullable<typeof database.account>> | null
+            try {
+                parsed = JSON.parse(loginResult)
+            } catch {
+                throw new Error('Invalid official account credential')
+            }
+            if (!parsed || typeof parsed.id !== 'string' || !parsed.id
+                || typeof parsed.token !== 'string' || !parsed.token) {
+                throw new Error('Invalid official account credential')
+            }
+            if (expectedAccountId && parsed.id !== expectedAccountId) {
+                throw new Error('Official account changed during reauthentication')
+            }
+            const credential = {
+                ...database.account,
+                id: parsed.id,
+                token: parsed.token,
+                data: parsed.data && typeof parsed.data === 'object' ? parsed.data : {},
+            }
+            localStorage.setItem("fallbackRisuToken", JSON.stringify(credential))
+            database.account = credential
         }
-        this.checkAuth()
     }
 
 

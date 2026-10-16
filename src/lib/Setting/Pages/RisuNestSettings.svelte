@@ -5,6 +5,7 @@
     import {
         RISUNEST_SETTINGS_TABS,
         risuNestSettingsTabRequest,
+        activeRisuNestSettingsTab,
         type RisuNestSettingsTab,
     } from 'src/ts/setting/risuNestSettingsTabs'
     import { isTauri, isTauriAndroid, isTauriIOS } from 'src/ts/platform'
@@ -15,6 +16,7 @@
     import RisuNestImageGeometry from './RisuNestImageGeometry.svelte'
     import RisuNestPluginData from './RisuNestPluginData.svelte'
     import RisuNestLocalData from './RisuNestLocalData.svelte'
+    import RisuNestPluginStartup from './RisuNestPluginStartup.svelte'
     import ServerSyncSettings from './ServerSyncSettings.svelte'
     import RisuNestStorageDashboard from './RisuNestStorageDashboard.svelte'
     import RisuNestDataHealth from './RisuNestDataHealth.svelte'
@@ -42,6 +44,10 @@
     // A screen that sends the reader here names the tab; otherwise the page opens on the first one.
     let activeTab: RisuNestSettingsTab = $state(get(risuNestSettingsTabRequest) ?? 'settings')
     let tabButtons: HTMLButtonElement[] = $state([])
+    $effect(() => {
+        activeRisuNestSettingsTab.set(activeTab)
+        return () => activeRisuNestSettingsTab.set(null)
+    })
 
     $effect(() => {
         const requested = $risuNestSettingsTabRequest
@@ -132,6 +138,7 @@
             {/if}
             <ExternalStorageSettings />
             {#if isTauri}
+                <RisuNestPluginStartup />
                 <RisuNestLocalData />
             {/if}
         {:else if activeTab === 'network-logs' && isTauri}

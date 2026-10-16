@@ -33,8 +33,8 @@ impl Default for PngCardLimits {
             max_card_metadata_bytes: crate::import_export_jobs::MAX_CONTENT_METADATA_BYTES as u64,
             max_recognized_metadata_bytes: 768 * 1024 * 1024,
             max_embedded_asset_bytes: 64 * 1024 * 1024,
-            max_embedded_asset_total_bytes: 512 * 1024 * 1024,
-            max_embedded_asset_count: 10_000,
+            max_embedded_asset_total_bytes: 10 * 1024 * 1024 * 1024,
+            max_embedded_asset_count: 50_000,
         }
     }
 }

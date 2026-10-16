@@ -1,5 +1,13 @@
 use super::*;
-use std::io::Write;
+pub(super) mod gui;
+mod native;
+use ::windows::core::{Interface, BSTR, HRESULT};
+use ::windows::Win32::Foundation::{E_ACCESSDENIED, E_FAIL, VARIANT_BOOL};
+use ::windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+use ::windows::Win32::System::TaskScheduler::*;
+use ::windows::Win32::System::Variant::VARIANT;
+use native::{At, Failure, NativeResult};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 const HELPER_TASK_DESCRIPTION: &str = "RisuNest update helper";
 
@@ -41,15 +49,47 @@ fn quote_argument(value: &str) -> String {
     quoted
 }
 
+fn connect() -> NativeResult<(ITaskService, ITaskFolder)> {
+    unsafe {
+        let service: ITaskService =
+            CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER).at("connect")?;
+        let empty = VARIANT::default();
+        service
+            .Connect(&empty, &empty, &empty, &empty)
+            .at("connect")?;
+        let folder = service.GetFolder(&BSTR::from("\\")).at("connect")?;
+        Ok((service, folder))
+    }
+}
+
+fn get_task(folder: &ITaskFolder, name: &str) -> NativeResult<Option<IRegisteredTask>> {
+    match unsafe { folder.GetTask(&BSTR::from(name)) } {
+        Ok(task) => Ok(Some(task)),
+        Err(error) if matches!(error.code().0 as u32, 0x80070002 | 0x80070003) => Ok(None),
+        result => result.map(Some).at("read-task"),
+    }
+}
+
+fn helper_owned(task: &IRegisteredTask) -> NativeResult<bool> {
+    unsafe {
+        let info = task
+            .Definition()
+            .at("read-definition")?
+            .RegistrationInfo()
+            .at("read-definition")?;
+        let description = native::read_string("read-definition", |value| info.Description(value))?;
+        native::equal(&description, HELPER_TASK_DESCRIPTION, false)
+    }
+}
+
 pub(super) fn spawn_update_helper(root: &Path, command: &mut Command) -> Result<u32> {
-    const SPAWN: &str = r#"$ErrorActionPreference='Stop';$s=New-Object -ComObject 'Schedule.Service';$s.Connect();$f=$s.GetFolder('\');$d=$s.NewTask(0);$d.RegistrationInfo.Description='RisuNest update helper';$d.RegistrationInfo.Date=[DateTime]::UtcNow.ToString('o');$d.Principal.LogonType=3;$d.Principal.RunLevel=0;$d.Settings.Enabled=$true;$d.Settings.StartWhenAvailable=$true;$d.Settings.ExecutionTimeLimit=$env:RISUNEST_HELPER_LIMIT;$a=$d.Actions.Create(0);$a.Path=$env:RISUNEST_HELPER_PROGRAM;$a.Arguments=$env:RISUNEST_HELPER_ARGUMENTS;$r=$f.RegisterTaskDefinition($env:RISUNEST_HELPER_TASK,$d,6,$null,$null,3,$null);$run=$r.Run($null);for($i=0;$i-lt 100-and $run.EnginePID-eq 0;$i++){Start-Sleep -Milliseconds 20};$pidValue=$run.EnginePID;if($pidValue-eq 0){$f.DeleteTask($env:RISUNEST_HELPER_TASK,0);throw 'helper did not start'};[Console]::Out.Write($pidValue)"#;
-    let task_name = format!(
-        "{}-update-helper-{}",
-        instance_name(root),
+    let name = format!(
+        "{}{}",
+        helper_task_prefix(root),
         risunest_sync_server::management::discovery::request_id()
-            .map_err(|_| "update-helper-start-failed".to_owned())?
+            .map_err(|_| "update-helper-start-failed")?
     );
-    command.args(["--scheduled-task", &task_name]);
+    command.arg("--scheduled-task").arg(&name);
     let program = command
         .get_program()
         .to_str()
@@ -64,110 +104,159 @@ pub(super) fn spawn_update_helper(root: &Path, command: &mut Command) -> Result<
         })
         .collect::<Result<Vec<_>>>()?
         .join(" ");
-    let output = process("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            SPAWN,
-        ])
-        .env("RISUNEST_HELPER_TASK", task_name)
-        .env("RISUNEST_HELPER_PROGRAM", program)
-        .env(
-            "RISUNEST_HELPER_LIMIT",
-            if command.get_args().any(|arg| arg == "--owner") {
-                "PT0S"
-            } else {
-                "PT10M"
-            },
-        )
-        .env("RISUNEST_HELPER_ARGUMENTS", arguments)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|_| "update-helper-start-failed".to_owned())?;
-    if !output.status.success() {
-        return Err("update-helper-start-failed".into());
-    }
-    String::from_utf8(output.stdout)
-        .ok()
-        .and_then(|value| value.trim().parse().ok())
-        .ok_or("update-helper-start-failed".into())
+    let limit = if command.get_args().any(|value| value == "--owner") {
+        "PT0S"
+    } else {
+        "PT10M"
+    };
+    native::on_com("update-helper-start-failed", || unsafe {
+        let (service, folder) = connect()?;
+        let definition = service.NewTask(0).at("definition")?;
+        let info = definition.RegistrationInfo().at("definition")?;
+        info.SetDescription(&BSTR::from(HELPER_TASK_DESCRIPTION))
+            .at("definition")?;
+        let date = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .map_err(|_| Failure {
+                stage: "date",
+                code: E_FAIL,
+            })?;
+        info.SetDate(&BSTR::from(date.as_str())).at("definition")?;
+        let principal = definition.Principal().at("definition")?;
+        principal
+            .SetLogonType(TASK_LOGON_INTERACTIVE_TOKEN)
+            .at("definition")?;
+        principal.SetRunLevel(TASK_RUNLEVEL_LUA).at("definition")?;
+        let settings = definition.Settings().at("definition")?;
+        settings.SetEnabled(true.into()).at("definition")?;
+        settings
+            .SetStartWhenAvailable(true.into())
+            .at("definition")?;
+        settings
+            .SetExecutionTimeLimit(&BSTR::from(limit))
+            .at("definition")?;
+        let action: IExecAction = definition
+            .Actions()
+            .at("definition")?
+            .Create(TASK_ACTION_EXEC)
+            .at("definition")?
+            .cast()
+            .at("definition")?;
+        action.SetPath(&BSTR::from(program)).at("definition")?;
+        action
+            .SetArguments(&BSTR::from(arguments.as_str()))
+            .at("definition")?;
+        let empty = VARIANT::default();
+        let task = folder
+            .RegisterTaskDefinition(
+                &BSTR::from(name.as_str()),
+                &definition,
+                TASK_CREATE_OR_UPDATE.0,
+                &empty,
+                &empty,
+                TASK_LOGON_INTERACTIVE_TOKEN,
+                &empty,
+            )
+            .at("register")?;
+        let running = task.Run(&empty).at("run")?;
+        for _ in 0..100 {
+            let pid = running.EnginePID().at("run")?;
+            if pid != 0 {
+                return Ok(pid);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            running.Refresh().at("run")?;
+        }
+        folder
+            .DeleteTask(&BSTR::from(name.as_str()), 0)
+            .at("cleanup")?;
+        Err(Failure {
+            stage: "run",
+            code: E_FAIL,
+        })
+    })
 }
 
 pub(super) fn finish_update_helper(root: &Path, task_name: &str) -> Result<()> {
-    const REMOVE: &str = r#"$ErrorActionPreference='Stop';$s=New-Object -ComObject 'Schedule.Service';$s.Connect();$f=$s.GetFolder('\');try{$t=$f.GetTask($env:RISUNEST_HELPER_TASK)}catch{$r=$_.Exception;while($r.InnerException){$r=$r.InnerException};if($r.HResult -eq -2147024894 -or $r.HResult -eq -2147024893){exit 0};throw};if($t.Definition.RegistrationInfo.Description -ne $env:RISUNEST_HELPER_DESCRIPTION){throw 'unexpected helper task owner'};$f.DeleteTask($env:RISUNEST_HELPER_TASK,0)"#;
     if !valid_helper_task(root, task_name) {
         return Err("update-helper-task-invalid".into());
     }
-    let status = process("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            REMOVE,
-        ])
-        .env("RISUNEST_HELPER_TASK", task_name)
-        .env("RISUNEST_HELPER_DESCRIPTION", HELPER_TASK_DESCRIPTION)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|_| "update-helper-task-cleanup-failed".to_owned())?;
-    if status.success() {
+    native::on_com("update-helper-task-cleanup-failed", || unsafe {
+        let (_service, folder) = connect()?;
+        if let Some(task) = get_task(&folder, task_name)? {
+            if !helper_owned(&task)? {
+                return Err(Failure {
+                    stage: "ownership",
+                    code: E_ACCESSDENIED,
+                });
+            }
+            folder.DeleteTask(&BSTR::from(task_name), 0).at("delete")?;
+        }
         Ok(())
-    } else {
-        Err("update-helper-task-cleanup-failed".into())
-    }
+    })
+}
+
+fn stale_helper_date(date: &str, now: OffsetDateTime) -> bool {
+    OffsetDateTime::parse(date, &Rfc3339)
+        .is_ok_and(|date| now - date >= time::Duration::minutes(15))
+}
+
+fn remove_helpers(root: &Path, stale_only: bool) -> Result<()> {
+    native::on_com("update-helper-task-cleanup-failed", || unsafe {
+        let (_service, folder) = connect()?;
+        let tasks = folder.GetTasks(TASK_ENUM_HIDDEN.0).at("enumerate")?;
+        let mut names = Vec::new();
+        for index in 1..=tasks.Count().at("enumerate")? {
+            let task = tasks.get_Item(&VARIANT::from(index)).at("enumerate")?;
+            let name = task.Name().at("enumerate")?.to_string();
+            if valid_helper_task(root, &name) {
+                names.push(name);
+            }
+        }
+        for name in names {
+            let Some(task) = get_task(&folder, &name)? else {
+                continue;
+            };
+            if !helper_owned(&task)? {
+                continue;
+            }
+            let instances = task.GetInstances(0).at("instances")?;
+            let count = instances.Count().at("instances")?;
+            if stale_only {
+                if task.State().at("state")? == TASK_STATE_RUNNING || count != 0 {
+                    continue;
+                }
+                let info = task
+                    .Definition()
+                    .at("read-definition")?
+                    .RegistrationInfo()
+                    .at("read-definition")?;
+                let date = native::read_string("read-definition", |value| info.Date(value))?;
+                if !stale_helper_date(&date, OffsetDateTime::now_utc()) {
+                    continue;
+                }
+            } else {
+                for index in 1..=count {
+                    instances
+                        .get_Item(&VARIANT::from(index))
+                        .at("instances")?
+                        .Stop()
+                        .at("stop")?;
+                }
+            }
+            folder
+                .DeleteTask(&BSTR::from(name.as_str()), 0)
+                .at("delete")?;
+        }
+        Ok(())
+    })
 }
 
 pub(super) fn sweep_stale_update_helpers(root: &Path) -> Result<()> {
-    const SWEEP: &str = r#"$ErrorActionPreference='Stop';$s=New-Object -ComObject 'Schedule.Service';$s.Connect();$f=$s.GetFolder('\');foreach($t in @($f.GetTasks(1))){$n=$t.Name;if(!$n.StartsWith($env:RISUNEST_HELPER_PREFIX,[StringComparison]::Ordinal)){continue};$x=$n.Substring($env:RISUNEST_HELPER_PREFIX.Length);if($x -cnotmatch '\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z'){continue};if($t.Definition.RegistrationInfo.Description -ne $env:RISUNEST_HELPER_DESCRIPTION){continue};if($t.State -eq 4 -or $t.GetInstances(0).Count -ne 0){continue};$date=[DateTime]::MinValue;if(![DateTime]::TryParse($t.Definition.RegistrationInfo.Date,[ref]$date)){continue};if($date.ToUniversalTime() -gt [DateTime]::UtcNow.AddMinutes(-15)){continue};$f.DeleteTask($n,0)}"#;
-    let status = process("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            SWEEP,
-        ])
-        .env("RISUNEST_HELPER_PREFIX", helper_task_prefix(root))
-        .env("RISUNEST_HELPER_DESCRIPTION", HELPER_TASK_DESCRIPTION)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|_| "update-helper-task-cleanup-failed")?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err("update-helper-task-cleanup-failed".into())
-    }
+    remove_helpers(root, true)
 }
-
 pub(super) fn cleanup_update_helpers(root: &Path) -> Result<()> {
-    const CLEAN: &str = r#"$ErrorActionPreference='Stop';$s=New-Object -ComObject 'Schedule.Service';$s.Connect();$f=$s.GetFolder('\');foreach($t in @($f.GetTasks(1))){$n=$t.Name;if(!$n.StartsWith($env:RISUNEST_HELPER_PREFIX,[StringComparison]::Ordinal)){continue};$x=$n.Substring($env:RISUNEST_HELPER_PREFIX.Length);if($x.Length -ne 36 -or $x -cnotmatch '\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z'){continue};if($t.Definition.RegistrationInfo.Description -ne $env:RISUNEST_HELPER_DESCRIPTION){continue};foreach($i in @($t.GetInstances(0))){$i.Stop()};$f.DeleteTask($n,0)}"#;
-    let status = process("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            CLEAN,
-        ])
-        .env("RISUNEST_HELPER_PREFIX", helper_task_prefix(root))
-        .env("RISUNEST_HELPER_DESCRIPTION", HELPER_TASK_DESCRIPTION)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|_| "update-helper-task-cleanup-failed".to_owned())?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err("update-helper-task-cleanup-failed".into())
-    }
+    remove_helpers(root, false)
 }
 
 fn task_xml(root: &Path, executable: &Path) -> Result<String> {
@@ -217,117 +306,158 @@ fn update_task_xml(root: &Path, program: &Path, server: &Path) -> Result<String>
     ))
 }
 
-const SCRIPT: &str = r#"
-$ErrorActionPreference='Stop'
-$stage='connect'
-try {
- $service=New-Object -ComObject 'Schedule.Service'; $service.Connect(); $folder=$service.GetFolder('\')
- $task=$null
- try { $task=$folder.GetTask($env:RISUNEST_TASK_NAME) } catch {
-  $reason=$_.Exception; while($reason.InnerException){$reason=$reason.InnerException}
-  if($reason.HResult -ne -2147024894 -and $reason.HResult -ne -2147024893){throw}
- }
- $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
- $actionMatches=$true
- if($null -ne $task) {
-  $stage='ownership'
-  $definition=$task.Definition
-  $principal=$definition.Principal.UserId
-  if($principal -notlike 'S-1-*'){$principal=([System.Security.Principal.NTAccount]$principal).Translate([System.Security.Principal.SecurityIdentifier]).Value}
-  if($principal -ne $sid -or $definition.Actions.Count -ne 1 -or $definition.RegistrationInfo.Description -ne $env:RISUNEST_TASK_DESCRIPTION){throw 'unexpected-task-owner'}
-  $action=$definition.Actions.Item(1)
-  $actionMatches=$false
-  if($action.Type -eq 0) {
-   try { $actionMatches=[StringComparer]::OrdinalIgnoreCase.Equals([IO.Path]::GetFullPath($action.Path),[IO.Path]::GetFullPath($env:RISUNEST_TASK_PROGRAM)) -and $action.Arguments -eq $env:RISUNEST_TASK_ARGUMENTS } catch { $actionMatches=$false }
-  }
- }
- if($env:RISUNEST_TASK_ACTION -eq 'manual') {
-  $definition=[IO.File]::ReadAllText($env:RISUNEST_TASK_XML).Replace('__CURRENT_SID__',$sid)
-  $task=$folder.RegisterTask($env:RISUNEST_TASK_NAME,$definition,6,$sid,$null,3,$null)
-  $actionMatches=$true
-  $null=$task.Run($null)
- }
- switch($env:RISUNEST_TASK_ACTION) {
-  'install' {
-   $stage='read-definition'
-   $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-   $definition=[IO.File]::ReadAllText($env:RISUNEST_TASK_XML).Replace('__CURRENT_SID__',$sid)
-   $stage='register'
-   $task=$folder.RegisterTask($env:RISUNEST_TASK_NAME,$definition,6,$sid,$null,3,$null)
-   $actionMatches=$true
-  }
-  'remove' { if($null -ne $task){$folder.DeleteTask($env:RISUNEST_TASK_NAME,0)}; $task=$null; $actionMatches=$true }
-  'start' { if($null -eq $task){throw 'missing-task'}; if(!$actionMatches){throw 'unexpected-task-action'}; $null=$task.Run($null) }
- }
- $login=$false
- if($null -ne $task){foreach($trigger in $task.Definition.Triggers){if($trigger.Type -eq 9 -and $trigger.Enabled){$login=$true}}}
- @{registered=$login;enabled=($login -and $task.Enabled);actionMatches=$actionMatches} | ConvertTo-Json -Compress
-} catch {
- $reason=$_.Exception; while($reason.InnerException){$reason=$reason.InnerException}
- [Console]::Error.WriteLine($stage+':'+$reason.HResult.ToString('X8'))
- exit 1
+fn action_matches(
+    definition: &ITaskDefinition,
+    program: &Path,
+    arguments: &str,
+) -> NativeResult<bool> {
+    unsafe {
+        let action = definition
+            .Actions()
+            .at("read-definition")?
+            .get_Item(1)
+            .at("read-definition")?;
+        let mut kind = TASK_ACTION_TYPE::default();
+        action.Type(&mut kind).at("read-definition")?;
+        if kind != TASK_ACTION_EXEC {
+            return Ok(false);
+        }
+        let action: IExecAction = action.cast().at("read-definition")?;
+        let path = native::read_string("read-definition", |value| action.Path(value))?;
+        let actual = native::read_string("read-definition", |value| action.Arguments(value))?;
+        Ok(native::equal(
+            &native::full_path(&path)?,
+            &native::full_path(&program.to_string_lossy())?,
+            true,
+        )? && native::equal(&actual, arguments, false)?)
+    }
 }
-"#;
+
+fn task_operation(
+    name: &str,
+    description: &str,
+    program: &Path,
+    arguments: &str,
+    xml: &str,
+    action: &str,
+) -> NativeResult<StartupStatus> {
+    unsafe {
+        let (_service, folder) = connect()?;
+        let mut task = get_task(&folder, name)?;
+        let sid = native::current_sid()?;
+        let mut matches = true;
+        if let Some(task) = &task {
+            let definition = task.Definition().at("read-definition")?;
+            let principal = definition.Principal().at("ownership")?;
+            let user = native::read_string("ownership", |value| principal.UserId(value))?;
+            let info = definition.RegistrationInfo().at("ownership")?;
+            let actual_description =
+                native::read_string("ownership", |value| info.Description(value))?;
+            let mut count = 0;
+            definition
+                .Actions()
+                .at("ownership")?
+                .Count(&mut count)
+                .at("ownership")?;
+            if !native::equal(&native::account_sid(&user)?, &sid, true)?
+                || count != 1
+                || !native::equal(&actual_description, description, false)?
+            {
+                return Err(Failure {
+                    stage: "ownership",
+                    code: E_ACCESSDENIED,
+                });
+            }
+            matches = action_matches(&definition, program, arguments).unwrap_or(false);
+        }
+        let empty = VARIANT::default();
+        if matches!(action, "manual" | "install") {
+            task = Some(
+                folder
+                    .RegisterTask(
+                        &BSTR::from(name),
+                        &BSTR::from(xml.replace("__CURRENT_SID__", &sid).as_str()),
+                        TASK_CREATE_OR_UPDATE.0,
+                        &VARIANT::from(sid.as_str()),
+                        &empty,
+                        TASK_LOGON_INTERACTIVE_TOKEN,
+                        &empty,
+                    )
+                    .at("register")?,
+            );
+            matches = true;
+        }
+        match action {
+            "manual" | "start" => {
+                let task = task.as_ref().ok_or(Failure {
+                    stage: "run",
+                    code: HRESULT::from_win32(2),
+                })?;
+                if !matches {
+                    return Err(Failure {
+                        stage: "action",
+                        code: E_ACCESSDENIED,
+                    });
+                }
+                task.Run(&empty).at("run")?;
+            }
+            "remove" => {
+                if task.is_some() {
+                    folder.DeleteTask(&BSTR::from(name), 0).at("delete")?;
+                }
+                task = None;
+                matches = true;
+            }
+            _ => (),
+        }
+        let mut registered = false;
+        let mut enabled = false;
+        if let Some(task) = task {
+            let triggers = task
+                .Definition()
+                .at("read-definition")?
+                .Triggers()
+                .at("read-definition")?;
+            let mut count = 0;
+            triggers.Count(&mut count).at("read-definition")?;
+            for index in 1..=count {
+                let trigger = triggers.get_Item(index).at("read-definition")?;
+                let mut kind = TASK_TRIGGER_TYPE2::default();
+                let mut active = VARIANT_BOOL::default();
+                trigger.Type(&mut kind).at("read-definition")?;
+                trigger.Enabled(&mut active).at("read-definition")?;
+                registered |= kind == TASK_TRIGGER_LOGON && active.as_bool();
+            }
+            enabled = registered && task.Enabled().at("read-definition")?.as_bool();
+        }
+        Ok(StartupStatus {
+            registered,
+            enabled,
+            action_matches: matches,
+        })
+    }
+}
 
 pub(super) fn startup(root: &Path, executable: &Path, action: &str) -> Result<StartupStatus> {
-    let mut file = tempfile::NamedTempFile::new().map_err(|_| {
-        format!(
-            "startup-file-create-failed: {}",
-            std::env::temp_dir().display()
-        )
-    })?;
     let definition = task_xml(root, executable)?;
     let definition = if action == "manual" {
         definition.replace("<Triggers><LogonTrigger><Enabled>true</Enabled><UserId>__CURRENT_SID__</UserId></LogonTrigger></Triggers>", "<Triggers/>")
     } else {
         definition
     };
-    file.write_all(definition.as_bytes())
-        .map_err(|_| format!("startup-file-write-failed: {}", file.path().display()))?;
-    // Close the delete-on-close handle before .NET opens the definition. Its
-    // default FileShare.Read cannot coexist with that Windows DELETE access.
-    let path = file.into_temp_path();
-    let output = process("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            SCRIPT,
-        ])
-        .env("RISUNEST_TASK_NAME", instance_name(root))
-        .env("RISUNEST_TASK_ACTION", action)
-        .env("RISUNEST_TASK_PROGRAM", executable)
-        .env("RISUNEST_TASK_DESCRIPTION", "RisuNest user sync server")
-        .env(
-            "RISUNEST_TASK_ARGUMENTS",
-            format!(
-                "serve --data-dir \"{}\"",
-                root.to_string_lossy().trim_end_matches(['\\', '/'])
-            ),
+    let arguments = format!(
+        "serve --data-dir \"{}\"",
+        root.to_string_lossy().trim_end_matches(['\\', '/'])
+    );
+    native::on_com("task-scheduler-operation-failed", || {
+        task_operation(
+            &instance_name(root),
+            "RisuNest user sync server",
+            executable,
+            &arguments,
+            &definition,
+            action,
         )
-        .env("RISUNEST_TASK_XML", &path)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|error| format!("task-scheduler-launch-failed: {error}"))?;
-    if !output.status.success() {
-        return Err(scheduler_error(
-            "task-scheduler-operation-failed",
-            &output.stderr,
-        ));
-    }
-    let value: serde_json::Value =
-        serde_json::from_slice(&output.stdout).map_err(|_| "task-scheduler-response-invalid")?;
-    Ok(StartupStatus {
-        registered: value["registered"]
-            .as_bool()
-            .ok_or("task-scheduler-response-invalid")?,
-        enabled: value["enabled"]
-            .as_bool()
-            .ok_or("task-scheduler-response-invalid")?,
-        action_matches: value["actionMatches"]
-            .as_bool()
-            .ok_or("task-scheduler-response-invalid")?,
     })
 }
 
@@ -348,74 +478,27 @@ pub(super) fn update_schedule(
     if effective == "install" && !program.is_file() {
         return Err("manager-executable-missing".into());
     }
-    let mut file = tempfile::NamedTempFile::new().map_err(|_| {
-        format!(
-            "update-task-file-create-failed: {}",
-            std::env::temp_dir().display()
-        )
-    })?;
-    file.write_all(update_task_xml(root, &program, server)?.as_bytes())
-        .map_err(|_| format!("update-task-file-write-failed: {}", file.path().display()))?;
-    let path = file.into_temp_path();
+    let definition = update_task_xml(root, &program, server)?;
     let arguments = format!(
         "--data-dir \"{}\" --server \"{}\" update scheduled",
         root.to_string_lossy().trim_end_matches(['\\', '/']),
         server.to_string_lossy()
     );
-    let output = process("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            SCRIPT,
-        ])
-        .env(
-            "RISUNEST_TASK_NAME",
-            format!("{}-update", instance_name(root)),
+    let status = native::on_com("update-task-scheduler-operation-failed", || {
+        task_operation(
+            &format!("{}-update", instance_name(root)),
+            "RisuNest user sync updater",
+            &program,
+            &arguments,
+            &definition,
+            effective,
         )
-        .env("RISUNEST_TASK_ACTION", effective)
-        .env("RISUNEST_TASK_PROGRAM", &program)
-        .env("RISUNEST_TASK_ARGUMENTS", arguments)
-        .env("RISUNEST_TASK_DESCRIPTION", "RisuNest user sync updater")
-        .env("RISUNEST_TASK_XML", &path)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|error| format!("task-scheduler-launch-failed: {error}"))?;
-    if !output.status.success() {
-        return Err(scheduler_error(
-            "update-task-scheduler-operation-failed",
-            &output.stderr,
-        ));
-    }
-    let value: serde_json::Value =
-        serde_json::from_slice(&output.stdout).map_err(|_| "task-scheduler-response-invalid")?;
+    })?;
     Ok(UpdateScheduleStatus {
-        registered: value["registered"]
-            .as_bool()
-            .ok_or("task-scheduler-response-invalid")?,
-        enabled: value["enabled"]
-            .as_bool()
-            .ok_or("task-scheduler-response-invalid")?,
-        action_matches: value["actionMatches"]
-            .as_bool()
-            .ok_or("task-scheduler-response-invalid")?,
+        registered: status.registered,
+        enabled: status.enabled,
+        action_matches: status.action_matches,
     })
-}
-
-fn scheduler_error(code: &str, stderr: &[u8]) -> String {
-    let detail = String::from_utf8_lossy(stderr);
-    let detail = detail.trim();
-    if !detail.is_empty()
-        && detail.len() < 80
-        && detail
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() || c.is_ascii_lowercase() || c == '-' || c == ':')
-    {
-        format!("{code}:{detail}")
-    } else {
-        code.to_owned()
-    }
 }
 
 #[cfg(test)]
@@ -423,20 +506,66 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stale_helpers_accept_legacy_utc_dates_and_preserve_recent_or_invalid_dates() {
+        let date = "2026-10-16T01:02:03.1234567Z";
+        let created = OffsetDateTime::parse(date, &Rfc3339).unwrap();
+        assert!(stale_helper_date(
+            date,
+            created + time::Duration::minutes(15)
+        ));
+        assert!(!stale_helper_date(
+            date,
+            created + time::Duration::minutes(15) - time::Duration::nanoseconds(1)
+        ));
+        assert!(!stale_helper_date(date, created - time::Duration::hours(1)));
+        assert!(!stale_helper_date("invalid", created));
+        assert!(!stale_helper_date("", created));
+    }
+
+    #[test]
+    fn task_comparisons_preserve_windows_powershell_case_and_lexical_paths() {
+        assert!(native::equal("Äbc 한글", "äBC 한글", false).unwrap());
+        assert!(!native::equal("--data-dir a", "--data-dir b", false).unwrap());
+        assert!(native::equal("", "", false).unwrap());
+        assert!(!native::equal("", "a", false).unwrap());
+        let left = native::full_path(r"C:\missing\parent\..\한글\SERVER.EXE").unwrap();
+        assert!(native::equal(&left, r"c:\missing\한글\server.exe", true).unwrap());
+        assert!(native::full_path("C:\\server.exe\0other").is_err());
+    }
+
+    #[test]
+    fn native_com_calls_do_not_change_an_existing_runtime_apartment() {
+        use ::windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
+        std::thread::spawn(|| {
+            unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
+                .ok()
+                .unwrap();
+            let identity = native::on_com("test", native::current_sid).unwrap();
+            assert!(identity.starts_with("S-1-"));
+            let same_mode = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+            unsafe {
+                CoUninitialize();
+            }
+            same_mode.ok().unwrap();
+            unsafe {
+                CoUninitialize();
+            }
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
     fn scheduler_failures_keep_the_stage_and_hresult_without_arbitrary_output() {
         assert_eq!(
-            scheduler_error(
+            native::diagnostic(
                 "update-task-scheduler-operation-failed",
-                b"register:80070005\r\n"
+                Failure {
+                    stage: "register",
+                    code: E_ACCESSDENIED
+                }
             ),
             "update-task-scheduler-operation-failed:register:80070005"
-        );
-        assert_eq!(
-            scheduler_error(
-                "task-scheduler-operation-failed",
-                b"unexpected private output"
-            ),
-            "task-scheduler-operation-failed"
         );
     }
 

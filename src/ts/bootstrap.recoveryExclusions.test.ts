@@ -43,7 +43,10 @@ vi.mock('./platform', async () => (await import('./platform.testSupport')).platf
     startup.native ? { runtime: 'tauri', os: 'ios' } : { runtime: 'web', os: 'windows' })))
 vi.mock('./storage/deviceSettings', async () => (await import('./bootstrap.testSupport')).deviceSettingsModule(startup))
 vi.mock('./storage/persistentStorageRuntime', async () => (await import('./bootstrap.testSupport')).persistentStorageRuntimeModule())
-vi.mock('./storage/nativeFileJobRecovery', async () => (await import('./bootstrap.testSupport')).nativeFileJobRecoveryModule())
+vi.mock('./storage/nativeFileJobRecovery', async original => ({
+    ...(await import('./bootstrap.testSupport')).nativeFileJobRecoveryModule(),
+    acknowledgeRecoveredNativeRestores: (await original<typeof import('./storage/nativeFileJobRecovery')>()).acknowledgeRecoveredNativeRestores,
+}))
 vi.mock('./storage/persistentBootstrap', async () => (await import('./bootstrap.testSupport')).persistentBootstrapModule(startup))
 vi.mock('./storage/database.svelte', async () => (await import('./bootstrap.testSupport')).databaseModule(startup))
 vi.mock('./storage/databasePreparation', async () => (await import('./bootstrap.testSupport')).databasePreparationModule())
@@ -99,7 +102,9 @@ vi.mock('./process/files/inlayProviderImage', async () => (await import('./boots
 
 import { loadData } from './bootstrap'
 import { language } from 'src/lang'
-import { keepPluginsOffForThisStart, loadPlugins } from './plugins/plugins.svelte'
+import { afterPluginsStarted, keepPluginsOffForThisStart, loadPlugins } from './plugins/plugins.svelte'
+import { pluginStartupGate, configurePluginStartup, setPluginStartupSyncExcluded, retryPluginStartup } from './plugins/pluginStartupGate'
+import { shouldReconcileNativeFileJobs, reconcileNativeFileJobsBeforeBootstrap } from './storage/nativeFileJobRecovery'
 import { alertError, alertNormal, alertToast, alertTOS, waitAlert } from './alert'
 import { invoke } from '@tauri-apps/api/core'
 import { initializePersistentStorage } from './storage/persistentStorageRuntime'
@@ -112,6 +117,11 @@ import { getExternalStorageBridge } from './storage/sync/external/bridge'
 
 beforeEach(() => {
     vi.clearAllMocks()
+    vi.mocked(shouldReconcileNativeFileJobs).mockReturnValue(false)
+    vi.mocked(reconcileNativeFileJobsBeforeBootstrap).mockResolvedValue({
+        pendingRestoreAcknowledgements: [], pendingOfficialPublications: [], interruptedRestores: [],
+        libraryRestoreCommitted: false, pendingSnapshotBodies: [],
+    })
     startup.reachUi = false
     vi.stubGlobal('localStorage', { getItem: () => null, setItem: vi.fn(), removeItem: vi.fn() })
     vi.stubGlobal('navigator', {})
@@ -121,11 +131,67 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+    setPluginStartupSyncExcluded(false)
+    configurePluginStartup(() => false, async () => {})
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
 })
 
 describe('bootstrap recovery exclusions', () => {
+    it.each([false, true])('bypasses excluded sync before plugin startup, preserving plugin exclusion and restore acknowledgement (plugins excluded=%s)', async pluginsExcluded => {
+        startup.native = true
+        startup.exclusions = pluginsExcluded ? ['sync', 'plugins'] : ['sync']
+        vi.mocked(shouldReconcileNativeFileJobs).mockReturnValue(true)
+        vi.mocked(reconcileNativeFileJobsBeforeBootstrap).mockResolvedValue({
+            pendingRestoreAcknowledgements: ['synthetic-restored-job'], pendingOfficialPublications: [], interruptedRestores: [],
+            libraryRestoreCommitted: true, pendingSnapshotBodies: [],
+        })
+        const listeners = new Set<() => void | Promise<void>>()
+        vi.mocked(afterPluginsStarted).mockImplementation(listener => { listeners.add(listener); return () => {listeners.delete(listener)} })
+        let started = 0
+        const load = async () => {
+            if (!await pluginStartupGate.ensure()) return
+            started++
+            for (const listener of listeners) await listener()
+        }
+        configurePluginStartup(() => true, load)
+        vi.mocked(loadPlugins).mockImplementationOnce(load)
+        await loadData()
+        expect(started).toBe(pluginsExcluded ? 0 : 1)
+        expect(invoke).toHaveBeenCalledWith('native_file_job_forget', {jobId:'synthetic-restored-job'})
+        expect(invoke).not.toHaveBeenCalledWith('pds_lww_binding_state', expect.anything())
+        if (!pluginsExcluded) {
+            await retryPluginStartup()
+            expect(started).toBe(2)
+            expect(installServerSyncProduction).toHaveBeenCalledExactlyOnceWith({resumeBound:false})
+        }
+    })
+    it.each([true, false])('acknowledges recovered restores after the plugin decision (excluded=%s)', async excluded => {
+        startup.native = true
+        startup.exclusions = excluded ? ['plugins'] : []
+        vi.mocked(shouldReconcileNativeFileJobs).mockReturnValue(true)
+        const recovered = { pendingRestoreAcknowledgements: ['synthetic-restored-job'], pendingOfficialPublications: [], interruptedRestores: [],
+            libraryRestoreCommitted: true, pendingSnapshotBodies: [] }
+        vi.mocked(reconcileNativeFileJobsBeforeBootstrap).mockResolvedValue(recovered)
+        const listeners = new Set<() => void | Promise<void>>()
+        vi.mocked(afterPluginsStarted).mockImplementation(listener => {
+            listeners.add(listener)
+            return () => { listeners.delete(listener) }
+        })
+        await loadData()
+        if (!excluded) {
+            expect(invoke).not.toHaveBeenCalledWith('native_file_job_forget', expect.anything())
+            // Closing while receive is pending leaves the job for the next launch.
+            listeners.clear()
+            await loadData()
+            expect(invoke).not.toHaveBeenCalledWith('native_file_job_forget', expect.anything())
+            expect(listeners.size).toBe(1)
+            for (const started of listeners) await started()
+        }
+        expect(invoke).toHaveBeenCalledWith('native_file_job_forget', { jobId: 'synthetic-restored-job' })
+        expect(listeners.size).toBe(0)
+        if (excluded) expect(loadPlugins).not.toHaveBeenCalled()
+    })
     it.each([true, false])('skips account and sync startup work while reaching UI (native=%s)', async (native) => {
         startup.native = native
         startup.exclusions = ['account', 'sync']

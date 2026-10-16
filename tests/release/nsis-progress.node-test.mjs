@@ -15,6 +15,7 @@ const stages = {
   obsolete: 'Removing obsolete RisuNest Sync program files...',
   files: 'Removing RisuNest Sync program files...',
   prepare: 'Stopping RisuNest Sync and preparing the installation...',
+  baseline: 'Stopping RisuNest Sync and preparing the installation...',
   schedule: 'Applying scheduled update settings...',
   autostart: 'Registering automatic server startup...',
   start: 'Starting RisuNest Sync and checking the server response...',
@@ -23,6 +24,7 @@ const stages = {
   cleanup: 'Stopping the server and removing startup and update tasks...',
   data: 'Removing RisuNest Sync server data...',
   forget: 'Removing RisuNest Sync installation registration...',
+  commit: 'Removing RisuNest Sync installation registration...',
   'finish-removal': 'Finishing RisuNest Sync removal...',
   update: 'Stopping RisuNest Sync for the update...',
   app: 'Removing RisuNest application data...',
@@ -33,15 +35,18 @@ function commandStage(command) {
   if (command.includes('obsolete-files')) return 'obsolete';
   if (command.includes('remove-files')) return 'files';
   if (command.includes('installer removal-check')) return 'check';
+  if (command.includes('installer preserve-files')) return 'baseline';
   if (command.includes('installer prepare')) return 'prepare';
   if (command.includes('schedule reconcile')) return 'schedule';
   if (command.includes('autostart install')) return 'autostart';
   if (command.includes('start-and-verify')) return 'start';
-  if (command.includes('installer finish')) return 'finish';
+  if (command.includes('installer finish')) return command.includes('risunest-sync-remove.exe') ? 'finish-removal' : 'finish';
   if (command.includes('prepare-update')) return 'update';
   if (command.includes('uninstall lock-held')) return 'cleanup';
   if (command.includes('installer delete-data')) return 'data';
   if (command.includes('forget-removal')) return 'forget';
+  if (command.includes('commit-removal')) return 'commit';
+  if (command.includes('resume-removal')) return 'files';
   throw new Error(`Unrecognized synthetic manager command: ${command}`);
 }
 
@@ -61,8 +66,7 @@ test('NSIS displays the active operation and does not complete failed Sync setup
       .replaceAll('$LOCALAPPDATA', '$INSTDIR\\local')
       .replace(/!include [^\r\n]+windows-common.nsh"/, `!include "${resolve('src-tauri/windows-common.nsh')}"`)
       .replace(/MessageBox MB_OK\|MB_ICON(?:STOP|EXCLAMATION) "\$SyncFailureMessage"/g, 'DetailPrint "$SyncFailureMessage"')
-      .replace(/nsExec::ExecToStack '([^\r\n]+)'/g, (_, command) => `!insertmacro Manager "${commandStage(command)}"`)
-      .replace('StrCpy $R6 300', '!insertmacro Capture "finish-removal"\n  StrCpy $R6 1');
+      .replace(/nsExec::ExecToStack '([^\r\n]+)'/g, (_, command) => `!insertmacro Manager "${commandStage(command)}"`);
     writeFileSync(join(root, 'sync.nsh'), syncHook);
     const appHook = readFileSync(resolve('src-tauri/windows.nsh'), 'utf8')
       .replace(/!include [^\r\n]+windows-common.nsh"/, `!include "${resolve('src-tauri/windows-common.nsh')}"`)
@@ -83,6 +87,7 @@ LoadLanguageFile "${'$'}{NSISDIR}\Contrib\Language files\English.nlf"
 LoadLanguageFile "${'$'}{NSISDIR}\Contrib\Language files\Korean.nlf"
 !define MAINBINARYNAME "SyntheticRisuNest"
 !define PRODUCTNAME "Synthetic RisuNest"
+!define BUNDLEID "synthetic.risunest.progress"
 Var UpdateMode
 Var DeleteAppDataCheckboxState
 Var FixtureFail
@@ -208,10 +213,6 @@ SectionEnd
       assert.equal(install.status, !remove && fail ? 1 : 0, `${name}: install ${install.error ?? ''}`);
       if (remove) {
         rmSync(join(location, 'progress'), { force: true });
-        if (fail === 'wait') {
-          mkdirSync(join(data, 'manager-update'), { recursive: true });
-          writeFileSync(join(data, `manager-update/installer-${nonce}.ready`), '{}');
-        }
         const result = spawnSync(join(location, 'uninstall.exe'), [...(fail ? ['/S'] : []), `_?=${location}`], { env: { ...env, RISUNEST_NSIS_FIXTURE_FAIL: fail }, timeout: 30000, windowsHide: true });
         assert.equal(result.status, fail ? 1 : 0, `${name}: removal ${result.error ?? ''}\n${existsSync(join(location, 'progress')) ? readFileSync(join(location, 'progress'), 'utf8') : 'no progress'}`);
       }
@@ -223,18 +224,18 @@ SectionEnd
     const expectStages = (result, names, overrides = {}) => {
       assert.deepEqual(result.progress, names.map(name => [name, overrides[name] ?? stages[name]]));
     };
-    expectStages(run('sync', 'install'), ['prepare', 'register', 'obsolete', 'schedule', 'autostart', 'start', 'finish']);
+    expectStages(run('sync', 'install'), ['prepare', 'baseline', 'register', 'obsolete', 'schedule', 'autostart', 'start', 'finish']);
     expectStages(run('sync', 'fresh', { existing: false }), ['register', 'schedule', 'autostart', 'start']);
     const removing = { prepare: 'Stopping RisuNest Sync and preparing removal...', finish: 'Preparing to remove RisuNest Sync server data...' };
-    expectStages(run('sync', 'preserve', { remove: true }), ['check', 'prepare', 'cleanup', 'files', 'finish-removal', 'forget'], removing);
-    expectStages(run('sync', 'delete', { remove: true, deleteData: true }), ['check', 'prepare', 'cleanup', 'finish', 'data', 'files', 'forget'], removing);
+    expectStages(run('sync', 'preserve', { remove: true }), ['check', 'prepare', 'cleanup', 'files', 'finish-removal', 'forget', 'commit'], removing);
+    expectStages(run('sync', 'delete', { remove: true, deleteData: true }), ['check', 'prepare', 'cleanup', 'finish', 'data', 'files', 'forget', 'commit'], removing);
     expectStages(run('sync', 'update', { remove: true, update: true, deleteData: true }), ['update']);
     expectStages(run('app', 'app-delete', { remove: true, deleteData: true }), ['app']);
     expectStages(run('app', 'app-preserve', { remove: true }), []);
     expectStages(run('app', 'app-update', { remove: true, update: true, deleteData: true }), []);
 
     for (const [stage, message] of [
-      ['register', /installation could not be registered/], ['obsolete', /program files could not be removed/], ['prepare', /prepared for installation/], ['schedule', /Scheduled update settings could not be applied/],
+      ['baseline', /prepared for installation/], ['register', /installation could not be registered/], ['obsolete', /program files could not be removed/], ['prepare', /prepared for installation/], ['schedule', /Scheduled update settings could not be applied/],
       ['autostart', /Automatic server startup could not be registered/], ['start', /could not be started or verified/],
       ['finish', /installation could not be finalized/],
     ]) {
@@ -248,7 +249,7 @@ SectionEnd
     for (const [stage, message] of [
       ['files', /removal is incomplete/], ['check', /removal checks did not pass/], ['prepare', /prepared for removal/],
       ['cleanup', /could not stop the server or remove/], ['finish', /preparing to remove server data/],
-      ['data', /server data could not be completely removed/], ['forget', /installation registration could not be removed/], ['update', /prepared for the update/],
+      ['data', /server data could not be completely removed/], ['forget', /installation registration could not be removed/], ['commit', /installation registration could not be removed/], ['update', /prepared for the update/],
     ]) {
       const result = run('sync', `remove-fail-${stage}`, { remove: true, deleteData: true, update: stage === 'update', fail: stage });
       assert.match(result.failure, message);
@@ -256,8 +257,10 @@ SectionEnd
       assert.doesNotMatch(result.failure, /ignored diagnostic text/);
       assert.equal(result.progress.at(-1)[0], stage, 'failed removal stops before the next manager command');
     }
-    const waiting = run('sync', 'remove-wait-failure', { remove: true, fail: 'wait' });
+    const waiting = run('sync', 'remove-wait-failure', { remove: true, fail: 'finish-removal' });
     assert.match(waiting.failure, /program files were removed, but removal could not be finalized/);
+    assert.match(waiting.failure, /synthetic-failure:80070005/);
+    assert.doesNotMatch(waiting.failure, /ignored diagnostic text/);
     assert.equal(waiting.progress.at(-1)[0], 'finish-removal');
   } finally {
     assert.equal(dirname(root), resolve(tmpdir()));

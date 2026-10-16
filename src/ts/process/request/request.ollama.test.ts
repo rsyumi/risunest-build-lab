@@ -1,3 +1,5 @@
+import { configurePluginStartup, pluginStartupState } from 'src/ts/plugins/pluginStartupGate'
+import { language } from 'src/lang'
 import { beforeEach, expect, it, vi } from "vitest";
 import { requestChatDataMain } from "./request";
 
@@ -279,3 +281,20 @@ it("preserves non-streaming thinking output and releases the native request", as
   });
   expect(transportSignal.aborted).toBe(true);
 });
+
+
+it.each(['ollama-cloud', 'plugin', 'gpt35'])('refuses %s before provider selection while plugins wait', async model => {
+  const previous = mocks.db.aiModel
+  mocks.db.aiModel = model
+  configurePluginStartup(() => true, async () => {})
+  pluginStartupState.set({ phase: 'waiting', since: Date.now() })
+  try {
+    await expect(requestChatDataMain({ formated: [], bias: {} }, 'model', new AbortController().signal))
+      .resolves.toMatchObject({ type: 'fail', result: language.risuNest.pluginStartup.requestRefused })
+    expect(mocks.fetch).not.toHaveBeenCalled()
+  } finally {
+    mocks.db.aiModel = previous
+    pluginStartupState.set({ phase: 'released', since: 0 })
+    configurePluginStartup(() => false, async () => {})
+  }
+})

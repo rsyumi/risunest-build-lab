@@ -287,41 +287,32 @@ fn archiving_moves_conversations_into_one_object_and_restoring_puts_them_back() 
 }
 
 #[test]
-fn cancelling_streamed_archive_keeps_the_live_character_and_revision() {
-    let (_directory, mut store, _cas) = archive_store();
-    let before = store
-        .read_character("middle-archived", None)
-        .expect("read active character")
-        .expect("character exists")
-        .value;
-    let revision = store.revision().expect("read revision");
-    let checks = Cell::new(0_u32);
-    let is_cancelled = || {
-        let next = checks.get() + 1;
-        checks.set(next);
-        next >= 6
-    };
-
-    let error = store
-        .archive_character_with_cancellation(
-            "middle-archived",
-            revision,
-            10,
-            &is_cancelled,
-            None,
-        )
-        .expect_err("cancel archive while streaming");
-
-    assert!(error.to_string().contains("cancelled"));
-    assert_eq!(store.revision().expect("read revision after cancellation"), revision);
-    assert_eq!(
-        store
-            .read_character("middle-archived", None)
-            .expect("read character after cancellation")
-            .expect("live character remains")
-            .value,
-        before,
-    );
+fn cancelling_or_oversizing_streamed_archive_keeps_the_live_character_and_revision() {
+    for cancel in [true, false] {
+        let (_directory, mut store, cas) = archive_store();
+        let before = store.materialize(None).unwrap();
+        let revision = store.revision().expect("read revision");
+        let checks = Cell::new(0_u32);
+        let is_cancelled = || {
+            let next = checks.get() + 1;
+            checks.set(next);
+            cancel && next >= 6
+        };
+        let error = if cancel {
+            store.archive_character_with_cancellation(
+                "middle-archived", revision, 10, &is_cancelled, None,
+            ).expect_err("cancel archive while streaming")
+        } else {
+            super::super::archive::archive_character_with_limit(
+                &mut store.connection, &cas, "middle-archived", revision, 10,
+                &is_cancelled, None, 128,
+            ).expect_err("reject an archive above the decoded limit")
+        };
+        assert!(error.to_string().contains(if cancel { "cancelled" } else { "decoded size limit" }));
+        assert_eq!(store.revision().expect("read revision after failure"), revision);
+        assert_eq!(store.materialize(None).unwrap(), before);
+        assert!(store.read_character("middle-archived", None).unwrap().is_some());
+    }
 }
 
 #[test]

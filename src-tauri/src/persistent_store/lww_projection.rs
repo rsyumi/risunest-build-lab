@@ -1,6 +1,7 @@
 use super::classification::*;
 use super::*;
 use serde_json::{json, Map};
+use device_store::plugin_values::{self, text_value as plugin_text};
 
 const PERSONA_FIELDS: &[&str] = &[
     "personaPrompt",
@@ -820,6 +821,9 @@ pub(in crate::persistent_store) fn validate_received(
     if !known(key) {
         return Ok(());
     }
+    if key.components()[0] == "plugin-local" {
+        return validate_plugin_unit(_db, value);
+    }
     if key.components()[0] == "messages" && !matches!(value, UnitValue::Deleted) {
         return super::super::message_pages::validate_manifest(_db, value);
     }
@@ -865,11 +869,10 @@ pub(in crate::persistent_store) fn validate_received(
     }
     Ok(())
 }
-pub(in crate::persistent_store) fn apply_mutation(
+fn mutation_value(
     tx: &Transaction<'_>,
-    generation: &str,
     mutation: &UnitMutation,
-) -> StoreResult<()> {
+) -> StoreResult<Option<UnitValue>> {
     let value = match mutation {
         UnitMutation::Set { value, .. } => unit_value(tx, value)?,
         UnitMutation::Delete { .. } => UnitValue::Deleted,
@@ -903,10 +906,75 @@ pub(in crate::persistent_store) fn apply_mutation(
         return Err(error("unit-not-editable"));
     }
     if parent_status(tx, key)? == "retired" {
-        return Ok(());
+        return Ok(None);
     }
-    apply_value(tx, generation, key, &value, true)
+    Ok(Some(value))
 }
+pub(in crate::persistent_store) fn apply_mutation(
+    tx: &Transaction<'_>, generation: &str, mutation: &UnitMutation,
+) -> StoreResult<()> {
+    if let Some(value) = mutation_value(tx, mutation)? {
+        apply_value(tx, generation, mutation.key(), &value, true)?;
+    }
+    Ok(())
+}
+
+pub(in crate::persistent_store) fn apply_mutations(
+    tx: &Transaction<'_>, generation: &str, mutations: &[UnitMutation],
+) -> StoreResult<()> {
+    let mut root_mutations = Vec::new();
+    let mut characters = BTreeMap::new();
+    let flush = |root_mutations: &mut Vec<&UnitMutation>, characters: &mut BTreeMap<String, Vec<&UnitMutation>>| -> StoreResult<()> {
+        if !root_mutations.is_empty() {
+            let mut value = None;
+            for mutation in root_mutations.drain(..) {
+                if let Some(next) = mutation_value(tx, mutation)? {
+                    if value.is_none() { value = Some(root(tx, generation)?); }
+                    patch_root(value.as_mut().unwrap(), &mutation.key().components(), json_value_resolved(tx, &next)?)?;
+                }
+            }
+            if let Some(value) = value { write_root(tx, generation, &value)?; }
+        }
+        for (id, mutations) in std::mem::take(characters) {
+            let mut detail = None;
+            for mutation in mutations {
+                if let Some(next) = mutation_value(tx, mutation)? {
+                    if detail.is_none() { detail = Some(character_detail(tx, generation, &id)?); }
+                    patch_character(detail.as_mut().unwrap(), &mutation.key().components(), json_value_resolved(tx, &next)?, true)?;
+                }
+            }
+            if let Some(detail) = detail { commit::put_character_detail(tx, generation, &detail)?; }
+        }
+        Ok(())
+    };
+    for mutation in mutations {
+        let p = mutation.key().components();
+        if matches!(p[0].as_str(), "root" | "toggle" | "variable" | "preset-protected" | "persona" | "record") {
+            root_mutations.push(mutation);
+        } else if p[0] == "character" {
+            characters.entry(p[1].clone()).or_insert_with(Vec::new).push(mutation);
+        } else {
+            flush(&mut root_mutations, &mut characters)?;
+            apply_mutation(tx, generation, mutation)?;
+        }
+    }
+    flush(&mut root_mutations, &mut characters)
+}
+
+fn patch_root(v: &mut Value, p: &[String], next: Option<Value>) -> StoreResult<()> {
+    match p[0].as_str() {
+        "root" => patch(v, &p[1], next),
+        "toggle" | "variable" | "preset-protected" => {
+            let map = if p[0] == "preset-protected" { "protectedPresetValues" } else { "explicitGlobalChatVariables" };
+            let field = v.as_object_mut().ok_or_else(|| error("invalid-root"))?.entry(map).or_insert(json!({}));
+            patch(field, &p[1], next)
+        }
+        "persona" => patch_array(v, "personas", "id", &p[1], Some(&p[2]), next),
+        "record" => patch_array(v, &p[1], if p[1] == "plugins" { "name" } else { "id" }, &p[2], None, next),
+        _ => Err(error("unit-not-editable")),
+    }
+}
+
 fn patch(value: &mut Value, field: &str, next: Option<Value>) -> StoreResult<()> {
     let map = value
         .as_object_mut()
@@ -973,7 +1041,36 @@ pub(in crate::persistent_store) fn apply(
     key: &UnitKey,
     value: &UnitValue,
 ) -> StoreResult<()> {
-    apply_value(tx, generation, key, value, false)
+    if key.components()[0] == "plugin-local" {
+        apply_received(tx, generation, key, value).map(|_| ())
+    } else {
+        apply_value(tx, generation, key, value, false)
+    }
+}
+
+pub(in crate::persistent_store) fn apply_received(
+    tx: &Transaction<'_>, generation: &str, key: &UnitKey, value: &UnitValue,
+) -> StoreResult<bool> {
+    let changed = plugin_storage_changed(tx, generation, key, value)?;
+    apply_value(tx, generation, key, value, false)?;
+    let p = key.components();
+    if changed && p[0] == "plugin-local" {
+        plugin_values::advance_remote_sequence(tx, &p[1], &p[2], &p[3])?;
+    }
+    Ok(changed)
+}
+
+fn plugin_storage_changed(tx: &Transaction<'_>, generation: &str, key: &UnitKey, value: &UnitValue) -> StoreResult<bool> {
+    let p = key.components();
+    let current = if p[0] == "plugin-local" {
+        if !plugin_participates(tx)? { return Ok(false); }
+        plugin_unit_value(tx, &p[1], &p[2], &p[3])?
+    } else if p[0] == "plugin" {
+        let mut values = BTreeMap::new();
+        capture_key(tx, generation, key, &mut values)?;
+        values.remove(key).unwrap_or(UnitValue::Deleted)
+    } else { return Ok(false); };
+    Ok(wire(current.identity())? != wire(value.identity())?)
 }
 /// The character whose detail `apply` patches for this key, when the patch
 /// touches nothing else.
@@ -1082,22 +1179,30 @@ fn apply_value(
     if p[0] == "plugin-local" && !plugin_participates(tx)? {
         return Ok(());
     }
+    if p[0] == "plugin-local" {
+        if let UnitValue::Object { descriptor, .. } = value {
+            let (rowid, length) = plugin_text::object_row(tx, &descriptor.object_hash)?;
+            if length > plugin_text::PART_BYTES as u64 {
+                validate_plugin_unit(tx, value)?;
+                let info = plugin_text::inspect_object(tx, &descriptor.object_hash)?;
+                let (clock, writer): (String, String) = tx.query_row(
+                    "SELECT write_clock,writer_id FROM plugin_device_storage WHERE owner=?1 AND space=?2 AND key=?3",
+                    params![p[1], p[2], p[3]], |row| Ok((row.get(0)?, row.get(1)?))).optional()?.unwrap_or(("0".into(), String::new()));
+                return plugin_values::write_reserved(tx, &p[1], &p[2], &p[3], info.byte_length, &clock, &writer, |output| {
+                    let input = tx.blob_open(rusqlite::MAIN_DB, "message_page_objects", "body", rowid, true)?;
+                    if plugin_text::decode(input, output, plugin_text::MAX_VALUE_BYTES)? != info {
+                        return Err(error("invalid-large-unit"));
+                    }
+                    Ok(())
+                });
+            }
+        }
+    }
     let next = json_value_resolved(tx, value)?;
     match p[0].as_str() {
-        "root" => {
+        "root" | "toggle" | "variable" | "preset-protected" | "persona" | "record" => {
             let mut v = root(tx, generation)?;
-            patch(&mut v, &p[1], next)?;
-            write_root(tx, generation, &v)?;
-        }
-        "toggle" | "variable" | "preset-protected" => {
-            let mut v = root(tx, generation)?;
-            let map = if p[0] == "preset-protected" {
-                "protectedPresetValues"
-            } else {
-                "explicitGlobalChatVariables"
-            };
-            let field = v.as_object_mut().unwrap().entry(map).or_insert(json!({}));
-            patch(field, &p[1], next)?;
+            patch_root(&mut v, &p, next)?;
             write_root(tx, generation, &v)?;
         }
         "character" => {
@@ -1119,23 +1224,6 @@ fn apply_value(
             .ok_or_else(|| error("parent-missing"))?;
             patch(&mut v, &p[2], next)?;
             tx.execute("UPDATE bot_presets SET value=?3,name=?4,image=?5 WHERE generation=?1 AND preset_id=?2",params![generation,p[1],serde_json::to_string(&v)?,v.get("name").and_then(Value::as_str).unwrap_or_default(),v.get("image").and_then(Value::as_str)])?;
-        }
-        "persona" => {
-            let mut v = root(tx, generation)?;
-            patch_array(&mut v, "personas", "id", &p[1], Some(&p[2]), next)?;
-            write_root(tx, generation, &v)?;
-        }
-        "record" => {
-            let mut v = root(tx, generation)?;
-            patch_array(
-                &mut v,
-                &p[1],
-                if p[1] == "plugins" { "name" } else { "id" },
-                &p[2],
-                None,
-                next,
-            )?;
-            write_root(tx, generation, &v)?;
         }
         "exists" => {
             if next.is_none() {
@@ -1311,6 +1399,9 @@ fn apply_value(
                         .ok_or_else(|| error("plugin-local-value-invalid"))
                 })
                 .transpose()?;
+            if value.is_some_and(|value| plugin_text::encoded_length(value) > plugin_text::MAX_VALUE_BYTES) {
+                return Err(error("plugin device value is too large"));
+            }
             tx.execute("INSERT INTO plugin_device_storage VALUES(?1,?2,?3,?4,?5,?6,'0','',NULL,NULL,NULL) ON CONFLICT(owner,space,key) DO UPDATE SET value=excluded.value,byte_size=excluded.byte_size,tombstone=excluded.tombstone",params![p[1],p[2],p[3],value,value.map(str::len).unwrap_or(0) as i64,i64::from(value.is_none())])?;
         }
         "hypa" => apply_hypa(tx, &p[1], next)?,
@@ -1340,7 +1431,7 @@ pub(in crate::persistent_store) fn device_replacement_changes(
 ) -> StoreResult<Vec<(UnitKey, UnitValue)>> {
     use device_store::sections::{FrozenBackupSections, SectionValueRow};
     use base64::Engine;
-    fn units(tx: &Connection, rows: &FrozenBackupSections) -> StoreResult<BTreeMap<UnitKey, UnitValue>> {
+    fn units(tx: &Connection, rows: &FrozenBackupSections, local: bool) -> StoreResult<BTreeMap<UnitKey, UnitValue>> {
         let mut values = BTreeMap::new();
         for row in &rows.hypa {
             let value = match &row.value {
@@ -1357,6 +1448,10 @@ pub(in crate::persistent_store) fn device_replacement_changes(
         for row in &rows.local_plugins {
             let value = match &row.value {
                 SectionValueRow::Plugin { value, .. } => unit_value(tx, &json!(value))?,
+                SectionValueRow::PluginObject { object, .. } => {
+                    if local { plugin_unit_value(tx, &row.key1, &row.key2, &row.key3)? }
+                    else { wire(UnitValue::object(RecordDescriptor::content(object.hash.clone())))? }
+                }
                 SectionValueRow::Tombstone { .. } => UnitValue::Deleted,
                 _ => return Err(error("replacement-plugin-row-invalid")),
             };
@@ -1364,8 +1459,8 @@ pub(in crate::persistent_store) fn device_replacement_changes(
         }
         Ok(values)
     }
-    let before = units(tx, &device_store::sections::capture_replacement_device_rows(tx)?)?;
-    let after = units(tx, replacement)?;
+    let before = units(tx, &device_store::sections::capture_replacement_device_rows(tx)?, true)?;
+    let after = units(tx, replacement, false)?;
     let mut keys: BTreeSet<_> = before.keys().chain(after.keys()).cloned().collect();
     let mut statement = tx.prepare("SELECT key FROM lww_units WHERE json_extract(key,'$[0]') IN ('hypa','plugin-local')")?;
     let stored = statement.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
@@ -1424,11 +1519,7 @@ pub(in crate::persistent_store) fn capture_device_changes(
             };
             (unit_key(&["hypa", &k1])?, value)
         } else {
-            let row:Option<(Option<String>,bool)>=tx.query_row("SELECT value,tombstone FROM plugin_device_storage WHERE owner=?1 AND space=?2 AND key=?3",params![k1,k2,k3],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-            let value = match row {
-                Some((Some(value), false)) => unit_value(tx, &json!(value))?,
-                _ => UnitValue::Deleted,
-            };
+            let value = plugin_unit_value(tx, &k1, &k2, &k3)?;
             (unit_key(&["plugin-local", &k1, &k2, &k3])?, value)
         };
         #[cfg(test)]
@@ -1447,10 +1538,44 @@ pub(in crate::persistent_store) fn capture_device_changes(
     }
     Ok(())
 }
+fn validate_plugin_unit(db: &Connection, value: &UnitValue) -> StoreResult<()> {
+    if let UnitValue::Object { descriptor, .. } = value {
+        let (_, length) = plugin_text::object_row(db, &descriptor.object_hash)?;
+        if length <= plugin_text::PART_BYTES as u64 { return validate_large_unit(db, value).map(|_| ()); }
+        if *descriptor != RecordDescriptor::content(descriptor.object_hash.clone()) {
+            return Err(error("invalid-large-unit"));
+        }
+        let info = plugin_text::inspect_object(db, &descriptor.object_hash).map_err(|failure| {
+            if failure.to_string().contains("too large") { failure } else { error("invalid-large-unit") }
+        })?;
+        if info.encoded_length <= MAX_INLINE_UNIT_BYTES as u64 { return Err(error("invalid-large-unit")); }
+    } else { json_value(value)?; }
+    Ok(())
+}
+
+pub(in crate::persistent_store) fn plugin_unit_value(db: &Connection, owner: &str, space: &str, key: &str) -> StoreResult<UnitValue> {
+    let row: Option<(i64, i64)> = db.query_row(
+        "SELECT rowid,byte_size FROM plugin_device_storage WHERE owner=?1 AND space=?2 AND key=?3 AND tombstone=0",
+        params![owner, space, key], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+    let Some((rowid, size)) = row else { return Ok(UnitValue::Deleted); };
+    if size < 0 { return Err(error("plugin device size is invalid")); }
+    if size <= plugin_text::PART_BYTES as i64 {
+        let value: String = db.query_row("SELECT value FROM plugin_device_storage WHERE rowid=?1", [rowid], |row| row.get(0))?;
+        return unit_value(db, &Value::String(value));
+    }
+    let info = plugin_text::store_encoded(db, || Ok(db.blob_open(rusqlite::MAIN_DB, "plugin_device_storage", "value", rowid, true)?))?;
+    wire(UnitValue::object(RecordDescriptor::content(info.hash)))
+}
 pub(in crate::persistent_store) fn refresh_orders(
     tx: &Transaction<'_>,
     generation: &str,
     changed: &[UnitKey],
+) -> StoreResult<()> {
+    refresh_orders_charged(tx, generation, changed, None)
+}
+
+pub(in crate::persistent_store) fn refresh_orders_charged(
+    tx: &Connection, generation: &str, changed: &[UnitKey], mut written: Option<&mut dyn FnMut(i64) -> StoreResult<()>>,
 ) -> StoreResult<()> {
     let mut scopes = BTreeSet::new();
     for key in changed {
@@ -1538,7 +1663,9 @@ pub(in crate::persistent_store) fn refresh_orders(
             // Owner-local reordering must retain the positions of other owners
             // in the flattened upstream object.
             for (id, position) in ids.iter().zip(positions) {
-                tx.execute("UPDATE plugin_storage SET ordinal=?4 WHERE generation=?1 AND owner=?2 AND storage_key=?3 AND ordinal<>?4",params![generation,p[2],id,position])?;
+                if tx.execute("UPDATE plugin_storage SET ordinal=?4 WHERE generation=?1 AND owner=?2 AND storage_key=?3 AND ordinal<>?4",params![generation,p[2],id,position])? > 0 {
+                    if let Some(written) = written.as_deref_mut() { written(tx.query_row("SELECT length(CAST(value AS BLOB)) FROM plugin_storage WHERE generation=?1 AND owner=?2 AND storage_key=?3", params![generation,p[2],id], |row| row.get(0))?)?; }
+                }
             }
             continue;
         }
@@ -1650,17 +1777,24 @@ pub(in crate::persistent_store) fn refresh_orders(
             let mut v = root(tx, generation)?;
             patch(&mut v, "characterOrder", Some(json!(projected)))?;
             write_root(tx, generation, &v)?;
+            if let Some(written) = written.as_deref_mut() { written(tx.query_row("SELECT length(CAST(value AS BLOB)) FROM root WHERE generation=?1", [generation], |row| row.get(0))?)?; }
         }
         for (i, id) in ids.iter().enumerate() {
             match p[1].as_str() {
                 "characters" => {
-                    tx.execute("UPDATE characters SET configured_index=?3 WHERE generation=?1 AND character_id=?2 AND configured_index<>?3",params![generation,id,i as i64])?;
+                    if tx.execute("UPDATE characters SET configured_index=?3 WHERE generation=?1 AND character_id=?2 AND configured_index<>?3",params![generation,id,i as i64])? > 0 {
+                        if let Some(written) = written.as_deref_mut() { written(tx.query_row("SELECT length(CAST(detail AS BLOB)) FROM characters WHERE generation=?1 AND character_id=?2", params![generation,id], |row| row.get(0))?)?; }
+                    }
                 }
                 "conversations" => {
-                    tx.execute("UPDATE conversations SET configured_index=?4 WHERE generation=?1 AND character_id=?2 AND conversation_id=?3 AND configured_index<>?4",params![generation,p[2],id,i as i64])?;
+                    if tx.execute("UPDATE conversations SET configured_index=?4 WHERE generation=?1 AND character_id=?2 AND conversation_id=?3 AND configured_index<>?4",params![generation,p[2],id,i as i64])? > 0 {
+                        if let Some(written) = written.as_deref_mut() { written(tx.query_row("SELECT length(CAST(detail AS BLOB)) FROM conversations WHERE generation=?1 AND character_id=?2 AND conversation_id=?3", params![generation,p[2],id], |row| row.get(0))?)?; }
+                    }
                 }
                 "presets" => {
-                    tx.execute("UPDATE bot_presets SET configured_index=?3 WHERE generation=?1 AND preset_id=?2 AND configured_index<>?3",params![generation,id,i as i64])?;
+                    if tx.execute("UPDATE bot_presets SET configured_index=?3 WHERE generation=?1 AND preset_id=?2 AND configured_index<>?3",params![generation,id,i as i64])? > 0 {
+                        if let Some(written) = written.as_deref_mut() { written(tx.query_row("SELECT length(CAST(value AS BLOB)) FROM bot_presets WHERE generation=?1 AND preset_id=?2", params![generation,id], |row| row.get(0))?)?; }
+                    }
                 }
                 _ => {}
             }
@@ -1679,6 +1813,7 @@ pub(in crate::persistent_store) fn refresh_orders(
                 });
             }
             write_root(tx, generation, &v)?;
+            if let Some(written) = written.as_deref_mut() { written(tx.query_row("SELECT length(CAST(value AS BLOB)) FROM root WHERE generation=?1", [generation], |row| row.get(0))?)?; }
         }
     }
     Ok(())
@@ -1848,7 +1983,14 @@ pub(in crate::persistent_store) fn archive_metadata(
     let body = super::super::message_pages::object_body(db, &descriptor.object_hash)?
         .ok_or_else(|| error("archive-metadata-missing"))?;
     let archived: super::super::archive::ArchivedObject = serde_json::from_slice(&body)?;
-    if archive_value(db, &archived)? != *value {
+    let (_, _, descriptor, _) = archive_objects(&archived)?;
+    let expected = {
+        let result = UnitValue::object(descriptor);
+        #[cfg(test)]
+        crate::persistent_store::hash_work::descriptor_creation(&result);
+        result
+    }.map_err(error)?;
+    if expected != *value {
         return Err(error("archive-descriptor-mismatch"));
     }
     Ok(archived)

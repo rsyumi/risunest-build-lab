@@ -37,7 +37,7 @@ pub(super) use replacement_source::{SourceLayer, REMAPPED as REMAPPED_SOURCE, ST
 pub(super) use replacement_source::{clear as clear_replacement_source, insert as insert_replacement_source, units as replacement_source_units};
 pub(super) use projection::validate_received;
 pub(super) use projection::{
-    apply_mutation, capture_device_changes, capture_targets, is_device, preserve_local_root,
+    apply_mutations, capture_device_changes, capture_targets, is_device, preserve_local_root,
     refresh_orders, archive_object_hashes, archive_value,
 };
 
@@ -92,7 +92,7 @@ pub(super) fn inline(value: &Value) -> StoreResult<UnitValue> {
 /// equal units on every device.
 pub(super) fn unit_value(db: &Connection, value: &Value) -> StoreResult<UnitValue> {
     use base64::Engine;
-    let canonical = wire(risunest_sync_wire::payload_value::canonicalize(&serde_json::to_vec(value)?))?;
+    let canonical = wire(risunest_sync_wire::payload_value::encode(value))?;
     if canonical.len() <= MAX_INLINE_UNIT_BYTES {
         return Ok(UnitValue::Inline {
             bytes: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(canonical),
@@ -135,7 +135,7 @@ pub(super) fn validate_large_unit(db: &Connection, value: &UnitValue) -> StoreRe
     }
     let body = large_unit_body(db, value)?.ok_or_else(|| error("invalid-large-unit"))?;
     if body.len() <= MAX_INLINE_UNIT_BYTES
-        || risunest_sync_wire::payload_value::canonicalize(&body).ok().as_ref() != Some(&body)
+        || !risunest_sync_wire::payload_value::is_canonical(&body)
     {
         return Err(error("invalid-large-unit"));
     }
@@ -242,6 +242,7 @@ pub(crate) struct ApplyReceive {
 pub(crate) struct ApplyResult {
     pub revision: i64,
     pub affected_keys: Vec<UnitKey>,
+    pub plugin_storage_changed_keys: Vec<UnitKey>,
     pub held_keys: Vec<UnitKey>,
     pub deferred_keys: Vec<UnitKey>,
 }
@@ -680,6 +681,7 @@ fn suppress_retired(db: &Connection, parent: &UnitKey) -> StoreResult<()> {
         other=>("json_extract(key,'$[0]')='record' AND json_extract(key,'$[1]')=?2 AND json_extract(key,'$[2]')=?1",p[2].as_str(),Some(other)),
     };
     for (table, action) in [
+        ("lww_units", "DELETE FROM lww_units"),
         ("lww_outbox", "DELETE FROM lww_outbox"),
         (
             "lww_receive_rows",
@@ -807,10 +809,13 @@ impl PersistentStore {
         let values = crate::sqlite_open::open(scratch.path().join("units.sqlite"))?;
         values.execute_batch("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-4096; PRAGMA temp_store=FILE;
             CREATE TABLE units(key TEXT PRIMARY KEY,stamp TEXT NOT NULL,value TEXT NOT NULL); BEGIN")?;
-        for row in rows {
+        'units: for row in rows {
             if probe.is_cancelled() { return Err(error("cancelled")); }
             let (key,stamp,value) = row?;
             let key: UnitKey = wire(key.try_into())?;
+            for parent in parent_keys(&key)? {
+                if is_retired(&reader.connection, &parent)? { continue 'units; }
+            }
             let stamp: Stamp = serde_json::from_str(&stamp)?;
             wire(stamp.validate())?;
             let value: UnitValue = serde_json::from_str(&value)?;
@@ -878,6 +883,31 @@ impl PersistentStore {
     }
     pub(crate) fn lww_activated_receipt(&self, request_id: &str) -> StoreResult<Option<(i64, String)>> {
         activated_receipt(&self.connection, request_id)
+    }
+
+    pub(crate) fn lww_file_restore_receipt(&self, request_id: &str, staging_id: &str, authority: &str) -> StoreResult<Option<i64>> {
+        let row: Option<(String, String, String, bool)> = self.device_store()?.connection().query_row(
+            "SELECT authority,body,digest,complete FROM lww_intents WHERE request_id=?1", [request_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).optional()?;
+        let activated = activated_receipt(&self.connection, request_id)?;
+        let Some((stored_authority, body, digest, complete)) = row else {
+            return if activated.is_some() { Err(error("request-receipt-missing")) } else { Ok(None) };
+        };
+        let Intent::Replacement { staging_id: stage, base_revision, .. } = serde_json::from_str(&body)?
+            else { return Err(error("request-id-integrity")); };
+        if stored_authority != authority || stage != staging_id || risunest_sync_wire::hash(body.as_bytes()) != digest {
+            return Err(error("request-id-integrity"));
+        }
+        let Some((revision, generation)) = activated else { return Err(error("restore-activation-pending")); };
+        let applied_digest: String = self.connection.query_row(
+            "SELECT digest FROM lww_requests WHERE request_id=?1", [request_id], |row| row.get(0),
+        )?;
+        if applied_digest != digest || generation != staging_id || base_revision.checked_add(1) != Some(revision) {
+            return Err(error("request-id-integrity"));
+        }
+        if !complete { return Err(error("restore-activation-pending")); }
+        Ok(Some(revision))
     }
     pub(crate) fn lww_device_replacement_receipt(
         &self,
@@ -988,6 +1018,22 @@ impl PersistentStore {
         Ok(Some(body))
     }
 
+    pub(crate) fn lww_native_object(&self, hash: &str) -> StoreResult<Option<rusqlite::blob::Blob<'_>>> {
+        for db in [&self.connection, self.device_store()?.connection()] {
+            let row: Option<i64> = db.query_row("SELECT rowid FROM message_page_objects WHERE hash=?1", [hash], |row| row.get(0)).optional()?;
+            if let Some(rowid) = row { return Ok(Some(db.blob_open(rusqlite::MAIN_DB, "message_page_objects", "body", rowid, true)?)); }
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn lww_copy_large_object_to_cas(&self, hash: &str, cas: &crate::asset_repository::PayloadCas, inline_limit: usize) -> StoreResult<bool> {
+        let Some(mut blob) = self.lww_native_object(hash)? else { return Ok(false); };
+        let length = blob.len() as u64;
+        if length <= inline_limit as u64 { return Ok(false); }
+        cas.prepare_reader_expected(&mut blob, hash, length)?;
+        Ok(true)
+    }
+
     pub(crate) fn lww_verified_object_present(&self, hash: &str) -> StoreResult<bool> {
         super::message_pages::retained_object_present(&self.connection, hash)
     }
@@ -1013,6 +1059,16 @@ impl PersistentStore {
             {
                 continue;
             }
+            if change.key.components()[0] == "plugin-local"
+                && device_store::plugin_values::text_value::object_row(&self.connection, &descriptor.object_hash)?.1
+                    > device_store::plugin_values::text_value::PART_BYTES as u64
+            {
+                let info = device_store::plugin_values::text_value::inspect_object(&self.connection, &descriptor.object_hash)?;
+                let tx = device.unchecked_transaction()?;
+                device_store::plugin_values::text_value::copy_object(&self.connection, &tx, &info)?;
+                tx.commit()?;
+                continue;
+            }
             let body = super::message_pages::object_body(&self.connection, &descriptor.object_hash)?
                 .ok_or_else(|| error("unit-object-body-required"))?;
             super::message_pages::put_object(device, &descriptor.object_hash, &body)?;
@@ -1021,6 +1077,52 @@ impl PersistentStore {
     }
     pub(crate) fn lww_put_object(&self, hash: &str, body: &[u8]) -> StoreResult<()> {
         super::message_pages::put_object(&self.connection, hash, body)
+    }
+    pub(crate) fn lww_put_object_reader(&self, hash: &str, mut input: impl std::io::Read, length: u64) -> StoreResult<()> {
+        use std::io::{Read, Write};
+        use sha2::{Digest, Sha256};
+        wire(risunest_sync_wire::validate_hash(hash))?;
+        let length = i32::try_from(length).map_err(|_| error("object-size-invalid"))?;
+        let db = &self.connection;
+        db.execute_batch("SAVEPOINT lww_object_stream")?;
+        let result = (|| -> StoreResult<()> {
+            let existing: Option<i64> = db.query_row("SELECT rowid FROM message_page_objects WHERE hash=?1", [hash], |row| row.get(0)).optional()?;
+            let rowid = match existing {
+                Some(rowid) => rowid,
+                None => {
+                    db.execute("INSERT INTO message_page_objects(hash,body) VALUES(?1,zeroblob(?2))", params![hash, length])?;
+                    db.last_insert_rowid()
+                }
+            };
+            let mut output = db.blob_open(rusqlite::MAIN_DB, "message_page_objects", "body", rowid, existing.is_some())?;
+            if output.len() != length as usize { return Err(error("message object identity collision")); }
+            let mut buffer = [0; 64 * 1024];
+            let mut digest = Sha256::new(); let mut copied = 0u64;
+            loop {
+                let count = input.read(&mut buffer)?;
+                if count == 0 { break; }
+                copied += count as u64;
+                if copied > length as u64 { return Err(error("message object length mismatch")); }
+                digest.update(&buffer[..count]);
+                if existing.is_none() { output.write_all(&buffer[..count])?; }
+            }
+            #[cfg(test)] super::hash_work::observe("native_page_object_verify", copied as usize);
+            if copied != length as u64 || hex::encode(digest.finalize()) != hash { return Err(error("message object hash mismatch")); }
+            output.close()?;
+            let mut stored = db.blob_open(rusqlite::MAIN_DB, "message_page_objects", "body", rowid, true)?;
+            let mut digest = Sha256::new();
+            loop { let count = stored.read(&mut buffer)?; if count == 0 { break; } digest.update(&buffer[..count]); }
+            #[cfg(test)] super::hash_work::observe("native_page_object_verify", length as usize);
+            if hex::encode(digest.finalize()) != hash { return Err(error("message object identity collision")); }
+            stored.close()?;
+            db.execute("INSERT INTO message_page_verified_objects(hash) SELECT ?1 WHERE NOT EXISTS(SELECT 1 FROM message_page_verified_objects WHERE hash=?1)", [hash])?;
+            db.execute("DELETE FROM message_page_object_marks WHERE hash=?1", [hash])?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => { db.execute_batch("RELEASE lww_object_stream")?; Ok(()) }
+            Err(failure) => { db.execute_batch("ROLLBACK TO lww_object_stream; RELEASE lww_object_stream")?; Err(failure) }
+        }
     }
     pub(crate) fn lww_put_managed_object(&mut self, hash: &str, body: &[u8]) -> StoreResult<()> {
         if {
@@ -1526,7 +1628,7 @@ impl PersistentStore {
                 ..
             } => {
                 let changes =
-                    intent_rows::read_replacement(self.device_store()?.connection(), &header.request_id, &changes)?;
+                    intent_rows::read_replacement(self.device_store()?.connection(), &self.repository_root, &header.request_id, &changes)?;
                 if let Some(sections) = device_sections {
                     self.finish_lww_device_replacement(&header, &staging_id, &changes, &sections, &device_changes, &stamp, &digest)?;
                 } else {
@@ -1538,7 +1640,7 @@ impl PersistentStore {
                 changes,
                 ..
             } => {
-                let changes = intent_rows::read_target(self.device_store()?.connection(), &header.request_id, &changes)?;
+                let changes = intent_rows::read_target(self.device_store()?.connection(), &self.repository_root, &header.request_id, &changes)?;
                 self.finish_lww_replacement(
                     &header,
                     &staging_id,
@@ -2314,7 +2416,9 @@ impl PersistentStore {
                         && read_unit(&tx, &change.key)?
                             .is_none_or(|(_, v)| !matches!(v, UnitValue::Deleted));
                     if decision == LwwDecision::ApplyRemote || new_retirement {
-                        projection::apply(&tx, &generation, &change.key, &change.value)?;
+                        if projection::apply_received(&tx, &generation, &change.key, &change.value)? {
+                            result.plugin_storage_changed_keys.push(change.key.clone());
+                        }
                         put_unit(
                             &tx,
                             &change.key,
@@ -2325,7 +2429,9 @@ impl PersistentStore {
                         )?;
                         result.affected_keys.push(change.key.clone());
                     } else if was_unprojected && decision == LwwDecision::Identical {
-                        projection::apply(&tx, &generation, &change.key, &change.value)?;
+                        if projection::apply_received(&tx, &generation, &change.key, &change.value)? {
+                            result.plugin_storage_changed_keys.push(change.key.clone());
+                        }
                         result.affected_keys.push(change.key.clone());
                     }
                     let local_pending: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM lww_requests receipt JOIN lww_outbox pending ON pending.version=receipt.request_id WHERE receipt.request_id=?1 AND pending.key=?2 AND pending.stamp=?3 AND pending.value=?4)",params![id,change.key.as_str(),serde_json::to_string(&change.stamp)?,serde_json::to_string(&change.value)?],|row|row.get(0))?;
@@ -2774,6 +2880,9 @@ impl PersistentStore {
         staging_id: &str,
         sections: &[&device_store::sections::PreparedSectionRows],
     ) -> StoreResult<RevisionResult> {
+        let tx = self.device_store_mut()?.transaction()?;
+        for section in sections { section.retain_plugin_objects(&tx)?; }
+        tx.commit()?;
         let frozen = device_store::sections::freeze_backup_sections(sections)?;
         self.lww_commit_replacement_inputs(header, staging_id, true, Some(&frozen))
     }
@@ -2788,6 +2897,9 @@ impl PersistentStore {
         if let Some(units) = source_units {
             self.stage_replacement_source(staging_id, units)?;
         }
+        let tx = self.device_store_mut()?.transaction()?;
+        for section in sections { section.retain_plugin_objects(&tx)?; }
+        tx.commit()?;
         let frozen = device_store::sections::freeze_backup_sections(sections)?;
         self.lww_commit_replacement_inputs(header, staging_id, source_units.is_some(), Some(&frozen))
     }
@@ -2850,7 +2962,7 @@ impl PersistentStore {
         }
         let generation = active_generation(&self.connection)?;
         let tx = self.connection.transaction()?;
-        let changes = replacement_changes(&tx, &generation, staging_id, effective_source)?;
+        let changes = replacement_changes(&tx, &self.repository_root, &generation, staging_id, effective_source)?;
         tx.commit()?;
         let (device_changes, device_settings_digest) = if let Some(sections) = device_sections {
             let tx = self.device_store_mut()?.transaction()?;
@@ -2925,7 +3037,7 @@ impl PersistentStore {
         staging_id: &str,
         changes: &[Change],
     ) -> StoreResult<RevisionResult> {
-        let rows = FrozenRows::new()?;
+        let rows = FrozenRows::new(&self.repository_root)?;
         for change in changes { rows.insert(intent_rows::target_row(change)?)?; }
         self.lww_replace_target_rows(header, staging_id, &rows)
     }
@@ -2958,7 +3070,7 @@ impl PersistentStore {
             wire(stamp.ok_or_else(|| error("request-id-integrity"))?.validate())?;
             projection::validate_received(&self.connection, &key, &value)
         })?;
-        binding_stage::validate_binding_source_rows(&self.connection, staging_id, header, changes)?;
+        binding_stage::validate_binding_source_rows(&self.connection, &self.repository_root, staging_id, header, changes)?;
         let rows = intent_rows::write(
             &mut self.device_store_mut()?.connection,
             &header.request_id,
@@ -2996,6 +3108,7 @@ impl PersistentStore {
         };
         let result = commit::replace_commit_lww_rows(
             &mut self.connection,
+            &self.repository_root,
             staging_id,
             header,
             stamp,
@@ -3044,6 +3157,7 @@ fn archived_character(key: &UnitKey) -> Option<String> {
 /// message bodies, and replay retains the same key order and frozen digest.
 fn replacement_changes(
     tx: &Transaction<'_>,
+    root: &std::path::Path,
     active: &str,
     staging_id: &str,
     source: Option<SourceLayer<'_>>,
@@ -3051,7 +3165,7 @@ fn replacement_changes(
     let sourced = |key: &UnitKey| -> StoreResult<Option<UnitValue>> {
         source.map(|source| replacement_source::get(tx, source, key)).transpose().map(Option::flatten)
     };
-    let changes = FrozenRows::new()?;
+    let changes = FrozenRows::new(root)?;
     changes.db.execute_batch("CREATE TABLE captured(key TEXT PRIMARY KEY,before_value TEXT,staged_value TEXT);")?;
     for (generation, column) in [(active, "before_value"), (staging_id, "staged_value")] {
         let sql = format!("INSERT INTO captured(key,{column}) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET {column}=excluded.{column}");
@@ -3138,7 +3252,7 @@ impl PersistentStore {
         }
         let generation = active_generation(&self.connection)?;
         let tx = self.connection.transaction()?;
-        let rows = replacement_changes(&tx, &generation, staging_id, source.map(|_| SourceLayer::staged(staging_id)))?;
+        let rows = replacement_changes(&tx, &self.repository_root, &generation, staging_id, source.map(|_| SourceLayer::staged(staging_id)))?;
         let mut merged = (Vec::new(), BTreeSet::new());
         rows.visit(false, |key, _, value, source_override| {
             if source_override { merged.1.insert(key.clone()); }
@@ -3246,11 +3360,12 @@ thread_local! {
 }
 fn reset_target_device(
     tx: &Transaction<'_>,
+    root: &std::path::Path,
     header: &Header,
     received: &[Change],
     binding: DecimalU64,
 ) -> StoreResult<()> {
-    let rows = FrozenRows::new()?;
+    let rows = FrozenRows::new(root)?;
     for change in received { rows.insert(intent_rows::target_row(change)?)?; }
     reset_target_device_rows(tx, header, &rows, binding)
 }

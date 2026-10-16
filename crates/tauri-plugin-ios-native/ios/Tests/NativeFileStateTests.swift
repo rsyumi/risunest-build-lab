@@ -58,4 +58,22 @@ final class NativeFileStateTests: XCTestCase {
         try NativeFileState.removeStagedInboxSource(owned, inbox: inbox)
         XCTAssertFalse(FileManager.default.fileExists(atPath: owned.path))
     }
+    func testDiscardAcceptsLegacyAndCustodyCopiesButRefusesOtherNestedFolders() throws {
+        for parent in [root!, root.appendingPathComponent("custody")] {
+            let folder = parent.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let source = folder.appendingPathComponent("source.risudat")
+            try Data([1]).write(to: source)
+            try NativeFileState.discardStagedFile(source, staging: root)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path))
+        }
+        for parent in [root.appendingPathComponent("unrelated"), root.appendingPathComponent("custody/nested")] {
+            let folder = parent.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let source = folder.appendingPathComponent("source.risudat")
+            try Data([2]).write(to: source)
+            XCTAssertThrowsError(try NativeFileState.discardStagedFile(source, staging: root))
+            XCTAssertEqual(try Data(contentsOf: source), Data([2]))
+        }
+    }
 }

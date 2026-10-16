@@ -75,7 +75,7 @@ fn write_risum(
     }))
     .map_err(|error| invalid_input(error.to_string()))?;
     let metadata_length = u32::try_from(metadata.len())
-        .map_err(|_| invalid_input("RISUM metadata exceeds its frame limit"))?;
+        .map_err(|_| NativeJobError::too_large("module", "RISUM metadata exceeds its frame limit"))?;
     output.write_all(&[111, 0]).map_err(io_error)?;
     output
         .write_all(&metadata_length.to_le_bytes())
@@ -86,7 +86,7 @@ fn write_risum(
             return Err(cancelled("RISUM export cancelled while writing assets"));
         }
         let length = u32::try_from(payload.len())
-            .map_err(|_| invalid_input("RISUM asset exceeds its frame limit"))?;
+            .map_err(|_| NativeJobError::too_large("module", "RISUM asset exceeds its frame limit"))?;
         output.write_all(&[1]).map_err(io_error)?;
         output.write_all(&length.to_le_bytes()).map_err(io_error)?;
         write_rpack(output, payload, &is_cancelled)?;
@@ -158,7 +158,7 @@ where
             .write(true)
             .open(&source)
             .map_err(io_error)?;
-        let mut output = BufWriter::new(file);
+        let mut output = BufWriter::new(super::export::ProgressWriter::new(file, job));
         let _total_items = {
             let reader = prepared.reader().map_err(store_error)?;
             let projected = export::projected_root_module(
@@ -180,6 +180,7 @@ where
         output.flush().map_err(io_error)?;
         output.get_ref().sync_all().map_err(io_error)?;
         drop(output);
+        let source_bytes = fs::metadata(&source).map_err(io_error)?.len();
         if job.is_cancel_requested() {
             return Err(cancelled(
                 "RISUM export cancelled before destination publication",
@@ -219,7 +220,11 @@ where
             destination_root,
             &destination_path,
             || job.is_cancel_requested() || phase_failure.borrow().is_some(),
-            |_| {},
+            |progress| {
+                if let Err(error) = job.set_export_bytes(progress.copied_bytes, Some(source_bytes)) {
+                    *phase_failure.borrow_mut() = Some(error);
+                }
+            },
             || {
                 if job.is_cancel_requested() || phase_failure.borrow().is_some() {
                     return Err(destination::DestinationWriteError::Cancelled);
@@ -280,9 +285,7 @@ fn write_projected_risum(
         .transpose()?;
     let asset_count = assets.as_ref().map_or(0, |assets| assets.len());
     if asset_count > 50_000 {
-        return Err(invalid_input(
-            "RISUM asset count exceeds the importer limit",
-        ));
+        return Err(NativeJobError::too_large("module", "RISUM asset count exceeds the importer limit"));
     }
     if let Some(occurrences) = occurrences {
         if occurrences.len() != asset_count {
@@ -336,9 +339,7 @@ fn write_projected_risum(
                     (hash, size)
                 };
             if size > 64 * 1024 * 1024 {
-                return Err(invalid_input(
-                    "RISUM asset exceeds the importer per-frame limit",
-                ));
+                return Err(NativeJobError::too_large("module", "RISUM asset exceeds the importer per-frame limit"));
             }
             descriptors.push((hash, size));
             tuple[1] = Value::String(String::new());
@@ -347,7 +348,7 @@ fn write_projected_risum(
     let metadata = serde_json::to_vec_pretty(&json!({"module": module, "type": "risuModule"}))
         .map_err(|error| invalid_input(error.to_string()))?;
     if metadata.len() > crate::import_export_jobs::MAX_CONTENT_METADATA_BYTES {
-        return Err(invalid_input("RISUM metadata exceeds the importer limit"));
+        return Err(NativeJobError::too_large("module", "RISUM metadata exceeds the importer limit"));
     }
     output.write_all(&[111, 0]).map_err(io_error)?;
     output
@@ -360,9 +361,7 @@ fn write_projected_risum(
             .checked_add(*size)
             .ok_or_else(|| invalid_input("RISUM aggregate size overflow"))?;
         if aggregate > 10 * 1024 * 1024 * 1024 {
-            return Err(invalid_input(
-                "RISUM assets exceed the aggregate importer limit",
-            ));
+            return Err(NativeJobError::too_large("module", "RISUM assets exceed the aggregate importer limit"));
         }
         output.write_all(&[1]).map_err(io_error)?;
         output

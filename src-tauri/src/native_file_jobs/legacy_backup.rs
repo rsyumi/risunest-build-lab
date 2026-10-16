@@ -21,10 +21,10 @@ use crate::persistent_store::{
 use crate::server_sync::residency::RemotePayloadAccess;
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
-use serde_json::{Map, Value};
-use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
 use std::fmt;
+use serde_json::{Map, Value};
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
 use std::sync::Mutex;
@@ -32,6 +32,7 @@ use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
 mod cold_expansion;
+pub(super) mod account_encryption;
 mod compatible_assets;
 mod compatible_export;
 mod compatible_projection;
@@ -186,11 +187,11 @@ impl<'a> LegacyRestoreProgress<'a> {
             return;
         }
         match pocket_risu::classify(logical_name) {
-            Ok(Some(pocket_risu::Entry::Payload { .. })) => counts.pocket_media += 1,
+            Ok(Some(pocket_risu::Entry::Payload { .. } | pocket_risu::Entry::Legacy { .. })) => counts.pocket_media += 1,
             Ok(Some(
                 pocket_risu::Entry::Metadata { .. } | pocket_risu::Entry::Provenance { .. },
             )) => counts.pocket_metadata += 1,
-            Ok(Some(pocket_risu::Entry::Cache)) => counts.skipped += 1,
+            Ok(Some(pocket_risu::Entry::Cache | pocket_risu::Entry::Skipped)) => counts.skipped += 1,
             Ok(None) => {
                 if cold_key(logical_name).is_some() {
                     counts.cold_storage += 1
@@ -210,6 +211,7 @@ impl<'a> LegacyRestoreProgress<'a> {
     fn restore_scale(&self) -> restore::RestoreProgressScale {
         let state = self.state.borrow();
         restore::RestoreProgressScale {
+            result_source: None,
             spool_directory: None,
             reject_cold_references: false,
             base_bytes: state.read_bytes.saturating_add(state.prepared_bytes),
@@ -324,6 +326,7 @@ pub(crate) fn restore_legacy_local_backup(
         expected_revision,
         job,
         progress: &progress,
+        result_source: None,
         result: None,
     };
     let parsed = parse_legacy_local_backup_v1_observed(
@@ -351,6 +354,7 @@ pub(crate) fn restore_legacy_local_backup(
 }
 
 struct LegacyDatabaseRestore<'a> {
+    result_source: Option<(u64, String)>,
     app: AppHandle,
     cas: &'a PayloadCas,
     repository_root: &'a std::path::Path,
@@ -361,6 +365,7 @@ struct LegacyDatabaseRestore<'a> {
 }
 
 impl StrictLocalBackupDatabaseRestore for LegacyDatabaseRestore<'_> {
+    fn source_validated(&mut self, bytes: u64, sha256: &str) { self.result_source = Some((bytes, sha256.to_owned())); }
     fn restore_database(
         &mut self,
         database: &StagedLocalBackupEntry,
@@ -370,7 +375,15 @@ impl StrictLocalBackupDatabaseRestore for LegacyDatabaseRestore<'_> {
         let path = database.staged_path.as_ref().ok_or_else(|| {
             LocalBackupError::database_restore("legacy backup database is not staged")
         })?;
-        let file = File::open(path).map_err(LocalBackupError::io)?;
+        let decrypted = match account_encryption::prepare(entries, database, self.job) {
+            Ok(value) => value,
+            Err(error) => {
+                self.result = Some(Err(error.clone()));
+                return Err(LocalBackupError::database_restore(error.message));
+            }
+        };
+        let file = File::open(decrypted.as_ref().map(|file| file.path()).unwrap_or(path)).map_err(LocalBackupError::io)?;
+        let database_bytes = file.metadata().map_err(LocalBackupError::io)?.len();
         let mut durable = DurableCasJob::begin(
             self.repository_root,
             &self.job.id(),
@@ -401,17 +414,19 @@ impl StrictLocalBackupDatabaseRestore for LegacyDatabaseRestore<'_> {
             payloads,
             durable: Mutex::new(durable),
             incomplete: Mutex::new(super::IncompleteRestorePreview::default()),
+            activation_pending: std::sync::atomic::AtomicBool::new(false),
         };
         let result = restore::restore_started_risu_save(
             OpenedJobSource {
                 file,
-                total_bytes: database.byte_length,
+                total_bytes: database_bytes,
                 custody: None,
             },
             self.expected_revision,
             self.job,
             &sink,
             restore::RestoreProgressScale {
+                result_source: self.result_source.clone(),
                 spool_directory: path.parent().map(std::path::Path::to_path_buf),
                 ..self.progress.restore_scale()
             },
@@ -430,6 +445,7 @@ impl StrictLocalBackupDatabaseRestore for LegacyDatabaseRestore<'_> {
 }
 
 struct LegacyReplacementSink {
+    activation_pending: std::sync::atomic::AtomicBool,
     app: AppHandle,
     payloads: PreparedLegacyRestorePayloads,
     durable: Mutex<DurableCasJob>,
@@ -437,6 +453,18 @@ struct LegacyReplacementSink {
 }
 
 impl restore::ReplacementSink for LegacyReplacementSink {
+    fn prepare_activation_receipt(&self, staging_id: &str, job: &JobControl, result: &JobResultSummary) -> StoreResult<Option<String>> {
+        crate::persistent_store::commands::with_store(self.app.state(), |store| super::restore_receipts::prepare(store, job, staging_id, result))
+    }
+
+    fn activation_receipt(&self, staging_id: &str, authority: &str) -> StoreResult<Option<i64>> {
+        let result = crate::persistent_store::commands::with_store(self.app.state(), |store| store.lww_file_restore_receipt(staging_id, staging_id, authority));
+        if result.is_err() { self.activation_pending.store(true, std::sync::atomic::Ordering::Release); }
+        if matches!(result, Ok(Some(_))) && self.release_durable(CasReleaseOutcome::Committed).is_err() {
+            self.activation_pending.store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
+    }
     fn begin(&self) -> StoreResult<StagingResult> {
         crate::persistent_store::commands::with_store_mut(
             self.app.state(),
@@ -520,6 +548,7 @@ impl restore::ReplacementSink for LegacyReplacementSink {
         preview.character_names.sort();
         preview.character_names.dedup();
         preview.invalid_inlays = self.payloads.invalid_inlays.clone();
+        preview.omissions.inlays = self.payloads.skipped_inlays;
         Ok(preview)
     }
 
@@ -549,7 +578,7 @@ impl restore::ReplacementSink for LegacyReplacementSink {
             Some(expected_revision),
         );
         if committed.is_ok() {
-            let _ = self.release_durable(CasReleaseOutcome::Committed);
+            self.release_durable(CasReleaseOutcome::Committed)?;
         }
         committed
     }
@@ -577,6 +606,7 @@ impl LegacyReplacementSink {
 
 impl Drop for LegacyReplacementSink {
     fn drop(&mut self) {
+        if self.activation_pending.load(std::sync::atomic::Ordering::Acquire) { return; }
         if let Ok(durable) = self.durable.get_mut() {
             let _ = durable.release(CasReleaseOutcome::Aborted);
         }
@@ -584,6 +614,13 @@ impl Drop for LegacyReplacementSink {
 }
 
 fn local_backup_error(error: LocalBackupError) -> NativeJobError {
+    let item = match error.code {
+        LocalBackupErrorCode::RecordTooLarge => Some("record"),
+        LocalBackupErrorCode::DecodedBlockTooLarge => Some("backup"),
+        LocalBackupErrorCode::LengthOverflow => Some("backup-entry"),
+        _ => None,
+    };
+    if let Some(item) = item { return NativeJobError::too_large(item, error.message); }
     let code = match error.code {
         LocalBackupErrorCode::CompatibilityImportRequired => "compatibility-import-required",
         LocalBackupErrorCode::UnsupportedEncryption | LocalBackupErrorCode::UnsupportedFormat => {
@@ -647,6 +684,7 @@ fn now_millis() -> i64 {
 pub(crate) struct PreparedLegacyRestorePayloads {
     pub(crate) asset_aliases: Vec<AssetAlias>,
     pub(crate) invalid_inlays: Vec<String>,
+    pub(crate) skipped_inlays: u64,
     /// Upstream cold payload key to the staged file that holds its body.
     pub(crate) cold_payloads: HashMap<String, std::path::PathBuf>,
 }
@@ -675,7 +713,7 @@ fn produces_alias(logical_name: &str) -> bool {
     }
     matches!(
         pocket_risu::classify(logical_name),
-        Ok(Some(pocket_risu::Entry::Payload { .. })) | Ok(None)
+        Ok(Some(pocket_risu::Entry::Payload { .. } | pocket_risu::Entry::Legacy { .. })) | Ok(None)
     )
 }
 
@@ -686,10 +724,22 @@ pub(crate) fn prepare_legacy_restore_payloads_observed(
     cancellation: &dyn CancellationProbe,
     observer: &dyn LegacyPrepareObserver,
 ) -> Result<PreparedLegacyRestorePayloads, LocalBackupError> {
+    prepare_legacy_restore_payloads_with_limits(entries, cas, durable, cancellation, observer, restore::RestoreLimits::default())
+}
+
+pub(super) fn prepare_legacy_restore_payloads_with_limits(
+    entries: &[StagedLocalBackupEntry],
+    cas: &PayloadCas,
+    durable: &mut DurableCasJob,
+    cancellation: &dyn CancellationProbe,
+    observer: &dyn LegacyPrepareObserver,
+    limits: restore::RestoreLimits,
+) -> Result<PreparedLegacyRestorePayloads, LocalBackupError> {
     preflight_legacy_restore_entries(entries)?;
     let pocket_metadata = pocket_risu::index_metadata(entries, cancellation)?;
     let mut asset_aliases = Vec::new();
     let mut invalid_inlays = Vec::new();
+    let mut skipped_inlays = 0;
     let mut cold_payloads = HashMap::new();
     let mut asset_keys = HashSet::new();
     let mut incoming = Vec::new();
@@ -710,17 +760,43 @@ pub(crate) fn prepare_legacy_restore_payloads_observed(
             continue;
         }
         if let Some(pocket_entry) = pocket_risu::classify(&entry.logical_name)? {
+            if matches!(pocket_entry, pocket_risu::Entry::Skipped) { skipped_inlays += 1; }
+            if let pocket_risu::Entry::Legacy { id } = pocket_entry {
+                observer.item_started(&entry.logical_name);
+                match pocket_risu::prepare_legacy(entry, id, &pocket_metadata, cas, durable, cancellation) {
+                    Ok(None) => skipped_inlays += 1,
+                    Ok(Some(alias)) => {
+                        if !asset_keys.insert(("inlay".to_owned(), id.to_owned())) {
+                            return Err(invalid("legacy backup contains a duplicate Inlay key"));
+                        }
+                        asset_aliases.push(alias);
+                    }
+                    Err(error) if error.code == LocalBackupErrorCode::DatabaseRestore => invalid_inlays.push(entry.logical_name.clone()),
+                    Err(error) => return Err(error),
+                }
+                observer.item_done();
+            }
             if let pocket_risu::Entry::Payload { id, ext } = pocket_entry {
                 if !asset_keys.insert(("inlay".to_owned(), id.to_owned())) {
                     return Err(invalid("legacy backup contains a duplicate Inlay key"));
                 }
-                asset_aliases.push(pocket_risu::prepare(
+                let alias = match pocket_risu::prepare(
                     entry,
                     id,
                     ext,
                     &pocket_metadata,
                     cancellation,
-                )?);
+                ) {
+                    Ok(Some(alias)) => alias,
+                    Ok(None) => { skipped_inlays += 1; observer.item_done(); continue; }
+                    Err(error) if error.code == LocalBackupErrorCode::DatabaseRestore => {
+                        invalid_inlays.push(entry.logical_name.clone());
+                        observer.item_done();
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                asset_aliases.push(alias);
                 incoming.push(import_payload(entry)?);
                 incoming_names.push(entry.logical_name.as_str());
             }
@@ -728,7 +804,7 @@ pub(crate) fn prepare_legacy_restore_payloads_observed(
         }
         if let Some(key) = cold_key(&entry.logical_name) {
             observer.item_started(&entry.logical_name);
-            let staged = prepare_cold(entry, cancellation, observer)?;
+            let staged = prepare_cold_with_limits(entry, cancellation, observer, limits)?;
             if cold_payloads.insert(key, staged).is_some() {
                 return Err(invalid(
                     "legacy backup contains a duplicate cold payload key",
@@ -781,6 +857,7 @@ pub(crate) fn prepare_legacy_restore_payloads_observed(
     check_cancelled(cancellation)?;
     Ok(PreparedLegacyRestorePayloads {
         invalid_inlays,
+        skipped_inlays,
         asset_aliases,
         cold_payloads,
     })
@@ -789,31 +866,8 @@ pub(crate) fn prepare_legacy_restore_payloads_observed(
 fn preflight_legacy_restore_entries(
     entries: &[StagedLocalBackupEntry],
 ) -> Result<(), LocalBackupError> {
-    reject_account_encryption(entries)?;
     for entry in entries {
         pocket_risu::classify(&entry.logical_name)?;
-    }
-    Ok(())
-}
-
-fn reject_account_encryption(entries: &[StagedLocalBackupEntry]) -> Result<(), LocalBackupError> {
-    let Some(entry) = entries
-        .iter()
-        .find(|entry| entry.logical_name == ENCRYPTION_ENTRY)
-    else {
-        return Ok(());
-    };
-    if entry.byte_length > MAX_METADATA_BYTES as u64 {
-        return Err(invalid("legacy backup encryption metadata is too large"));
-    }
-    let file = open_staged(entry)?;
-    let metadata: Value = serde_json::from_reader(BufReader::new(file))
-        .map_err(|_| invalid("legacy backup encryption metadata is invalid"))?;
-    if metadata.get("type").and_then(Value::as_str) == Some("account") {
-        return Err(LocalBackupError::new(
-            LocalBackupErrorCode::CompatibilityImportRequired,
-            "account-encrypted legacy backup requires the compatibility importer",
-        ));
     }
     Ok(())
 }
@@ -948,46 +1002,39 @@ fn prepare_inlay(
 
 /// Validates a staged upstream cold payload without materializing its full body.
 /// The body is spliced into its referencing record when characters are staged.
-fn prepare_cold(
-    entry: &StagedLocalBackupEntry,
-    cancellation: &dyn CancellationProbe,
-    observer: &dyn LegacyPrepareObserver,
-) -> Result<std::path::PathBuf, LocalBackupError> {
-    prepare_cold_with_limit(entry, cancellation, observer, restore::RestoreLimits::default().max_decoded_block_bytes)
-}
-
+#[cfg(test)]
 fn prepare_cold_with_limit(
     entry: &StagedLocalBackupEntry,
     cancellation: &dyn CancellationProbe,
     observer: &dyn LegacyPrepareObserver,
     max_decoded_bytes: u64,
 ) -> Result<std::path::PathBuf, LocalBackupError> {
+    prepare_cold_with_limits(entry, cancellation, observer, restore::RestoreLimits {
+        max_decoded_block_bytes: max_decoded_bytes, ..Default::default()
+    })
+}
+
+fn prepare_cold_with_limits(
+    entry: &StagedLocalBackupEntry,
+    cancellation: &dyn CancellationProbe,
+    observer: &dyn LegacyPrepareObserver,
+    limits: restore::RestoreLimits,
+) -> Result<std::path::PathBuf, LocalBackupError> {
     let file = open_staged(entry)?;
-    if entry.byte_length > max_decoded_bytes || file.metadata().map_err(LocalBackupError::io)?.len() > max_decoded_bytes {
-        return Err(invalid("decoded block limit exceeded for cold payload"));
+    if entry.byte_length > limits.max_decoded_block_bytes || file.metadata().map_err(LocalBackupError::io)?.len() > limits.max_decoded_block_bytes {
+        return Err(LocalBackupError::new(LocalBackupErrorCode::DecodedBlockTooLarge, "decoded block limit exceeded for cold payload"));
     }
     let source = CancellationReader::observed(file, cancellation, observer);
-    let record_bytes = Cell::new(Some(0));
-    let source = restore::RecordLimitReader { inner: BufReader::new(source), bytes: &record_bytes };
-    let mut deserializer = serde_json::Deserializer::from_reader(source);
-    if !serde::de::Deserializer::deserialize_any(&mut deserializer, ColdRootVisitor(&record_bytes)).map_err(
-        |error| {
-            if cancellation.is_cancelled() {
-                LocalBackupError::new(
-                    LocalBackupErrorCode::Cancelled,
-                    "legacy backup job was cancelled",
-                )
-            } else if error.to_string().contains("restore record limit exceeded") {
-                invalid("legacy backup cold payload exceeds the record limit")
-            } else {
-                invalid("legacy backup cold payload is invalid")
-            }
-        },
-    )? {
-        return Err(invalid(
-            "legacy backup cold payload has an unsupported root",
-        ));
-    }
+    // Cold plugin values may be any JSON. Apply record limits only when a character
+    // or conversation references the payload, through the common restore reader.
+    let mut deserializer = serde_json::Deserializer::from_reader(BufReader::new(source));
+    <IgnoredAny as serde::Deserialize>::deserialize(&mut deserializer).map_err(|_| {
+        if cancellation.is_cancelled() {
+            LocalBackupError::new(LocalBackupErrorCode::Cancelled, "legacy backup job was cancelled")
+        } else {
+            invalid("legacy backup cold payload is invalid")
+        }
+    })?;
     deserializer
         .end()
         .map_err(|_| invalid("legacy backup cold payload has trailing data"))?;
@@ -999,7 +1046,16 @@ fn prepare_cold_with_limit(
         .ok_or_else(|| invalid("legacy backup cold payload is not staged"))
 }
 
-struct ColdRootVisitor<'a>(&'a Cell<Option<u64>>);
+fn validate_referenced_cold_records<R: Read>(source: R, max_record_bytes: u64) -> Result<(), serde_json::Error> {
+    let record_bytes = restore::RecordBudget::new(max_record_bytes);
+    record_bytes.set(Some(0));
+    let source = restore::RecordLimitReader { inner: BufReader::new(source), bytes: &record_bytes };
+    let mut deserializer = serde_json::Deserializer::from_reader(source);
+    serde::de::Deserializer::deserialize_any(&mut deserializer, ColdRootVisitor(&record_bytes))?;
+    deserializer.end()
+}
+
+struct ColdRootVisitor<'a>(&'a restore::RecordBudget);
 
 impl<'de> Visitor<'de> for ColdRootVisitor<'_> {
     type Value = bool;
@@ -1013,10 +1069,7 @@ impl<'de> Visitor<'de> for ColdRootVisitor<'_> {
         A: SeqAccess<'de>,
     {
         self.0.set(None);
-        while let Some(mut value) = sequence.next_element_seed(restore::BoundedValueSeed(self.0))? {
-            super::restore::pocket_features::message(&mut value, "cold")
-                .map_err(serde::de::Error::custom)?;
-        }
+        while sequence.next_element_seed(restore::BoundedValueSeed(self.0))?.is_some() {}
         Ok(true)
     }
 
@@ -1036,10 +1089,7 @@ impl<'de> Visitor<'de> for ColdRootVisitor<'_> {
                     map.next_value_seed(ColdFeatureSeed("character", self.0))?;
                 }
                 "savedToggleValues" | "bindedPersona" => {
-                    let value = map.next_value_seed(restore::BoundedValueSeed(self.0))?;
-                    let mut chat = serde_json::json!({key: value});
-                    super::restore::pocket_features::chat(&mut chat, "cold")
-                        .map_err(serde::de::Error::custom)?;
+                    map.next_value_seed(restore::BoundedValueSeed(self.0))?;
                 }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
@@ -1050,8 +1100,8 @@ impl<'de> Visitor<'de> for ColdRootVisitor<'_> {
     }
 }
 
-// Validate feature fields while retaining the bounded streaming cold-payload path.
-struct ColdFeatureSeed<'a>(&'static str, &'a Cell<Option<u64>>);
+// Read feature fields within the record limit while keeping the cold-payload read streaming.
+struct ColdFeatureSeed<'a>(&'static str, &'a restore::RecordBudget);
 impl<'de> serde::de::DeserializeSeed<'de> for ColdFeatureSeed<'_> {
     type Value = ();
     fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
@@ -1070,10 +1120,7 @@ impl<'de> Visitor<'de> for ColdFeatureSeed<'_> {
     fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<(), A::Error> {
         self.1.set(None);
         if self.0 == "messages" {
-            while let Some(mut value) = sequence.next_element_seed(restore::BoundedValueSeed(self.1))? {
-                super::restore::pocket_features::message(&mut value, "cold")
-                    .map_err(serde::de::Error::custom)?;
-            }
+            while sequence.next_element_seed(restore::BoundedValueSeed(self.1))?.is_some() {}
         } else {
             while sequence
                 .next_element_seed(ColdFeatureSeed("chat", self.1))?
@@ -1093,10 +1140,7 @@ impl<'de> Visitor<'de> for ColdFeatureSeed<'_> {
                     map.next_value_seed(ColdFeatureSeed("messages", self.1))?;
                 }
                 "savedToggleValues" | "bindedPersona" if self.0 == "chat" => {
-                    let value = map.next_value_seed(restore::BoundedValueSeed(self.1))?;
-                    let mut chat = serde_json::json!({key: value});
-                    super::restore::pocket_features::chat(&mut chat, "cold")
-                        .map_err(serde::de::Error::custom)?;
+                    map.next_value_seed(restore::BoundedValueSeed(self.1))?;
                 }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
@@ -1223,6 +1267,7 @@ mod tests {
         character_json_export::export_character_json, JobKind, JobRegistry, JobState,
     };
     use sha2::{Digest, Sha256};
+    use std::cell::Cell;
     use std::fs;
     use std::io::Cursor;
 
@@ -1258,10 +1303,10 @@ mod tests {
     }
 
     #[test]
-    fn cold_preparation_bounds_values_keys_and_scalar_dispatch_before_reading_the_whole_record() {
-        struct ObservedBytes(Cell<u64>);
+    fn cold_preparation_streams_opaque_values_without_applying_chat_record_limits() {
+        struct ObservedBytes { total: Cell<u64>, largest: Cell<u64> }
         impl LegacyPrepareObserver for ObservedBytes {
-            fn item_bytes(&self, bytes: u64) { self.0.set(self.0.get() + bytes); }
+            fn item_bytes(&self, bytes: u64) { self.total.set(self.total.get() + bytes); self.largest.set(self.largest.get().max(bytes)); }
         }
         for (prefix, suffix) in [
             (br#"[{"role":"user","data":""#.as_slice(), b"\"}]".as_slice()),
@@ -1274,15 +1319,16 @@ mod tests {
             let path = directory.path().join("cold.json");
             let mut output = File::create(&path).unwrap();
             output.write_all(prefix).unwrap();
-            for _ in 0..144 { output.write_all(&[b'x';64*1024]).unwrap(); }
+            for _ in 0..3 { output.write_all(&[b'x';64*1024]).unwrap(); }
             output.write_all(suffix).unwrap();
             drop(output);
             let entry = StagedLocalBackupEntry { logical_name:"coldstorage/large.json".to_owned(), byte_length:fs::metadata(&path).unwrap().len(), sha256:String::new(), staged_path:Some(path) };
-            let observed = ObservedBytes(Cell::new(0));
-            let error = prepare_cold(&entry, &NeverCancelled, &observed).unwrap_err();
-            assert!(error.message.contains("cold payload exceeds the record limit"), "{error:?}");
-            assert!(observed.0.get() <= 8 * 1024 * 1024 + 64 * 1024);
-            assert!(observed.0.get() < entry.byte_length);
+            let observed = ObservedBytes { total: Cell::new(0), largest: Cell::new(0) };
+            prepare_cold_with_limits(&entry, &NeverCancelled, &observed, restore::RestoreLimits { max_record_bytes: 64 * 1024, ..Default::default() }).unwrap();
+            assert_eq!(observed.total.get(), entry.byte_length);
+            assert!(observed.largest.get() <= 64 * 1024);
+            let error = cold_expansion::load_with_limits(entry.staged_path.as_ref().unwrap(), entry.byte_length, 64 * 1024).unwrap_err();
+            assert!(error.contains("restore record limit exceeded"), "{error}");
         }
     }
 
@@ -1710,49 +1756,18 @@ mod tests {
     }
 
     #[test]
-    fn rejects_account_encryption_before_preparing_any_payload_object() {
+    fn encrypted_archive_keeps_ciphertext_for_the_native_reader() {
         let directory = tempfile::tempdir().unwrap();
-        let cas = PayloadCas::new(directory.path()).unwrap();
         let bytes = [
-            entry(b"portrait.png", b"original"),
             entry(b"encryption.risudat", br#"{"type":"account","time":123}"#),
-            entry(b"database.risudat", b"encrypted"),
-        ]
-        .concat();
-        let mut planner = PayloadPlanner {
-            cas: &cas,
-            durable: DurableCasJob::begin(
-                directory.path(),
-                &Uuid::new_v4().to_string(),
-                CasJobKind::LocalBackupRestore,
-                crate::asset_repository::job_pins::CasJobOwner::for_test(),
-                now_millis(),
-            )
-            .unwrap(),
-            prepared: None,
-        };
-
-        let error = parse_legacy_local_backup_v1(
-            &mut Cursor::new(bytes),
-            &test_legacy_staging(directory.path()),
-            PayloadTarget::JobStaging,
-            &mut planner,
-            &NeverCancelled,
-        )
-        .unwrap_err();
-
-        assert_eq!(
-            error.code,
-            crate::local_backup::LocalBackupErrorCode::CompatibilityImportRequired
-        );
-        assert_eq!(
-            fs::read_dir(directory.path().join("assets/objects"))
-                .map(|entries| entries.count())
-                .unwrap_or(0),
-            0,
-        );
-        assert_eq!(planner.durable.pin_count(), 0);
-        planner.durable.release(CasReleaseOutcome::Aborted).unwrap();
+            entry(b"database.risudat", b"synthetic ciphertext"),
+        ].concat();
+        let mut capture = ArchiveCapture::default();
+        parse_legacy_local_backup_v1(
+            &mut Cursor::new(bytes), &test_legacy_staging(directory.path()),
+            PayloadTarget::JobStaging, &mut capture, &NeverCancelled,
+        ).unwrap();
+        assert_eq!(capture.entries[1], ("database.risudat".to_owned(), b"synthetic ciphertext".to_vec()));
     }
 
     #[test]

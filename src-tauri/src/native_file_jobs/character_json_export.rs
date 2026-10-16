@@ -270,7 +270,7 @@ mod tests {
 
             assert_eq!(
                 error.code,
-                if cancel { "cancelled" } else { "invalid-input" }
+                if cancel { "cancelled" } else { "payload-too-large" }
             );
             assert_eq!(fs::read(destination).unwrap(), b"previous JSON");
         }
@@ -444,7 +444,8 @@ mod tests {
             mime: "application/octet-stream".to_owned(),
         })];
         let error = validate_asset_source_sizes(&sources, maximum_bytes).unwrap_err();
-        assert_eq!(error.code, "invalid-input");
+        assert_eq!(error.code, "payload-too-large");
+        assert_eq!(error.item_kind.as_deref(), Some("card"));
         assert!(error.message.contains("importer limit"));
     }
 }
@@ -583,12 +584,12 @@ where
     )?;
     let total_items = u64::try_from(sources.iter().filter(|source| source.is_some()).count())
         .map_err(|_| invalid_input("character JSON asset count is invalid"))?;
-    job.set_progress(JobProgress {
+    job.set_export_progress(JobProgress {
         completed_bytes: 0,
         total_bytes: None,
         completed_items: 0,
         total_items: Some(total_items),
-    })
+    }, 0, None)
     .map_err(job_error)?;
 
     let source = owned_directory.join("character.json");
@@ -597,7 +598,7 @@ where
         .write(true)
         .open(&source)
         .map_err(io_error)?;
-    let output = BufWriter::with_capacity(COPY_BUFFER_BYTES, file);
+    let output = BufWriter::with_capacity(COPY_BUFFER_BYTES, super::export::ProgressWriter::new(file, job));
     let mut output = LimitedWriter::new(output, maximum_bytes);
     write_json_value(
         &mut output,
@@ -611,12 +612,12 @@ where
     output.inner.get_ref().sync_all().map_err(io_error)?;
     drop(output);
     let source_bytes = fs::metadata(&source).map_err(io_error)?.len();
-    job.set_progress(JobProgress {
+    job.set_export_progress(JobProgress {
         completed_bytes: source_bytes,
         total_bytes: Some(source_bytes.saturating_mul(2)),
         completed_items: total_items,
         total_items: Some(total_items),
-    })
+    }, source_bytes, None)
     .map_err(job_error)?;
 
     if job.is_cancel_requested() {
@@ -662,12 +663,12 @@ where
         &destination_path,
         || job.is_cancel_requested() || phase_failure.borrow().is_some(),
         |progress| {
-            if let Err(error) = job.set_progress(JobProgress {
+            if let Err(error) = job.set_export_progress(JobProgress {
                 completed_bytes: source_bytes.saturating_add(progress.copied_bytes),
                 total_bytes: Some(source_bytes.saturating_mul(2)),
                 completed_items: total_items,
                 total_items: Some(total_items),
-            }) {
+            }, progress.copied_bytes, Some(source_bytes)) {
                 *phase_failure.borrow_mut() = Some(error);
             }
         },
@@ -712,9 +713,7 @@ fn validate_asset_source_sizes(
             JsonAssetSource::FallbackPortrait => FALLBACK_PORTRAIT.len() as u64,
         };
         if size > maximum_bytes {
-            return Err(invalid_input(
-                "JSON card embedded asset exceeds the importer limit",
-            ));
+            return Err(NativeJobError::too_large("card", "JSON card embedded asset exceeds the importer limit"));
         }
     }
     Ok(())
@@ -1132,7 +1131,7 @@ fn destination_error(error: destination::DestinationWriteError) -> NativeJobErro
 
 fn json_serde_error(error: serde_json::Error) -> NativeJobError {
     if error.to_string().contains(JSON_LIMIT_MESSAGE) {
-        invalid_input(JSON_LIMIT_MESSAGE)
+        NativeJobError::too_large("card", JSON_LIMIT_MESSAGE)
     } else {
         NativeJobError::new("store-error", error.to_string())
     }
@@ -1140,7 +1139,7 @@ fn json_serde_error(error: serde_json::Error) -> NativeJobError {
 
 fn json_io_error(error: io::Error) -> NativeJobError {
     if error.to_string().contains(JSON_LIMIT_MESSAGE) {
-        invalid_input(JSON_LIMIT_MESSAGE)
+        NativeJobError::too_large("card", JSON_LIMIT_MESSAGE)
     } else {
         io_error(error)
     }

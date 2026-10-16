@@ -4,6 +4,7 @@
 //! read the environment for a root. Callers take the resolved manifest from
 //! managed state. `tests/pathBoundary.node-test.mjs` enforces that boundary.
 
+use crate::launch_profile::ProfileName;
 use std::path::{Path, PathBuf};
 
 // Directory leaf names. A platform naming decision belongs here and nowhere
@@ -23,6 +24,13 @@ const LINUX_CACHE_LEAF: &str = "risunest";
 const LINUX_CLEANUP_LEAF: &str = "risunest-cleanup";
 const LINUX_INSTALL_DIRS: [&str; 2] = ["/usr/bin", "/usr/lib/risunest"];
 const MOBILE_CLEANUP_LEAF: &str = "risunest-cleanup";
+const WINDOWS_PROFILES_LEAF: &str = "RisuNestProfiles";
+const MACOS_PROFILES_LEAF: &str = "RisuNestProfiles";
+const LINUX_PROFILES_LEAF: &str = "risunest-profiles";
+const PROFILE_DATA_LEAF: &str = "data";
+const PROFILE_WEBVIEW_LEAF: &str = "webview";
+const PROFILE_CACHE_LEAF: &str = "cache";
+const PROFILE_CLEANUP_LEAF: &str = "cleanup";
 const LOGS_LEAF: &str = "logs";
 /// An agent build carries the installed product name, so every owned root takes
 /// a distinct leaf and an agent run cannot open real user data.
@@ -130,15 +138,7 @@ impl AppPaths {
     /// cleanup CLI both run before there is an `AppHandle`.
     #[cfg(desktop)]
     pub(crate) fn desktop(config: &tauri::utils::config::Config) -> Result<Self, String> {
-        let platform = Platform::current();
-        let mut paths = Self::layout(
-            platform,
-            &Hives::from_platform(),
-            &config.identifier,
-            agent_build(config),
-        )?;
-        paths.install = install_directory(platform, appimage_build());
-        Ok(paths)
+        DesktopProfiles::new(config).manifest(None)
     }
 
     /// Apply the platform checks that turn a computed store root into a usable
@@ -296,6 +296,151 @@ impl AppPaths {
             .into_iter()
             .chain(std::iter::once(self.cleanup_control.clone()))
             .find(|root| overlaps(root, install))
+    }
+}
+
+/// Every launch profile of one build: the default layout and the named profiles
+/// under the build's profile namespace.
+#[cfg_attr(not(desktop), allow(dead_code))]
+#[derive(Clone, Debug)]
+pub(crate) struct DesktopProfiles {
+    platform: Platform,
+    hives: Hives,
+    identifier: String,
+    agent: bool,
+    install: Option<PathBuf>,
+}
+
+/// Where named profiles live. Each holds one directory per profile name; on
+/// macOS and Linux the cache directories sit under a separate base.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProfileBases {
+    pub profiles: PathBuf,
+    pub caches: Option<PathBuf>,
+}
+
+#[cfg_attr(not(desktop), allow(dead_code))]
+impl DesktopProfiles {
+    #[cfg(desktop)]
+    pub(crate) fn new(config: &tauri::utils::config::Config) -> Self {
+        let platform = Platform::current();
+        Self {
+            platform,
+            hives: Hives::from_platform(),
+            identifier: config.identifier.clone(),
+            agent: agent_build(config),
+            install: install_directory(platform, appimage_build()),
+        }
+    }
+
+    /// Every hive inside one directory, for tests that run real cleanups.
+    #[cfg(test)]
+    pub(crate) fn synthetic(root: &Path, agent: bool) -> Self {
+        let hive = |name: &str| Some(root.join(name));
+        Self {
+            platform: Platform::current(),
+            hives: Hives {
+                roaming: hive("roaming"), local: hive("local"), config: hive("config"), cache: hive("cache"),
+                home: hive("home"), os_data: None, os_cache: None, os_documents: None,
+            },
+            identifier: "io.github.rsyumi.risunest".to_owned(),
+            agent,
+            install: None,
+        }
+    }
+
+    pub(crate) fn agent(&self) -> bool {
+        self.agent
+    }
+
+    pub(crate) fn identifier(&self) -> &str {
+        &self.identifier
+    }
+
+    /// The manifest of the default profile, or of a named one.
+    pub(crate) fn manifest(&self, profile: Option<&ProfileName>) -> Result<AppPaths, String> {
+        let mut paths = match profile {
+            None => AppPaths::layout(self.platform, &self.hives, &self.identifier, self.agent)?,
+            Some(profile) => self.named(profile)?,
+        };
+        paths.install = self.install.clone();
+        Ok(paths)
+    }
+
+    pub(crate) fn bases(&self) -> Result<ProfileBases, String> {
+        validate_identifier(&self.identifier)?;
+        let leaf = |name: &str| if self.agent { format!("{name}{AGENT_SUFFIX}") } else { name.to_owned() };
+        match self.platform {
+            Platform::Windows => Ok(ProfileBases {
+                profiles: Hives::require(&self.hives.local, "local application data")?.join(leaf(WINDOWS_PROFILES_LEAF)),
+                caches: None,
+            }),
+            Platform::MacOs => Ok(ProfileBases {
+                profiles: Hives::require(&self.hives.roaming, "application support")?.join(leaf(MACOS_PROFILES_LEAF)),
+                caches: Some(Hives::require(&self.hives.cache, "cache")?.join(leaf(MACOS_PROFILES_LEAF))),
+            }),
+            Platform::Linux => Ok(ProfileBases {
+                profiles: Hives::require(&self.hives.roaming, "user data")?.join(leaf(LINUX_PROFILES_LEAF)),
+                caches: Some(Hives::require(&self.hives.cache, "cache")?.join(leaf(LINUX_PROFILES_LEAF))),
+            }),
+            Platform::Android | Platform::Ios => Err("launch profiles are a desktop feature".into()),
+        }
+    }
+
+    /// The directories a named profile owns outright: its profile directory and,
+    /// where the cache lives elsewhere, its cache directory.
+    pub(crate) fn directories(&self, profile: &ProfileName) -> Result<Vec<PathBuf>, String> {
+        let bases = self.bases()?;
+        let mut directories = vec![bases.profiles.join(profile.as_str())];
+        directories.extend(bases.caches.map(|caches| caches.join(profile.as_str())));
+        Ok(directories)
+    }
+
+    /// The named profiles found on disk. A directory whose name is not a valid
+    /// profile name, or that is a link, is not a profile and is never touched.
+    pub(crate) fn names(&self) -> Result<Vec<ProfileName>, String> {
+        let bases = self.bases()?;
+        let mut names = Vec::new();
+        for base in std::iter::once(&bases.profiles).chain(bases.caches.as_ref()) {
+            let entries = match std::fs::read_dir(base) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(format!("launch profiles unavailable: {error}")),
+            };
+            for entry in entries {
+                let entry = entry.map_err(|error| format!("launch profiles unavailable: {error}"))?;
+                let Some(name) = entry.file_name().to_str().and_then(|name| ProfileName::parse(name).ok()) else { continue };
+                let metadata = std::fs::symlink_metadata(entry.path())
+                    .map_err(|error| format!("launch profiles unavailable: {error}"))?;
+                if metadata.is_dir() && !crate::trust_boundary::is_link_like(&metadata) {
+                    names.push(name);
+                }
+            }
+        }
+        names.sort();
+        names.dedup();
+        Ok(names)
+    }
+
+    fn named(&self, profile: &ProfileName) -> Result<AppPaths, String> {
+        let bases = self.bases()?;
+        let directory = bases.profiles.join(profile.as_str());
+        let data = directory.join(PROFILE_DATA_LEAF);
+        Ok(AppPaths {
+            logs: data.join(LOGS_LEAF),
+            webview: (self.platform != Platform::MacOs).then(|| directory.join(PROFILE_WEBVIEW_LEAF)),
+            cache: match bases.caches {
+                Some(caches) => caches.join(profile.as_str()),
+                None => directory.join(PROFILE_CACHE_LEAF),
+            },
+            cleanup_control: directory.join(PROFILE_CLEANUP_LEAF),
+            data,
+            // Identifier-derived directories and the Linux desktop integration
+            // belong to the default profile.
+            tauri_derived: Vec::new(),
+            install: None,
+            integration: None,
+        })
     }
 }
 
@@ -466,14 +611,26 @@ fn platform_store_root(root: &Path, platform: Platform) -> Result<PathBuf, Strin
         .map_err(|error| format!("application data root unavailable: {error}"))
 }
 
+/// The main window when startup must build it itself: with the WebView data
+/// directory where the platform takes one, or with a named WebKit data store.
+pub(crate) struct MainWindow {
+    pub config: tauri::utils::config::WindowConfig,
+    pub data_directory: Option<PathBuf>,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub data_store: Option<[u8; 16]>,
+}
+
 #[cfg(desktop)]
-pub(crate) fn take_main_window_with_webview_root(
+pub(crate) fn take_main_window(
     context: &mut tauri::Context<tauri::Wry>,
     paths: &AppPaths,
-) -> std::io::Result<Option<(tauri::utils::config::WindowConfig, PathBuf)>> {
-    let Some(root) = paths.webview.clone() else {
+    data_store: Option<[u8; 16]>,
+) -> std::io::Result<Option<MainWindow>> {
+    // Otherwise the configuration builds it, as it does for the default
+    // profile on macOS.
+    if paths.webview.is_none() && data_store.is_none() {
         return Ok(None);
-    };
+    }
     let index = context
         .config_mut()
         .app
@@ -483,8 +640,8 @@ pub(crate) fn take_main_window_with_webview_root(
         .ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "main window missing")
         })?;
-    let window = context.config_mut().app.windows.remove(index);
-    Ok(Some((window, root)))
+    let config = context.config_mut().app.windows.remove(index);
+    Ok(Some(MainWindow { config, data_directory: paths.webview.clone(), data_store }))
 }
 
 fn resolve_platform_root(root: &Path, create_missing: bool) -> std::io::Result<PathBuf> {

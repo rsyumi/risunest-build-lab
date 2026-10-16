@@ -721,6 +721,7 @@ export function normalizeDatabaseDefaults(data:Database): Database {
     data.streamingThoughtMode ??= 'recent'
     data.streamingDeferDisplayProcessing ??= false
     data.risunestChatEditPopup ??= true
+    data.risunestSyncStatusUi ??= true
     data.echoMessage ??= "Echo Message"
     data.echoDelay ??= 0
     if(!isTauri){
@@ -759,15 +760,15 @@ export function setDatabaseLite(data:Database){
     DBState.db = data
 }
 
-/** Gives the named root fields that have no value the value a load gives them. */
+/** Gives the named root fields the normalized value a load gives them. */
 export function fillRootFieldDefaults(data: Database, fields: readonly string[]): void {
     const target = data as unknown as Record<string, unknown>
-    const empty = fields.filter((field) => field !== 'characters' && field !== 'botPresets' && checkNullish(target[field]))
-    if (empty.length === 0) return
+    const received = fields.filter((field) => field !== 'characters' && field !== 'botPresets' && field !== 'pluginCustomStorage')
+    if (received.length === 0) return
     // Defaults read other root fields and edit nested values in place, so they run on a copy.
     const { characters: _characters, botPresets: _botPresets, pluginCustomStorage: _pluginCustomStorage, ...root } = data
     const loaded = normalizeDatabaseDefaults({ ...$state.snapshot(root), characters: [], botPresets: [] } as unknown as Database) as unknown as Record<string, unknown>
-    for (const field of empty) {
+    for (const field of received) {
         if (!checkNullish(loaded[field])) target[field] = loaded[field]
     }
 }
@@ -1318,6 +1319,7 @@ export interface Database{
     streamingThoughtMode?: StreamingThoughtMode
     streamingDeferDisplayProcessing?: boolean
     risunestChatEditPopup?: boolean
+    risunestSyncStatusUi?: boolean
     pluginDevelopMode?: boolean
     echoMessage?:string
     echoDelay?:number

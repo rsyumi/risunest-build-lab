@@ -186,6 +186,30 @@ describe('scoped Android control transport', () => {
         await expect(copied).resolves.toBe('copy-result')
     })
 
+    it('routes destination reservation, job binding and owned copy through the scoped SAF port', async () => {
+        vi.resetModules()
+        const sent: {id?: string; method: string; args: string[]}[] = []
+        const port: AndroidControlMessagePort = {postMessage: text => sent.push(JSON.parse(text))}
+        window.RisuNestControl = {postMessage() {}}
+        window.RisuNestSafControl = port
+        await import('./androidNativeControl')
+        const bridge = window.RisuSafBridge!
+        await bridge.reserveExport!('request', 'synthetic.zip', 'screenshot')
+        expect(sent.at(-1)).toEqual({method: 'saf.reserveExport', args: ['request', 'synthetic.zip', 'screenshot']})
+        const bound = bridge.bindExport!('request', 'job')
+        const bindMessage = sent.at(-1)!
+        expect(bindMessage).toMatchObject({method: 'saf.bindExport', args: ['request', 'job']})
+        port.onmessage?.({data: JSON.stringify({id: bindMessage.id, result: true})})
+        await expect(bound).resolves.toBe(true)
+        await bridge.copyReservedExport!('request', '/synthetic/source', 'job')
+        expect(sent.at(-1)).toEqual({method: 'saf.copyReservedExport', args: ['request', '/synthetic/source', 'job']})
+        const released = bridge.releaseExport!('request')
+        const releaseMessage = sent.at(-1)!
+        expect(releaseMessage).toMatchObject({method: 'saf.releaseExport', args: ['request']})
+        port.onmessage?.({data: JSON.stringify({id: releaseMessage.id, result: false})})
+        await expect(released).resolves.toBe(false)
+    })
+
     it('releases pending state when sending fails', async () => {
         vi.useFakeTimers()
         const port: AndroidControlMessagePort = { postMessage: () => { throw new Error('closed') } }

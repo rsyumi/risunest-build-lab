@@ -8,6 +8,8 @@ pub const MAX_BASE_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_PATCH_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_OPS: usize = 262_144;
 const BLOCK: usize = 64;
+// Bound bytewise probes even when a large candidate base barely matches.
+const MAX_SEARCH_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Base {
@@ -331,7 +333,8 @@ pub fn create(bases: &[&[u8]], target: &[u8]) -> Result<Recipe> {
     let mut literal = 0;
     let mut ops = Vec::new();
     let mut rolling = None;
-    while position + BLOCK <= target.len() {
+    let mut searched = 0;
+    while !index.is_empty() && position + BLOCK <= target.len() {
         let key = *rolling.get_or_insert_with(|| fingerprint(&target[position..position + BLOCK]));
         let mut best = (0u8, 0usize, 0usize);
         let start = index.partition_point(|anchor| anchor.fingerprint < key);
@@ -368,6 +371,14 @@ pub fn create(bases: &[&[u8]], target: &[u8]) -> Result<Recipe> {
             literal = position;
             rolling = None;
         } else {
+            searched += 1;
+            if searched > MAX_SEARCH_BYTES {
+                if target.len() - literal > MAX_PATCH_BYTES {
+                    return Err(WireError("delta-search-limit"));
+                }
+                // Keep useful copies already found and send the unsearched tail literally.
+                break;
+            }
             rolling = target.get(position + BLOCK).map(|next| {
                 key.wrapping_sub((target[position] as u64 + 1).wrapping_mul(factor))
                     .wrapping_mul(257)

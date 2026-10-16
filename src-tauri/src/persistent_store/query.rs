@@ -83,13 +83,16 @@ pub(super) fn read_preset(
 pub(super) fn query_plugin_storage(
     connection: &Connection,
     target: &ReadTarget,
+    owner: Option<&str>,
 ) -> StoreResult<PluginStorageCatalog> {
-    let mut statement = connection.prepare(
-        "SELECT owner, storage_key, byte_size, ordinal FROM plugin_storage
-         WHERE generation = ?1",
-    )?;
+    let sql = if owner.is_some() {
+        "SELECT owner, storage_key, byte_size, ordinal FROM plugin_storage WHERE generation=?1 AND owner=?2"
+    } else {
+        "SELECT owner, storage_key, byte_size, ordinal FROM plugin_storage WHERE generation=?1 AND ?2 IS NULL"
+    };
+    let mut statement = connection.prepare(sql)?;
     let mut items = statement
-        .query_map([&target.generation], |row| {
+        .query_map(params![target.generation, owner], |row| {
             Ok((
                 PluginStorageSummary {
                     owner: row.get(0)?,

@@ -789,6 +789,13 @@ impl PersistentStore {
         }
         for candidate in candidates {
             match &candidate.action {
+                RepairAction::SelectFirstConversation { character_id } => {
+                    transaction.execute(
+                        "UPDATE characters SET detail=json_set(detail,'$.chatPage',0) WHERE generation=?1 AND character_id=?2
+                         AND EXISTS(SELECT 1 FROM conversations WHERE generation=?1 AND character_id=?2)",
+                        rusqlite::params![staging, character_id],
+                    )?;
+                }
                 RepairAction::DropReference { .. } => {}
                 RepairAction::DropAlias { kind, key } => {
                     drop_alias(&transaction, staging, kind, key)?

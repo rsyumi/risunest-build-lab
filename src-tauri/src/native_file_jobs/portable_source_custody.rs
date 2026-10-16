@@ -11,6 +11,7 @@ use std::{
 enum Platform {
     Android,
     Ios,
+    SavedConflict,
 }
 type Release = Arc<dyn Fn(Option<&str>) -> Result<(), NativeJobError> + Send + Sync>;
 type Identity = Box<dyn Fn(&File) -> Result<bool, NativeJobError> + Send + Sync>;
@@ -72,6 +73,7 @@ fn parts(source: &JobSource) -> Result<(&str, Platform), NativeJobError> {
     match source {
         JobSource::AndroidSeekable { token } => Ok((token, Platform::Android)),
         JobSource::IosScoped { token } => Ok((token, Platform::Ios)),
+        JobSource::SavedConflict { token } => Ok((token, Platform::SavedConflict)),
         _ => Err(error("Source is not a portable custody token")),
     }
 }
@@ -175,7 +177,8 @@ pub(crate) fn claim(source: &JobSource, job_id: &str) -> Result<OpenedJobSource,
     if owned.platform != platform || owned.claimed.is_some() || owned.releasing {
         return Err(error("Source token is foreign or already claimed"));
     }
-    if owned.format != Some(super::BackupSourceFormat::Portable) {
+    let required_format = if platform == Platform::SavedConflict { super::BackupSourceFormat::BlockRisuSave } else { super::BackupSourceFormat::Portable };
+    if owned.format != Some(required_format) {
         return Err(error("Portable metadata has not been probed"));
     }
     let file = owned
@@ -217,6 +220,19 @@ pub(crate) fn discard(source: &JobSource) -> Result<bool, NativeJobError> {
     let (token, platform) = parts(source)?;
     super::parse_android_spool_token(token)?;
     release(token, platform, None)
+}
+
+pub(crate) fn register_saved_conflict(file: File, pins: crate::asset_repository::job_pins::DurableCasJob, token: String) -> Result<JobSource, NativeJobError> {
+    struct Pins(crate::asset_repository::job_pins::DurableCasJob);
+    impl Drop for Pins {
+        fn drop(&mut self) { let _ = self.0.release(crate::asset_repository::job_pins::CasReleaseOutcome::Aborted); }
+    }
+    let pins = Arc::new(Mutex::new(Pins(pins)));
+    let release: Release = Arc::new(move |_| pins.lock().map_err(|_| error("Saved backup pins are unavailable"))?.0
+        .release(crate::asset_repository::job_pins::CasReleaseOutcome::Aborted)
+        .map_err(|_| NativeJobError::new("cleanup-failed", "Saved backup pins could not be released")));
+    register(&token, Platform::SavedConflict, file, Some(release))?;
+    Ok(JobSource::SavedConflict { token })
 }
 pub(crate) fn probe_format(
     source: &JobSource,
@@ -465,7 +481,7 @@ pub(crate) fn cleanup_orphans(app: &tauri::AppHandle) -> Result<InterruptedSourc
     {
         use tauri_plugin_ios_native::IosNativeExt;
         let retired = app.ios_native().portable_source_orphans()
-            .map_err(|_| error("Source owner reset could not be confirmed"))?;
+            .map_err(|_| NativeJobError::new("cleanup-failed", "Source cleanup could not be confirmed"))?;
         Ok(cleanup_orphan_receipts(retired.into_iter().map(|source| (source.token, source.name)), |token| {
             app.ios_native().acknowledge_portable_source_orphan(token)
                 .map_err(|_| error("Source orphan cleanup acknowledgement is unavailable"))
@@ -778,6 +794,7 @@ mod tests {
         let token = uuid::Uuid::new_v4().to_string();
         register(&token, platform, File::open(path).unwrap(), None).unwrap();
         let source = match platform {
+            Platform::SavedConflict => JobSource::SavedConflict { token: token.clone() },
             Platform::Android => JobSource::AndroidSeekable { token },
             Platform::Ios => JobSource::IosScoped { token },
         };

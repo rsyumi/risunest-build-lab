@@ -37,6 +37,7 @@ test('selects platform SDK tools and scopes conflicting ADB settings to children
         assert.equal(env.ADB_SERVER_SOCKET, 'tcp:elsewhere:9999')
         assert.deepEqual(android.args(['shell', 'true']), ['-H', '127.0.0.1', '-P', '16222', '-s', 'emulator-5690', 'shell', 'true'])
         android.assertAvd('portable-synthetic\r\nOK\r\n')
+        android.assertAvd('portable-synthetic\r\r\nOK\r\r\n')
         assert.throws(() => android.assertAvd('another-profile\nOK'), /Unsafe Android AVD/)
         assert.throws(() => android.args(['shell', 'true'], 'emulator-5692'), /Unexpected Android target/)
     }
@@ -79,7 +80,7 @@ syncBuiltinESMExports()
 `)
     try {
         for (const runner of ['device-backup/android-smoke', 'startup/android-smoke', 'streaming/android-smoke',
-            'plugin-review/android-smoke', 'sync-server/android-probe', 'sync-server/android-runtime', 'startup/cdp']) {
+            'plugin-review/android-smoke', 'sync-server/android-probe', 'startup/cdp']) {
             await t.test(runner, () => {
                 writeFileSync(log, '')
                 const args = runner === 'startup/cdp'

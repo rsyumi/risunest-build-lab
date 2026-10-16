@@ -13,7 +13,6 @@ describe('fixed full portable backup scope', () => {
     })
     it('restores every present required section, including empty sections', async () => {
         await expect(selectPortableBackupRestore(preview())).resolves.toEqual(full)
-        await expect(selectPortableBackupRestore(preview(), { firstRun: true })).resolves.toEqual(full)
     })
     it.each(['hypa', 'local-plugins', 'local-settings'])('rejects missing %s before activation', async section => {
         await expect(selectPortableBackupRestore(preview({ deviceSections: preview().deviceSections.filter(value => value !== section) }))).rejects.toThrow('incomplete')

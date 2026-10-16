@@ -25,7 +25,7 @@ pub(crate) mod sections;
 /// The complete set of settings this device file holds. A key outside it is a
 /// caller mistake, so both directions reject it rather than storing a row no
 /// reader will ever ask for.
-pub(crate) const DEVICE_SETTING_KEYS: [&str; 17] = [
+pub(crate) const DEVICE_SETTING_KEYS: [&str; 20] = [
     "accountst",
     "ignoreRisuAuth",
     "dosync",
@@ -37,12 +37,15 @@ pub(crate) const DEVICE_SETTING_KEYS: [&str; 17] = [
     "mcpStdioApprovals",
     "risuNestDeviceSettings",
     "risuNestStartupExclusions",
+    "risuNestPluginSyncSettings",
     "risuNestDefaultPluginsAttempted",
     "risuNestUpdateSettings",
     "risuNestServerSyncRestoreHold",
     "official-account.association.v1",
     "official-account.asset-ledger.v1",
+    "official-account.pending-assets.v1",
     "sync-conflict-backups.index.v1",
+    "native-file-restore-receipts.v1",
 ];
 
 /// The largest batch a single settings read may ask for.
@@ -278,6 +281,8 @@ fn sequence(value: &str) -> StoreResult<Sequence> {
 
 pub(crate) struct DeviceStore {
     pub(super) connection: Connection,
+    pub(super) plugin_writes: plugin_values::sessions::WriteSessions,
+    pub(super) plugin_read_epoch: String,
 }
 
 impl DeviceStore {
@@ -302,7 +307,8 @@ impl DeviceStore {
                 })
             }
         }
-        Ok(Self { connection })
+        connection.execute_batch("CREATE TEMP TABLE plugin_remote_sequences(owner TEXT NOT NULL, space TEXT NOT NULL, key TEXT NOT NULL, sequence INTEGER NOT NULL, PRIMARY KEY(owner,space,key))")?;
+        Ok(Self { connection, plugin_writes: Default::default(), plugin_read_epoch: Uuid::new_v4().to_string() })
     }
 
     #[cfg_attr(not(test), allow(dead_code))]

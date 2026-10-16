@@ -1,4 +1,5 @@
 <script lang="ts">
+    import PluginStartupNotice from 'src/lib/Others/PluginStartupNotice.svelte'
     import { openRisuNestSettingsTab } from "src/ts/setting/risuNestSettingsTabs";
     import { PlusIcon, TrashIcon, LinkIcon, CodeXmlIcon, PowerIcon, PowerOffIcon, ShieldIcon } from "@lucide/svelte";
     import { language } from "src/lang";
@@ -32,6 +33,8 @@
 <span class="text-draculared text-xs mb-4">{language.pluginWarn}</span>
 
 <button type="button" class="text-textcolor2 hover:text-textcolor text-sm underline self-start mb-2" onclick={() => { openRisuNestSettingsTab('plugin-data'); $SettingsMenuIndex = 17 }}>{language.risuNest.pluginData.title}</button>
+
+<PluginStartupNotice inline />
 
 <div class="border-solid border-darkborderc p-2 flex flex-col border-1">
     {#if !DBState.db.plugins || DBState.db.plugins?.length === 0}

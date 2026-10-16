@@ -5,7 +5,7 @@ const mocks = vi.hoisted(() => ({
     os: 'android' as 'android' | 'ios', invoke: vi.fn(), open: vi.fn(), pick: vi.fn(), discard: vi.fn(),
 }))
 vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule(() => ({ runtime: 'tauri', os: mocks.os })))
-vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }))
+vi.mock('@tauri-apps/api/core', async original => ({ ...(await original<typeof import('@tauri-apps/api/core')>()), invoke: mocks.invoke }))
 vi.mock('@tauri-apps/plugin-fs', async () => (await import('./tauriFs.testSupport')).pluginFsModule({ open: mocks.open }))
 import { language } from 'src/lang'
 import { selectNativeFileData, selectNativeFiles, withNativeSelectedFile, type NativeSelectedFile } from './nativeFileSelection'
@@ -26,6 +26,7 @@ function readable(bytes = new Uint8Array([0, 128, 255, 10]), maxRead = Infinity)
 
 beforeEach(() => {
     vi.clearAllMocks()
+    mocks.invoke.mockReset()
     mocks.os = 'android'
     handles.length = 0
     window.RisuNativeFileSelection = { pick: mocks.pick, discard: mocks.discard }
@@ -49,14 +50,44 @@ describe('native mobile file selection', () => {
         expect(isLibraryFileOperationReserved()).toBe(false)
     })
 
-    it('uses the iOS native picker and cleanup, preserving multiple selection order and names', async () => {
+    // A fresh module graph has no cached root, as on a fresh launch, and the native side rejects staged work until it arrives.
+    async function iOSSelectionBeforeDataRoot() {
+        vi.resetModules()
         mocks.os = 'ios'
-        mocks.invoke.mockResolvedValueOnce({ cancelled: false, files: [metadata('첫째.RISUP'), metadata('second.json')] })
-            .mockResolvedValue(undefined)
-        const files = await selectNativeFileData({ multiple: true, accept: '.risup,.json' })
-        expect(files.map(file => file.name)).toEqual(['첫째.RISUP', 'second.json'])
-        expect(mocks.invoke).toHaveBeenCalledWith('plugin:ios-native|pick_files', { multiple: true })
-        expect(mocks.invoke.mock.calls.filter(([command]) => command === 'plugin:ios-native|discard_file')).toHaveLength(2)
+        let delivered = false
+        let deliver!: () => void
+        const root = new Promise(resolve => { deliver = () => { delivered = true; resolve({ data: '/owned' }) } })
+        mocks.invoke.mockImplementation(async (command, args) => {
+            if (command === 'app_paths_roots') return root
+            if (command === 'plugin:ios-native|pick_files') {
+                if (!delivered) throw new Error('The application data root has not been received yet')
+                return { cancelled: false, files: args.multiple ? [metadata('첫째.RISUP'), metadata('second.json')] : [metadata('첫째.RISUP')] }
+            }
+        })
+        return { ...(await import('./nativeFileSelection')), deliver: () => deliver() }
+    }
+    const iOSPickerCalls = () => mocks.invoke.mock.calls.filter(([command]) => command === 'plugin:ios-native|pick_files')
+
+    it.each([false, true])('opens the iOS picker only after the data root arrives, preserving order and names (multiple %s)', async multiple => {
+        const { selectNativeFileData, deliver } = await iOSSelectionBeforeDataRoot()
+        const selection = selectNativeFileData({ multiple, accept: '.risup,.json' })
+        await vi.waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith('app_paths_roots'))
+        expect(iOSPickerCalls()).toEqual([])
+        deliver()
+        expect((await selection).map(file => file.name)).toEqual(multiple ? ['첫째.RISUP', 'second.json'] : ['첫째.RISUP'])
+        expect(iOSPickerCalls()).toEqual([['plugin:ios-native|pick_files', { multiple }]])
+        expect(mocks.invoke.mock.calls.filter(([command]) => command === 'plugin:ios-native|discard_file')).toHaveLength(multiple ? 2 : 1)
+    })
+
+    it('opens no iOS picker when cancelled while the data root is pending', async () => {
+        const { selectNativeFileData, deliver } = await iOSSelectionBeforeDataRoot()
+        const controller = new AbortController()
+        const selection = selectNativeFileData({ signal: controller.signal })
+        await vi.waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith('app_paths_roots'))
+        controller.abort()
+        deliver()
+        expect(await selection).toEqual([])
+        expect(iOSPickerCalls()).toEqual([])
     })
 
     it('routes the DOM-compatible selector through native reads on mobile without mounting an input', async () => {

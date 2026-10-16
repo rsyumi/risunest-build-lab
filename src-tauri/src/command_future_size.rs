@@ -67,6 +67,7 @@ async_commands![
     external_storage::connection_commands::external_storage_complete_authorization,
     external_storage::connection_commands::external_storage_list_folders,
     external_storage::connection_commands::external_storage_select_folder,
+    external_storage::connection_commands::external_storage_change_endpoint,
     external_storage::connection_commands::external_storage_remove_connection,
     external_storage::connection_commands::external_storage_begin_connection_settings_export,
     external_storage::connection_commands::external_storage_save_connection_settings_file,
@@ -159,6 +160,10 @@ async_commands![
     android_commit_transport::pds_commit_android_finish,
     #[cfg(target_os = "android")]
     android_commit_transport::pds_replace_android_finish,
+    #[cfg(target_os = "android")]
+    android_commit_transport::pds_plugin_part_android_finish,
+    #[cfg(target_os = "android")]
+    android_commit_transport::pds_plugin_write_android_finish,
     #[cfg(windows)]
     persistent_commit_transport::pds_commit_shared_open,
     #[cfg(windows)]

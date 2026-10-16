@@ -1,4 +1,5 @@
 import rfdc from 'rfdc'
+import { forkChatParserContext } from './chatParserContextSeed.svelte'
 import {
     classifyChatParserHistory,
     type ChatParserHistoryReason,
@@ -525,7 +526,7 @@ function buildBoundedContext(
     messages: Message[],
     historyOffset: number,
 ): ProcessScriptCaptureContext {
-    const context = cloneProjectionData(seed) as ProcessScriptCaptureContext
+    const context = forkChatParserContext(seed)
     const parser = context.parserContext
     const character = parser.character
     character.chats[character.chatPage].message = messages

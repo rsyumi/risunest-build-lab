@@ -115,9 +115,48 @@ fn append_cleanup_failure(
 struct Probe<'a> {
     job: &'a JobControl,
     progress: std::sync::Mutex<(super::JobProgress, bool, Option<String>)>,
+    export: Option<std::sync::Arc<ExportProgress>>,
+}
+struct ExportProgress {
+    job: std::sync::Arc<JobControl>,
+    detail: std::sync::Mutex<super::JobDetail>,
+    failure: std::sync::Mutex<Option<String>>,
+}
+impl ExportProgress {
+    fn begin(&self, stage: super::JobStage, total: Option<u64>) -> Result<(), NativeJobError> {
+        let mut detail = self.detail.lock().map_err(|failure| error(failure.to_string()))?;
+        *detail = detail.advance(stage, super::StageUnit::Bytes, total);
+        self.job.set_detail(detail.clone()).map_err(error)
+    }
+    fn add(&self, bytes: u64, downloaded: bool) {
+        let mut detail = self.detail.lock().unwrap();
+        if downloaded {
+            if detail.stage == super::JobStage::PreparingExport {
+                *detail = detail.advance(super::JobStage::DownloadingExport, super::StageUnit::Bytes, None);
+            }
+            if detail.stage != super::JobStage::DownloadingExport { return; }
+        } else if matches!(detail.stage, super::JobStage::PreparingExport | super::JobStage::DownloadingExport) { return; }
+        detail.stage_completed = detail.stage_completed.saturating_add(bytes);
+        if let Err(error) = self.job.set_detail(detail.clone()) {
+            *self.failure.lock().unwrap() = Some(error);
+        }
+    }
 }
 impl<'a> Probe<'a> {
-    fn new(job: &'a JobControl) -> Self { Self { job, progress: std::sync::Mutex::new((super::JobProgress::default(), false, None)) } }
+    fn new(job: &'a JobControl) -> Self { Self { job, progress: std::sync::Mutex::new((super::JobProgress::default(), false, None)), export: None } }
+    fn for_export(job: &'a std::sync::Arc<JobControl>) -> Self {
+        let mut probe = Self::new(job);
+        probe.export = Some(std::sync::Arc::new(ExportProgress {
+            job: job.clone(),
+            detail: std::sync::Mutex::new(super::JobDetail::new(super::JobStage::PreparingExport, super::StageUnit::Bytes, 0, None, super::ImportCounts::default())),
+            failure: std::sync::Mutex::new(None),
+        }));
+        probe
+    }
+    fn export_stage(&self, stage: super::JobStage, total: Option<u64>) -> Result<(), NativeJobError> {
+        if let Some(export) = &self.export { export.begin(stage, total)?; }
+        Ok(())
+    }
     fn track_bytes(&self, total: u64) -> Result<(), NativeJobError> {
         let mut state = self.progress.lock().map_err(|_| error("portable progress mutex poisoned"))?;
         state.0.total_bytes = Some(total);
@@ -125,6 +164,9 @@ impl<'a> Probe<'a> {
         self.job.set_progress(state.0).map_err(error)
     }
     fn result(&self) -> Result<(), NativeJobError> {
+        if let Some(export) = &self.export {
+            if let Some(failure) = export.failure.lock().map_err(|failure| error(failure.to_string()))?.clone() { return Err(error(failure)); }
+        }
         match self.progress.lock().map_err(|_| error("portable progress mutex poisoned"))?.2.as_ref() {
             Some(message) => Err(NativeJobError::new("job-error", message)), None => Ok(())
         }
@@ -134,6 +176,7 @@ impl CancellationProbe for Probe<'_> {
     fn cancellation_flag(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> { Some(self.job.cancellation_flag()) }
     fn is_cancelled(&self) -> bool { self.job.is_cancel_requested() }
     fn backup_bytes_processed(&self, bytes: u64) {
+        if let Some(export) = &self.export { export.add(bytes, false); }
         let mut state = self.progress.lock().unwrap();
         if state.1 {
             state.0.completed_bytes = state.0.completed_bytes.saturating_add(bytes).min(state.0.total_bytes.unwrap_or(u64::MAX));
@@ -144,6 +187,12 @@ impl CancellationProbe for Probe<'_> {
         let mut state = self.progress.lock().unwrap();
         state.0.completed_items = state.0.completed_items.saturating_add(1);
         if let Err(error) = self.job.set_progress(state.0) { state.2 = Some(error); }
+    }
+    fn backup_download_observer(&self) -> Option<std::sync::Arc<dyn Fn(u64) + Send + Sync>> {
+        self.export.as_ref().map(|export| {
+            let export = export.clone();
+            std::sync::Arc::new(move |bytes| export.add(bytes, true)) as std::sync::Arc<dyn Fn(u64) + Send + Sync>
+        })
     }
 }
 fn storage_full(mut error: &(dyn std::error::Error + 'static)) -> bool {
@@ -305,11 +354,12 @@ fn write_verified(
     repair: bool,
     path: &Path,
     owned: &Path,
-    probe: &dyn CancellationProbe,
+    probe: &Probe<'_>,
 ) -> Result<VerifiedArchive, NativeJobError> {
     catalog
         .write_candidate(path, repair, probe)
         .map_err(portable_error)?;
+    probe.export_stage(super::JobStage::VerifyingExport, None)?;
     let verified = VerifiedArchive::open(File::open(path).map_err(error)?, owned, probe)
         .map_err(portable_error)?;
     if !verified.manifest.repair_required && verified.manifest.library_included {
@@ -370,7 +420,7 @@ pub(crate) fn export_portable(
     owned: &Path,
     handoffs: &Path,
     store: PersistentStore,
-    job: &JobControl,
+    job: &std::sync::Arc<JobControl>,
     device: Option<(&tauri::AppHandle, &PortableSelection)>,
     source_build: &str,
 ) -> Result<JobResultSummary, NativeJobError> {
@@ -395,7 +445,7 @@ fn export_portable_running(
     owned: &Path,
     handoffs: &Path,
     mut store: PersistentStore,
-    job: &JobControl,
+    job: &std::sync::Arc<JobControl>,
     selection: &PortableSelection,
     source_build: &str,
 ) -> Result<JobResultSummary, NativeJobError> {
@@ -413,7 +463,7 @@ fn export_portable_running(
     if selection.library {
         require_capacity(owned, store.portable_export_lower_bound().map_err(error)?)?;
     }
-    let probe = Probe::new(job);
+    let probe = Probe::for_export(job);
     let mut pins = new_pins(&store, CasJobKind::OfficialPublicationOrExportPreparation)?;
     let outcome = (|| {
         let captured = if selection.library {
@@ -435,6 +485,7 @@ fn export_portable_running(
         };
         let payload_bytes: i64 = captured.catalog.db.query_row("SELECT coalesce(sum(byte_length),0) FROM objects", [], |row| row.get(0)).map_err(error)?;
         probe.track_bytes((payload_bytes.max(0) as u64).saturating_mul(3))?;
+        probe.export_stage(super::JobStage::WritingExport, None)?;
         let path = owned.join("archive.risunest.part");
         let archive = write_verified(
             captured.catalog,
@@ -456,6 +507,7 @@ fn export_portable_running(
             }
         };
         super::job_transition(job, job.set_phase(JobPhase::PublishingDestination))?;
+        probe.export_stage(super::JobStage::PublishingDestination, Some(fs::metadata(&path).map_err(error)?.len()))?;
         probe.result()?;
         let published = publish(&path, &destination, owned, job, &probe)?;
         probe.result()?;
@@ -1066,15 +1118,24 @@ mod tests {
     fn portable_progress_reports_real_bytes_without_resetting_between_passes() {
         let job = super::super::JobRegistry::default().create(super::super::JobKind::ExportPortableBackup).unwrap();
         job.start(JobPhase::WritingExport).unwrap();
-        let probe = Probe::new(&job);
+        let probe = Probe::for_export(&job);
         portable_backup::copy_hash(&mut &b"fixture"[..], &mut std::io::sink(), 7, &probe).unwrap();
         assert_eq!(job.status().progress.completed_items, 1);
         assert_eq!(job.status().progress.total_bytes, None);
+        assert_eq!(job.status().detail.unwrap().stage_completed, 0);
+        probe.backup_download_observer().unwrap()(5);
+        portable_backup::copy_hash(&mut &b"fixture"[..], &mut std::io::sink(), 7, &probe).unwrap();
+        let downloaded = job.status().detail.unwrap();
+        assert_eq!(downloaded.stage, super::super::JobStage::DownloadingExport);
+        assert_eq!(downloaded.stage_completed, 5);
+        assert_eq!(downloaded.stage_total, None);
         probe.track_bytes(21).unwrap();
-        for expected in [7, 14, 21] {
+        for (stage, expected) in [(super::super::JobStage::WritingExport, 7), (super::super::JobStage::VerifyingExport, 14), (super::super::JobStage::PublishingDestination, 21)] {
+            probe.export_stage(stage, None).unwrap();
             portable_backup::copy_hash(&mut &b"fixture"[..], &mut std::io::sink(), 7, &probe).unwrap();
             assert_eq!(job.status().progress.completed_bytes, expected);
             assert_eq!(job.status().progress.total_bytes, Some(21));
+            assert_eq!(job.status().detail.unwrap().stage_completed, 7);
             probe.result().unwrap();
         }
     }
@@ -2077,6 +2138,66 @@ mod tests {
             .find(|character| character["chaId"] == "synthetic-large")
             .unwrap();
         assert!(character["chats"][0]["message"][0]["data"] == data.as_str());
+    }
+
+    #[test]
+    fn portable_export_restore_carries_large_message_and_archive_controls() {
+        use crate::persistent_store::{archive::ArchivedObject, lww::{ApplyReceive, Change, Header, Progress, StageReceive}, portable_identity::IdentityRemap};
+        use risunest_external_storage_format::message_pages::{MessageHash, MessageManifest, ManifestPage, MANIFEST_SCHEMA, MIN_PAGE_MESSAGES};
+        use risunest_sync_wire::{descriptor::RecordDescriptor, stamp::Stamp, unit::{UnitKey, UnitValue}};
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = library(&directory.path().join("source"));
+        store.archive_character("char-a", store.revision().unwrap(), 10).unwrap();
+        let lease = store.lww_acquire_backup_capture(store.revision().unwrap()).unwrap().0.lease;
+        let units = store.lww_backup_unit_values(&lease).unwrap();
+        store.release_revision(&lease).unwrap();
+        let UnitValue::Object { descriptor, .. } = &units[&UnitKey::new(&["archive", "char-a"]).unwrap()] else { panic!("archive control") };
+        let mut archived: ArchivedObject = serde_json::from_slice(&store.lww_object_body(&descriptor.object_hash).unwrap().unwrap()).unwrap();
+        archived.identity_remap = vec![IdentityRemap::default(); 35_000];
+        let archive = risunest_sync_wire::payload_value::encode(&serde_json::to_value(archived).unwrap()).unwrap();
+        let archive_hash = risunest_sync_wire::hash(&archive);
+        let mut archive_descriptor = descriptor.clone();
+        archive_descriptor.object_hash = archive_hash.clone();
+        let message = (0..10_000).map(|index| serde_json::json!({"role":"user","data":format!("synthetic-{index}")}))
+            .find(|message| MessageHash::from_bytes(&risunest_sync_wire::payload_value::encode(message).unwrap()).boundary().unwrap()).unwrap();
+        let page = risunest_external_storage_format::logical_records::encode_message_page(&vec![message; MIN_PAGE_MESSAGES]).unwrap();
+        let large_page = risunest_external_storage_format::logical_records::encode_message_page(&[serde_json::json!({"role":"user","data":"x".repeat(risunest_sync_wire::MAX_METADATA_BYTES)})]).unwrap();
+        let mut pages = vec![ManifestPage { hash: page.hash.clone(), message_count: MIN_PAGE_MESSAGES as u32, byte_length: page.size.into() }; 9500];
+        pages[0] = ManifestPage { hash: large_page.hash.clone(), message_count: 1, byte_length: large_page.size.into() };
+        let manifest = MessageManifest { schema: MANIFEST_SCHEMA.into(), message_count: (1 + 9499 * MIN_PAGE_MESSAGES as u64).into(),
+            pages }.encode().unwrap();
+        assert!(archive.len() > risunest_sync_wire::MAX_METADATA_BYTES);
+        assert!(manifest.bytes.len() > risunest_sync_wire::MAX_METADATA_BYTES);
+        eprintln!("synthetic portable controls: archive={} manifest={} large_page={} pages=9500 messages={}",
+            archive.len(), manifest.bytes.len(), large_page.bytes.len(), 1 + 9499 * MIN_PAGE_MESSAGES);
+        for (hash, body) in [(&archive_hash, &archive), (&manifest.hash, &manifest.bytes), (&page.hash, &page.bytes), (&large_page.hash, &large_page.bytes)] {
+            store.lww_put_object(hash, body).unwrap();
+        }
+        let mut manifest_descriptor = RecordDescriptor::content(manifest.hash.clone());
+        manifest_descriptor.dependencies = vec![page.hash.clone(), large_page.hash.clone()];
+        manifest_descriptor.dependencies.sort();
+        let originals = std::collections::BTreeMap::from([
+            (UnitKey::new(&["archive", "held-archive"]).unwrap(), UnitValue::object(archive_descriptor).unwrap()),
+            (UnitKey::new(&["messages", "held-messages", "held-chat"]).unwrap(), UnitValue::object(manifest_descriptor).unwrap()),
+        ]);
+        let header = Header { binding_authority: store.lww_binding_authority().unwrap(), request_id: "large-portable-controls".into() };
+        store.lww_stage_receive(&StageReceive {
+            header: header.clone(),
+            changes: originals.iter().map(|(key, value)| Change { key: key.clone(), value: value.clone(),
+                stamp: Stamp { physical_ms: 1u64.into(), logical: 0, writer_id: "00000000-0000-4000-8000-000000000001".into() } }).collect(),
+            progress: Progress { kind: "server".into(), cursor: 1u64.into(), writer_id: None }, admitted_time_upper_ms: u64::MAX.into(),
+        }).unwrap();
+        store.lww_apply_receive(&ApplyReceive { header: header.clone(), generating: Vec::new() }).unwrap();
+        store.lww_finish_receive(&header).unwrap();
+        let mut restored = export_and_restore(directory.path(), store);
+        let lease = restored.lww_acquire_backup_capture(restored.revision().unwrap()).unwrap().0.lease;
+        let restored_units = restored.lww_backup_unit_values(&lease).unwrap();
+        for (key, value) in originals { assert_eq!(restored_units.get(&key), Some(&value)); }
+        assert_eq!(restored.lww_object_body(&archive_hash).unwrap().unwrap(), archive);
+        assert_eq!(restored.lww_object_body(&manifest.hash).unwrap().unwrap(), manifest.bytes);
+        restored.release_revision(&lease).unwrap();
+        restored.restore_character("char-a", restored.revision().unwrap()).unwrap();
+        assert!(restored.read_character("char-a", None).unwrap().is_some());
     }
 
     #[test]

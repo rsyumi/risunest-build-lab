@@ -130,6 +130,7 @@ export function deviceSettingsModule(startup: BootstrapTestState) {
     return {
         getStartupExclusions: () => startup.exclusions,
         loadDeviceSettings: () => stub<ReturnType<DeviceSettings['loadDeviceSettings']>>({ nativeFileLogEnabled: false }),
+        reloadDeviceSettings: () => stub<ReturnType<DeviceSettings['reloadDeviceSettings']>>({ nativeFileLogEnabled: false }),
     } satisfies Partial<DeviceSettings>
 }
 
@@ -143,9 +144,9 @@ export function nativeFileJobRecoveryModule() {
     type Recovery = typeof import('./storage/nativeFileJobRecovery')
     return {
         shouldReconcileNativeFileJobs: vi.fn(() => false),
-        reconcileNativeFileJobsBeforeBootstrap: async () => stub<Awaited<ReturnType<Recovery['reconcileNativeFileJobsBeforeBootstrap']>>>({
+        reconcileNativeFileJobsBeforeBootstrap: vi.fn(async () => stub<Awaited<ReturnType<Recovery['reconcileNativeFileJobsBeforeBootstrap']>>>({
             pendingRestoreAcknowledgements: [], pendingOfficialPublications: [], interruptedRestores: [],
-        }),
+        })),
         acknowledgeRecoveredNativeRestores: vi.fn(),
     } satisfies Partial<Recovery>
 }
@@ -195,7 +196,7 @@ export function persistentDataRuntimeModule() {
 
 export function pluginsModule() {
     return {
-        keepPluginsOffForThisStart: vi.fn(), loadPlugins: vi.fn(), loadPluginsAfterAuthoritativeRestore: vi.fn(),
+        keepPluginsOffForThisStart: vi.fn(), afterPluginsStarted: vi.fn(() => () => {}), loadPlugins: vi.fn(), loadPluginsAfterAuthoritativeRestore: vi.fn(),
     } satisfies Partial<typeof import('./plugins/plugins.svelte')>
 }
 
@@ -254,6 +255,7 @@ export function nativeOfficialAccountFlowModule() {
     type Flow = typeof import('./storage/sync/nativeOfficialAccountFlow')
     return {
         configureNativeOfficialAccountFlow: vi.fn(),
+        restoreNativeOfficialAccountCandidate: vi.fn<Flow['restoreNativeOfficialAccountCandidate']>(),
         createNativeOfficialAccountFlowService: () => stub<ReturnType<Flow['createNativeOfficialAccountFlowService']>>({ flow: {}, snapshotRequestReauthentication: {} }),
         nativeOfficialAccountKeys: stub<Flow['nativeOfficialAccountKeys']>({ association: 'association', assetLedger: 'asset-ledger' }),
         normalizeNativeOfficialAccountCredential: (value: unknown) => value as ReturnType<Flow['normalizeNativeOfficialAccountCredential']>,
@@ -328,7 +330,7 @@ export function lifecycleCommitModule() {
 }
 
 export function deviceMarkersModule(startup: BootstrapTestState) {
-    return { initializeDeviceMarkers: vi.fn(), getDeviceMarkers: () => startup.markers } satisfies Partial<typeof import('./storage/deviceMarkers')>
+    return { initializeDeviceMarkers: vi.fn(), reloadDeviceMarkers: vi.fn(), getDeviceMarkers: () => startup.markers } satisfies Partial<typeof import('./storage/deviceMarkers')>
 }
 
 export function bootAttemptModule(startup: BootstrapTestState) {

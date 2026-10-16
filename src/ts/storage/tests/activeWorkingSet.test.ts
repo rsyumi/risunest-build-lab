@@ -607,7 +607,11 @@ describe('ActiveWorkingSet', () => {
             return transition()
         })
 
-        await expect(harness.workingSet.activateCharacter('b')).resolves.toBe(false)
+        let exhaustedGeneration: number | undefined
+        await expect(harness.workingSet.activateCharacter('b', {
+            onRetryExhausted: (generation) => { exhaustedGeneration = generation },
+        })).resolves.toBe(false)
+        expect(exhaustedGeneration).toBe(harness.workingSet.navigationGenerationToken)
         expect(harness.coordinator.runSelectedConversationTransition).not.toHaveBeenCalled()
         expect(harness.database.characters[0]).toBe(previous)
         expect(harness.workingSet.captureSelectedConversationTarget()?.characterId).toBe('a')

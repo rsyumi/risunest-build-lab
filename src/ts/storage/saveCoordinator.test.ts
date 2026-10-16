@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createPersistentStoreHarness } from '../../../tests/support/persistentStoreHarness'
 import type { Chat, Database, character } from './database.svelte'
 import { RevisionConflictError } from './persistentDataStore'
+import { PayloadTooLargeError, UnsaveableValueError } from './nativePersistenceValue'
 import { createLeaseStub, createStoreStub } from './persistentDataStore.testSupport'
 import { canonicalJson } from './saveCoordinator'
 import {
@@ -1511,15 +1512,12 @@ describe('SaveCoordinator', () => {
         }, 'new-character')
 
         expect(install).toHaveBeenCalledOnce()
-        expect(commit).toHaveBeenCalledOnce()
-        const addition = committedChanges(commit.mock.calls[0][0])
-        expect(addition).toMatchObject({
-            expectedRevision: 4,
-            replaceCharacter: { chaId: 'char-a', name: 'Selected changed' },
-            addCharacter: { chaId: 'char-added', name: 'Added' },
-        })
-        expect(addition.rootChanges).toEqual({ username: 'Root changed' })
-        expect(coordinator.revision).toBe(5)
+        const changes = commit.mock.calls.map(([input]) => committedChanges(input))
+        expect(changes.find((change) => change.addCharacter)?.addCharacter).toMatchObject({ chaId: 'char-added', name: 'Added' })
+        const edits = changes.find((change) => change.replaceCharacter)
+        expect(edits?.replaceCharacter).toMatchObject({ chaId: 'char-a', name: 'Selected changed' })
+        expect(edits?.rootChanges).toEqual({ username: 'Root changed' })
+        expect(coordinator.revision).toBe(6)
     })
 
     it('reports a standalone addition exact promise and then idle state', async () => {
@@ -1739,6 +1737,37 @@ describe('SaveCoordinator', () => {
         expect(coordinator.revision).toBe(2)
     })
 
+    it.each([
+        Object.assign(new Error('invalid character'), { code: 'validation' }),
+        new UnsaveableValueError('character', 'synthetic invalid value'),
+        new PayloadTooLargeError('character', 100_000_000),
+    ])('withdraws a permanently refused addition and preserves unrelated edits (%s)', async (refusal) => {
+        const {database, added} = makeAdditionDatabase()
+        const storage = await createPersistentStoreHarness(structuredClone(database))
+        const original = storage.store.commit.bind(storage.store)
+        vi.spyOn(storage.store, 'commit').mockImplementation(async (input) => {
+            if (input.addCharacter) throw refusal
+            return original(input)
+        })
+        const coordinator = new SaveCoordinator({store: storage.store,
+            captureRoot: () => captureRoot(database), captureSelectedCharacter: () => database.characters[0],
+            captureCharacter: id => database.characters.find(character => character.chaId === id) ?? null,
+            replaceDatabase: replacement => Object.assign(database, replacement),
+            publishCharacterMutation: state => {
+                database.characters = database.characters.filter(character => character.chaId !== state.characterId)
+                Object.assign(database, state.root)
+            },
+        })
+        coordinator.initialize(storage.revision)
+        database.username = 'Unrelated edit'
+        await expect(coordinator.commitCharacterAddition({characterId: added.chaId, estimatedBytes: 1,
+            install: () => database.characters.push(added)}, 'refused-addition')).rejects.toBe(refusal)
+        expect(database.characters.some(character => character.chaId === added.chaId)).toBe(false)
+        await coordinator.flushPendingData('save-after-refusal')
+        expect((await storage.store.readRoot()).value.username).toBe('Unrelated edit')
+        expect(await storage.store.readCharacter(added.chaId)).toBeNull()
+    })
+
     it('releases the reservation when install throws so later additions still run', async () => {
         const { database, added } = makeAdditionDatabase()
         const commit = vi.fn(async ({ expectedRevision }) => ({ revision: expectedRevision + 1 }))
@@ -1768,6 +1797,39 @@ describe('SaveCoordinator', () => {
 
         expect(commit).toHaveBeenCalledOnce()
         expect(commit.mock.calls[0][0].addCharacter).toMatchObject({ chaId: 'char-added' })
+    })
+
+    it.each([false, true])('retains an addition whose commit response was lost when retry reports a permanent refusal (read fails: %s)', async (readFails) => {
+        const {database, added} = makeAdditionDatabase()
+        const storage = await createPersistentStoreHarness(structuredClone(database))
+        const original = storage.store.commit.bind(storage.store)
+        const refused = Object.assign(new Error('character already exists'), {code: 'validation'})
+        let first = true
+        vi.spyOn(storage.store, 'commit').mockImplementation(async input => {
+            if (!first) throw refused
+            first = false
+            await original(input)
+            throw new Error('commit response lost')
+        })
+        const coordinator = new SaveCoordinator({store: storage.store,
+            captureRoot: () => captureRoot(database), captureSelectedCharacter: () => database.characters[0],
+            captureCharacter: id => database.characters.find(character => character.chaId === id) ?? null,
+            replaceDatabase: replacement => Object.assign(database, replacement),
+            publishCharacterMutation: state => { database.characters = database.characters.filter(character => character.chaId !== state.characterId) },
+        })
+        coordinator.initialize(storage.revision)
+        await expect(coordinator.commitCharacterAddition({characterId: added.chaId, estimatedBytes: 1,
+            install: () => database.characters.push(added)}, 'unknown-addition')).rejects.toThrow('commit response lost')
+        if (readFails) {
+            vi.spyOn(storage.store, 'readCharacter').mockRejectedValueOnce(new Error('read unavailable'))
+            await expect(coordinator.flushPendingData('retry-without-confirmation')).rejects.toBe(refused)
+            expect(database.characters.some(character => character.chaId === added.chaId)).toBe(true)
+            expect(coordinator.pendingWorkingSetRefreshRevision).toBeNull()
+        }
+        await expect(coordinator.flushPendingData('retry-unknown-addition')).rejects.toBe(refused)
+        expect(database.characters.some(character => character.chaId === added.chaId)).toBe(true)
+        expect((await storage.store.readCharacter(added.chaId))?.value.name).toBe(added.name)
+        expect(coordinator.pendingWorkingSetRefreshRevision).toBe(storage.revision + 1)
     })
 
     it.each([

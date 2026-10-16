@@ -44,28 +44,30 @@ pub(crate) fn detect(mut file: File) -> Result<BackupSourceFormat, NativeJobErro
         }
         return Err(unsupported());
     }
-    if count < 4 {
-        return Err(unsupported());
+    let local = (|| {
+        if count < 4 { return Err(unsupported()); }
+        let size = u32::from_le_bytes(prefix[..4].try_into().unwrap()) as usize;
+        if size == 0 || size > 1024 * 1024 { return Err(unsupported()); }
+        file.seek(SeekFrom::Start(4)).map_err(|_| unsupported())?;
+        let mut bytes = vec![0; size];
+        file.read_exact(&mut bytes).map_err(|_| unsupported())?;
+        let name = std::str::from_utf8(&bytes).map_err(|_| unsupported())?;
+        if name.contains('\0') || name.contains('\\')
+            || name.split('/').any(|p| p.is_empty() || p == "." || p == "..")
+        { return Err(unsupported()); }
+        let mut length = [0; 4];
+        file.read_exact(&mut length).map_err(|_| unsupported())?;
+        if 8 + size as u64 + u64::from(u32::from_le_bytes(length)) > file.metadata().map_err(|_| unsupported())?.len() {
+            return Err(unsupported());
+        }
+        Ok(BackupSourceFormat::LocalBackup)
+    })();
+    // A valid length-framed entry takes precedence over its coincidental two-byte zlib header.
+    if local.is_ok() { return local; }
+    if count >= 2 && super::restore::is_zlib_header(&prefix[..count]) {
+        return Ok(BackupSourceFormat::BlockRisuSave);
     }
-    let size = u32::from_le_bytes(prefix[..4].try_into().unwrap()) as usize;
-    if size == 0 || size > 1024 * 1024 {
-        return Err(unsupported());
-    }
-    file.seek(SeekFrom::Start(4)).map_err(|_| unsupported())?;
-    let mut bytes = vec![0; size];
-    file.read_exact(&mut bytes).map_err(|_| unsupported())?;
-    let name = std::str::from_utf8(&bytes).map_err(|_| unsupported())?;
-    if name.contains('\0')
-        || name.contains('\\')
-        || name
-            .split('/')
-            .any(|p| p.is_empty() || p == "." || p == "..")
-    {
-        return Err(unsupported());
-    }
-    // Foreign local backups start with a length-framed entry, commonly an asset. No extension
-    // or one-byte compressed header can establish a full archive's validity.
-    Ok(BackupSourceFormat::LocalBackup)
+    local
 }
 
 #[tauri::command(async)]
@@ -74,7 +76,7 @@ pub(crate) fn native_backup_source_format(
     state: State<'_, NativeFileJobState>,
     source: JobSource,
 ) -> Result<BackupSourceFormat, NativeJobError> {
-    logged("native_backup_source_format", (|| if matches!(source,JobSource::AndroidSeekable{..}|JobSource::IosScoped{..}) {
+    logged("native_backup_source_format", (|| if matches!(source,JobSource::SavedConflict{..}|JobSource::AndroidSeekable{..}|JobSource::IosScoped{..}) {
         portable_source_custody::ensure_platform_source(&app,&source)?;
         let detected=portable_source_custody::probe_format(&source)?;
         portable_source_custody::confirm_platform_probe(&app,&source,detected)?;
@@ -82,9 +84,95 @@ pub(crate) fn native_backup_source_format(
     } else { detect(open_job_source(&state.root,&source)?.file) })())
 }
 
+#[tauri::command(async)]
+pub(crate) fn native_conflict_backup_source(app: AppHandle, backup_id: String) -> Result<JobSource, NativeJobError> {
+    if backup_id.is_empty() || backup_id.len() > 256 || backup_id.contains(['/', '\\', '\0']) {
+        return Err(invalid_source_error("Invalid conflict backup ID"));
+    }
+    crate::persistent_store::commands::with_store(app.state(), |store| conflict_backup_source(store, &backup_id))
+        .map_err(restore::store_error)
+}
+
+fn conflict_backup_source(store: &crate::persistent_store::PersistentStore, backup_id: &str) -> crate::persistent_store::StoreResult<JobSource> {
+        let missing = || crate::persistent_store::StoreError::Validation { message: "Saved conflict backup is unavailable".to_owned() };
+        let index = store.device_store()?.read_setting("sync-conflict-backups.index.v1")?.ok_or_else(missing)?;
+        if !index.as_array().is_some_and(|entries| entries.iter().any(|entry| entry.get("id").and_then(Value::as_str) == Some(backup_id))) {
+            return Err(missing());
+        }
+        let key = format!("sync-conflict-backups/{backup_id}.risudat");
+        let alias = store.read_asset_alias("asset", &key, None)?.ok_or_else(missing)?.value;
+        let hash = alias.object_hash.ok_or_else(missing)?;
+        let cas = crate::asset_repository::PayloadCas::new(store.repository_root())?;
+        use crate::asset_repository::job_pins::{CasJobKind, CasJobOwner, CasObjectRole, CasReleaseOutcome, DurableCasJob};
+        let token = Uuid::new_v4().to_string();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+        let mut pins = DurableCasJob::begin(store.repository_root(), &token, CasJobKind::LocalBackupRestore, CasJobOwner::native_file_job(&token), now)?;
+        let opened = (|| {
+            pins.pin_existing(&cas, &hash, alias.size as u64, CasObjectRole::DirectObject)?;
+            cas.open_object(&hash)?.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "Saved conflict backup is unavailable"))
+        })();
+        let file = match opened { Ok(file) => file, Err(error) => { let _ = pins.release(CasReleaseOutcome::Aborted); return Err(error.into()); } };
+        portable_source_custody::register_saved_conflict(file, pins, token)
+            .map_err(|error| crate::persistent_store::StoreError::Validation { message: error.message })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::Digest;
+    #[test]
+    fn saved_conflict_sources_resolve_both_sides_without_replacing_the_library() {
+        use crate::persistent_store::{AssetAlias, PersistentStore};
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = PersistentStore::open(directory.path()).unwrap();
+        let stage = store.replace_begin().unwrap().staging_id;
+        store.replace_put_root(&stage, &serde_json::json!({"username":"Existing synthetic library"})).unwrap();
+        store.replace_put_presets(&stage, &[]).unwrap();
+        store.replace_commit(&stage, Some(0)).unwrap();
+        let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
+        for side in ["local", "remote"] {
+            let payload = cas.prepare_bytes(format!("RISUSAVE\0synthetic {side} backup bytes").as_bytes()).unwrap();
+            store.commit_asset_alias(&AssetAlias {
+                key: format!("sync-conflict-backups/{side}.risudat"), object_hash: Some(payload.content_hash),
+                kind: "asset".into(), size: payload.byte_size as i64, mime: "application/octet-stream".into(),
+                name: side.into(), ext: "risudat".into(), inlay_type: None, width: None, height: None,
+                metadata: serde_json::json!({}),
+            }, store.revision().unwrap()).unwrap();
+        }
+        store.device_store().unwrap().write_setting("sync-conflict-backups.index.v1", &serde_json::json!([
+            {"id":"local","side":"local"},{"id":"remote","side":"remote"},{"id":"missing","side":"remote"}
+        ])).unwrap();
+        let revision = store.revision().unwrap();
+        for side in ["local", "remote"] {
+            let source = conflict_backup_source(&store, side).unwrap();
+            assert!(matches!(source, JobSource::SavedConflict { .. }));
+            assert_eq!(portable_source_custody::probe_format(&source).unwrap(), BackupSourceFormat::BlockRisuSave);
+            let pins = || crate::asset_repository::job_pins::collect_durable_cas_job_roots(directory.path());
+            let hash = hex::encode(sha2::Sha256::digest(format!("RISUSAVE\0synthetic {side} backup bytes").as_bytes()));
+            assert!(pins().object_hashes.contains(&hash));
+            assert!(!pins().blockers.is_empty());
+            if side == "local" {
+                assert!(portable_source_custody::discard(&source).unwrap());
+                assert!(portable_source_custody::claim(&source, &Uuid::new_v4().to_string()).is_err());
+            } else {
+                let mut opened = portable_source_custody::claim(&source, &Uuid::new_v4().to_string()).unwrap();
+                assert!(!portable_source_custody::discard(&source).unwrap());
+                assert!(!pins().blockers.is_empty());
+                let mut bytes = Vec::new();
+                opened.file.read_to_end(&mut bytes).unwrap();
+                assert_eq!(bytes, format!("RISUSAVE\0synthetic {side} backup bytes").as_bytes());
+                drop(opened);
+            }
+            assert!(pins().blockers.is_empty());
+            assert!(!pins().object_hashes.contains(&hash));
+        }
+        assert!(conflict_backup_source(&store, "missing").is_err());
+        store.device_store().unwrap().remove_setting("sync-conflict-backups.index.v1").unwrap();
+        assert!(conflict_backup_source(&store, "local").is_err());
+        assert_eq!(store.revision().unwrap(), revision);
+        assert_eq!(store.read_root(None).unwrap().value["username"], "Existing synthetic library");
+    }
+
     #[test]
     fn android_pocket_backups_probe_and_claim_the_kotlin_spool() {
         for bytes in [
@@ -130,9 +218,19 @@ mod tests {
             ),
             (&b"\x04\0\0\0t"[..], None),
             (&b"PK\x03\x04"[..], None),
+            (&b"\x81\x00\x00\x00"[..], None),
         ] {
             fs::write(&path, bytes).unwrap();
             assert_eq!(detect(File::open(&path).unwrap()).ok(), expected);
         }
+        let name = format!("assets/{}", "a".repeat(369));
+        let archive = [(name.len() as u32).to_le_bytes().as_slice(), name.as_bytes(), &0u32.to_le_bytes()].concat();
+        assert!(restore::is_zlib_header(&archive));
+        fs::write(&path, archive).unwrap();
+        assert_eq!(detect(File::open(&path).unwrap()).unwrap(), BackupSourceFormat::LocalBackup);
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, br#"{"characters":[],"username":"Synthetic compressed database"}"#).unwrap();
+        fs::write(&path, encoder.finish().unwrap()).unwrap();
+        assert_eq!(detect(File::open(&path).unwrap()).unwrap(), BackupSourceFormat::BlockRisuSave);
     }
 }

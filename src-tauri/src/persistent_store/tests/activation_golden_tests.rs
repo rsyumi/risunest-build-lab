@@ -354,11 +354,11 @@ fn bind_new_device(store: &mut PersistentStore) {
 // generation. Every path must keep producing the same library and unit state.
 // TARGET and NEW_DEVICE were captured again once a binding stage counted the
 // conversations it projects and gave each new character a chat page.
-// PLAIN, SOURCE_UNITS and DEVICE_SECTIONS were captured again once an archived character's
-// marker stopped carrying an empty chat list.
-const PLAIN: &str = "5d804626bb1cb949c37f61b84f7cad4c87f08d89c84c974862aea7f4b918192e";
-const SOURCE_UNITS: &str = "d37977329186380cb151ddd347342c3f7e407e46f3e1abfe7f1557981e578384";
-const DEVICE_SECTIONS: &str = "bcd7ffc3a14af5ed5700ff89ba7adb8dba40089d2859dca370a159e7ddc7b660";
+// PLAIN, SOURCE_UNITS and DEVICE_SECTIONS include removal of retired child units;
+// permanent parent tombstones remain in the captured state.
+const PLAIN: &str = "381f9a28efa91579d36d2f5bbefa30938b52c41c0c9b0dbbf0c6fc2c59e118ac";
+const SOURCE_UNITS: &str = "e9a320c326ffe3c61e01f81112911613d582c1cde7098a9cf47cbab9f25ec89e";
+const DEVICE_SECTIONS: &str = "746739c2babc5c7277bce5685d285da705836d6cad7d2194ef36165b493e252a";
 const TARGET: &str = "908e9c6ddf880f41998c8a2f977a82c36e9a06dfc40d743bcd44b52a084e7de8";
 const NEW_DEVICE: &str = "908e9c6ddf880f41998c8a2f977a82c36e9a06dfc40d743bcd44b52a084e7de8";
 

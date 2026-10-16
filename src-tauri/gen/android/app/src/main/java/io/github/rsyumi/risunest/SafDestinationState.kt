@@ -60,6 +60,9 @@ internal fun isPendingSafDestinationPicker(record: SafDestinationRecord): Boolea
   record.destinationUri == null &&
     record.phase in setOf(SafDestinationPhase.PICKING, SafDestinationPhase.CANCELLING)
 
+internal fun restoredSafDestinationCancellation(record: SafDestinationRecord): Boolean =
+  record.reservedDestination || record.phase == SafDestinationPhase.CANCELLING
+
 internal fun selectedSafDestinationState(
   record: SafDestinationRecord,
   requestId: String,
@@ -76,6 +79,7 @@ internal fun selectedSafDestinationState(
       code = "cancelled",
       warningCodes = emptyList(),
       updatedAtMillis = nowMillis,
+      publicationPrerequisitesComplete = record.reservedDestination && !record.copyStarted,
     )
   }
   return record.copy(
@@ -100,6 +104,7 @@ internal fun expiredSafDestinationState(
   if (
     record.requestId != requestId ||
     !isPendingSafDestinationPicker(record) ||
+    record.reservedDestination ||
     nowMillis - record.updatedAtMillis < DESTINATION_PICKER_STALE_MILLIS
   ) return null
   val wasCancelling = record.phase == SafDestinationPhase.CANCELLING
@@ -110,6 +115,7 @@ internal fun expiredSafDestinationState(
     code = if (wasCancelling) "cancelled" else "destination-interrupted",
     warningCodes = emptyList(),
     updatedAtMillis = nowMillis,
+    publicationPrerequisitesComplete = record.reservedDestination && !record.copyStarted,
   )
 }
 
@@ -120,7 +126,7 @@ internal fun decideSafDestinationRecovery(
 ): SafDestinationRecoveryAction = when (record.phase) {
   SafDestinationPhase.PICKING -> if (
     hasRestoredActivityState &&
-    nowMillis - record.updatedAtMillis < DESTINATION_PICKER_STALE_MILLIS
+    (record.reservedDestination || nowMillis - record.updatedAtMillis < DESTINATION_PICKER_STALE_MILLIS)
   ) {
     SafDestinationRecoveryAction.WAIT_FOR_PICKER
   } else {
@@ -130,7 +136,7 @@ internal fun decideSafDestinationRecovery(
   SafDestinationPhase.CANCELLING -> if (record.destinationUri == null) {
     if (
       hasRestoredActivityState &&
-      nowMillis - record.updatedAtMillis < DESTINATION_PICKER_STALE_MILLIS
+      (record.reservedDestination || nowMillis - record.updatedAtMillis < DESTINATION_PICKER_STALE_MILLIS)
     ) {
       SafDestinationRecoveryAction.WAIT_FOR_PICKER
     } else {
@@ -156,6 +162,10 @@ internal data class SafDestinationRecord(
   val updatedAtMillis: Long,
   val sourceKind: SafDestinationSourceKind = SafDestinationSourceKind.RISU_SAVE,
   val publicationPrerequisitesComplete: Boolean = false,
+  val reservedDestination: Boolean = false,
+  val exportBound: Boolean = true,
+  val copyStarted: Boolean = true,
+  val jobId: String? = null,
 ) {
   fun isTerminal() = phase in setOf(
     SafDestinationPhase.SUCCEEDED,
@@ -199,6 +209,10 @@ internal class SafDestinationStateStore(
       updatedAtMillis = updatedAtMillis,
       sourceKind = sourceKind,
       publicationPrerequisitesComplete = publicationPrerequisitesComplete,
+      reservedDestination = optionalBooleanField(json, "reservedDestination", false) ?: return null,
+      exportBound = optionalBooleanField(json, "exportBound", true) ?: return null,
+      copyStarted = optionalBooleanField(json, "copyStarted", true) ?: return null,
+      jobId = if (json.contains("\"jobId\"")) (nullableStringField(json, "jobId") ?: return null).value else null,
     )
     return record.takeIf(::isValidRecord)
   }
@@ -221,6 +235,10 @@ internal class SafDestinationStateStore(
       "\"code\":${record.code?.let { "\"$it\"" } ?: "null"}," +
       "\"warningCodes\":[$warnings]," +
       "\"publicationPrerequisitesComplete\":${record.publicationPrerequisitesComplete}," +
+      "\"reservedDestination\":${record.reservedDestination}," +
+      "\"exportBound\":${record.exportBound}," +
+      "\"copyStarted\":${record.copyStarted}," +
+      "\"jobId\":${record.jobId?.let { "\"$it\"" } ?: "null"}," +
       "\"updatedAtMillis\":${record.updatedAtMillis}" +
       "}"
     try {
@@ -269,6 +287,64 @@ internal fun completedSafPublicationPrerequisites(
   )
 }
 
+internal fun reconciledSafDestination(
+  record: SafDestinationRecord,
+  ownedByRenderer: Boolean,
+  nowMillis: Long,
+): SafDestinationRecord? {
+  if (ownedByRenderer || record.sourceKind != SafDestinationSourceKind.RISU_SAVE || !record.isTerminal()) return null
+  if (!record.exportBound || !record.copyStarted || record.publicationPrerequisitesComplete) return record
+  return record.copy(
+    phase = SafDestinationPhase.FAILED,
+    code = "destination-interrupted",
+    warningCodes = (record.warningCodes.filterNot { it in interruptedSafDestinationWarnings() }.take(14) +
+      interruptedSafDestinationWarnings()).distinct(),
+    publicationPrerequisitesComplete = true,
+    updatedAtMillis = nowMillis,
+  )
+}
+
+// Session ownership is deliberately transient; persisted records belong to the previous renderer.
+internal class SafDestinationRendererSession {
+  var generation: Long = 0
+    private set
+  private var ownedRequestId: String? = null
+  private val recovered = linkedMapOf<String, SafDestinationRecord>()
+
+  fun own(requestId: String, expectedGeneration: Long = generation) {
+    if (expectedGeneration == generation) ownedRequestId = requestId
+  }
+  fun retire() { ownedRequestId = null; generation++ }
+  fun owns(requestId: String): Boolean = ownedRequestId == requestId
+  fun pending(): List<SafDestinationRecord> = recovered.values.toList()
+  fun hasRecovered(requestId: String): Boolean = recovered.containsKey(requestId)
+  fun status(current: SafDestinationRecord?): SafDestinationRecord? =
+    if (current == null) recovered.values.firstOrNull() else current.takeIf(SafDestinationRecord::isTerminal)
+
+  fun reconcile(
+    record: SafDestinationRecord,
+    nowMillis: Long,
+    save: (SafDestinationRecord) -> Unit,
+    prepare: (SafDestinationRecord) -> Boolean,
+    clear: (String) -> Boolean,
+    retainJournal: Boolean,
+  ): SafDestinationRecord? {
+    val terminal = reconciledSafDestination(record, owns(record.requestId), nowMillis) ?: return null
+    save(terminal)
+    if (!prepare(terminal)) return null
+    if (!retainJournal && !clear(terminal.requestId)) return null
+    recovered[terminal.requestId] = terminal
+    return terminal
+  }
+
+  fun acknowledge(requestId: String, current: SafDestinationRecord?, clear: (String) -> Boolean): Boolean {
+    if (!recovered.containsKey(requestId)) return false
+    if (current?.requestId == requestId && !clear(requestId)) return false
+    recovered.remove(requestId)
+    return true
+  }
+}
+
 internal fun acknowledgeSafDestinationExport(
   requestId: String,
   load: () -> SafDestinationRecord?,
@@ -281,21 +357,58 @@ internal fun acknowledgeSafDestinationExport(
     ?.takeIf { it.requestId == requestId && it.isTerminal() }
     ?: return false
   if (
-    requiresPublicationProof(record) &&
+    record.exportBound && record.copyStarted && requiresPublicationProof(record) &&
     !record.publicationPrerequisitesComplete
   ) return false
-  if (!prepare(record)) return false
+  if (record.exportBound && record.copyStarted && !prepare(record)) return false
   return clear(requestId)
 }
 
 internal fun interruptedSafDestinationWarnings(): List<String> =
   listOf("android-saf-provider-not-atomic", "partial-destination-may-remain")
 
+internal fun bindReservedSafDestination(
+  record: SafDestinationRecord,
+  requestId: String,
+  exportId: String,
+  nowMillis: Long,
+): SafDestinationRecord? {
+  if (!isCanonicalUuidV4(exportId) || record.requestId != requestId ||
+    !record.reservedDestination || record.copyStarted ||
+    record.phase != SafDestinationPhase.COPYING || record.destinationUri == null ||
+    (record.exportBound && record.jobId != exportId)) return null
+  return record.copy(jobId = exportId, exportId = exportId, exportBound = true, updatedAtMillis = nowMillis)
+}
+
+internal fun beginReservedSafCopy(
+  record: SafDestinationRecord,
+  requestId: String,
+  jobId: String,
+  exportId: String,
+  sourceKind: SafDestinationSourceKind,
+  nowMillis: Long,
+): SafDestinationRecord? {
+  if (!record.exportBound || record.sourceKind != sourceKind || !isCanonicalUuidV4(exportId)) return null
+  return bindReservedSafDestination(record, requestId, jobId, nowMillis)
+    ?.copy(copyStarted = true, exportId = exportId)
+}
+
+// A picker reservation proves access, not ownership of the returned document.
+internal fun interruptedSafDestinationWarnings(record: SafDestinationRecord): List<String> =
+  if (record.destinationUri == null) emptyList() else interruptedSafDestinationWarnings()
+
 private data class NullableString(val value: String?)
 private data class NullableLong(val value: Long?)
 
+private fun optionalBooleanField(json: String, name: String, default: Boolean): Boolean? =
+  if (json.contains("\"$name\"")) booleanField(json, name) else default
+
 private fun isValidRecord(record: SafDestinationRecord): Boolean {
   if (!isCanonicalUuidV4(record.requestId) || !isCanonicalUuidV4(record.exportId)) return false
+  if (record.jobId?.let { !isCanonicalUuidV4(it) } == true) return false
+  if (record.reservedDestination && record.exportBound && record.jobId == null) return false
+  if (!record.reservedDestination && (!record.exportBound || !record.copyStarted)) return false
+  if (!record.exportBound && (record.exportId != record.requestId || record.copyStarted)) return false
   if (record.updatedAtMillis < 0 || record.bytes?.let { it < 0 } == true) return false
   if (record.code?.let { !SAFE_CODE.matches(it) } == true) return false
   if (record.warningCodes.size > 16 || record.warningCodes.any { !SAFE_CODE.matches(it) }) return false

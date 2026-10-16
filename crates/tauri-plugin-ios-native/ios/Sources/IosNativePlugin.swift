@@ -346,6 +346,7 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
     private func sweepStaging() {
         guard !stagingSweepStarted, let staging = staging else { return }
         stagingSweepStarted = true
+        portableSources.sweepCopies(staging: staging)
         let manager = FileManager.default
         let receipts = staging.appendingPathComponent("receipts", isDirectory: true)
         var protected = Set<String>()
@@ -510,11 +511,15 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
         let args = try invoke.parseArgs(PortableSourceArgs.self)
         // Signal a running copy before queueing the descriptor and scope cleanup.
         _ = portableSources.cancelCopy(token: args.token, jobId: args.jobId)
-        fileQueue.async { invoke.resolve(self.portableSources.release(token: args.token, jobId: args.jobId)) }
+        if args.jobId == nil { invoke.resolve(portableSources.release(token: args.token, jobId: nil)) }
+        else { fileQueue.async { invoke.resolve(self.portableSources.release(token: args.token, jobId: args.jobId)) } }
     }
 
     @objc func portableSourceOrphans(_ invoke: Invoke) {
-        fileQueue.async { invoke.resolve(self.portableSources.orphanReceipts().map { $0.receipt }) }
+        fileQueue.async {
+            do { invoke.resolve(try self.portableSources.orphanReceipts().map { $0.receipt }) }
+            catch { invoke.reject("Backup source cleanup failed", code: "cleanup-failed") }
+        }
     }
     @objc func acknowledgePortableSourceOrphan(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(PortableSourceArgs.self)
@@ -533,7 +538,7 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
     @objc func discardBackupSource(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(PortableSourceArgs.self)
         _ = portableSources.cancelCopy(token: args.token, jobId: nil)
-        fileQueue.async { invoke.resolve(self.portableSources.release(token: args.token, jobId: nil)) }
+        invoke.resolve(portableSources.release(token: args.token, jobId: nil))
     }
 
     @objc func confirmPortableSourceFormat(_ invoke: Invoke) throws {
@@ -636,11 +641,7 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
         do {
             guard let staging = staging else { invoke.reject(rootUnavailable().localizedDescription); return }
             let file = try ownedFile(args.path, under: staging)
-            guard UUID(uuidString: file.deletingLastPathComponent().lastPathComponent) != nil,
-                  file.deletingLastPathComponent().deletingLastPathComponent() == staging.resolvingSymlinksInPath() else {
-                invoke.reject("Expected a staged import or export file"); return
-            }
-            try FileManager.default.removeItem(at: file.deletingLastPathComponent())
+            try NativeFileState.discardStagedFile(file, staging: staging)
             invoke.resolve()
         } catch { invoke.reject(error.localizedDescription) }
     }

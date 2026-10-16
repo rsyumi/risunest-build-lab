@@ -12,6 +12,9 @@ export default defineConfig(async (environment) => {
     typeof product === "function" ? await product(environment) : product;
   return mergeConfig(base, {
     root,
+    define: {
+      'import.meta.env.VITE_DEVICE_SMOKE_ROOT': JSON.stringify(process.env.RISUNEST_SMOKE_ROOT ?? null),
+    },
     plugins: [
       {
         name: "device-smoke-entry",

@@ -11,3 +11,12 @@ export function notifySyncBindingChanged(): void {
         try { listener() } catch { /* One view that fails to update does not stop the others. */ }
     }
 }
+
+const receiveListeners = new Set<() => void>()
+export function subscribeSyncReceiveCompleted(listener: () => void): () => void {
+    receiveListeners.add(listener)
+    return () => { receiveListeners.delete(listener) }
+}
+export function notifySyncReceiveCompleted(): void {
+    for (const listener of [...receiveListeners]) listener()
+}

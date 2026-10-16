@@ -22,6 +22,7 @@ pub(crate) struct RepairCandidate {
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "action", rename_all = "kebab-case")]
 pub(crate) enum RepairAction {
+    SelectFirstConversation { character_id: String },
     /// Removes one reference from the field that holds it. The stored bytes stay where they are.
     DropReference {
         owner: Owner,
@@ -46,6 +47,7 @@ impl RepairAction {
     /// The table a staged edit touches, for the preview's account of what changes.
     pub(crate) fn subject(&self) -> &str {
         match self {
+            Self::SelectFirstConversation { .. } => "character",
             Self::DropReference { owner, .. } => &owner.kind,
             Self::DropAlias { kind, .. } | Self::AdoptStoredPayload { kind, .. } => kind,
             Self::NormalizeRecords { table }
@@ -72,6 +74,7 @@ fn candidate(
 
 fn action_id(action: &RepairAction) -> String {
     match action {
+        RepairAction::SelectFirstConversation { .. } => "select-first-conversation".to_owned(),
         RepairAction::DropReference { .. } => "drop-reference".to_owned(),
         RepairAction::DropAlias { .. } => "drop-alias".to_owned(),
         RepairAction::AdoptStoredPayload { .. } => "adopt-stored-payload".to_owned(),
@@ -143,6 +146,12 @@ pub(crate) fn plan(result: &ScanResult) -> Vec<RepairCandidate> {
                 let Some(locator) = &finding.locator else {
                     continue;
                 };
+                if finding.owner.kind == "character" && locator.source_path == "$.chatPage" {
+                    candidates.push(candidate(index, RepairAction::SelectFirstConversation {
+                        character_id: finding.owner.id.clone(),
+                    }, true, false));
+                    continue;
+                }
                 candidates.push(candidate(
                     index,
                     RepairAction::DropReference {

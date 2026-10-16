@@ -113,6 +113,7 @@ vi.mock('./storage/persistentDataRuntime.svelte', () => ({
     activateCharacter: mocks.activateCharacter,
     acquireDestructiveReplacementFence: mocks.unexpectedNativeRuntimeAccess,
     capturePersistentMutationToken: mocks.unexpectedNativeRuntimeAccess,
+    getPersistentDataRuntime: mocks.unexpectedNativeRuntimeAccess,
     commitCharacterAddition: mocks.commitCharacterAddition,
     deactivateActiveWorkingSet: mocks.deactivateActiveWorkingSet,
     fencePersistentNavigation: mocks.fencePersistentNavigation,
@@ -272,9 +273,9 @@ describe('runtime chat identity', () => {
         const changed = await changeChar(0)
 
         expect(changed).toBe(true)
-        expect(mocks.activateCharacter).toHaveBeenCalledWith(first.chaId, {
+        expect(mocks.activateCharacter).toHaveBeenCalledWith(first.chaId, expect.objectContaining({
             normalize: expect.any(Function),
-        })
+        }))
     })
 
     it('publishes character navigation before yielding to the UI', async () => {
@@ -358,6 +359,33 @@ describe('runtime chat identity', () => {
         expect(mocks.alertToast).toHaveBeenCalledWith(language.navigationBlockedWhileEditingPaused)
         expect(mocks.alertError).not.toHaveBeenCalled()
         expect(get(navigationActivity)).toBeNull()
+    })
+
+    it.each([false, true])('reports exhausted activation only when navigation is current (superseded: %s)', async (superseded) => {
+        mocks.database.characters.push(createBlankChar())
+        let attempts = 0
+        mocks.activateCharacter.mockImplementation(async () => {
+            mocks.navigationGeneration++
+            if (++attempts === 2 && superseded) mocks.navigationGeneration++
+            return false
+        })
+        await expect(changeChar(0)).resolves.toBe(false)
+        expect(attempts).toBe(2)
+        if (superseded) expect(mocks.alertToast).not.toHaveBeenCalled()
+        else expect(mocks.alertToast).toHaveBeenCalledWith(language.characterSelectionFailed)
+    })
+
+    it.each([false, true])('reports internal activation retry exhaustion only while current (%s)', async (superseded) => {
+        mocks.database.characters.push(createBlankChar())
+        mocks.activateCharacter.mockImplementation(async (_id, options) => {
+            mocks.navigationGeneration += 4
+            options.onRetryExhausted(mocks.navigationGeneration)
+            if (superseded) mocks.navigationGeneration++
+            return false
+        })
+        await expect(changeChar(0)).resolves.toBe(false)
+        if (superseded) expect(mocks.alertToast).not.toHaveBeenCalled()
+        else expect(mocks.alertToast).toHaveBeenCalledWith(language.characterSelectionFailed)
     })
 
     it('normalizes navigation metadata without enumerating the selected chat body', async () => {
@@ -833,9 +861,9 @@ describe('character activation retry', () => {
 
         const older = changeChar(0)
         await vi.waitFor(() =>
-            expect(mocks.activateCharacter).toHaveBeenCalledWith(first.chaId, {
+            expect(mocks.activateCharacter).toHaveBeenCalledWith(first.chaId, expect.objectContaining({
                 normalize: expect.any(Function),
-            }),
+            })),
         )
         await expect(changeChar(1)).resolves.toBe(true)
         firstActivation.resolve(false)

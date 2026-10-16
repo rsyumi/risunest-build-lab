@@ -11,7 +11,6 @@ import java.io.ByteArrayInputStream
 import java.io.SequenceInputStream
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 
 internal data class PortableSelected(val ready: SafSpoolReady, val sourceType: String)
@@ -51,7 +50,6 @@ internal object PortableSourceNative {
     val bytes: Long,
     val cancelled: AtomicBoolean = AtomicBoolean(false),
     val copying: AtomicBoolean = AtomicBoolean(false),
-    val copied: CountDownLatch = CountDownLatch(1),
   )
   private val selected = ConcurrentHashMap<String, Owned>()
 
@@ -80,7 +78,7 @@ internal object PortableSourceNative {
             override val totalBytes: Long? = null
             override fun open(): InputStream = SequenceInputStream(ByteArrayInputStream(prefix, 0, count), input)
           }
-          val copied = store.spool(listOf(wrapped), isCancelled = { cancelled() || owner.isRetired() })
+          val copied = store.spool(listOf(wrapped), isCancelled = { cancelled() || owner.isRetired() }, restoreCopy = true)
           if (copied.failures.isNotEmpty() || copied.ready.size != 1) throw IOException(copied.failures.firstOrNull()?.code ?: "source-copy-failed")
           return PortableSelected(copied.ready.single(), "androidSpool")
         }
@@ -101,10 +99,12 @@ internal object PortableSourceNative {
   @JvmStatic fun releaseDescriptor(token: String): Boolean {
     val source = selected[token] ?: return true
     source.cancelled.set(true)
-    if (source.copying.get()) source.copied.await()
-    source.descriptor.close()
-    selected.remove(token, source)
-    source.owner.released(token)
+    // The copy owns its duplicate descriptor and removes its partial spool when it settles.
+    if (source.copying.get()) return true
+    if (selected.remove(token, source)) {
+      source.descriptor.close()
+      source.owner.released(token)
+    }
     return true
   }
 
@@ -130,12 +130,14 @@ internal object PortableSourceNative {
           override val totalBytes = source.bytes
           override fun open(): InputStream = input
         }
-        val copied = input.use { store.spool(listOf(wrapped), isCancelled = cancelled, onProgress = onProgress, delivered = true) }
+        val copied = input.use { store.spool(listOf(wrapped), isCancelled = cancelled, onProgress = onProgress, delivered = true, restoreCopy = true) }
         settlePortableSourceCopy(store, copied, verified = { verifyCopy(token) }, cancelled = cancelled)
       }
     } finally {
-      source.copied.countDown()
-      if (!discard(token)) batch = batch?.let { withdrawPortableSourceCopy(store, it, "cleanup-failed") }
+      source.copying.set(false)
+      val discarded = discard(token)
+      val released = releaseDescriptor(token)
+      if (!discarded || !released) batch = batch?.let { withdrawPortableSourceCopy(store, it, "cleanup-failed") }
     }
     return batch!!
   }

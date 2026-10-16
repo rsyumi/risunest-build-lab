@@ -63,6 +63,8 @@ export function createQrScanner(api: QrScanApi = pluginApi, view: QrScanView = o
             current = session
             let timer: ReturnType<typeof setTimeout> | undefined
             let hide: (() => void) | undefined
+            let timeout!: (error: QrScanError) => void
+            const timedOut = new Promise<never>((_, fail) => { timeout = fail })
             const work = async () => {
                 let permission: string = await api.checkPermissions()
                 if (session.stopped) throw new QrScanError('qr-scan-cancelled')
@@ -77,16 +79,14 @@ export function createQrScanner(api: QrScanApi = pluginApi, view: QrScanView = o
                     throw new QrScanError('qr-scan-cancelled')
                 }
                 hide = shown
+                timer = setTimeout(() => timeout(new QrScanError('qr-scan-timeout')), SCAN_TIMEOUT_MS)
                 const result = await api.scan({ formats: [Format.QRCode], windowed: true, cameraDirection: 'back' })
                 if (session.stopped) throw new QrScanError('qr-scan-cancelled')
                 if (result.format !== Format.QRCode) throw new QrScanError('qr-camera-unavailable')
                 return result.content
             }
             try {
-                const timeout = new Promise<never>((_, fail) => {
-                    timer = setTimeout(() => fail(new QrScanError('qr-scan-timeout')), SCAN_TIMEOUT_MS)
-                })
-                return await Promise.race([work(), stopped, timeout])
+                return await Promise.race([work(), stopped, timedOut])
             } catch (cause) {
                 throw scanError(cause)
             } finally {

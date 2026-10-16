@@ -11,6 +11,9 @@ import {
     loadV3Plugins,
     areV3PluginsIdle,
     prepareV3PluginsForReload,
+    fencePluginExecutionForAuthorityReplacement,
+    restartPluginsAfterAuthorityReplacement,
+    canInterruptV3Plugins,
 } from './v3.svelte'
 import { registerOwnedPluginMCP } from '../hostToolHost'
 import { requestChatDataMain } from '../../process/request/request'
@@ -19,13 +22,22 @@ import { additionalMessageButtons } from '../messageButtons.svelte'
 import { chatViewEvents } from '../chatViewHost.svelte'
 import { beginGenerationEndRun, noteGenerationStarted, type GenerationEndStatus } from '../../process/generationEnd'
 import { language } from 'src/lang'
+import { get } from 'svelte/store'
+import { configurePluginStartup, pluginStartupGate } from '../pluginStartupGate'
+import { registerSyncBindingTransport } from '../../storage/sync/bindingRegistry'
+import { createStoreStub } from '../../storage/persistentDataStore.testSupport'
+import type { NativeBlockRestoreRuntime } from '../../storage/nativeFileJobs'
 
 const mocks = vi.hoisted(() => ({
+    native: false,
+    realRestore: false,
+    invoke: vi.fn(),
     database: null as any,
     selectedId: 0,
     confirm: vi.fn(async () => true),
     permissionValues: new Map<string, unknown>(),
     providers: new Map<string, Function>(),
+    cancelReload: vi.fn(),
     patchConversation: vi.fn(async (): Promise<unknown> => ({ status: 'applied', revision: 4 })),
     listHostTools: vi.fn(async (_owner: string): Promise<unknown> => ({ scope: 'scope', tools: [] })),
     callHostTool: vi.fn(async (_owner: string, _request: unknown, _signal?: AbortSignal): Promise<unknown> => []),
@@ -35,7 +47,12 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('../plugins.svelte', async () => (await import('./v3Host.testSupport')).pluginsModule({
     pluginV2: { providers: mocks.providers, providerOptions: new Map() },
+    cancelPluginReloadAfterSync: mocks.cancelReload,
+    loadPluginsAfterAuthoritativeRestore: async () => {
+        if (mocks.realRestore) await (await vi.importActual<typeof import('../plugins.svelte')>('../plugins.svelte')).loadPluginsAfterAuthoritativeRestore()
+    },
 }))
+vi.mock('@tauri-apps/api/core', async original => ({ ...await original<object>(), invoke: mocks.invoke }))
 vi.mock('src/ts/storage/database.svelte', async () => (await import('./v3Host.testSupport')).databaseModule({
     read: () => mocks.database,
     write: (database) => { mocks.database = database },
@@ -53,7 +70,7 @@ vi.mock('src/ts/globalApi.svelte', () => ({
     checkCharOrder: vi.fn(), forageStorage: {}, getFetchLogs: vi.fn(),
 }))
 vi.mock('src/ts/gui/colorscheme', async () => (await import('./v3Host.testSupport')).colorschemeModule())
-vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule(() => ({ runtime: mocks.native ? 'tauri' : 'web', os: 'windows' })))
 vi.mock('src/ts/process/mcp/pluginmcp', async () => (await import('./v3Host.testSupport')).pluginMcpModule())
 vi.mock('src/ts/process/files/inlays', async () => (await import('./v3Host.testSupport')).inlaysModule())
 vi.mock('src/ts/translator/translator', async () => (await import('./v3Host.testSupport')).translatorModule())
@@ -197,9 +214,35 @@ async function startFixture(name = pluginName, script = fixtureScript): Promise<
     await guest(name, 'await globalThis.rpcReady; return true')
 }
 
+async function gatedRestoreFixture() {
+    mocks.native = true
+    mocks.realRestore = true
+    mocks.invoke.mockImplementation(async command => {
+        if (command === 'pds_lww_binding_state') return { target: {kind:'server',connectionId:'gated-fixture'}, targetAuthority:'1', selectionEpoch:'1', libraryId:'synthetic', progress:null }
+        if (command === 'pds_close_plugin_claim_eligibility') return
+        throw new Error(`Unexpected native command ${command}`)
+    })
+    const receives: Array<{signal:AbortSignal; resolve():void; reject(error:unknown):void}> = []
+    const unexpected = async (): Promise<never> => { throw new Error('Unexpected binding operation') }
+    const dispose = registerSyncBindingTransport({kind:'server',connectionId:'gated-fixture'}, {
+        inspectTarget:unexpected, pullAvailableState:unexpected, replaceFromTarget:unexpected,
+        publishInitialSharedState:unexpected, resumeBinding:unexpected, fenceOldJobs:unexpected,
+        receiveAvailableChanges: context => new Promise<void>((resolve,reject) => { receives.push({signal:context.signal,resolve,reject}) }),
+    })
+    const plugins = await vi.importActual<typeof import('../plugins.svelte')>('../plugins.svelte')
+    configurePluginStartup(() => true, () => plugins.loadPlugins())
+    mocks.database.plugins = [{name:'gated-successor',version:'3.0',enabled:true,script:'globalThis.rpcReady = Promise.resolve()',realArg:{},arguments:{},customLink:[],argMeta:{}}]
+    return {plugins,receives,dispose}
+}
+
 describe('Plugin v3 real iframe DOM/RPC bridge', () => {
     beforeEach(() => {
         vi.clearAllMocks()
+        mocks.native = false
+        mocks.realRestore = false
+        pluginStartupGate.invalidate()
+        pluginStartupGate.state.set({phase:'released',since:0})
+        configurePluginStartup(() => false, async () => {})
         doingChat.set(false)
         vi.stubGlobal('ImageBitmap', class {})
         const srcdocDescriptor = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'srcdoc')
@@ -241,6 +284,7 @@ function __postToParent(message) {
         })
         mocks.permissionValues.clear()
         mocks.providers.clear()
+        mocks.cancelReload.mockReset()
         guestEvaluations = []
         mocks.confirm.mockResolvedValue(true)
         mocks.selectedId = 0
@@ -254,6 +298,11 @@ function __postToParent(message) {
     })
 
     afterEach(async () => {
+        mocks.realRestore = false
+        mocks.native = false
+        pluginStartupGate.invalidate()
+        configurePluginStartup(() => false, async () => {})
+        await restartPluginsAfterAuthorityReplacement()
         await loadV3Plugins([])
         document.body.replaceChildren()
         vi.unstubAllEnvs()
@@ -459,6 +508,107 @@ function __postToParent(message) {
         `)
         await loadV3Plugins([])
         expect(dispose).toHaveBeenCalledOnce()
+    })
+
+    it('permits plugin reload after restore preparation fails', async () => {
+        mocks.cancelReload.mockImplementationOnce(() => { throw new Error('Synthetic preparation failure') })
+        await expect(fencePluginExecutionForAuthorityReplacement()).rejects.toThrow('Synthetic preparation failure')
+        expect(canInterruptV3Plugins()).toBe(true)
+        await startFixture('after-failed-restore')
+        expect(getV3PluginInstance('after-failed-restore')).toBeDefined()
+    })
+
+    it.each(['pre-aborted','preparation-failure'] as const)('restarts through the actual startup gate after %s and retries failed readiness', async failure => {
+        const h = await gatedRestoreFixture()
+        try {
+            await h.plugins.loadPlugins()
+            expect(h.receives).toHaveLength(1)
+            const controller = new AbortController()
+            if (failure === 'pre-aborted') controller.abort()
+            else mocks.cancelReload.mockImplementationOnce(() => { throw new Error('Synthetic preparation failure') })
+            await expect(fencePluginExecutionForAuthorityReplacement(controller.signal)).rejects.toThrow()
+            expect(h.receives[0].signal.aborted).toBe(true)
+            await restartPluginsAfterAuthorityReplacement()
+            expect(h.receives).toHaveLength(2)
+            h.receives[1].reject(new Error('Synthetic readiness failure'))
+            await vi.waitFor(() => expect(get(pluginStartupGate.state).phase).toBe('failed'))
+            expect(getV3PluginInstance('gated-successor')).toBeUndefined()
+            pluginStartupGate.retry()
+            await vi.waitFor(() => expect(h.receives).toHaveLength(3))
+            h.receives[2].resolve()
+            await vi.waitFor(() => expect(getV3PluginInstance('gated-successor')).toBeDefined())
+            const instance = getV3PluginInstance('gated-successor')
+            h.receives[0].resolve()
+            await Promise.resolve(); await Promise.resolve()
+            expect(getV3PluginInstance('gated-successor')).toBe(instance)
+        } finally { h.dispose() }
+    })
+
+    it('recovers a native preparation deadline through the real fence, restart and startup gate', async () => {
+        await startFixture('deadline-restore', `globalThis.rpcReady = risuai.onUnload(() => new Promise(resolve => { globalThis.finishCleanup = resolve; }));`)
+        const child = getV3PluginInstance('deadline-restore')!.host
+        const h = await gatedRestoreFixture()
+        mocks.invoke.mockImplementation(async command => {
+            if (command === 'pds_lww_binding_state') return {target:{kind:'none'},targetAuthority:'1',selectionEpoch:'1',libraryId:null,progress:null}
+            if (command === 'pds_close_plugin_claim_eligibility') return
+            throw new Error(`Unexpected native command ${command}`)
+        })
+        const unexpected = (): never => { throw new Error('Replacement must not be submitted') }
+        const runtime = {
+            capturePersistentMutationToken:async()=>({revision:1,mutationGeneration:0}),
+            acquireDestructiveReplacementFence:unexpected, withPausedPersistentWrites:unexpected,
+            beginActivatedLibraryGuard:unexpected, refreshActivatedLibraryUnderPause:unexpected,
+            markCommittedWorkingSetRefreshRequired:unexpected, setActivatedLibraryRecoveryLifecycle:unexpected,
+            getStorageAuthorityEpoch:()=>0, store:createStoreStub({}),
+        } satisfies NativeBlockRestoreRuntime
+        const deadlines = new Set<() => void>()
+        let cancelled = false
+        const commands: string[] = []
+        const {runNativeBlockRisuSaveRestore} = await import('../../storage/nativeFileJobs')
+        try {
+            const restore = runNativeBlockRisuSaveRestore(runtime,{type:'desktopPath',path:'synthetic.risudat'},{firstRun:true},{
+                isTauri:()=>true, wait:async()=>{},
+                restoreClock:{schedule(_milliseconds,callback){deadlines.add(callback);return()=>{deadlines.delete(callback)}}},
+                invoke:async command=>{
+                    commands.push(command)
+                    if(command==='native_file_job_start') return {jobId:'deadline-job'}
+                    if(command==='native_file_job_status') return {kind:'restore-block-risu-save',state:cancelled?'cancelled':'waitingForInput',phase:cancelled?'cancelled':'awaiting-activation'}
+                    if(command==='native_file_job_cancel'){cancelled=true;return {outcome:'requested'}}
+                    if(command==='native_file_job_forget')return true
+                    throw new Error(`Unexpected native command ${command}`)
+                },
+            })
+            const outcome = expect(restore).rejects.toMatchObject({code:'restore-control-timeout'})
+            await vi.waitFor(async()=>expect(await child.executeInIframe('return typeof globalThis.finishCleanup')).toBe('function'))
+            for(const expire of [...deadlines]) expire()
+            await vi.waitFor(()=>expect(cancelled).toBe(true))
+            await child.executeInIframe('globalThis.finishCleanup(); return true')
+            await outcome
+            await vi.waitFor(()=>expect(getV3PluginInstance('gated-successor')).toBeDefined())
+            expect(commands).not.toContain('native_file_job_finalize')
+            expect(get(pluginStartupGate.state).phase).toBe('released')
+        } finally { h.dispose() }
+    })
+
+    it('cancels a stalled restore fence without letting late teardown erase the next plugin load', async () => {
+        await startFixture('cancelled-restore', `globalThis.rpcReady = risuai.onUnload(() => new Promise(resolve => { globalThis.finishCleanup = resolve; }));`)
+        const child = getV3PluginInstance('cancelled-restore')!.host
+        const controller = new AbortController()
+        const fencing = fencePluginExecutionForAuthorityReplacement(controller.signal)
+        const cancelled = expect(fencing).rejects.toMatchObject({name:'AbortError'})
+        await vi.waitFor(async () => expect(await child.executeInIframe('return typeof globalThis.finishCleanup')).toBe('function'))
+        const h = await gatedRestoreFixture()
+        controller.abort()
+        expect(canInterruptV3Plugins()).toBe(true)
+        try {
+            await restartPluginsAfterAuthorityReplacement()
+            expect(h.receives).toHaveLength(1)
+            h.receives[0].resolve()
+            await child.executeInIframe('globalThis.finishCleanup(); return true')
+            await cancelled
+            await vi.waitFor(() => expect(getV3PluginInstance('gated-successor')).toBeDefined())
+            expect(getV3PluginInstance('cancelled-restore')).toBeUndefined()
+        } finally { h.dispose() }
     })
 
     it('serializes overlapping reloads and invokes guest cleanup once', async () => {

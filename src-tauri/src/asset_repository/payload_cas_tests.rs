@@ -10,6 +10,7 @@ const RACE_ROOT_ENV: &str = "RISUNEST_CAS_RACE_ROOT";
 const RACE_START_ENV: &str = "RISUNEST_CAS_RACE_START";
 const RACE_READY_ENV: &str = "RISUNEST_CAS_RACE_READY";
 const RACE_RESULT_ENV: &str = "RISUNEST_CAS_RACE_RESULT";
+const RACE_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn import_payload(root: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     use std::io::Write;
@@ -502,9 +503,9 @@ fn cross_process_publish_race_creates_exactly_one_object() {
         result_paths.push(result);
     }
 
-    wait_for_paths(&ready_paths, "race children readiness");
+    wait_for_race_children(&mut children, Some(&ready_paths), RACE_WAIT_TIMEOUT);
     std::fs::write(&start, b"start").expect("release race children");
-    wait_for_children(children);
+    wait_for_race_children(&mut children, None, RACE_WAIT_TIMEOUT);
 
     let results = result_paths
         .iter()
@@ -529,14 +530,50 @@ fn cross_process_publish_race_creates_exactly_one_object() {
     );
 }
 
+struct RaceChild {
+    process: Child,
+    stdout: PathBuf,
+    stderr: PathBuf,
+}
+
+impl RaceChild {
+    fn stop(&mut self) {
+        if !matches!(self.process.try_wait(), Ok(Some(_))) {
+            let _ = self.process.kill();
+        }
+        let _ = self.process.wait();
+    }
+
+    fn diagnostic(&mut self) -> String {
+        let status = self.process.try_wait();
+        self.stop();
+        format!(
+            "race child pid={} status before cleanup={status:?}\nstdout:\n{}\nstderr:\n{}",
+            self.process.id(),
+            std::fs::read_to_string(&self.stdout)
+                .unwrap_or_else(|error| format!("cannot read stdout: {error}")),
+            std::fs::read_to_string(&self.stderr)
+                .unwrap_or_else(|error| format!("cannot read stderr: {error}")),
+        )
+    }
+}
+
+impl Drop for RaceChild {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 fn spawn_race_child(
     executable: &Path,
     repository_root: OsString,
     start: &Path,
     ready: &Path,
     result: &Path,
-) -> Child {
-    Command::new(executable)
+) -> RaceChild {
+    let stdout = ready.with_extension("stdout");
+    let stderr = ready.with_extension("stderr");
+    let process = Command::new(executable)
         .arg("asset_repository::payload_cas_tests::cross_process_publish_child")
         .arg("--exact")
         .arg("--nocapture")
@@ -544,19 +581,24 @@ fn spawn_race_child(
         .env(RACE_START_ENV, start)
         .env(RACE_READY_ENV, ready)
         .env(RACE_RESULT_ENV, result)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::from(
+            std::fs::File::create(&stdout).expect("create race child stdout"),
+        ))
+        .stderr(Stdio::from(
+            std::fs::File::create(&stderr).expect("create race child stderr"),
+        ))
         .spawn()
-        .expect("spawn race child")
+        .expect("spawn race child");
+    RaceChild {
+        process,
+        stdout,
+        stderr,
+    }
 }
 
 fn wait_for_path(path: &Path, description: &str) {
-    wait_for_paths(&[path.to_path_buf()], description);
-}
-
-fn wait_for_paths(paths: &[PathBuf], description: &str) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !paths.iter().all(|path| path.exists()) {
+    let deadline = Instant::now() + RACE_WAIT_TIMEOUT;
+    while !path.exists() {
         assert!(
             Instant::now() < deadline,
             "timed out waiting for {description}"
@@ -565,14 +607,54 @@ fn wait_for_paths(paths: &[PathBuf], description: &str) {
     }
 }
 
-fn wait_for_children(children: Vec<Child>) {
-    for child in children {
-        let output = child.wait_with_output().expect("wait for race child");
-        assert!(
-            output.status.success(),
-            "race child failed:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
+fn wait_for_race_children(
+    children: &mut [RaceChild],
+    ready_paths: Option<&[PathBuf]>,
+    timeout: Duration,
+) {
+    let description = if ready_paths.is_some() {
+        "race children readiness"
+    } else {
+        "race children completion"
+    };
+    let deadline = Instant::now() + timeout;
+    loop {
+        let mut completed = 0;
+        let mut failure = None;
+        for (index, child) in children.iter_mut().enumerate() {
+            match child.process.try_wait() {
+                Ok(Some(status)) if ready_paths.is_some() || !status.success() => {
+                    failure = Some(format!(
+                        "race child {index} exited with {status} while waiting for {description}"
+                    ));
+                    break;
+                }
+                Ok(Some(_)) => completed += 1,
+                Ok(None) => {}
+                Err(error) => {
+                    failure = Some(format!("cannot check race child {index}: {error}"));
+                    break;
+                }
+            }
+        }
+        if failure.is_none() {
+            if ready_paths.map_or(completed == children.len(), |paths| {
+                paths.iter().all(|path| path.exists())
+            }) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                failure = Some(format!("timed out waiting for {description}"));
+            }
+        }
+        if let Some(failure) = failure {
+            let diagnostics = children
+                .iter_mut()
+                .map(RaceChild::diagnostic)
+                .collect::<Vec<_>>()
+                .join("\n");
+            panic!("{failure}\n{diagnostics}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }

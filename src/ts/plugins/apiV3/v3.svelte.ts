@@ -1,3 +1,6 @@
+import { pluginStartupGate } from '../pluginStartupGate'
+import { createPluginDeviceKeyspace } from '../pluginDeviceKeyspace'
+import type { PluginOwnerStorage } from '../pluginStorageStore'
 import { Mutex } from "src/ts/mutex";
 import { allowedDbKeys, customProviderStore, getV2PluginAPIs, handlePluginInstallViaPlugin, pluginStorageStore, pluginV2, type PluginV2ProviderArgument, type PluginV2ProviderOptions, type RisuPlugin } from "../plugins.svelte";
 import { SandboxHost } from "./factory";
@@ -110,9 +113,7 @@ const documentEventListeners: Array<{
 // makes can widen past its own rows.
 const pluginDatabaseAccessByOwner = new Map<string, PluginDatabaseAccess>()
 
-function getPluginDatabaseAccess(owner: string): PluginDatabaseAccess {
-    const existing = pluginDatabaseAccessByOwner.get(owner)
-    if (existing) return existing
+function getPluginDatabaseAccess(owner: string, storage: PluginOwnerStorage): PluginDatabaseAccess {
     const access = createProductionPluginDatabaseAccess({
         owner,
         getPersistentRevision,
@@ -131,7 +132,8 @@ function getPluginDatabaseAccess(owner: string): PluginDatabaseAccess {
             console.warn('Plugin full-object identity replacement rejected', diagnostic)
         },
         getNavigationGeneration: getPersistentNavigationGeneration,
-        readPluginStorageSnapshot: () => pluginStorageStore.forOwner(owner).snapshot(),
+        storageObservation: storage.observation,
+        readPluginStorageSnapshot: () => storage.snapshot(),
         prepareAuthoritativeDatabaseUpdate: async (database) => {
             if (!Object.prototype.hasOwnProperty.call(database, 'plugins')) return database
             return {
@@ -761,9 +763,10 @@ const makeRisuaiAPIV3 = (
     // Every storage entry point below is bound to this plugin's name, which the
     // host reads from the installed banner. The guest cannot reach the binding.
     const ownedPluginStorage = pluginStorageStore.forOwner(plugin.name)
-    const ownedSafeLocalStorage = new SafeLocalStorage(plugin.name)
+    const ownedDeviceStorage = createPluginDeviceKeyspace(plugin.name)
+    const ownedSafeLocalStorage = new SafeLocalStorage(plugin.name, ownedDeviceStorage)
     const pluginLifetime = new AbortController()
-    const databaseAccess = getPluginDatabaseAccess(plugin.name)
+    const databaseAccess = getPluginDatabaseAccess(plugin.name, ownedPluginStorage)
     const permissionContext: PluginPermissionContext = {
         name: plugin.name,
         hash: hasher(new TextEncoder().encode(plugin.script)),
@@ -794,6 +797,8 @@ const makeRisuaiAPIV3 = (
     addPluginUnloadCallback(plugin.name, () => {
         pluginLifetime.abort()
         databaseAccess.closeReadBaselines?.()
+        ownedPluginStorage.dispose()
+        ownedDeviceStorage.dispose()
     })
     return {
 
@@ -1446,7 +1451,7 @@ const makeRisuaiAPIV3 = (
             }
         },
         getLocalPluginStorage: () => {
-            return new SafeLocalPluginStorage(plugin.name)
+            return new SafeLocalPluginStorage(plugin.name, ownedDeviceStorage)
         },
         checkCharOrder: checkCharOrder,
         requestPluginPermission: (permission:string) => {
@@ -1746,6 +1751,7 @@ const v3PluginInstances: V3PluginInstance[] = [];
 const pluginActivityListeners = new Set<() => void>();
 const pluginLoadMutex = new Mutex();
 let authorityReplacementFenced = false;
+let authorityReplacementFenceGeneration = 0;
 
 function notifyPluginActivity(): void {
     for (const listener of pluginActivityListeners) listener();
@@ -1773,14 +1779,26 @@ export function prepareV3PluginsForReload(interrupt = false): boolean {
     return true;
 }
 
-export async function fencePluginExecutionForAuthorityReplacement(): Promise<void> {
+export async function fencePluginExecutionForAuthorityReplacement(signal?: AbortSignal): Promise<void> {
+    const generation = ++authorityReplacementFenceGeneration;
+    const isCurrent = () => generation === authorityReplacementFenceGeneration && !signal?.aborted;
+    const cancel = () => { if (generation === authorityReplacementFenceGeneration) authorityReplacementFenced = false; };
     authorityReplacementFenced = true;
-    const { cancelPluginReloadAfterSync } = await import('../plugins.svelte');
-    cancelPluginReloadAfterSync();
-    for (const access of pluginDatabaseAccessByOwner.values()) access.expireReadBaselines?.()
-    await loadV3Plugins([])
-    for (const access of pluginDatabaseAccessByOwner.values()) access.closeReadBaselines?.()
-    pluginDatabaseAccessByOwner.clear()
+    pluginStartupGate.invalidate();
+    signal?.addEventListener('abort', cancel, {once:true});
+    try {
+        const { cancelPluginReloadAfterSync } = await import('../plugins.svelte');
+        if (!isCurrent()) throw new DOMException('Plugin preparation cancelled', 'AbortError');
+        cancelPluginReloadAfterSync();
+        for (const access of pluginDatabaseAccessByOwner.values()) access.expireReadBaselines?.()
+        await loadV3Plugins([], isCurrent)
+        if (!isCurrent()) throw new DOMException('Plugin preparation cancelled', 'AbortError');
+        for (const access of pluginDatabaseAccessByOwner.values()) access.closeReadBaselines?.()
+        pluginDatabaseAccessByOwner.clear()
+    } catch (error) {
+        cancel();
+        throw error;
+    } finally { signal?.removeEventListener('abort', cancel); }
 }
 
 export async function invalidatePluginCachesAfterAuthorityReplacement(): Promise<void> {
@@ -1790,14 +1808,15 @@ export async function invalidatePluginCachesAfterAuthorityReplacement(): Promise
 }
 
 export async function restartPluginsAfterAuthorityReplacement(): Promise<void> {
+    authorityReplacementFenceGeneration++;
     authorityReplacementFenced = false;
     const {loadPluginsAfterAuthoritativeRestore} = await import('../plugins.svelte')
     await loadPluginsAfterAuthoritativeRestore()
 }
 
-export async function loadV3Plugins(plugins:RisuPlugin[], isCurrent: () => boolean = () => true){
-    await pluginLoadMutex.runExclusive(async () => {
-        if (!isCurrent()) return;
+export async function loadV3Plugins(plugins:RisuPlugin[], isCurrent: () => boolean = () => true): Promise<boolean> {
+    return await pluginLoadMutex.runExclusive(async () => {
+        if (!isCurrent()) return false;
         const instancesToUnload = [...v3PluginInstances];
         await Promise.all(instancesToUnload.map(async (instance) => {
             await unloadV3Plugin(instance.name);
@@ -1808,13 +1827,16 @@ export async function loadV3Plugins(plugins:RisuPlugin[], isCurrent: () => boole
         }
         documentEventListeners.length = 0;
 
-        if (!isCurrent() || authorityReplacementFenced) return;
-        const loadPromises = plugins.map(plugin => executePluginV3(plugin));
+        if (!isCurrent() || authorityReplacementFenced) return false;
+        const current = () => isCurrent() && !authorityReplacementFenced;
+        const loadPromises = plugins.map(plugin => executePluginV3(plugin, current));
         await Promise.all(loadPromises);
+        return current();
     });
 }
 
-export async function executePluginV3(plugin:RisuPlugin){
+export async function executePluginV3(plugin:RisuPlugin, isCurrent: () => boolean = () => true){
+    if (!isCurrent() || authorityReplacementFenced) return;
 
     const alreadyRunning = v3PluginInstances.find(p => p.name === plugin.name);
     if(alreadyRunning){
@@ -1846,6 +1868,7 @@ export async function executePluginV3(plugin:RisuPlugin){
         host.onScriptSettled(closeClaimSession);
         addPluginUnloadCallback(plugin.name, closeClaimSession);
     }
+    if (!isCurrent() || authorityReplacementFenced) { await unloadV3Plugin(plugin.name); return; }
     host.run(iframe, plugin.script, plugin.name);
     console.log(`[RisuAI Plugin: ${plugin.name}] Loaded API V3 plugin.`);
 }

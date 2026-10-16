@@ -2,6 +2,8 @@
   import { tooltipRight } from "src/ts/gui/tooltip";
   import { observeNearViewport } from "src/ts/ui/observeNearViewport";
 
+  import type { RepresentativeImageList } from "src/ts/ui/representativeImagePriority";
+
   type ImageSource = string | Promise<string> | (() => string | Promise<string>);
 
   interface Props {
@@ -18,6 +20,8 @@
         currentTarget: EventTarget & HTMLDivElement;
     }) => any
     chaId?: string;
+    imagePriority?: RepresentativeImageList;
+    imageReference?: string;
   }
 
   let {
@@ -31,11 +35,16 @@
     backgroundimg = '',
     children,
     oncontextmenu,
-    chaId
+    chaId,
+    imagePriority,
+    imageReference
   }: Props = $props();
 
   let avatarElement: HTMLSpanElement | null = $state(null);
   let sourceVisible = $state(false);
+  $effect(() => {
+    if (avatarElement && imagePriority) return imagePriority.observe(avatarElement, imageReference);
+  });
   let resolvedSrc = $derived.by(() => {
     if (typeof src !== 'function') return src;
     if (!sourceVisible) return '';

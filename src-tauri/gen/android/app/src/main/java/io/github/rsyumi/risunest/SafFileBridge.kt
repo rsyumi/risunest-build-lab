@@ -2,6 +2,7 @@ package io.github.rsyumi.risunest
 
 import android.system.Os
 import android.system.OsConstants
+import android.system.ErrnoException
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -18,7 +19,18 @@ private const val SPOOL_OWNERSHIP_FORMAT = "risunest-android-saf-spool"
 private const val SPOOL_STAGING_PREFIX = ".spooling-"
 private const val SPOOL_CLEANUP_PREFIX = ".cleanup-"
 private const val SPOOL_DELIVERY_MARKER = "delivered"
+private const val SPOOL_RESTORE_COPY_MARKER = "restore-copy"
 internal const val SPOOL_INTERRUPTED_CODE = "import-interrupted"
+
+internal fun spoolWriteFailureCode(error: Throwable): String {
+  var cause: Throwable? = error
+  val seen = mutableSetOf<Throwable>()
+  while (cause != null && seen.add(cause)) {
+    if (cause is ErrnoException && (cause.errno == OsConstants.ENOSPC || cause.errno == OsConstants.EDQUOT)) return "storage-full"
+    cause = cause.cause
+  }
+  return "spool-write-failed"
+}
 private val BACKUP_SOURCE_SUFFIXES = listOf(
   ".risunest",
   ".risudat",
@@ -125,9 +137,21 @@ internal data class SafSpoolBatch(
 
 internal fun interface SafAtomicPublisher {
   fun publish(temporary: File, target: File)
+  fun createDirectory(directory: File, parents: Boolean) {
+    val created = if (parents) directory.mkdirs() else directory.mkdir()
+    if (!created && !(parents && directory.isDirectory)) throw IOException("SAF spool directory cannot be created")
+  }
 }
 
 internal object AndroidSafAtomicPublisher : SafAtomicPublisher {
+  override fun createDirectory(directory: File, parents: Boolean) {
+    if (parents) directory.parentFile?.takeUnless { it.isDirectory }?.let { createDirectory(it, true) }
+    try {
+      Os.mkdir(directory.absolutePath, 448)
+    } catch (error: ErrnoException) {
+      if (!(parents && error.errno == OsConstants.EEXIST && directory.isDirectory)) throw error
+    }
+  }
   override fun publish(temporary: File, target: File) {
     Os.rename(temporary.absolutePath, target.absolutePath)
     val directory = Os.open(
@@ -167,8 +191,8 @@ internal class SafSpoolStore(
     isCancelled: () -> Boolean = { false },
     onProgress: (SafSpoolProgress) -> Unit = {},
     delivered: Boolean = false,
+    restoreCopy: Boolean = false,
   ): SafSpoolBatch {
-    root.mkdirs()
     val ready = mutableListOf<SafSpoolReady>()
     val existing = listReady().filter { it.operationId != null }.associateBy { it.operationId }
     val failures = mutableListOf<SafSpoolFailure>()
@@ -189,9 +213,8 @@ internal class SafSpoolStore(
       val ownedDirectory = root.resolve(token)
       val stagingDirectory = root.resolve("$SPOOL_STAGING_PREFIX$token")
       try {
-        if (!stagingDirectory.mkdir()) {
-          throw SafSpoolException("spool-create-failed", "SAF spool directory cannot be created")
-        }
+        atomicPublisher.createDirectory(root, true)
+        atomicPublisher.createDirectory(stagingDirectory, false)
         writeOwnership(stagingDirectory, token, nowMillis())
         writeManifest(
           stagingDirectory,
@@ -221,7 +244,8 @@ internal class SafSpoolStore(
           operationId = source.operationId,
         )
         // A spool handed straight to a request is never offered again as a new import.
-        if (delivered) writeDurableJson(stagingDirectory, SPOOL_DELIVERY_MARKER, "{}", "SAF spool delivery marker")
+        if (delivered || restoreCopy) writeDurableJson(stagingDirectory, SPOOL_DELIVERY_MARKER, "{}", "SAF spool delivery marker")
+        if (restoreCopy) writeDurableJson(stagingDirectory, SPOOL_RESTORE_COPY_MARKER, "{}", "SAF restore copy marker")
         atomicPublisher.publish(stagingDirectory, ownedDirectory)
         ready.add(SafSpoolReady(
           token,
@@ -238,7 +262,7 @@ internal class SafSpoolStore(
       } catch (error: Exception) {
         deleteGeneratedDirectory(stagingDirectory, token)
         deleteGeneratedDirectory(ownedDirectory, token)
-        failures.add(SafSpoolFailure(displayName, "spool-write-failed"))
+        failures.add(SafSpoolFailure(displayName, spoolWriteFailureCode(error)))
       }
     }
     return SafSpoolBatch(ready, failures)
@@ -342,6 +366,9 @@ internal class SafSpoolStore(
   fun isDelivered(token: String): Boolean =
     ownedReadyDirectory(token)?.resolve(SPOOL_DELIVERY_MARKER)?.isFile == true
 
+  fun isRestoreCopy(token: String): Boolean =
+    ownedReadyDirectory(token)?.resolve(SPOOL_RESTORE_COPY_MARKER)?.isFile == true
+
   private fun ownedReadyDirectory(token: String): File? {
     if (!isCanonicalUuidV4(token) || !root.isDirectory) return null
     val canonicalRoot = runCatching { root.canonicalFile }.getOrNull() ?: return null
@@ -370,7 +397,10 @@ internal class SafSpoolStore(
     var copiedBytes = 0L
     try {
       input.use { openedInput ->
-        FileOutputStream(target).use { output ->
+        val openedOutput = try { FileOutputStream(target) } catch (error: Exception) {
+          throw SafSpoolException(spoolWriteFailureCode(error), "SAF spool cannot be opened", error)
+        }
+        openedOutput.use { output ->
           val buffer = ByteArray(bufferBytes)
           while (true) {
             checkCancellation(isCancelled)
@@ -385,7 +415,7 @@ internal class SafSpoolStore(
             try {
               output.write(buffer, 0, bytesRead)
             } catch (error: Exception) {
-              throw SafSpoolException("spool-write-failed", "SAF spool cannot be written", error)
+              throw SafSpoolException(spoolWriteFailureCode(error), "SAF spool cannot be written", error)
             }
             copiedBytes += bytesRead
             onProgress(SafSpoolProgress(token, copiedBytes, source.totalBytes))
@@ -395,7 +425,7 @@ internal class SafSpoolStore(
             output.flush()
             output.fd.sync()
           } catch (error: Exception) {
-            throw SafSpoolException("spool-write-failed", "SAF spool cannot be flushed", error)
+            throw SafSpoolException(spoolWriteFailureCode(error), "SAF spool cannot be flushed", error)
           }
         }
       }
@@ -452,7 +482,7 @@ internal class SafSpoolStore(
       atomicPublisher.publish(temporary, target)
     } catch (error: Exception) {
       temporary.delete()
-      throw SafSpoolException("spool-write-failed", "$label cannot be written", error)
+      throw SafSpoolException(spoolWriteFailureCode(error), "$label cannot be written", error)
     }
   }
 
@@ -478,6 +508,8 @@ internal class SafSpoolStore(
       "ownership.json",
       "$SPOOL_DELIVERY_MARKER.tmp",
       SPOOL_DELIVERY_MARKER,
+      "$SPOOL_RESTORE_COPY_MARKER.tmp",
+      SPOOL_RESTORE_COPY_MARKER,
       "claim.lock",
     )) {
       val file = canonicalDirectory.resolve(name)
@@ -528,8 +560,9 @@ internal fun replayReadySpoolBatch(store: SafSpoolStore, handedOff: Set<String>)
     if (!store.isDelivered(spool.token)) {
       ready += spool
     } else if (spool.token !in handedOff) {
+      val restoreCopy = store.isRestoreCopy(spool.token)
       val code = if (store.discardReady(spool.token)) SPOOL_INTERRUPTED_CODE else "cleanup-failed"
-      failures += SafSpoolFailure(spool.displayName, code)
+      if (!restoreCopy || code == "cleanup-failed") failures += SafSpoolFailure(spool.displayName, code)
     }
   }
   return SafSpoolBatch(ready, failures)
@@ -561,7 +594,9 @@ internal suspend fun copySafDestinationOnIo(
   val baseWarnings = listOf("android-saf-provider-not-atomic")
   var copiedBytes = 0L
   try {
+    checkDestinationCancellation(isCancelled, baseWarnings)
     openSource().use { input ->
+      checkDestinationCancellation(isCancelled, baseWarnings)
       openDestination().use { output ->
         val buffer = ByteArray(bufferBytes)
         while (true) {
@@ -602,11 +637,12 @@ internal suspend fun copySafDestinationOnIo(
 private class ManagedHandoffKind(
   val nameRegex: Regex,
   val sourceKind: SafDestinationSourceKind,
+  val publicationPrerequisitesComplete: Boolean = false,
   val fileNamesFor: (String) -> List<String>,
 )
 
 private val MANAGED_HANDOFF_KINDS = listOf(
-  ManagedHandoffKind(MANAGED_RAW_RECOVERY_NAME, SafDestinationSourceKind.RISU_SAVE) { id ->
+  ManagedHandoffKind(MANAGED_RAW_RECOVERY_NAME, SafDestinationSourceKind.RISU_SAVE, true) { id ->
     listOf("risunest-rescue-$id.risunest-rescue.zip")
   },
   ManagedHandoffKind(MANAGED_PORTABLE_BACKUP_NAME, SafDestinationSourceKind.RISU_SAVE) { id ->
@@ -615,16 +651,16 @@ private val MANAGED_HANDOFF_KINDS = listOf(
   ManagedHandoffKind(MANAGED_LEGACY_BACKUP_NAME, SafDestinationSourceKind.LEGACY_BACKUP) { id ->
     listOf("risu-backup-$id.bin")
   },
-  ManagedHandoffKind(MANAGED_CHARACTER_CHARX_NAME, SafDestinationSourceKind.RISU_SAVE) { id ->
+  ManagedHandoffKind(MANAGED_CHARACTER_CHARX_NAME, SafDestinationSourceKind.RISU_SAVE, true) { id ->
     listOf("risu-charx-$id.charx", "risu-charx-$id.jpeg")
   },
-  ManagedHandoffKind(MANAGED_CHARACTER_CARD_NAME, SafDestinationSourceKind.RISU_SAVE) { id ->
+  ManagedHandoffKind(MANAGED_CHARACTER_CARD_NAME, SafDestinationSourceKind.RISU_SAVE, true) { id ->
     listOf("risu-character-card-$id.json", "risu-character-card-$id.png")
   },
-  ManagedHandoffKind(MANAGED_RISU_MODULE_NAME, SafDestinationSourceKind.RISU_SAVE) { id ->
+  ManagedHandoffKind(MANAGED_RISU_MODULE_NAME, SafDestinationSourceKind.RISU_SAVE, true) { id ->
     listOf("risu-module-$id.risum")
   },
-  ManagedHandoffKind(MANAGED_DATASET_NAME, SafDestinationSourceKind.RISU_SAVE) { id ->
+  ManagedHandoffKind(MANAGED_DATASET_NAME, SafDestinationSourceKind.RISU_SAVE, true) { id ->
     listOf("risu-dataset-$id.json")
   },
   ManagedHandoffKind(MANAGED_DOWNLOAD_NAME, SafDestinationSourceKind.DOWNLOAD) { id ->
@@ -708,6 +744,9 @@ internal fun managedExportSourceKind(source: File): SafDestinationSourceKind = w
     ?: SafDestinationSourceKind.RISU_SAVE
 }
 
+internal fun managedExportHasNoPublicationPrerequisites(source: File): Boolean =
+  MANAGED_HANDOFF_KINDS.firstOrNull { it.nameRegex.matches(source.name) }?.publicationPrerequisitesComplete == true
+
 internal fun resolveManagedExportById(appDataRoot: File, exportId: String): File? {
   if (!isCanonicalUuidV4(exportId)) return null
   val source = appDataRoot.resolve("persistent/exports/risusave-$exportId.risudat")
@@ -743,6 +782,21 @@ internal fun prepareManagedExportAcknowledgement(
   val directory = appDataRoot.resolve("native-file-jobs/screenshot-output/$exportId")
   if (!directory.exists()) return true
   return discardManagedScreenshotSource(appDataRoot, exportId)
+}
+
+internal fun prepareRecoveredRisuSaveAcknowledgement(appDataRoot: File, exportId: String): Boolean {
+  if (!isCanonicalUuidV4(exportId)) return false
+  val source = appDataRoot.resolve("persistent/exports/risusave-$exportId.risudat")
+  val ownership = source.parentFile!!.resolve("risusave-$exportId.lease")
+  if (source.exists()) {
+    val owned = resolveManagedRisuSaveSource(appDataRoot, source.path) ?: return false
+    if (!owned.delete()) return false
+  }
+  if (!ownership.exists()) return true
+  if (!ownership.isFile || ownership.length() > 4_096 ||
+    stringField(runCatching { ownership.readText(Charsets.UTF_8) }.getOrNull() ?: return false, "exportId") != exportId
+  ) return false
+  return ownership.delete()
 }
 
 internal fun requiresRisuSavePublicationProof(
@@ -984,6 +1038,7 @@ internal fun androidSafDestinationScript(
   message: String? = null,
   warningCodes: List<String>,
   publicationPrerequisitesComplete: Boolean = false,
+  copyStarted: Boolean = true,
 ): String {
   val detail = androidSafDestinationJson(
     requestId,
@@ -995,6 +1050,7 @@ internal fun androidSafDestinationScript(
     message,
     warningCodes,
     publicationPrerequisitesComplete,
+    copyStarted,
   )
   return "window.tauriAndroidSafDestinationResult=$detail;" +
     "window.dispatchEvent(new CustomEvent('risu-android-saf-destination',{detail:$detail}));"
@@ -1010,6 +1066,7 @@ internal fun androidSafDestinationJson(
   message: String? = null,
   warningCodes: List<String>,
   publicationPrerequisitesComplete: Boolean = false,
+  copyStarted: Boolean = true,
 ): String {
   val warnings = warningCodes.joinToString(",") { jsonString(it) }
   return "{" +
@@ -1021,7 +1078,8 @@ internal fun androidSafDestinationJson(
     "\"code\":${code?.let(::jsonString) ?: "null"}," +
     "\"message\":${message?.let(::jsonString) ?: "null"}," +
     "\"warningCodes\":[$warnings]," +
-    "\"publicationPrerequisitesComplete\":$publicationPrerequisitesComplete" +
+    "\"publicationPrerequisitesComplete\":$publicationPrerequisitesComplete," +
+    "\"copyStarted\":$copyStarted" +
     "}"
 }
 

@@ -3327,7 +3327,7 @@ dependencies = [
 
 [[package]]
 name = "risunest-sync-gui"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "cc",
  "qrcode",
@@ -3344,7 +3344,7 @@ dependencies = [
 
 [[package]]
 name = "risunest-sync-manager"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "async-trait",
  "crossterm",
@@ -3362,14 +3362,16 @@ dependencies = [
  "sha2 0.11.0",
  "tar",
  "tempfile",
+ "time",
  "tokio",
+ "windows",
  "windows-sys 0.61.2",
  "zip",
 ]
 
 [[package]]
 name = "risunest-sync-server"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "async-trait",
  "axum",

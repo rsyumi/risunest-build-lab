@@ -32,7 +32,7 @@ export function androidTarget(options, env = process.env, platform = process.pla
             return ['-H', '127.0.0.1', '-P', String(port), '-s', serial, ...command]
         },
         assertAvd(output) {
-            assert.equal(output.trim().split(/\r?\n/)[0], avd, 'Unsafe Android AVD')
+            assert.equal(output.trim().split(/\r?\n/)[0].trim(), avd, 'Unsafe Android AVD')
         },
     }
 }

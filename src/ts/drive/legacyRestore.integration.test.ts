@@ -128,49 +128,42 @@ describe('legacy WebView restore integrity', () => {
         expect(state.blobs.get('legacy-image')).toEqual(new Uint8Array([9, 8, 7]))
     })
 
-    it.each([false, true])('decrypts an account backup through the correct transport, native=%s', async native => {
-        state.native = native
+    it('decrypts an account backup through the browser transport', async () => {
         const serveKey: typeof fetch = async (url, init) => {
             expect(url).toBe('https://sv.risuai.xyz/cryptokey?key=123')
-            expect(new Headers(init?.headers).get('Sec-Fetch-Site')).toBe(native ? 'same-site' : null)
+            expect(new Headers(init?.headers).get('Sec-Fetch-Site')).toBeNull()
             return new Response(JSON.stringify({ key: 'synthetic-key' }))
         }
-        vi.stubGlobal('fetch', native ? vi.fn(() => { throw new Error('Unexpected browser request') }) : serveKey)
-        state.nativeFetch.mockImplementation(serveKey)
+        vi.stubGlobal('fetch', serveKey)
         await restore(encryptedArchive())
         expect(state.replace.mock.calls[0][0].characters).toEqual(risuSaveFixtureDatabase.characters)
         expect(state.blobs.get('assets/synthetic.png')).toEqual(new Uint8Array([1, 2, 3]))
+        expect(state.nativeFetch).not.toHaveBeenCalled()
     })
 
     it.each([
         ['network', 'backup-key-request-failed', /DNS lookup failed/],
-        ['plugin', 'backup-key-request-failed', /Synthetic HTTP plugin failure/],
+        ['transport-string', 'backup-key-request-failed', /Synthetic transport failure/],
         ['json', 'backup-key-invalid', /JSON/],
         ['missing-key', 'backup-key-invalid', /no valid backup key/],
         ['empty-key', 'backup-key-invalid', /no valid backup key/],
         ['wrong-key', 'backup-decryption-failed', /operation-specific reason/],
     ] as const)('classifies %s failures and preserves their details without replacing the library or publishing attachments', async (failure, code, detail) => {
-        state.native = failure === 'plugin'
         const failRequest: typeof fetch = async () => {
             if (failure === 'network') throw new TypeError('DNS lookup failed')
-            if (failure === 'plugin') throw 'Synthetic HTTP plugin failure'
+            if (failure === 'transport-string') throw 'Synthetic transport failure'
             if (failure === 'json') return new Response('not JSON')
             return new Response(JSON.stringify(failure === 'missing-key' ? {} : { key: failure === 'empty-key' ? '' : 'wrong-key' }))
         }
         vi.stubGlobal('fetch', failRequest)
-        state.nativeFetch.mockImplementation(failRequest)
         await expect(restore(encryptedArchive())).rejects.toMatchObject({ code, message: expect.stringMatching(detail) })
         expect(state.replace).not.toHaveBeenCalled()
         expect(state.blobs.size).toBe(0)
     })
 
-    it.each([
-        [false, 403], [true, 403], [false, 503], [true, 503],
-    ] as const)('distinguishes HTTP rejection from connectivity failure, native=%s status=%s', async (native, status) => {
-        state.native = native
+    it.each([403, 503])('distinguishes HTTP %s rejection from connectivity failure', async (status) => {
         const rejectRequest: typeof fetch = async () => new Response('Request rejected', { status })
         vi.stubGlobal('fetch', rejectRequest)
-        state.nativeFetch.mockImplementation(rejectRequest)
         await expect(restore(encryptedArchive())).rejects.toMatchObject({
             code: 'backup-key-http-error', message: expect.stringContaining(`HTTP ${status}`),
         })
@@ -185,8 +178,7 @@ describe('legacy WebView restore integrity', () => {
         expect(state.blobs.size).toBe(0)
     })
 
-    it.each([false, true])('preserves cancellation while requesting an account backup key, native=%s', async native => {
-        state.native = native
+    it('preserves cancellation while requesting an account backup key in the browser', async () => {
         const controller = new AbortController()
         const cancelRequest: typeof fetch = async (_url, init) => {
             controller.abort()
@@ -194,12 +186,11 @@ describe('legacy WebView restore integrity', () => {
             throw new TypeError('Failed to fetch')
         }
         vi.stubGlobal('fetch', cancelRequest)
-        state.nativeFetch.mockImplementation(cancelRequest)
         await expect(restore(encryptedArchive(), controller)).rejects.toMatchObject({ name: 'AbortError' })
         expect(state.replace).not.toHaveBeenCalled()
     })
 
-    // The native importer treats every readable metadata except the account type as unencrypted.
+    // The browser importer treats every readable metadata except the account type as unencrypted.
     it.each(['{"type":"none"}', '{}', 'null', '{"type":"synthetic"}'])('restores a backup with non-account encryption metadata %s unencrypted', async metadata => {
         vi.stubGlobal('fetch', async () => { throw new Error('Unexpected key request') })
         await restore(backupArchive(

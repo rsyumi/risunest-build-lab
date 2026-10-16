@@ -1,3 +1,4 @@
+import { notifySyncReceiveCompleted } from '../bindingChanges'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { isTauri } from '../../../platform'
@@ -118,7 +119,7 @@ function createAdapter(connectionId: string): Adapter {
                 binding.signal.throwIfAborted()
                 const request = await progress.invoke<LwwStageReceive | null>('external_lww_receive', { request: header(connectionId, binding) }, binding.state.targetAuthority)
                 binding.signal.throwIfAborted()
-                if (!request) { progress.finish('complete', received > 0); return { count: received, more: false } }
+                if (!request) { progress.finish('complete', received > 0); notifySyncReceiveCompleted(); return { count: received, more: false } }
                 binding.signal.throwIfAborted()
                 progress.stage('applying')
                 await getPersistentDataRuntime().applyLwwReceive(request)
@@ -236,7 +237,10 @@ function createAdapter(connectionId: string): Adapter {
         }),
         async replaceAsNewDevice(staged, preparation, binding) { bindingProgress?.stage('applying', binding.state.targetAuthority); return replaceNativeSyncBindingAsNewDevice(staged, preparation, binding) },
         async resumeNewDeviceBinding(_preparation, _result, binding) { await transport.resumeBinding(binding) },
-        async receiveAvailableChanges(binding) { await receive(binding) },
+        async receiveAvailableChanges(binding) {
+            if (!active || active.signal.aborted || active.state.targetAuthority !== binding.state.targetAuthority || active.state.selectionEpoch !== binding.state.selectionEpoch) throw new Error('Sync is stopped')
+            await receive({ ...binding, signal: AbortSignal.any([binding.signal, active.signal]) })
+        },
     }
     const unregister = registerSyncBindingTransport({ kind: 'external', connectionId }, transport)
     const unregisterGate = registerLibraryFileOperationGate(async () => {

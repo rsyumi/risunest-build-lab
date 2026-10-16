@@ -804,12 +804,15 @@ fn device_settings_accept_only_the_assigned_keys() {
             "mcpStdioApprovals",
             "risuNestDeviceSettings",
             "risuNestStartupExclusions",
+            "risuNestPluginSyncSettings",
             "risuNestDefaultPluginsAttempted",
             "risuNestUpdateSettings",
             "risuNestServerSyncRestoreHold",
             "official-account.association.v1",
             "official-account.asset-ledger.v1",
+            "official-account.pending-assets.v1",
             "sync-conflict-backups.index.v1",
+            "native-file-restore-receipts.v1",
         ]
     );
 
@@ -818,6 +821,16 @@ fn device_settings_accept_only_the_assigned_keys() {
             .write_setting(key, &serde_json::json!("value"))
             .expect("write an assigned key");
     }
+
+    let pending_key = "official-account.pending-assets.v1";
+    let pending = serde_json::json!({ "accountId": "synthetic-account" });
+    store.write_setting(pending_key, &pending).unwrap();
+    drop(store);
+    let mut store = DeviceStore::open(_directory.path()).expect("reopen device store");
+    assert_eq!(store.read_setting(pending_key).unwrap(), Some(pending));
+    store.remove_setting(pending_key).unwrap();
+    assert_eq!(store.read_setting(pending_key).unwrap(), None);
+    store.write_setting(pending_key, &serde_json::json!("value")).unwrap();
 
     let value = serde_json::json!("value");
     assert!(store.write_setting("mainpage", &value).is_err());
@@ -1464,10 +1477,13 @@ mod section_exchange {
         for key in [
             "official-account.association.v1",
             "official-account.asset-ledger.v1",
+            "official-account.pending-assets.v1",
             "sync-conflict-backups.index.v1",
+            "native-file-restore-receipts.v1",
             "risuNestServerSyncRestoreHold",
             "risu_lastsaved",
             "risuNestDefaultPluginsAttempted",
+            "risuNestPluginSyncSettings",
         ] {
             assert!(!LOCAL_SETTING_KEYS.contains(&key));
             store
@@ -1538,6 +1554,54 @@ mod section_exchange {
             assert!(past.contains(object) && !past.contains(inline));
             assert!(past.contains(&format!("\"byteLength\":\"{}\"", MAX_INLINE_VALUE_BYTES + 1)));
         }
+        use super::super::{sections, plugin_values::text_value};
+        use risunest_external_storage_format::{content_identity::hash, format::FingerprintBuilder};
+        let (directory, mut store) = open();
+        let (_target_directory, mut target) = open();
+        let text = format!("{}가😀", "q".repeat(text_value::PART_BYTES - 3));
+        for space in ["string", "json"] {
+            let value = if space == "json" { serde_json::to_string(&text).unwrap() } else { text.clone() };
+            let opened = store.open_plugin_device_write("plugin-a", space, "multipart", text_value::encoded_length(&value)).unwrap();
+            let id = serde_json::to_value(opened).unwrap()["sessionId"].as_str().unwrap().to_owned();
+            let mut start = 0;
+            while start < value.len() {
+                let mut end = (start + text_value::PART_BYTES - 16).min(value.len());
+                while !value.is_char_boundary(end) { end -= 1; }
+                store.append_plugin_device_write("plugin-a", &id, start as u64, &value[start..end]).unwrap(); start = end;
+            }
+            store.write_plugin_device_values("plugin-a", &[PluginDeviceMutation::Staged { session_id: id }]).unwrap();
+        }
+        let captured = store.capture_backup_sections(&[SectionKind::Hypa, SectionKind::LocalPlugins, SectionKind::LocalSettings], directory.path()).unwrap();
+        let mut received = Vec::new();
+        for section in &captured {
+            let mut builder = SectionSpoolBuilder::new_backup(section.kind(), directory.path()).unwrap();
+            let mut fingerprint = FingerprintBuilder::new(&section.kind().fingerprint_domain());
+            section.visit_entries(|entry, object| {
+                if section.kind() == SectionKind::LocalPlugins {
+                    assert_eq!(entry.value.object_references().len(), 2);
+                    assert!(entry.value.object_references().iter().all(|part| part.byte_length <= text_value::PART_BYTES as u64));
+                    let mut refused = SectionSpoolBuilder::new_backup(section.kind(), directory.path())?;
+                    assert!(refused.push_backup_entry(entry.clone(), |_| Ok(vec![0])).is_err());
+                }
+                fingerprint.push(&entry.key, &hash(&entry.encode().unwrap())).unwrap();
+                builder.push_backup_entry(entry.clone(), object)
+            }).unwrap();
+            received.push(builder.finish(&fingerprint.finish()).unwrap());
+        }
+        let frozen = sections::freeze_backup_sections(&received.iter().collect::<Vec<_>>()).unwrap();
+        let encoded = serde_json::to_vec(&frozen).unwrap();
+        assert!(encoded.len() < 4096);
+        let frozen = serde_json::from_slice(&encoded).unwrap();
+        let tx = target.transaction().unwrap();
+        for section in &received { section.retain_plugin_objects(&tx).unwrap(); }
+        drop(received);
+        let stamp = risunest_sync_wire::stamp::Stamp { physical_ms: 1.into(), logical: 0, writer_id: uuid::Uuid::new_v4().to_string() };
+        sections::restore_frozen_backup_sections(&tx, &frozen, &stamp).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(target.read_plugin_device_value("plugin-a", "string", "multipart").unwrap(), Some(text.clone()));
+        assert_eq!(target.read_plugin_device_value("plugin-a", "json", "multipart").unwrap(), Some(serde_json::to_string(&text).unwrap()));
+        let types: i64 = target.connection().query_row("SELECT count(*) FROM plugin_device_storage WHERE typeof(value)='text'", [], |row| row.get(0)).unwrap();
+        assert_eq!(types, 2);
     }
 
     /// An object installs only as the stored text its entry names: the body
@@ -1561,7 +1625,7 @@ mod section_exchange {
             SectionEntry::new(
                 SectionKind::LocalPlugins,
                 local_plugin_entry_key("plugin-a", id, "key").unwrap(),
-                SectionValue::LocalPlugin(LocalPluginValue { space, value: object(body) }),
+                SectionValue::LocalPlugin(LocalPluginValue { space, value: object(body).into() }),
                 None,
             )
             .unwrap()

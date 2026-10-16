@@ -14,7 +14,7 @@ vi.mock('../storage/persistentDataStoreFactory', () => ({
 }))
 vi.mock('../parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
 vi.mock('./apiV3/v3.svelte', () => ({
-    loadV3Plugins: vi.fn(async () => undefined),
+    loadV3Plugins: vi.fn(async () => true),
     customV3ProviderMetaStore: [],
     areV3PluginsIdle: () => activity.idle,
     canInterruptV3Plugins: () => activity.interruptible,
@@ -74,7 +74,7 @@ describe('plugin API version gate', () => {
         db.plugins=[makePlugin('modern','3.0'),{...makePlugin('disabled','3.0'),enabled:false},makePlugin('unsupported','2.1')]
         setDatabaseLite(db)
         vi.mocked(loadV3Plugins).mockClear()
-        vi.mocked(loadV3Plugins).mockImplementationOnce(async plugins=>{meta.push({name:plugins[0].name})})
+        vi.mocked(loadV3Plugins).mockImplementationOnce(async plugins=>{meta.push({name:plugins[0].name}); return true})
         await loadPluginsAfterAuthoritativeRestore()
         expect(vi.mocked(loadV3Plugins).mock.calls.map(([plugins])=>plugins.map(plugin=>plugin.name))).toEqual([['modern']])
         expect(meta).toEqual([{name:'modern'}])

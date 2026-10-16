@@ -1,3 +1,4 @@
+import { advancePluginStorageRemoteChanges, type PluginStorageWriteCheck } from './pluginStorageProtection'
 const PLUGIN_ACCESS_OWNER = 'test-plugin'
 import { describe, expect, it, vi } from 'vitest'
 import type { Database } from '../storage/database.svelte'
@@ -309,7 +310,7 @@ function createHarness(options: { unitIntent?: boolean; revisionAdmission?: bool
     const replacePersistentCompleteCharacter = vi.fn(async () => true)
     const replacePersistentConversation = vi.fn(async () => true)
     const reportIdentityReplacementRejected = vi.fn()
-    const commitPersistentUnitIntent = vi.fn(async (_reason: string, _units: readonly import('./pluginUnitIntents').PluginUnitMutation[], _conversations?: readonly unknown[], _wholeMessages?: readonly import('./pluginUnitIntents').PluginWholeMessageIntent[]) => undefined)
+    const commitPersistentUnitIntent = vi.fn(async (_reason: string, _units: readonly import('./pluginUnitIntents').PluginUnitMutation[], _conversations?: readonly unknown[], _wholeMessages?: readonly import('./pluginUnitIntents').PluginWholeMessageIntent[], _committed?: unknown, check?: PluginStorageWriteCheck) => { check?.validate(); check?.committed() })
     const access = createPluginDatabaseAccess({
         owner: PLUGIN_ACCESS_OWNER,
         store,
@@ -451,18 +452,18 @@ describe('plugin unit writes with read provenance', () => {
         harness.compatibilityDatabase.plugins = [original] as any
         harness.prepareAuthoritativeDatabaseUpdate.mockImplementation(async update => ({ ...update, plugins: [] }))
         await harness.access.setDatabase({ plugins: [] }, ['plugins'])
-        expect(harness.commitPersistentUnitIntent).toHaveBeenLastCalledWith('plugin-setDatabase', [], [], [])
+        expect(harness.commitPersistentUnitIntent.mock.calls.at(-1)?.[1]).toEqual([])
         await harness.access.setDatabase({ plugins: [{ ...original, script: 'replacement' }] }, ['plugins'])
-        expect(harness.commitPersistentUnitIntent).toHaveBeenLastCalledWith('plugin-setDatabase', [], [], [])
+        expect(harness.commitPersistentUnitIntent.mock.calls.at(-1)?.[1]).toEqual([])
         const proposed = { name: 'new', script: 'proposed', version: '3.0', enabled: true }
         await harness.access.setDatabase({ plugins: [proposed] }, ['plugins'])
-        expect(harness.commitPersistentUnitIntent).toHaveBeenLastCalledWith('plugin-setDatabase', [], [], [])
+        expect(harness.commitPersistentUnitIntent.mock.calls.at(-1)?.[1]).toEqual([])
         harness.prepareAuthoritativeDatabaseUpdate.mockImplementation(async update => ({ ...update, plugins: [proposed] }))
         await harness.access.setDatabase({ plugins: [proposed, proposed] }, ['plugins'])
-        expect(harness.commitPersistentUnitIntent).toHaveBeenLastCalledWith('plugin-setDatabase', [
+        expect(harness.commitPersistentUnitIntent.mock.calls.at(-1)?.[1]).toEqual([
             { key: '["record","plugins","new"]', type: 'set', value: proposed },
             { key: '["order","plugins"]', type: 'set', value: ['installed', 'new'] },
-        ], [], [])
+        ])
         expect(harness.compatibilityDatabase.plugins).toEqual([original])
     })
 
@@ -472,11 +473,11 @@ describe('plugin unit writes with read provenance', () => {
         const copy = JSON.parse(JSON.stringify(read))
         copy.username = 'Copy edit'
         await harness.access.setDatabase(copy, ['username'])
-        expect(harness.commitPersistentUnitIntent).toHaveBeenLastCalledWith('plugin-setDatabase', [{ key: '["root","username"]', type: 'set', value: 'Copy edit' }], [], [])
+        expect(harness.commitPersistentUnitIntent.mock.calls.at(-1)?.[1]).toEqual([{ key: '["root","username"]', type: 'set', value: 'Copy edit' }])
         harness.compatibilityDatabase.username = 'Copy edit'
         await harness.access.getDatabaseSnapshot(['username'], ['username'])
         await harness.access.setDatabase(copy, ['username'])
-        expect(harness.commitPersistentUnitIntent).toHaveBeenLastCalledWith('plugin-setDatabase', [], [], [])
+        expect(harness.commitPersistentUnitIntent.mock.calls.at(-1)?.[1]).toEqual([])
     })
 
     it.each([
@@ -2086,11 +2087,11 @@ describe('plugin database access', () => {
         read.username = 'After'
         read.privateValue = 42
         await harness.access.setDatabase(read, ['characters', 'username'])
-        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledWith('plugin-setDatabase', [
+        expect(harness.commitPersistentUnitIntent.mock.calls.at(-1)?.[1]).toEqual([
             { key: '["character","trashed","name"]', type: 'set', value: 'Edited while inactive' },
             { key: '["plugin","test-plugin","privateValue"]', type: 'set', value: 42 },
             { key: '["root","username"]', type: 'set', value: 'After' },
-        ], [], [])
+        ])
         expect(harness.materializeDatabaseSnapshot).not.toHaveBeenCalled()
         expect(harness.replacePersistentDatabase).not.toHaveBeenCalled()
         expect(authoritative.characters[1].name).toBe('trashed')
@@ -2103,9 +2104,9 @@ describe('plugin database access', () => {
         const read = await harness.access.getDatabaseSnapshot(['pluginCustomStorage'], ['pluginCustomStorage'])
         ;(read.pluginCustomStorage as Record<string, unknown>).shared = 'updated'
         await harness.access.setDatabase(read, ['pluginCustomStorage'])
-        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledWith('plugin-setDatabase', [
+        expect(harness.commitPersistentUnitIntent.mock.calls.at(-1)?.[1]).toEqual([
             { key: '["plugin","test-plugin","shared"]', type: 'set', value: 'updated' },
-        ], [], [])
+        ])
         expect(harness.replacePersistentDatabase).not.toHaveBeenCalled()
     })
 
@@ -2228,10 +2229,10 @@ describe('plugin database access', () => {
             },
         }, ['pluginCustomStorage'])
 
-        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledWith('plugin-setDatabaseLite', [
+        expect(harness.commitPersistentUnitIntent.mock.calls.at(-1)?.[1]).toEqual([
             { key: '["plugin","test-plugin","2"]', type: 'set', value: 0 },
             { key: '["plugin","test-plugin","memory"]', type: 'set', value: { replaced: true } },
-        ], [], [])
+        ])
         expect(harness.applyCompatibilityDatabaseLite).not.toHaveBeenCalled()
         expect(harness.materializeDatabaseSnapshot).not.toHaveBeenCalled()
     })
@@ -2243,9 +2244,9 @@ describe('plugin database access', () => {
             pluginCustomStorage: { memory: 'authoritative' },
         }, ['pluginCustomStorage'])
 
-        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledWith('plugin-setDatabase', [
+        expect(harness.commitPersistentUnitIntent.mock.calls.at(-1)?.[1]).toEqual([
             { key: '["plugin","test-plugin","memory"]', type: 'set', value: 'authoritative' },
-        ], [], [])
+        ])
         expect(harness.materializeDatabaseSnapshot).not.toHaveBeenCalled()
         expect(harness.replacePersistentDatabase).not.toHaveBeenCalled()
     })
@@ -2284,9 +2285,9 @@ describe('plugin database access', () => {
         ;(read.characters as Database['characters'])[0].name = 'Plugin edit'
         database.characters[0].image = 'Concurrent remote description'
         await harness.access.setDatabase(read, ['characters'])
-        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledWith('plugin-setDatabase', [
+        expect(harness.commitPersistentUnitIntent.mock.calls.at(-1)?.[1]).toEqual([
             { key: '["character","char","name"]', type: 'set', value: 'Plugin edit' },
-        ], [], [])
+        ])
         expect(harness.replacePersistentDatabase).not.toHaveBeenCalled()
         expect(database.characters[0].image).toBe('Concurrent remote description')
     })
@@ -2297,9 +2298,9 @@ describe('plugin database access', () => {
         harness.compatibilityDatabase.maxContext = 16384
         read.username = 'After'
         await harness.access.setDatabase(read, ['username', 'maxContext'])
-        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledWith('plugin-setDatabase', [
+        expect(harness.commitPersistentUnitIntent.mock.calls.at(-1)?.[1]).toEqual([
             { key: '["root","username"]', type: 'set', value: 'After' },
-        ], [], [])
+        ])
         expect(harness.materializeDatabaseSnapshot).not.toHaveBeenCalled()
         expect(harness.compatibilityDatabase.maxContext).toBe(16384)
     })
@@ -2313,9 +2314,9 @@ describe('plugin database access', () => {
         harness.compatibilityDatabase.maxContext = 16384
         gate.resolve({ username: 'Plugin edit' })
         await writing
-        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledWith('plugin-setDatabase', [
+        expect(harness.commitPersistentUnitIntent.mock.calls.at(-1)?.[1]).toEqual([
             { key: '["root","username"]', type: 'set', value: 'Plugin edit' },
-        ], [], [])
+        ])
         expect(harness.compatibilityDatabase.maxContext).toBe(16384)
         expect(harness.replacePersistentDatabase).not.toHaveBeenCalled()
     })
@@ -2399,5 +2400,37 @@ describe('plugin database access', () => {
         expect(() => harness.access.setDatabaseLite(update, ['pluginCustomStorage'])).toThrow(
             /pluginCustomStorage must be a plain record/i,
         )
+    })
+})
+
+
+describe('database permission storage observations', () => {
+    it.each(['setDatabase', 'setDatabaseLite'] as const)('rejects stale owned storage through %s and accepts a fresh read', async method => {
+        const h = createHarness()
+        const stale = await h.access.getDatabaseSnapshot(['pluginCustomStorage'], ['pluginCustomStorage'])
+        ;(stale.pluginCustomStorage as Record<string, unknown>).memory = { retained: false }
+        advancePluginStorageRemoteChanges([JSON.stringify(['plugin', PLUGIN_ACCESS_OWNER, 'memory'])])
+        await expect(h.access[method](stale, ['pluginCustomStorage'])).rejects.toThrow('PLUGIN_STORAGE_STALE')
+        const fresh = await h.access.getDatabaseSnapshot(['pluginCustomStorage'], ['pluginCustomStorage'])
+        ;(fresh.pluginCustomStorage as Record<string, unknown>).memory = { retained: false }
+        await expect(h.access[method](fresh, ['pluginCustomStorage'])).resolves.toBeUndefined()
+        await h.access.closeReadBaselines()
+    })
+
+    it('does not rebase an in-flight database submission when another read completes', async () => {
+        const h = createHarness()
+        const stale = await h.access.getDatabaseSnapshot(['pluginCustomStorage'], ['pluginCustomStorage'])
+        ;(stale.pluginCustomStorage as Record<string, unknown>).memory = { retained: false }
+        let finish!: () => void
+        const paused = new Promise<void>(resolve => { finish = resolve })
+        h.prepareAuthoritativeDatabaseUpdate.mockImplementationOnce(async update => { await paused; return update })
+        const writing = h.access.setDatabase(stale, ['pluginCustomStorage'])
+        const rejected = expect(writing).rejects.toThrow('PLUGIN_STORAGE_STALE')
+        await vi.waitFor(() => expect(h.prepareAuthoritativeDatabaseUpdate).toHaveBeenCalled())
+        advancePluginStorageRemoteChanges([JSON.stringify(['plugin', PLUGIN_ACCESS_OWNER, 'memory'])])
+        await h.access.getDatabaseSnapshot(['pluginCustomStorage'], ['pluginCustomStorage'])
+        finish()
+        await rejected
+        await h.access.closeReadBaselines()
     })
 })

@@ -33,7 +33,7 @@ vi.mock('./gui/colorscheme', async () => (await import('./globalApi.testSupport'
 vi.mock('./gui/guisize', async () => (await import('./globalApi.testSupport')).guisizeModule())
 vi.mock('streamsaver', async () => (await import('./globalApi.testSupport')).streamsaverModule())
 vi.mock('@tauri-apps/plugin-fs', async () => (await import('./globalApi.testSupport')).tauriFsModule())
-vi.mock('@tauri-apps/api/core', async () => (await import('./globalApi.testSupport')).tauriCoreModule())
+vi.mock('@tauri-apps/api/core', async () => ({ ...(await import('./globalApi.testSupport')).tauriCoreModule(), invoke: vi.fn(async () => undefined) }))
 vi.mock('@tauri-apps/api/path', async () => (await import('./globalApi.testSupport')).tauriPathModule())
 vi.mock('@tauri-apps/plugin-shell', async () => (await import('./globalApi.testSupport')).tauriShellModule())
 vi.mock('@tauri-apps/plugin-dialog', async () => (await import('./globalApi.testSupport')).tauriDialogModule())
@@ -41,10 +41,37 @@ vi.mock('@tauri-apps/api/webviewWindow', async () => (await import('./globalApi.
 vi.mock('@tauri-apps/plugin-http', async () => (await import('./globalApi.testSupport')).tauriHttpModule())
 
 import { fetch as pluginFetch } from '@tauri-apps/plugin-http'
+import { invoke } from '@tauri-apps/api/core'
 import { fetchNative, getFetchLogs, globalFetch } from './globalApi.svelte'
 
 describe('network requests without application URL restrictions', () => {
+    test.each([
+        ['global', 'api.openai.com', 'openai'], ['native', 'api.openai.com', 'openai'],
+        ['global', 'constructor', 'custom'], ['native', 'constructor', 'custom'],
+    ] as const)('%s records %s status and transport request sequences without request contents or secrets', async (kind, hostname, provider) => {
+        state.platform = { runtime: 'tauri', os: 'windows' }
+        state.database.usePlainFetch = false
+        const chatId = crypto.randomUUID()
+        const request = () => kind === 'global'
+            ? globalFetch(`https://${hostname}/v1/chat?key=secret-query`, {
+                chatId, rawResponse: true, headers: { Authorization: 'secret-header' }, body: { prompt: 'secret-prompt' },
+            })
+            : fetchNative(`https://${hostname}/v1/chat?key=secret-query`, {
+                chatId, logFetch: false, headers: { Authorization: 'secret-header' }, body: 'secret-prompt',
+            })
+        vi.mocked(pluginFetch).mockResolvedValueOnce(new Response('secret response', { status: 429 }))
+        const response = await request()
+        if (response instanceof Response) await response.body?.cancel()
+        vi.mocked(pluginFetch).mockRejectedValueOnce(new Error('secret-error'))
+        await request().catch(() => undefined)
+        const messages = vi.mocked(invoke).mock.calls.filter(([command]) => command === 'native_log_error').map(([, args]) => (args as { message: string }).message)
+        expect(messages).toContain(`provider-request provider=${provider} request-sequence=1 http-status=429`)
+        expect(messages).toContain(`provider-request provider=${provider} request-sequence=2 transport-failure`)
+        expect(messages.join('\n')).not.toMatch(/secret|key=|Authorization|prompt|https:|chat/)
+    })
+
     beforeEach(() => {
+        vi.mocked(invoke).mockClear()
         state.platform = { runtime: 'web', os: 'windows' }
         state.database.usePlainFetch = true
         vi.stubGlobal(

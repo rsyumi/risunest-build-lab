@@ -1,6 +1,7 @@
 import "../../src/ts/polyfill";
 import { invoke as nativeInvoke } from "@tauri-apps/api/core";
-import { appDataDir, join } from "@tauri-apps/api/path";
+import { join } from "@tauri-apps/api/path";
+import { nativeDataPath } from "../../src/ts/storage/nativePaths";
 import {
   PluginDeviceKeyspace,
   createNativePluginDeviceBackend,
@@ -22,6 +23,10 @@ import {
   type HypaEmbeddingEntry,
 } from "../../src/ts/storage/hypaEmbeddingCache";
 import { createNativeDeviceSettings } from "../../src/ts/storage/nativeDeviceSettings";
+import { getDeviceMarkers, initializeDeviceMarkers } from '../../src/ts/storage/deviceMarkers';
+import { updateDeviceSettings } from '../../src/ts/storage/deviceSettings';
+import { normalizeDatabaseDefaults, setDatabase } from '../../src/ts/storage/database.svelte';
+import { pluginValueMeasurement } from './plugin-values';
 import {
   capturePersistentRoot,
   createPersistentDataRuntime,
@@ -157,10 +162,12 @@ async function seed() {
     "graph",
     JSON.stringify({ nested: [1, 2, 3], enabled: true }),
   );
-  await createNativeDeviceSettings().set(settingKey, {
-    enabled: true,
-    label: "synthetic",
+  updateDeviceSettings({
+    messageSendKey: 'button',
+    generationHistoryLimitEnabled: true,
+    generationHistoryLimitMultiplier: 3,
   });
+  await getDeviceMarkers().flush();
 }
 
 async function mutate() {
@@ -180,11 +187,12 @@ async function mutate() {
   await plugins.setItem("string", "text", "replaced");
   await plugins.removeItem("json", "graph");
   await plugins.setItem("json", "extra", JSON.stringify({ remove: true }));
-  await createNativeDeviceSettings().set(settingKey, {
-    enabled: false,
-    label: "replaced",
-    extra: true,
+  updateDeviceSettings({
+    messageSendKey: 'ctrl-shift-enter',
+    generationHistoryLimitEnabled: false,
+    generationHistoryLimitMultiplier: 4,
   });
+  await getDeviceMarkers().flush();
 }
 
 async function fingerprints() {
@@ -243,11 +251,12 @@ function syntheticRuntime(): Promise<PersistentDataRuntime> {
     const store = new SqlitePersistentDataStore();
     await store.open();
     const root = await store.readRoot();
-    let database = await projectScalableWorkingSetAtRevision(store, root.revision, {
+    let database = normalizeDatabaseDefaults(await projectScalableWorkingSetAtRevision(store, root.revision, {
       selectedCharacterId: null,
       selectedConversationId: null,
       activeCharacterIds: new Set(),
-    });
+    }));
+    setDatabase(database);
     const runtime = createPersistentDataRuntime({
       store,
       state: {
@@ -259,7 +268,7 @@ function syntheticRuntime(): Promise<PersistentDataRuntime> {
         getSelectedCharacterId: () => null,
         getSelectedConversationId: () => null,
         captureWorkingSetDatabase: () => database,
-        replaceDatabase: (next) => { database = next; },
+        replaceDatabase: (next) => { database = next; setDatabase(database); },
         publishCharacter(value) {
           const index = database.characters.findIndex((candidate) => candidate.chaId === value.chaId);
           if (index < 0) database.characters.push(value);
@@ -274,7 +283,7 @@ function syntheticRuntime(): Promise<PersistentDataRuntime> {
           else character.chats[index] = conversation;
         },
       },
-      prepareDatabase: async (value) => structuredClone(value),
+      prepareDatabase: async (value) => normalizeDatabaseDefaults(structuredClone(value)),
       onLocalRevision(revision) { control.revision = revision; save(); },
     });
     await runtime.initializeActiveWorkingSet(database);
@@ -336,7 +345,7 @@ async function exportArchive(destination: string) {
   const result = await runNativeArchiveExport(
     await syntheticRuntime(),
     { type: "desktopPath", path: destination },
-    { library: false, deviceSections: sections },
+    { library: true, deviceSections: sections },
     {
       pollIntervalMs: 20,
       onStarted(jobId) {
@@ -372,13 +381,13 @@ async function restore(destination: string) {
       onNativeStatus: observeRestoreStatus,
       async choosePortableSections(preview) {
         check(
-          !preview.libraryIncluded &&
+          preview.libraryIncluded &&
             sections.every((section) =>
               preview.deviceSections.includes(section),
             ),
           "native-section-preview-matches",
         );
-        return { library: false, deviceSections: sections };
+        return { library: true, deviceSections: sections };
       },
     },
     fileJobDependencies,
@@ -394,7 +403,7 @@ async function start() {
   control.stage = "export";
   control.startedAt = Date.now();
   control.backupPath = await join(
-    await appDataDir(),
+    await nativeDataPath(),
     "synthetic-device-backup.risunest",
   );
   save();
@@ -467,9 +476,9 @@ async function completeRestore() {
       await syntheticRuntime(),
       {
         type: "desktopPath",
-        path: await join(await appDataDir(), "synthetic-cancelled.risunest"),
+        path: await join(await nativeDataPath(), "synthetic-cancelled.risunest"),
       },
-      { library: false, deviceSections: ["hypa"] },
+      { library: true, deviceSections: sections },
       {
         signal: cancellation.signal,
         pollIntervalMs: 10,
@@ -508,6 +517,7 @@ async function completeRestore() {
 }
 
 async function resume() {
+  await nativeInvoke('pds_open');
   const recovered = await reconcileNativeFileJobsBeforeBootstrap({
     invoke: fileJobDependencies.invoke,
     wait,
@@ -516,6 +526,8 @@ async function resume() {
     recovered.pendingRestoreAcknowledgements,
     { invoke: fileJobDependencies.invoke, wait },
   );
+  await nativeInvoke('pds_open');
+  await initializeDeviceMarkers();
   if (control.stage === "fault-restore") {
     check(true, "native-startup-recovery-completed");
     check(!!control.fault?.reached, "synthetic-process-kill-point-reached");
@@ -604,9 +616,34 @@ function fail(error: unknown) {
     "Synthetic device backup smoke failed";
 }
 
-const entryCompletion = deviceMaintenanceBeforeBootstrap()
+async function verifySyntheticRoot() {
+  const expected = import.meta.env.VITE_DEVICE_SMOKE_ROOT;
+  if (!expected && navigator.userAgent.includes('Windows')) throw new Error('Synthetic Windows root is required');
+  if (expected) {
+    const actual = await nativeDataPath();
+    const normalized = (value: string) => value.replaceAll('\\', '/').toLowerCase();
+    if (normalized(actual) !== normalized(expected)) throw new Error('Synthetic native root mismatch');
+  }
+}
+
+const entryCompletion = verifySyntheticRoot()
+  .then(() => deviceMaintenanceBeforeBootstrap())
   .then(resume)
   .catch(fail);
+
+(globalThis as typeof globalThis & { __pluginValueMeasurement?: ReturnType<typeof pluginValueMeasurement> }).__pluginValueMeasurement = pluginValueMeasurement({
+  async ready() {
+    await entryCompletion;
+    if (control.failure || control.stage !== 'ready') throw new Error(control.failure ?? 'Fresh synthetic harness required');
+    await nativeInvoke('pds_open');
+  },
+  async backup() {
+    const destination = await join(await nativeDataPath(), 'synthetic-plugin-values.risunest');
+    await exportArchive(destination);
+    return destination;
+  },
+  restore,
+});
 
 let legacyMeasurement: Record<string, unknown> = { phase: 'idle' };
 (globalThis as typeof globalThis & { __legacyRestoreMeasurement?: {

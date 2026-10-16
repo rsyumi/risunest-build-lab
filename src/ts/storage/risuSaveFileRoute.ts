@@ -3,9 +3,12 @@ import type { ExportExclusions } from './exportExcludedReport'
 import type { Database } from './database.svelte'
 import {
     AndroidSafDestinationError,
+    withAndroidSafDestination,
     type AndroidSafDestinationEvent,
     type AndroidSafDestinationRequest,
     type AndroidSafDestinationResult,
+    type AndroidSafDestinationReservation,
+    type reserveAndroidSafDestination,
 } from './androidSafBridge'
 import type { PersistentDataRuntime } from './persistentDataRuntime.svelte'
 import { listenRecoveredPublications } from './recoveredPublicationListener'
@@ -48,6 +51,7 @@ type FileRouteRuntime = Pick<
 >
 
 export interface RisuSaveFileRouteDependencies {
+    reserveAndroidDestination: typeof reserveAndroidSafDestination
     platform(): 'native-desktop' | 'native-ios' | 'native-android' | 'web'
     runtime(): FileRouteRuntime
     chooseNativeImport(): Promise<string | null>
@@ -137,6 +141,18 @@ async function exportThroughAndroidSaf(
     options: RisuSaveFileRouteOptions,
     dependencies: RisuSaveFileRouteDependencies,
 ): Promise<RisuSaveFileRouteResult> {
+    const reservation = await dependencies.reserveAndroidDestination(name, 'risuSave', options.signal)
+    return withAndroidSafDestination(reservation, () =>
+        exportToReservedAndroidSaf(runtime, name, options, dependencies, reservation))
+}
+
+async function exportToReservedAndroidSaf(
+    runtime: FileRouteRuntime,
+    name: string,
+    options: RisuSaveFileRouteOptions,
+    dependencies: RisuSaveFileRouteDependencies,
+    reservation: AndroidSafDestinationReservation,
+): Promise<RisuSaveFileRouteResult> {
     const terminal = await dependencies.withFlushedExport(
         runtime,
         'risu-save-file-export',
@@ -152,6 +168,7 @@ async function exportThroughAndroidSaf(
                 async (file) => {
                     try {
                         const published = await dependencies.copyAndroidExport({
+                            reservation,
                             sourcePath: file.path,
                             suggestedName: name,
                             signal: options.signal,
@@ -335,11 +352,6 @@ function isCapabilityUnavailable(error: unknown): boolean {
     return error instanceof NativeFileJobError && error.code === 'capability-unavailable'
 }
 
-function isNativeCompatibilityFallback(error: unknown): boolean {
-    return isCapabilityUnavailable(error)
-        || error instanceof NativeFileJobError && error.code === 'unsupported-format'
-}
-
 const WEB_IMPORT_KIND = 'restore-block-risu-save' as const
 
 function webImportStatus(
@@ -399,11 +411,6 @@ async function importWithWebCodec(
     return importWithBytes(runtime, bytes, options, dependencies)
 }
 
-/** Tells the dialog the native job gave up and the user must pick the file again in the WebView. */
-function announceWebReselect(options: RisuSaveFileRouteOptions): void {
-    options.onStatus?.(syntheticNativeFileJobStatus({ kind: WEB_IMPORT_KIND }, 'awaiting-reselect'))
-}
-
 async function exportWithWebCodec(
     name: string,
     omitAccount: boolean,
@@ -430,9 +437,7 @@ export async function importRisuSaveFromPicker(
                         : { name: basenameOf(path) },
                 )
             }
-            let result: NativeFileJobResult
-            try {
-                result = await dependencies.runNativeImport(
+            const result = await dependencies.runNativeImport(
                     runtime,
                     { type: 'desktopPath', path },
                     {
@@ -447,13 +452,6 @@ export async function importRisuSaveFromPicker(
                             : {}),
                     },
                 )
-            } catch (error) {
-                if (isNativeCompatibilityFallback(error)) {
-                    announceWebReselect(options)
-                    return importWithWebCodec(runtime, options, dependencies)
-                }
-                throw error
-            }
             return {
                 mode: 'native',
                 warningCodes: result.warningCodes,
@@ -464,6 +462,7 @@ export async function importRisuSaveFromPicker(
         }
     }
 
+    if (dependencies.platform() !== 'web') throw new NativeFileJobError('native-required', 'Use the native backup source picker')
     return importWithWebCodec(runtime, options, dependencies)
 }
 

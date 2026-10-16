@@ -39,6 +39,18 @@ pub(crate) struct Publication {
     pub entries: Vec<OutboxEntry>,
     pub config: super::credentials::StoredConfig,
 }
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReceivePage {
+    #[serde(flatten)]
+    pub(crate) page: StageReceive,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) receive_frontier: Option<DecimalU64>,
+    #[serde(default = "receive_page_more")]
+    pub(crate) more: bool,
+}
+fn receive_page_more() -> bool { true }
+
 pub(crate) struct OperationLog(pub(crate) Connection);
 impl OperationLog {
     pub(crate) fn open(root: &Path) -> Result<Self> {
@@ -651,7 +663,9 @@ impl LwwClient {
             self.cancelled.clone(),
         );
         for hash in &objects {
-            if cache.stat_object(hash)?.is_none() {
+            if cache.stat_object(hash)?.is_none()
+                && !store.lww_copy_large_object_to_cas(hash, &cache.cas, super::cache::SMALL_OBJECT_BYTES)?
+            {
                 if let Some(body) = store.lww_object_body(hash)? {
                     cache.put(&body)?;
                 } else {
@@ -934,11 +948,16 @@ impl LwwClient {
         store.lww_record_unpublished_proof(header, &proof_id, &proof)?;
         Ok(store.lww_retry_unpublished(header, &proof_id, corrected.into())?)
     }
-    pub(crate) fn receive_page(
+    #[cfg(test)]
+    pub(crate) fn receive_page(&self, store: &mut PersistentStore, header: &Header) -> Result<StageReceive> {
+        self.receive_page_with_frontier(store, header).map(|page| page.page)
+    }
+
+    pub(crate) fn receive_page_with_frontier(
         &self,
         store: &mut PersistentStore,
         header: &Header,
-    ) -> Result<StageReceive> {
+    ) -> Result<ReceivePage> {
         self.check()?;
         if store.lww_binding_authority()? != header.binding_authority {
             return Err(SyncError::new("binding-authority-changed", 409));
@@ -954,11 +973,11 @@ impl LwwClient {
             )
             .optional()?;
         if let Some(pending) = pending {
-            let page: StageReceive = serde_json::from_str(&pending)
+            let page: ReceivePage = serde_json::from_str(&pending)
                 .map_err(|_| SyncError::new("receive-page-integrity", 409))?;
             // What its archives read is this device's state, which may have changed since the
             // page was stored.
-            self.prepare_archive_bodies(store, &page.changes)?;
+            self.prepare_archive_bodies(store, &page.page.changes)?;
             return Ok(page);
         }
         self.client.lane().step(Step::Listing);
@@ -997,6 +1016,8 @@ impl LwwClient {
             });
         let mut next_key = None;
         let mut done = false;
+        let receive_frontier;
+        let more;
         let (cursor, changes): (DecimalU64, Vec<Change>) = if boot {
             if existing_pin.is_none() {
                 let (_, pin): (_, StatePin) = self.client.json(
@@ -1046,7 +1067,7 @@ impl LwwClient {
                 if existing_pin.is_none() {
                     return Err(SyncError::new("state-pin-expired", 410));
                 }
-                return self.receive_page(store, header);
+                return self.receive_page_with_frontier(store, header);
             }
             if !(200..300).contains(&reply.status) {
                 return Err(response_error(reply));
@@ -1059,6 +1080,8 @@ impl LwwClient {
             self.client.lane().backlog(page.items.len() as u64, 0);
             next_key = page.next_key.map(|key| key.as_str().to_owned());
             done = next_key.is_none();
+            more = !done;
+            receive_frontier = done.then_some(pin.start_seq);
             (
                 if done {
                     pin.start_seq
@@ -1095,6 +1118,9 @@ impl LwwClient {
             // A last page holding only this device's own publications reads back a
             // push and is not work to show.
             let left = page.through_seq.0 - page.next_after.0;
+            more = left > 0;
+            receive_frontier = Some(page.through_seq);
+            if more && page.next_after <= cursor { return Err(SyncError::new("invalid-changes-page", 502)); }
             let writer = store.lww_clock_state().ok().map(|state| state.writer_id);
             let read_back = left == 0 && page.items.iter().all(|item| writer.as_ref() == Some(&item.stamp.writer_id));
             self.client.lane().backlog(if read_back { 0 } else { page.next_after.0 - cursor.0 }, left);
@@ -1148,6 +1174,7 @@ impl LwwClient {
             },
             admitted_time_upper_ms: upper,
         };
+        let staged = ReceivePage { page: staged, receive_frontier, more };
         self.log.0.execute(
             "INSERT INTO receive_pages VALUES(?1,?2,?3,?4,?5)",
             params![
@@ -1413,8 +1440,9 @@ impl LwwClient {
         }
         transfer.download_with_hints(&required_large, &[], &hints)?;
         for hash in required_large {
-            let body = read_whole(&cache, &hash)?;
-            store.lww_put_object(&hash, &body)?;
+            let mut body = cache.open_object(&hash)?.ok_or_else(|| SyncError::new("cached-object-missing", 409))?;
+            let length = body.len()?;
+            store.lww_put_object_reader(&hash, &mut body, length)?;
         }
         if !remote.is_empty() {
             let cas = crate::asset_repository::PayloadCas::new(store.repository_root())?;
@@ -1520,7 +1548,9 @@ fn delta_bases(
         if base == target {
             continue;
         }
-        if cache.stat_object(&base)?.is_none() {
+        if cache.stat_object(&base)?.is_none()
+            && !store.lww_copy_large_object_to_cas(&base, &cache.cas, super::cache::SMALL_OBJECT_BYTES)?
+        {
             let Some(body) = store.lww_object_body(&base)? else { continue };
             if cache.put(&body)? != base {
                 continue;

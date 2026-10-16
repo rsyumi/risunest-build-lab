@@ -9,7 +9,9 @@ import { PayloadTooLargeError } from './nativePersistenceValue'
 
 import {
     NativeFileJobActivationCommittedError,
+    NativeFileJobActivationUnresolvedError,
     NativeFileJobError,
+    PORTABLE_BODIES_INCOMPLETE,
     resolveNativeFileJobStage,
     portableBodyRetryRequest,
     retryNativePortableRestoreBodies,
@@ -99,6 +101,21 @@ export interface SharedNativeFileOperationOptions {
 export const nativeFileOperation = writable<NativeFileOperationState | null>(null)
 export const nativeFileOperationOutcome = writable<NativeFileOperationOutcome | null>(null)
 
+export function recordRecoveredNativeFileOperation(status: NativeFileJobStatus): void {
+    nativeFileOperationOutcome.update(outcome => {
+        if (!outcome || outcome.status?.jobId !== status.jobId || activeOperation) return outcome
+        const pendingBodies = status.kind === 'restore-portable-backup' && status.portableBodyRetry?.pending
+        if (!['succeeded', 'failed', 'cancelled'].includes(status.state)) return {...outcome, status}
+        if (status.state === 'succeeded' && status.result && !pendingBodies) {
+            return {...outcome, status, state: 'succeeded', result: status.result, error: undefined,
+                warningCodes: mergeWarningCodes(outcome.warningCodes, status.result.warningCodes ?? [])}
+        }
+        const cause = new NativeFileJobError(status.error?.code ?? 'restore-failed', status.error?.message ?? 'Restore failed')
+        return {...outcome, status, state: status.state === 'cancelled' ? 'cancelled' : 'failed',
+            error: outcomeError(outcome.kind, status.activationRevision === undefined ? cause : new NativeFileJobActivationCommittedError(status.activationRevision, cause, pendingBodies ? PORTABLE_BODIES_INCOMPLETE : undefined))}
+    })
+}
+
 /**
  * Which surface draws a dialog-presented operation. The onboarding takes
  * backup restores into its own panel while it is on screen; the shared
@@ -137,15 +154,18 @@ function mergeWarningCodes(...groups: string[][]): string[] {
     return [...new Set(groups.flat())]
 }
 
-// A backup source copy reports its bytes only as stage detail, before the restore job measures any.
-function backgroundTaskPercent({ progress, detail }: NativeFileJobStatus): number | null {
+function backgroundTaskPercent({ kind, phase, progress, detail }: NativeFileJobStatus): number | null {
+    if (kind.startsWith('restore-')) {
+        if (detail) return measuredTaskPercent(detail.stageCompleted, detail.stageTotal)
+        return phase === 'reading-source' ? measuredTaskPercent(progress.completedBytes, progress.totalBytes) : null
+    }
     const percent = measuredTaskPercent(progress.completedBytes, progress.totalBytes)
     return percent === null && detail?.stage === 'copying-source' && detail.stageUnit === 'bytes'
         ? measuredTaskPercent(detail.stageCompleted, detail.stageTotal) : percent
 }
 
 function outcomeError(kind: NativeFileOperationKind, error: unknown): NativeFileOperationError {
-    if (error instanceof NativeFileJobActivationCommittedError) {
+    if (error instanceof NativeFileJobActivationCommittedError || error instanceof NativeFileJobActivationUnresolvedError) {
         const cause = error.cause
         return {
             code: error.code,
@@ -161,7 +181,8 @@ function outcomeError(kind: NativeFileOperationKind, error: unknown): NativeFile
         'code' in error && typeof error.code === 'string' &&
         'message' in error && typeof error.message === 'string'
     ) {
-        return { code: error.code, message: error.message, recoveryRequired: false }
+        return { code: error.code, message: error.message, recoveryRequired: false,
+            ...('itemKind' in error && typeof error.itemKind === 'string' ? { itemKind: error.itemKind } : {}) }
     }
     return {
         code: `${kind}-error`,
@@ -330,7 +351,7 @@ function runSharedNativeFileOperationWithAdmission<T>(
     publishActiveState()
     const context: SharedNativeFileOperationContext = {
         signal: controller.signal,
-        onStatus: recordStatus,
+        onStatus: status => { if (activeController === controller) recordStatus(status) },
         setBlocking: (blocking) => updateActiveState({ blocking }),
         setSource: (source) => updateActiveState({ source }),
         setPartialWritesPossible: (value) => updateActiveState({ partialWritesPossible: value }),
@@ -360,7 +381,7 @@ function runSharedNativeFileOperationWithAdmission<T>(
             ...context,
             signal: task.signal ?? context.signal,
             onStatus: status => {
-                recordStatus(status)
+                context.onStatus(status)
                 task.progress(backgroundTaskPercent(status))
             },
             })

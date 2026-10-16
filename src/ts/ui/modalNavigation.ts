@@ -64,11 +64,15 @@ function navigationLayer(node: HTMLElement, initial: NavigationOptions, trapFocu
     }
     const isTopmost = () => token !== null && [...live].at(-1) === token
     const closeOnBack = () => {
-        if (cleanupInFlight || !token || historyTokens().includes(token)) return
-        if (isTopmost() && cancelVisibleAlert()) {
-            history.pushState({ ...history.state, [key]: [...historyTokens(), token] }, '')
+        if (cleanupInFlight || !isTopmost() || !token || historyTokens().includes(token)) return
+        const remaining = [...live].filter((entry) => entry !== token)
+        if (cancelVisibleAlert()) {
+            history.pushState({ ...history.state, [key]: [...remaining, token] }, '')
             if (lastFocused?.isConnected) lastFocused.focus()
             return
+        }
+        if (remaining.some((entry) => !historyTokens().includes(entry))) {
+            history.pushState({ ...history.state, [key]: remaining }, '')
         }
         options.close()
     }

@@ -32,7 +32,7 @@
     interface Props {
         close: () => void
         values?: ToggleValues
-        onApply?: (values: ToggleValues, keys: readonly string[]) => void
+        onApply?: (values: ToggleValues, keys: readonly string[]) => Promise<boolean>
     }
     let { close, values, onApply }: Props = $props()
     let displayedValues = $derived(values ?? DBState.db.globalChatVariables)
@@ -77,8 +77,9 @@
                 ? language.applyTogglePresetMismatchConfirm
                 : language.applyTogglePresetConfirm
             if (!(await alertConfirm(message)) || displayedValues !== originalValues) return
-            if (onApply) onApply(preset.values, currentToggleKeys())
-            else applyToggleValues(DBState.db.globalChatVariables, preset.values, currentToggleKeys())
+            if (onApply) {
+                if (!(await onApply(preset.values, currentToggleKeys()))) return
+            } else applyToggleValues(DBState.db.globalChatVariables, preset.values, currentToggleKeys())
             alertToast(language.togglePresetApplied(preset.name))
             close()
         })

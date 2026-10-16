@@ -334,8 +334,8 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
         return invokeStore('pds_read_plugin_storage_page', { query })
     }
 
-    queryPluginStorage(): Promise<PluginStorageCatalog> {
-        return invokeStore('pds_query_plugin_storage', {})
+    queryPluginStorage(owner?: string): Promise<PluginStorageCatalog> {
+        return invokeStore('pds_query_plugin_storage', owner === undefined ? {} : { owner })
     }
 
     readPluginStorage(owner: string, key: string): Promise<Versioned<unknown> | null> {
@@ -600,9 +600,9 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
                 validatePluginStorageValueQuery(query)
                 return invokeStore('pds_read_plugin_storage_page', { query, lease })
             },
-            queryPluginStorage: async () => {
+            queryPluginStorage: async (owner) => {
                 assertActive()
-                return invokeStore('pds_query_plugin_storage', { lease })
+                return invokeStore('pds_query_plugin_storage', owner === undefined ? { lease } : { lease, owner })
             },
             readPluginStorage: async (owner, key) => {
                 assertActive()

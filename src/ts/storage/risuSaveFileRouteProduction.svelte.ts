@@ -6,10 +6,11 @@ import { join } from '@tauri-apps/api/path'
 import { iosStagingPath } from './nativePaths'
 import { mkdir, remove } from '@tauri-apps/plugin-fs'
 import { pickIOSFile, discardIOSFile, exportIOSFile } from './iosFiles'
-import { isTauriIOS, isTauriAndroid, isTauriDesktop } from '../platform'
+import { isTauri, isTauriIOS, isTauriAndroid, isTauriDesktop } from '../platform'
 import {
     acknowledgeAndroidSafExport,
     copyNativeExportToAndroidSaf,
+    reserveAndroidSafDestination,
     markAndroidSafExportPublicationReady,
 } from './androidSafBridge'
 import {
@@ -123,6 +124,7 @@ const productionDependencies: RisuSaveFileRouteDependencies = {
     },
     withFlushedExport: withFlushedRisuSaveExport,
     copyAndroidExport: copyNativeExportToAndroidSaf,
+    reserveAndroidDestination: reserveAndroidSafDestination,
     markAndroidExportReady: markAndroidSafExportPublicationReady,
     acknowledgeAndroidExport: acknowledgeAndroidSafExport,
     reloadPlugins: loadPlugins,
@@ -132,10 +134,15 @@ const productionDependencies: RisuSaveFileRouteDependencies = {
 
 export { nativeFileOperation }
 
-export const importRisuSaveFromSystemPicker = (
+export const importRisuSaveFromSystemPicker = async (
     options: RisuSaveFileRouteOptions = {},
-) =>
-    runSharedNativeFileOperation(
+) => {
+    if (isTauri) {
+        const { restoreBackupFromSystemPicker } = await import('./portableBackupFileRouteProduction.svelte')
+        const result = await restoreBackupFromSystemPicker(options)
+        return result ? { mode: 'native' as const, warningCodes: result.warningCodes, bytes: result.sourceBytes } : null
+    }
+    return runSharedNativeFileOperation(
         'import',
         'risu-save-import',
         ({ signal, onStatus, setBlocking, setSource }) =>
@@ -160,6 +167,7 @@ export const importRisuSaveFromSystemPicker = (
             ),
         { presentation: 'dialog', format: 'risu-save' },
     )
+}
 
 export const exportRisuSaveFromSystemPicker = (
     options: RisuSaveFileRouteOptions = {},

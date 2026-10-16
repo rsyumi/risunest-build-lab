@@ -2,7 +2,7 @@ import Foundation
 import Darwin
 
 enum PortableSourceError: Error {
-    case busy, unavailable, notSeekable, ownership, changed, cancelled, readFailed, writeFailed
+    case busy, unavailable, notSeekable, ownership, changed, cancelled, readFailed, writeFailed, storageFull, cleanupFailed
 
     /// The code a failed backup source copy reports to JavaScript. Android reports the same codes.
     var copyFailureCode: String {
@@ -12,13 +12,24 @@ enum PortableSourceError: Error {
         case .cancelled: return "cancelled"
         case .readFailed: return "source-read-failed"
         case .writeFailed: return "spool-write-failed"
+        case .storageFull: return "storage-full"
+        case .cleanupFailed: return "cleanup-failed"
         case .unavailable, .notSeekable, .ownership: return "source-reselect-required"
         }
     }
 }
 
 private func copyStep<T>(_ failure: PortableSourceError, _ step: () throws -> T) throws -> T {
-    do { return try step() } catch { throw failure }
+    do { return try step() } catch {
+        if case .writeFailed = failure, isFullStorage(error as NSError) { throw PortableSourceError.storageFull }
+        throw failure
+    }
+}
+
+private func isFullStorage(_ error: NSError) -> Bool {
+    if error.domain == NSPOSIXErrorDomain && (error.code == Int(ENOSPC) || error.code == Int(EDQUOT)) { return true }
+    if error.domain == NSCocoaErrorDomain && error.code == NSFileWriteOutOfSpaceError { return true }
+    return (error.userInfo[NSUnderlyingErrorKey] as? NSError).map(isFullStorage) ?? false
 }
 
 struct PortableSourceCopyProgress: Encodable {
@@ -53,6 +64,7 @@ final class PortableSourceCustody {
         let owner: String
         let release = DispatchSemaphore(value: 0)
         let finished = DispatchSemaphore(value: 0)
+        let cleanupFinished = DispatchGroup()
         var jobId: String?
         var claimRequest: String?
         var releasing = false
@@ -63,6 +75,8 @@ final class PortableSourceCustody {
         var probeId: String?
         var probeFinished: DispatchSemaphore?
         var completedProbes: [String] = []
+        var copiedFolder: URL?
+        var cleanupSucceeded = true
         init(handle: FileHandle, info: stat, name: String, owner: String) {
             self.handle = handle; self.bytes = UInt64(info.st_size)
             self.identity = Identity(info); self.name = name
@@ -80,8 +94,30 @@ final class PortableSourceCustody {
     }
     private let lock = NSLock()
     private let synchronizeCopy: (FileHandle) throws -> Void
-    init(synchronizeCopy: @escaping (FileHandle) throws -> Void = { try $0.synchronize() }) {
+    private let beforeInstall: () -> Void
+    private let removeCopy: (URL) throws -> Void
+    private let backgroundReleases = DispatchGroup()
+    private var cleanupFailurePending = false
+    final class CopyStorage {
+        static let shared = CopyStorage()
+        private let lock = NSLock()
+        private var swept = Set<URL>()
+        func sweep(staging: URL) throws {
+            lock.lock(); defer { lock.unlock() }
+            let folder = staging.standardizedFileURL.appendingPathComponent("custody", isDirectory: true)
+            guard swept.insert(folder).inserted else { return }
+            if FileManager.default.fileExists(atPath: folder.path) { try FileManager.default.removeItem(at: folder) }
+        }
+    }
+    private let copyStorage: CopyStorage
+    init(synchronizeCopy: @escaping (FileHandle) throws -> Void = { try $0.synchronize() },
+         beforeInstall: @escaping () -> Void = {},
+         removeCopy: @escaping (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) },
+         copyStorage: CopyStorage = .shared) {
         self.synchronizeCopy = synchronizeCopy
+        self.beforeInstall = beforeInstall
+        self.removeCopy = removeCopy
+        self.copyStorage = copyStorage
     }
     private let coordinatorQueue: OperationQueue = {
         let queue = OperationQueue()
@@ -135,8 +171,10 @@ final class PortableSourceCustody {
                           lseek(fd, 0, SEEK_SET) == 0 else { throw PortableSourceError.notSeekable }
                     let token = selectionToken
                     let source = Source(handle: handle, info: info, name: url.lastPathComponent, owner: owner)
+                    self.beforeInstall()
                     self.lock.lock()
                     guard !self.retiredOwners.contains(owner) else { self.lock.unlock(); handle.closeFile(); throw PortableSourceError.ownership }
+                    source.cleanupFinished.enter()
                     self.active[token] = source
                     self.lock.unlock()
                     selected = true
@@ -168,7 +206,7 @@ final class PortableSourceCustody {
 
     func descriptor(token: String, jobId: String?) throws -> [String: Any] {
         lock.lock(); defer { lock.unlock() }
-        guard UUID(uuidString: token) != nil, let source = active[token], !source.releasing, !source.copying else { throw PortableSourceError.unavailable }
+        guard UUID(uuidString: token) != nil, let source = active[token], !source.releasing, !source.copying, source.copiedFolder == nil else { throw PortableSourceError.unavailable }
         guard source.jobId != nil || !retiredOwners.contains(source.owner) else { throw PortableSourceError.ownership }
         if let jobId = jobId {
             guard UUID(uuidString: jobId) != nil, source.probeId == nil, source.format == "portable",
@@ -183,7 +221,7 @@ final class PortableSourceCustody {
 
     func confirm(token: String, format: String) throws {
         lock.lock(); defer { lock.unlock() }
-        guard let source = active[token], source.jobId == nil, source.claimRequest == nil, !retiredOwners.contains(source.owner), !source.releasing, !source.copying, source.probeId == nil,
+        guard let source = active[token], source.jobId == nil, source.claimRequest == nil, !retiredOwners.contains(source.owner), !source.releasing, !source.copying, source.copiedFolder == nil, source.probeId == nil,
               ["portable", "block-risu-save", "local-backup"].contains(format) else { throw PortableSourceError.ownership }
         source.format = format
     }
@@ -191,7 +229,7 @@ final class PortableSourceCustody {
     func beginProbe(token: String, probeId: String) throws {
         lock.lock(); defer { lock.unlock() }
         guard UUID(uuidString: probeId) != nil, let source = active[token], source.jobId == nil,
-              !source.releasing, !source.copying, source.probeId == nil, !retiredOwners.contains(source.owner) else { throw PortableSourceError.ownership }
+              !source.releasing, !source.copying, source.copiedFolder == nil, source.probeId == nil, !retiredOwners.contains(source.owner) else { throw PortableSourceError.ownership }
         source.probeId = probeId
         source.probeFinished = DispatchSemaphore(value: 0)
     }
@@ -224,23 +262,26 @@ final class PortableSourceCustody {
 
     /// Throws a `PortableSourceError`, whose `copyFailureCode` JavaScript receives.
     func materialize(token: String, staging: URL, onProgress: @escaping (PortableSourceCopyProgress) -> Void = { _ in }) throws -> [String: Any] {
+        sweepCopies(staging: staging)
         lock.lock()
         guard let source = active[token], source.jobId == nil, source.claimRequest == nil, !retiredOwners.contains(source.owner), !source.releasing, !source.copyCancelled, source.probeId == nil,
               source.format == "block-risu-save" || source.format == "local-backup" else {
             lock.unlock(); throw PortableSourceError.ownership
         }
-        guard !source.copying else { lock.unlock(); throw PortableSourceError.busy }
+        guard !source.copying, source.copiedFolder == nil else { lock.unlock(); throw PortableSourceError.busy }
         source.copying = true
         lock.unlock()
-        let folder = staging.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let folder = staging.appendingPathComponent("custody", isDirectory: true).appendingPathComponent(UUID().uuidString, isDirectory: true)
+        lock.lock(); source.copiedFolder = folder; lock.unlock()
         var success = false
         defer {
-            if !success { try? FileManager.default.removeItem(at: folder) }
+            if !success { try? removeCopy(folder) }
+            lock.lock(); source.copying = false; lock.unlock()
             source.copied.signal()
         }
         try copyStep(.writeFailed) { try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true) }
         let destination = folder.appendingPathComponent("source.risudat")
-        guard FileManager.default.createFile(atPath: destination.path, contents: nil) else { throw PortableSourceError.writeFailed }
+        try copyStep(.writeFailed) { try Data().write(to: destination) }
         let output = try copyStep(.writeFailed) { try FileHandle(forWritingTo: destination) }
         defer { output.closeFile() }
         var info = stat()
@@ -264,7 +305,7 @@ final class PortableSourceCustody {
         return ["cancelled": false, "path": destination.path, "name": source.name, "bytes": copied]
     }
 
-    func release(token: String, jobId: String?) -> Bool {
+    func release(token: String, jobId: String?, waitForCleanup: Bool = false) -> Bool {
         lock.lock()
         guard let source = active[token] else {
             let completed = released.contains(token) || retired.contains(where: { $0.token == token })
@@ -273,16 +314,41 @@ final class PortableSourceCustody {
         }
         let requested = source.jobId == nil && source.claimRequest != nil && source.claimRequest == jobId
         guard (source.claimRequest == nil && source.jobId == jobId) || (jobId != nil && (source.jobId == jobId || requested)) else { lock.unlock(); return false }
-        if source.releasing { lock.unlock(); return false }
+        if source.releasing {
+            lock.unlock()
+            if waitForCleanup { source.cleanupFinished.wait(); return source.cleanupSucceeded }
+            return true
+        }
         source.releasing = true
+        if jobId == nil { source.copyCancelled = true }
         let copying = source.copying
         let probe = source.probeFinished
+        let deferred = !waitForCleanup && jobId == nil && (copying || probe != nil)
+        if deferred { backgroundReleases.enter() }
         lock.unlock()
+        if deferred {
+            DispatchQueue.global(qos: .utility).async {
+                _ = self.finishRelease(token: token, source: source, copying: copying, probe: probe)
+                self.backgroundReleases.leave()
+            }
+            return true
+        }
+        return finishRelease(token: token, source: source, copying: copying, probe: probe)
+    }
+
+    private func finishRelease(token: String, source: Source, copying: Bool, probe: DispatchSemaphore?) -> Bool {
         probe?.wait()
         if copying { source.copied.wait() }
+        var cleaned = true
+        if let folder = source.copiedFolder {
+            do { try removeCopy(folder) }
+            catch { cleaned = !FileManager.default.fileExists(atPath: folder.path) }
+        }
         source.release.signal()
         source.finished.wait()
         lock.lock()
+        source.cleanupSucceeded = cleaned
+        if !cleaned { cleanupFailurePending = true }
         active.removeValue(forKey: token)
         released.append(token)
         if released.count > 16 { released.removeFirst(released.count - 16) }
@@ -290,7 +356,8 @@ final class PortableSourceCustody {
         reservedOwner = nil
         retiredOwners.remove(source.owner)
         lock.unlock()
-        return true
+        source.cleanupFinished.leave()
+        return cleaned
     }
 
     func retireUnclaimed(owner: String, completion: (() -> Void)? = nil) {
@@ -302,7 +369,7 @@ final class PortableSourceCustody {
         lock.unlock()
         retirementQueue.addOperation {
             pending?.wait()
-            for receipt in receipts where self.release(token: receipt.token, jobId: nil) {
+            for receipt in receipts where self.release(token: receipt.token, jobId: nil, waitForCleanup: true) {
                 self.lock.lock()
                 if !self.retired.contains(where: { $0.token == receipt.token }) { self.retired.append(receipt) }
                 self.lock.unlock()
@@ -311,9 +378,21 @@ final class PortableSourceCustody {
         }
     }
 
-    func orphanReceipts() -> [RetiredSource] {
+    func orphanReceipts() throws -> [RetiredSource] {
         retirementQueue.waitUntilAllOperationsAreFinished()
-        lock.lock(); defer { lock.unlock() }; return retired
+        backgroundReleases.wait()
+        lock.lock(); defer { lock.unlock() }
+        if cleanupFailurePending {
+            cleanupFailurePending = false
+            throw PortableSourceError.cleanupFailed
+        }
+        return retired
+    }
+
+    /// Run once per process/root, before any copy can occupy this private staging directory.
+    func sweepCopies(staging: URL) {
+        do { try copyStorage.sweep(staging: staging) }
+        catch { lock.lock(); cleanupFailurePending = true; lock.unlock() }
     }
 
     func acknowledgeOrphan(token: String) -> Bool {

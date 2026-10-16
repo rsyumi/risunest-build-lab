@@ -21,7 +21,7 @@ import { getV2PluginAPIs } from '../plugins/plugins.svelte'
 import type { Database } from './database.svelte'
 import type { PersistentDataStore, PersistentUnitMutation, WorkingSetCommit } from './persistentDataStore'
 import { createStoreStub } from './persistentDataStore.testSupport'
-import { captureCurrentPreset, getDatabase, getEffectivePresetId, normalizeDatabaseDefaults, setDatabase, setDatabaseLite, setEffectivePresetOverride, setPreset } from './database.svelte'
+import { captureCurrentPreset, fillRootFieldDefaults, getDatabase, getEffectivePresetId, normalizeDatabaseDefaults, setDatabase, setDatabaseLite, setEffectivePresetOverride, setPreset } from './database.svelte'
 import { createPresetWorkingSetController } from './presetWorkingSetOperations'
 import {
     configurePersistentDataRuntime,
@@ -1640,6 +1640,30 @@ describe('received root fields without a value', () => {
         commit.mockRestore()
         return keys
     }
+
+    it.each([false, true])('normalizes present received values like a load without writing corrections back (catalog=%s)', async (catalog) => {
+        const {store, runtime, saveFailures} = await rootRuntime(catalog)
+        const values = { promptInfoInsideChat: true, chatLoadInitialPages: -10, chatLoadAdditionalPages: 100000,
+            risunestInlayFormat: 'invalid', risunestInlayWebpQuality: -1, risunestInlayMaxDimension: -100,
+            risunestInlayAnimationMaxFps: -10, loreBookPage: 9999 }
+        const expected = normalizeDatabaseDefaults({...JSON.parse(JSON.stringify(getDatabase())), ...values} as unknown as Database)
+        const mutations = Object.entries(values).map(([field, value]) => ({key: JSON.stringify(['root', field]), type: 'set' as const, value}))
+        await receiveCommit(store, runtime, {unitMutations: mutations}, mutations.map(({key}) => key))
+        for (const field of Object.keys(values)) expect(getDatabase()[field]).toEqual(expected[field])
+        expect(await savedKeys(store, runtime)).toEqual(['classicMaxWidth'])
+        const stored = (await store.readRoot()).value
+        for (const [field, value] of Object.entries(values)) expect(stored[field]).toEqual(value)
+        expect(saveFailures).toEqual([])
+    })
+
+    it('normalizes an older string-shaped root provider while leaving unrelated fields unchanged', () => {
+        const database = normalizeDatabaseDefaults({} as Database)
+        Object.assign(database, {openrouterProvider: 'synthetic-provider', chatLoadInitialPages: -10, pluginCustomStorage: {synthetic: 'kept'}})
+        fillRootFieldDefaults(database, ['openrouterProvider', 'pluginCustomStorage'])
+        expect(database.openrouterProvider).toEqual({order: ['synthetic-provider'], only: [], ignore: []})
+        expect(database.chatLoadInitialPages).toBe(-10)
+        expect(database.pluginCustomStorage).toEqual({synthetic: 'kept'})
+    })
 
     it.each([false, true].flatMap((catalog) => (['askRemoval', 'sendWithEnter'] as const).map((field) => ({catalog, field}))))(
         'gives a removed $field the value a load gives it without saving it (catalog=$catalog)', async ({catalog, field}) => {

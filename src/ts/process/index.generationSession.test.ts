@@ -18,6 +18,8 @@ const mocks = vi.hoisted(() => ({
     outputTriggerReturnsNull: false,
     tokenizeResult: null as Promise<number> | null,
     inlay: null as null | ((data: string) => { text: string, promise?: Promise<string> }),
+    inlayAsset: null as any,
+    caption: vi.fn(async (_image: string | Uint8Array) => [{ generated_text: 'synthetic caption' }]),
     moduleTriggers: [] as any[],
     moduleRegex: [] as any[],
     editHooks: new Set<unknown>(),
@@ -113,7 +115,13 @@ vi.mock('./triggers', async (importOriginal) => {
 })
 vi.mock('./memory/hypamemory', async () => (await import('./tests/sendChatTestHarness')).hypamemoryModule())
 vi.mock('./embedding/addinfo', async () => (await import('./tests/sendChatTestHarness')).addinfoModule())
-vi.mock('./files/inlays', async () => (await import('./tests/sendChatTestHarness')).inlaysModule())
+vi.mock('./files/inlays', async () => (await import('./tests/sendChatTestHarness')).inlaysModule({
+    getInlayAsset: vi.fn(async () => mocks.inlayAsset),
+}))
+vi.mock('./files/inlayImageEncoding', async (importOriginal) => ({
+    ...await importOriginal<typeof import('./files/inlayImageEncoding')>(),
+    decodeInlayImageBitmap: async () => ({ width: 4000, height: 3000, close() {} } as ImageBitmap),
+}))
 vi.mock('./models/modelString', async () => (await import('./tests/sendChatTestHarness')).modelStringModule())
 vi.mock('./inlayScreen', async () => (await import('./tests/sendChatTestHarness')).inlayScreenModule({
     runInlayScreen: (_char: unknown, data: string) => {
@@ -121,7 +129,7 @@ vi.mock('./inlayScreen', async () => (await import('./tests/sendChatTestHarness'
         return mocks.inlay ? mocks.inlay(data) : { text: data }
     },
 }))
-vi.mock('./transformers', async () => (await import('./tests/sendChatTestHarness')).transformersModule())
+vi.mock('./transformers', async () => (await import('./tests/sendChatTestHarness')).transformersModule({ runImageEmbedding: mocks.caption }))
 vi.mock('./memory/hanuraiMemory', async () => (await import('./tests/sendChatTestHarness')).hanuraiMemoryModule())
 vi.mock('./memory/hypav2', async () => (await import('./tests/sendChatTestHarness')).hypav2Module())
 vi.mock('./memory/hypav3', async () => (await import('./tests/sendChatTestHarness')).hypav3Module({
@@ -348,6 +356,8 @@ describe('sendChat generation session integration', () => {
         mocks.outputTriggerReturnsNull = false
         mocks.tokenizeResult = null
         mocks.inlay = null
+        mocks.inlayAsset = null
+        mocks.caption.mockClear()
         mocks.listeners.clear()
         mocks.resolvePosition.mockClear()
         mocks.editHooks.clear()
@@ -397,6 +407,33 @@ describe('sendChat generation session integration', () => {
                 },
             }
         })
+    })
+
+    it('caps the local caption image without changing the stored attachment', async () => {
+        installDatabase(makeChat([{ role: 'user', data: '{{inlay::caption-budget}}', chatId: 'image' }]))
+        const original = { type: 'image', data: 'data:image/png;base64,iVBORw0KGgoH', width: 4000, height: 3000 }
+        mocks.inlayAsset = { ...original }
+        const create = document.createElement.bind(document)
+        const canvas = vi.spyOn(document, 'createElement').mockImplementation((tag, options) => {
+            const element = create(tag, options)
+            if (tag === 'canvas') {
+                const target = element as HTMLCanvasElement
+                target.getContext = (() => ({ drawImage() {} })) as any
+                target.toBlob = (callback) => callback(new Blob([JSON.stringify({ width: target.width, height: target.height })], { type: 'image/webp' }))
+            }
+            return element
+        })
+        try {
+            await expect(sendChat()).resolves.toBe(true)
+            const sent = mocks.caption.mock.calls[0]?.[0] as string
+            expect(sent).toMatch(/^data:image\/webp;base64,/)
+            const size = JSON.parse(atob(sent.split(',')[1]))
+            expect(size.width * size.height).toBeLessThanOrEqual(1024 * 1024)
+            expect(size.width).toBeGreaterThan(0)
+            expect(mocks.inlayAsset).toEqual(original)
+        } finally {
+            canvas.mockRestore()
+        }
     })
 
     it.each(['disabled', 'v2', 'hanurai'])('retains covered messages when the active memory route is %s', async (route) => {

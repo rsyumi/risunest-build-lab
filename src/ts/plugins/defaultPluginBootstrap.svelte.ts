@@ -1,3 +1,4 @@
+import { pluginStartupState, pluginStartupGate } from './pluginStartupGate'
 import { fromStore } from 'svelte/store'
 import { onboardingHold } from '../../lib/Others/Onboarding/onboardingGate'
 import { isTauri } from '../platform'
@@ -23,13 +24,18 @@ const DEFAULT_PLUGINS = [
 
 let started = false
 
-async function installDefaultPlugins(): Promise<void> {
+function defaultPluginAttempts() {
     const markers = getDeviceMarkers()
     const attempted: unknown = JSON.parse(markers.getItem(ATTEMPT_KEY) ?? '[]')
     if (!Array.isArray(attempted) || attempted.some(name => typeof name !== 'string')) {
         throw new Error('Invalid default plugin attempt record')
     }
     const pending = DEFAULT_PLUGINS.filter(([name]) => !attempted.includes(name))
+    return { markers, attempted, pending }
+}
+
+async function installDefaultPlugins(): Promise<void> {
+    const { markers, attempted, pending } = defaultPluginAttempts()
     if (!pending.length) return
     const epoch = getPersistentStorageAuthorityEpoch()
     assertPersistentMutationAllowed(epoch)
@@ -69,14 +75,18 @@ export function startDefaultPluginBootstrap(): void {
     started = true
     const onboarding = fromStore(onboardingHold)
     const blocked = fromStore(persistentWorkingSetInputBlocked)
+    const startup = fromStore(pluginStartupState)
     const stop = $effect.root(() => {
         $effect(() => {
             const held = onboarding.current
             const replacing = blocked.current
-            if (!DBState.db.didFirstSetup || held || replacing) return
+            const waiting = startup.current.phase !== 'released'
+            if (!DBState.db.didFirstSetup || held || replacing || waiting) return
             let cancelled = false
             void yieldToUi().then(async () => {
                 if (cancelled) return
+                if (!defaultPluginAttempts().pending.length) { stop(); return }
+                if (!await pluginStartupGate.ensure({ installingDefaults: true }) || cancelled) return
                 stop()
                 await installDefaultPlugins()
             }).catch(error => console.error('Default plugin bootstrap failed', error))

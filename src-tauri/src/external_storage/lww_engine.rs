@@ -259,19 +259,38 @@ impl StagedControls {
     fn new(root: std::path::PathBuf) -> Self {
         Self { root, created: false }
     }
-    fn freeze(&mut self, hash: &str, encoded: &str, cancel: &Cancellation) -> Result<FrozenControl> {
+    fn freeze(&mut self, store: &PersistentStore, hash: &str, encoded: &str, cancel: &Cancellation) -> Result<FrozenControl> {
         cancel.check()?;
         let directory = self.root.join("controls");
         if !self.created {
             std::fs::create_dir_all(&directory).map_err(transient)?;
             self.created = true;
         }
-        let bytes = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| segment::corrupt())?;
         let source = directory.join(hash);
         let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&source).map_err(transient)?;
-        std::io::Write::write_all(&mut file, &bytes).map_err(transient)?;
+        let byte_length = if encoded.is_empty() {
+            use std::io::{Read, Write};
+            use sha2::{Digest, Sha256};
+            let mut input = store.lww_native_object(hash).map_err(store_error)?.ok_or_else(segment::corrupt)?;
+            let mut digest = Sha256::new();
+            let mut length = 0u64;
+            let mut buffer = [0; 64 * 1024];
+            loop {
+                cancel.check()?;
+                let count = input.read(&mut buffer).map_err(transient)?;
+                if count == 0 { break; }
+                file.write_all(&buffer[..count]).map_err(transient)?;
+                digest.update(&buffer[..count]); length += count as u64;
+            }
+            if hex::encode(digest.finalize()) != hash { return Err(segment::corrupt()); }
+            length
+        } else {
+            let bytes = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| segment::corrupt())?;
+            std::io::Write::write_all(&mut file, &bytes).map_err(transient)?;
+            bytes.len() as u64
+        };
         file.sync_all().map_err(transient)?;
-        Ok(FrozenControl { content_hash: hash.into(), byte_length: bytes.len() as u64, source })
+        Ok(FrozenControl { content_hash: hash.into(), byte_length, source })
     }
     fn keep(&mut self) {
         self.created = false;
@@ -831,7 +850,7 @@ impl ExternalLwwEngine {
                                 continue;
                             }
                             if let Some(encoded) = controls.get_mut(hash) {
-                                let control = staged.freeze(hash, &std::mem::take(encoded), cancel)?;
+                                let control = staged.freeze(store, hash, &std::mem::take(encoded), cancel)?;
                                 frozen_controls.insert(hash.clone(), control);
                             }
                         }
@@ -1479,8 +1498,8 @@ impl ExternalLwwEngine {
             match cas.open_object(&asset.content_hash).map_err(transient)? {
                 Some(file) => self.seal_checked(file, asset, object_id, path, &mut check),
                 None => {
-                    let bytes = store.lww_object_body(&asset.content_hash).map_err(store_error)?.ok_or_else(segment::corrupt)?;
-                    self.seal_checked(Cursor::new(bytes), asset, object_id, path, &mut check)
+                    let input = store.lww_native_object(&asset.content_hash).map_err(store_error)?.ok_or_else(segment::corrupt)?;
+                    self.seal_checked(input, asset, object_id, path, &mut check)
                 }
             }
         } else if let Some(proof) = &asset.remote_source {
@@ -1827,6 +1846,11 @@ impl ExternalLwwEngine {
                         continue;
                     }
                 }
+                if store.lww_native_object(&hash).map_err(store_error)?.is_some_and(|body| body.len() as usize > 8 * 1024 * 1024) {
+                    // An empty entry asks the accepted publication to freeze the native body directly.
+                    controls.insert(hash, String::new());
+                    continue;
+                }
                 let bytes = store.lww_object_body(&hash).map_err(store_error)?.ok_or_else(segment::corrupt)?;
                 let encoded=URL_SAFE_NO_PAD.encode(&bytes);
                 if bytes.len()>segment::SMALL_BODY_BYTES { controls.insert(hash,encoded); }
@@ -1932,7 +1956,8 @@ impl ExternalLwwEngine {
                 .map_err(store_error)?;
         }
         let hashes=super::snapshot_restore::admit_data_catalogs(
-            &payload.data_catalogs,store,&self.target_scope(),&self.root_key,self.provider.as_ref(),&self.repository,cancel,
+            &payload.data_catalogs,store,&self.target_scope(),&self.root_key,
+            Some(&super::runtime::connection_directory(&self.connection_root,&self.connection_id).join("package-cache")),self.provider.as_ref(),&self.repository,cancel,
         ).await?;
         for hash in hashes {
             store.external_lww_witness_object(&self.target_scope(),&hash).map_err(store_error)?;

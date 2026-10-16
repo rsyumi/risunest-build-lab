@@ -188,10 +188,10 @@ impl HttpTransport for NativeHttpTransport {
             let status = response.status().as_u16();
             let mut headers: BTreeMap<String, String> = BTreeMap::new();
             for (name, value) in response.headers() {
-                let value = value.to_str().map_err(|_| ProviderError::new(ErrorKind::Corrupt))?;
+                let value = value.to_str().map_err(|_| super::providers::common::error(ErrorKind::Corrupt, status))?;
                 if let Some(existing) = headers.get_mut(name.as_str()) {
                     if matches!(name.as_str(), "etag" | "location" | "content-length" | "content-range") {
-                        return Err(ProviderError::new(ErrorKind::Corrupt));
+                        return Err(super::providers::common::error(ErrorKind::Corrupt, status));
                     }
                     existing.push_str(", ");
                     existing.push_str(value);

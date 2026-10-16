@@ -32,7 +32,7 @@ internal fun acceptsAndroidControl(
 
 internal fun androidControlNotification(method: String): Boolean =
   method.startsWith("lifecycle.") || method in setOf(
-    "saf.copyExport", "saf.cancelSource", "saf.pickBackupSource", "saf.pickPortableBackupSource",
+    "saf.copyExport", "saf.copyReservedExport", "saf.reserveExport", "saf.cancelSource", "saf.pickBackupSource", "saf.pickPortableBackupSource",
     "saf.pickLegacyBackupSource", "saf.pickContentSource",
   )
 
@@ -40,10 +40,10 @@ internal fun androidControlArgumentCount(method: String): Int? = when (method) {
   "lifecycle.onFlushComplete", "lifecycle.onFlushHold", "lifecycle.exitListenerReady", "lifecycle.acknowledgeOpenedFile",
   "saf.pickBackupSource", "saf.pickPortableBackupSource", "saf.discardPortableSource", "saf.materializeBackupSource", "saf.pickLegacyBackupSource", "saf.cancelExport",
   "saf.cancelSource", "saf.discardSource", "saf.markExportPublicationReady",
-  "saf.acknowledgeExport" -> 1
+  "saf.acknowledgeExport", "saf.releaseExport" -> 1
   "background.begin", "background.end", "notification.completion", "files.pick", "files.discard" -> 1
-  "background.progress", "saf.pickContentSource" -> 2
-  "saf.copyExport" -> 3
+  "background.progress", "saf.pickContentSource", "saf.bindExport" -> 2
+  "saf.copyExport", "saf.copyReservedExport", "saf.reserveExport" -> 3
   "lifecycle.requestExit", "lifecycle.requestRestart", "lifecycle.onFrontendReady",
   "generation.begin", "generation.end", "generation.notificationsEnabled", "generation.requestNotifications",
   "generation.openNotificationSettings", "generation.webViewVersion", "notification.enabled",

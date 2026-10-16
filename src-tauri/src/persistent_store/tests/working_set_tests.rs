@@ -203,6 +203,11 @@ fn plugin_storage_is_revisioned_per_key_and_lease_isolated() {
         })
         .expect("mutate plugin storage");
 
+    for (selected, expected) in [(None, 1), (Some(lease.lease.as_str()), 2)] {
+        assert_eq!(store.query_plugin_storage_for_owner(selected, Some(UNOWNED_OWNER)).unwrap().items.len(), expected);
+        assert!(store.query_plugin_storage_for_owner(selected, Some("another-owner")).unwrap().items.is_empty());
+    }
+
     assert_eq!(
         store
             .read_plugin_storage(UNOWNED_OWNER, "alpha", Some(&lease.lease))

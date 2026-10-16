@@ -38,6 +38,8 @@ impl Provider for StreamingProvider {
     fn replace_head<'a>(&'a self, r: &'a RepositoryHandle, l: &'a RemoteLocator, h: &'a HeadBytes, x: &'a Cancellation) -> ProviderFuture<'a, HeadReceipt> { self.provider.replace_head(r,l,h,x) }
     fn list_objects<'a>(&'a self, r: &'a RepositoryHandle, c: Collection, cursor: Option<&'a str>, limit: u16, x: &'a Cancellation) -> ProviderFuture<'a, ObjectPage> { self.provider.list_objects(r,c,cursor,limit,x) }
     fn delete_object<'a>(&'a self, r: &'a RepositoryHandle, l: &'a RemoteLocator, x: &'a Cancellation) -> ProviderFuture<'a, ()> { self.provider.delete_object(r,l,x) }
+    fn supports_incomplete_cleanup(&self) -> bool { self.provider.supports_incomplete_cleanup() }
+    fn cleanup_incomplete_objects<'a>(&'a self, r: &'a RepositoryHandle, j: &'a [String], cursor: Option<&'a str>, limit: usize, deleting: &'a (dyn Fn(bool) + Send + Sync), x: &'a Cancellation) -> ProviderFuture<'a, IncompleteCleanupPage> { self.provider.cleanup_incomplete_objects(r,j,cursor,limit,deleting,x) }
     fn delete_empty_container<'a>(&'a self, r: &'a RepositoryHandle, l: &'a RemoteLocator, j: &'a [String], x: &'a Cancellation) -> ProviderFuture<'a, ()> { self.provider.delete_empty_container(r,l,j,x) }
     fn reconcile_upload<'a>(&'a self, r: &'a RepositoryHandle, i: &'a ObjectIntent, s: Option<&'a ResumeState>, x: &'a Cancellation) -> ProviderFuture<'a, UploadResolution> { self.provider.reconcile_upload(r,i,s,x) }
     fn lookup_metadata<'a>(&'a self, r: &'a RepositoryHandle, i: &'a ObjectIntent, l: Option<&'a RemoteLocator>, x: &'a Cancellation) -> ProviderFuture<'a, Option<ObjectReceipt>> { self.provider.lookup_metadata(r,i,l,x) }
