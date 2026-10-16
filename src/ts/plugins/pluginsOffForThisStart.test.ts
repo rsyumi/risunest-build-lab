@@ -10,7 +10,7 @@ vi.mock('../storage/persistentDataStoreFactory', () => ({
 }))
 vi.mock('../parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
 vi.mock('./apiV3/v3.svelte', () => ({
-    loadV3Plugins: vi.fn(async () => undefined),
+    loadV3Plugins: vi.fn(async () => true),
     customV3ProviderMetaStore: [],
     areV3PluginsIdle: () => true,
     canInterruptV3Plugins: () => true,

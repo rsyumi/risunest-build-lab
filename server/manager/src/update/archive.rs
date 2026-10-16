@@ -455,8 +455,10 @@ pub fn validate_removal_inventory(
 }
 
 pub fn previous_owned_files(path: &Path) -> Result<Option<Vec<PathBuf>>> {
-    let Ok(bytes) = fs::read(path) else {
-        return Ok(None);
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("managed-install-marker-invalid".into()),
     };
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return Ok(None);

@@ -559,6 +559,7 @@ export class RisuSaveDecoder {
                         break;
                     }
                     case RisuSaveType.PLUGIN_STORAGE_META:{
+                        if(this.blocks[key].name !== 'pluginStorageMeta') break;
                         const meta = JSON.parse(this.blocks[key].content);
                         if(meta && Object.keys(meta).length > 0){
                             db.pluginStorageMeta = meta;

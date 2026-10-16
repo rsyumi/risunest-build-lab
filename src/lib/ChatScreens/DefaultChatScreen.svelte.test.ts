@@ -1,3 +1,4 @@
+import { configurePluginStartup, pluginStartupState } from 'src/ts/plugins/pluginStartupGate'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 import { get, writable } from 'svelte/store'
@@ -750,4 +751,26 @@ it('reports a reroll whose tail could not be reopened as failed', async () => {
     type('').dispatchEvent(new KeyboardEvent('keydown', { key: 'm', ctrlKey: true, bubbles: true }))
     await vi.waitFor(() => expect(records).toEqual([endOf('failed', true)]))
     expect(mocks.error).toHaveBeenCalledWith(language.generationConversationChanged)
+})
+
+
+it('refuses send and regenerate while plugins wait, retaining the draft and conversation', async () => {
+    configurePluginStartup(() => true, async () => {})
+    pluginStartupState.set({ phase: 'waiting', since: Date.now() })
+    try {
+        const input = type('Keep this draft')
+        const before = JSON.parse(JSON.stringify(DBState.db.characters[0].chats[0].message))
+        send()
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'm', ctrlKey: true, bubbles: true }))
+        await tick()
+        expect(input.value).toBe('Keep this draft')
+        expect(DBState.db.characters[0].chats[0].message).toEqual(before)
+        expect(mocks.generate).not.toHaveBeenCalled()
+        expect(mocks.trigger).not.toHaveBeenCalled()
+        expect(mocks.error.mock.calls).toEqual([[language.risuNest.pluginStartup.requestRefused], [language.risuNest.pluginStartup.requestRefused]])
+        expect(document.querySelector<HTMLButtonElement>('.button-icon-send')!.disabled).toBe(false)
+    } finally {
+        pluginStartupState.set({ phase: 'released', since: 0 })
+        configurePluginStartup(() => false, async () => {})
+    }
 })

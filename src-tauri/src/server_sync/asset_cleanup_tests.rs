@@ -30,6 +30,7 @@ fn retained_cleanup_uses_one_page_and_no_payload_hashing() {
     store.asset_residency_set_policy(AssetPolicy::Remote, || Ok(())).unwrap();
     requests.0.store(0, Ordering::Relaxed);
     requests.1.store(0, Ordering::Relaxed);
+    crate::persistent_store::ASSET_GC_LIBRARY_ROOT_COLLECTIONS.with(|count| count.set(0));
     crate::persistent_store::hash_work::reset_hash_work();
     let started = std::time::Instant::now();
     let result = store.asset_residency_evict(|| Ok(())).unwrap();
@@ -42,6 +43,9 @@ fn retained_cleanup_uses_one_page_and_no_payload_hashing() {
     eprintln!("cleanup sample: objects={count} bytes={} retention_requests={retained} missing_requests={missing} payload_hash_bytes={hashed} elapsed_ms={elapsed}", count * size);
     assert_eq!(result.evicted_bytes, (count * size) as u64);
     assert_eq!((retained, missing, hashed), (1, 0, 0));
+    let inventories = crate::persistent_store::ASSET_GC_LIBRARY_ROOT_COLLECTIONS.with(|count| count.get());
+    assert_eq!(inventories, 1, "eviction and all custody pages reuse the unchanged library inventory");
+    eprintln!("cleanup library_inventories={inventories}");
 }
 
 #[test]

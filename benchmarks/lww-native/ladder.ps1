@@ -18,7 +18,7 @@ $ErrorActionPreference = 'Stop'
 $Rungs = @($Rungs | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 $Groups = @($Groups | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 foreach ($group in $Groups) {
-    if ($group -notin 'server', 'backup', 'maintenance', 'serverless') { throw "Unknown group '$group'." }
+    if ($group -notin 'server', 'backup', 'maintenance', 'serverless', 'eviction') { throw "Unknown group '$group'." }
 }
 $repository = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $commonGitDirectory = (& git -C $repository rev-parse --path-format=absolute --git-common-dir).Trim()

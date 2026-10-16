@@ -65,6 +65,31 @@ fn text_headers() -> http::HeaderMap {
 }
 
 #[test]
+fn retry_operation_survives_storage_and_old_records_remain_readable() {
+    let f = Fixture::new();
+    f.enable(false, true);
+    let operation = uuid::Uuid::new_v4();
+    for _ in 0..2 {
+        let capture = f.recorder.begin_operation("synthetic", "GET", "https://synthetic.example", &http::HeaderMap::new(), Some(operation)).guard();
+        capture.finish("error");
+        let record = f.detail(&capture);
+        assert_eq!(record.operation_id.as_deref(), Some(operation.to_string().as_str()));
+        assert_eq!(ListItem::from(&record).operation_id, record.operation_id);
+        let mut legacy = serde_json::to_value(&record).unwrap();
+        legacy.as_object_mut().unwrap().remove("operationId");
+        assert!(serde_json::from_value::<Record>(legacy).unwrap().operation_id.is_none());
+        let mut exported = Vec::new();
+        f.snapshot(&capture).export_json(&mut exported).unwrap();
+        let exported: serde_json::Value = serde_json::from_slice(&exported).unwrap();
+        assert_eq!(exported["operationId"], operation.to_string());
+    }
+    let listing = f.recorder.list(Query::default()).unwrap();
+    assert_eq!(listing.items.len(), 2);
+    assert_ne!(listing.items[0].id, listing.items[1].id);
+    assert!(listing.items.iter().all(|item| item.operation_id.as_deref() == Some(operation.to_string().as_str())));
+}
+
+#[test]
 fn defaults_are_opt_in_and_disabled_capture_does_not_copy_or_enqueue() {
     let f = Fixture::new();
     assert!(!f.recorder.settings().enabled);

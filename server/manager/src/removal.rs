@@ -11,6 +11,18 @@ const RECORD: &str = "risunest-sync-instance.json";
 const INSTALL_BASELINE: &str = "risunest-sync-bundle.previous.json";
 /// Antivirus scans and exiting helper processes briefly hold files that are free to remove.
 const TRANSIENT_REMOVAL_BUDGET: Duration = Duration::from_secs(5);
+#[cfg(windows)]
+const REMOVAL_RETRY: &str = ".risunest-sync-removal";
+
+#[cfg(windows)]
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FinalizationReceipt {
+    schema: u32,
+    data: PathBuf,
+    server: PathBuf,
+    registration: Option<Registration>,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -418,11 +430,18 @@ fn plan_at_with_force(
     let version = inventory["version"]
         .as_str()
         .ok_or("managed-install-marker-invalid")?;
-    plan.files = update::validate_removal_inventory(&install, version, true)?
-        .into_iter()
-        .map(|p| install.join(p))
-        .collect();
-    if cfg!(windows) && install.join(INSTALL_BASELINE).is_file() {
+    let files = update::validate_removal_inventory(&install, version, true)?;
+    #[cfg(windows)]
+    let files = {
+        let mut files = files;
+        include_install_baseline(&install, &mut files)?;
+        files
+    };
+    plan.files = files.into_iter().map(|p| install.join(p)).collect();
+    if cfg!(windows)
+        && install.join(INSTALL_BASELINE).is_file()
+        && !plan.files.contains(&install.join(INSTALL_BASELINE))
+    {
         plan.files.push(install.join(INSTALL_BASELINE));
     }
     for file in &plan.files {
@@ -512,6 +531,54 @@ fn remove_file_within(path: &Path, budget: Duration) -> Result<()> {
     }
 }
 
+#[cfg(any(windows, test))]
+fn existing_install_inventory(path: &Path) -> Result<Option<Vec<PathBuf>>> {
+    safe_path(path)?;
+    Ok(update::previous_owned_files(path).unwrap_or(None))
+}
+
+#[cfg(any(windows, test))]
+pub fn preserve_install_baseline(server: &Path) -> Result<bool> {
+    let install = install_directory(server)?;
+    safe_path(&install)?;
+    let current = marker(&install);
+    let Some(mut files) = existing_install_inventory(&current)? else {
+        return Ok(false);
+    };
+    let baseline = install.join(INSTALL_BASELINE);
+    safe_path(&baseline)?;
+    if let Some(previous) = update::previous_owned_files(&baseline)? {
+        files.extend(previous);
+    }
+    files.sort();
+    files.dedup();
+    let mut inventory: serde_json::Value =
+        serde_json::from_slice(&fs::read(current).map_err(|_| "managed-install-marker-invalid")?)
+            .map_err(|_| "managed-install-marker-invalid")?;
+    inventory["files"] =
+        serde_json::to_value(files).map_err(|_| "managed-install-marker-invalid")?;
+    update::write_json(&baseline, &inventory, "installer-baseline-write-failed")?;
+    Ok(true)
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn include_install_baseline(install: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    let baseline = install.join(INSTALL_BASELINE);
+    safe_path(&baseline)?;
+    if let Some(previous) = update::previous_owned_files(&baseline)? {
+        for relative in previous {
+            safe_path(&install.join(&relative))?;
+            if !files.contains(&relative) {
+                files.push(relative);
+            }
+        }
+    }
+    if baseline.is_file() {
+        files.push(PathBuf::from(INSTALL_BASELINE));
+    }
+    Ok(())
+}
+
 pub fn remove_obsolete_owned_files(server: &Path, previous: &Path) -> Result<bool> {
     let install = install_directory(server)?;
     safe_path(&install)?;
@@ -544,6 +611,16 @@ pub fn remove_obsolete_owned_files(server: &Path, previous: &Path) -> Result<boo
 
 #[cfg(windows)]
 pub fn remove_owned_files(root: &Path, server: &Path, force: bool) -> Result<()> {
+    remove_owned_files_with(root, server, force, false)
+}
+
+#[cfg(windows)]
+pub fn remove_owned_files_resumable(root: &Path, server: &Path, force: bool) -> Result<()> {
+    remove_owned_files_with(root, server, force, true)
+}
+
+#[cfg(windows)]
+fn remove_owned_files_with(root: &Path, server: &Path, force: bool, resumable: bool) -> Result<()> {
     let plan = plan_with_force(root, server, false, force)?;
     if !plan.blockers.is_empty() {
         return Err(plan.blockers.join(", "));
@@ -551,19 +628,24 @@ pub fn remove_owned_files(root: &Path, server: &Path, force: bool) -> Result<()>
     if lifecycle::owner_active(root)? {
         return Err("removal-process-still-running".into());
     }
-    remove_planned_files(&plan, TRANSIENT_REMOVAL_BUDGET)
+    // These shipped command semantics must survive archive updates that retain uninstall.exe.
+    if !resumable {
+        return remove_released_files(&plan, TRANSIENT_REMOVAL_BUDGET);
+    }
+    remove_planned_files_with(&plan, TRANSIENT_REMOVAL_BUDGET, || {
+        prepare_finalization(
+            &registry()?,
+            root,
+            server,
+            force,
+            &std::env::current_exe().map_err(|_| "removal-helper-unavailable")?,
+        )
+    })
 }
 
-/// A retried uninstall runs the installed manager again, which needs the background manager
-/// for its guard and the marker for its plan, so those are removed after every other file.
-/// The manager goes first among them: an open console manager then fails before the others.
 #[cfg(windows)]
-fn remove_planned_files(plan: &RemovalPlan, budget: Duration) -> Result<()> {
-    let last = [
-        plan.install.join("risunest-sync-manager.exe"),
-        plan.install.join("risunest-sync-manager-background.exe"),
-        marker(&plan.install),
-    ];
+fn remove_released_files(plan: &RemovalPlan, budget: Duration) -> Result<()> {
+    let last = final_files(&plan.install);
     for file in plan.files.iter().filter(|file| !last.contains(file)) {
         remove_file_within(file, budget)?;
     }
@@ -573,8 +655,386 @@ fn remove_planned_files(plan: &RemovalPlan, budget: Duration) -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn final_files(install: &Path) -> [PathBuf; 3] {
+    [
+        install.join("risunest-sync-manager.exe"),
+        install.join("risunest-sync-manager-background.exe"),
+        marker(install),
+    ]
+}
+
+#[cfg(windows)]
+fn finalization_directory(server: &Path) -> Result<PathBuf> {
+    let directory = install_directory(server)?.join(REMOVAL_RETRY);
+    safe_path(&directory)?;
+    for name in [
+        "manager.exe",
+        "manager.exe.new",
+        "receipt.json",
+        "receipt.new",
+        "complete",
+        "complete.new",
+        "data-path",
+        "data-path.new",
+    ] {
+        safe_path(&directory.join(name))?;
+    }
+    Ok(directory)
+}
+
+#[cfg(windows)]
+fn prepare_finalization(
+    registry: &Path,
+    root: &Path,
+    server: &Path,
+    force: bool,
+    helper: &Path,
+) -> Result<()> {
+    let directory = finalization_directory(server)?;
+    if directory.join("receipt.json").exists() || directory.join("complete").exists() {
+        return Err("removal-finalization-pending".into());
+    }
+    let registration = match read_record(&record_path(registry, root)) {
+        Ok(record) => Some(record),
+        Err(error) if force && error == "removal-registration-missing" => None,
+        Err(error) => return Err(error),
+    };
+    fs::create_dir_all(&directory).map_err(|_| "removal-helper-unavailable")?;
+    let temporary = directory.join("manager.exe.new");
+    fs::copy(helper, &temporary).map_err(|_| "removal-helper-copy-failed")?;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&temporary)
+        .and_then(|file| file.sync_all())
+        .map_err(|_| "removal-helper-copy-failed")?;
+    fs::rename(&temporary, directory.join("manager.exe"))
+        .map_err(|_| "removal-helper-copy-failed")?;
+    use std::os::windows::ffi::OsStrExt;
+    let data_path: Vec<_> = root
+        .as_os_str()
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    write_finalization_bytes(&directory, "data-path", &data_path)?;
+    write_finalization(
+        &directory,
+        "receipt",
+        &FinalizationReceipt {
+            schema: 1,
+            data: root.to_owned(),
+            server: server.to_owned(),
+            registration,
+        },
+    )
+}
+
+#[cfg(windows)]
+fn write_finalization(directory: &Path, name: &str, value: &impl Serialize) -> Result<()> {
+    write_finalization_bytes(
+        directory,
+        name,
+        &serde_json::to_vec(value).map_err(|_| "removal-finalization-write-failed")?,
+    )
+}
+
+#[cfg(windows)]
+fn write_finalization_bytes(directory: &Path, name: &str, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let temporary = directory.join(format!("{name}.new"));
+    safe_path(&temporary)?;
+    let mut file = fs::File::create(&temporary).map_err(|_| "removal-finalization-write-failed")?;
+    file.write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|_| "removal-finalization-write-failed")?;
+    drop(file);
+    let target = directory.join(if name == "receipt" {
+        "receipt.json"
+    } else {
+        name
+    });
+    fs::rename(temporary, target).map_err(|_| "removal-finalization-write-failed".into())
+}
+
+#[cfg(windows)]
+fn read_finalization(registry: &Path, server: &Path) -> Result<FinalizationReceipt> {
+    let directory = finalization_directory(server)?;
+    let path = directory.join("receipt.json");
+    if fs::metadata(&path)
+        .map_err(|_| "removal-finalization-invalid")?
+        .len()
+        > 16 * 1024
+    {
+        return Err("removal-finalization-invalid".into());
+    }
+    let receipt: FinalizationReceipt =
+        serde_json::from_slice(&fs::read(path).map_err(|_| "removal-finalization-invalid")?)
+            .map_err(|_| "removal-finalization-invalid")?;
+    let install = install_directory(server)?;
+    safe_path(&receipt.data)?;
+    if receipt.schema != 1
+        || receipt.server != server
+        || receipt.data.starts_with(&install)
+        || install.starts_with(&receipt.data)
+    {
+        return Err("removal-finalization-invalid".into());
+    }
+    use std::os::windows::ffi::OsStrExt;
+    let data_path: Vec<_> = receipt
+        .data
+        .as_os_str()
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let path = directory.join("data-path");
+    if fs::metadata(&path)
+        .map_err(|_| "removal-finalization-invalid")?
+        .len()
+        != data_path.len() as u64
+        || fs::read(path).map_err(|_| "removal-finalization-invalid")? != data_path
+    {
+        return Err("removal-finalization-invalid".into());
+    }
+    if let Some(record) = &receipt.registration {
+        if record.schema != 1
+            || record.data != receipt.data
+            || record.server != server
+            || record.install != install
+            || record.instance != platform::instance_name(&receipt.data)
+        {
+            return Err("removal-finalization-invalid".into());
+        }
+    }
+    let current = match read_record(&record_path(registry, &receipt.data)) {
+        Ok(record) => Some(record),
+        Err(error) if error == "removal-registration-missing" => None,
+        Err(error) => return Err(error),
+    };
+    // Forgetting registration is the last native step. A retry after it may only
+    // clean its fixed local bookkeeping, never infer another deletion plan.
+    if current != receipt.registration
+        && !(current.is_none() && final_files(&install).iter().all(|file| !file.exists()))
+    {
+        return Err("removal-registration-conflict".into());
+    }
+    Ok(receipt)
+}
+
+#[cfg(windows)]
+pub fn resume_finalization(server: &Path, delete_data: bool) -> Result<bool> {
+    resume_finalization_at(&registry()?, server, delete_data, removal_profiles)
+}
+
+#[cfg(windows)]
+fn resume_finalization_at(
+    registry: &Path,
+    server: &Path,
+    delete_data: bool,
+    profiles: impl FnOnce() -> Result<Vec<PathBuf>>,
+) -> Result<bool> {
+    let receipt = read_finalization(registry, server)?;
+    let data_kept = delete_data && !record_path(registry, &receipt.data).exists();
+    if delete_data && !data_kept {
+        delete_registered_data_at(registry, &receipt.data, server, profiles)?;
+    }
+    let _lock = if receipt.data.exists() {
+        safe_tree(&receipt.data.join("manager-update"))?;
+        let started = Instant::now();
+        Some(loop {
+            match update::try_lock(&receipt.data) {
+                Ok(lock) => break lock,
+                Err(_) if started.elapsed() < TRANSIENT_REMOVAL_BUDGET => {
+                    std::thread::sleep(Duration::from_millis(50))
+                }
+                Err(error) => return Err(error),
+            }
+        })
+    } else {
+        None
+    };
+    safe_path(&receipt.data.join("owner.lock"))?;
+    if lifecycle::owner_active(&receipt.data)? {
+        return Err("removal-process-still-running".into());
+    }
+    let files = final_files(&install_directory(server)?);
+    for file in &files {
+        safe_path(file)?;
+    }
+    remove_final_files(&files, TRANSIENT_REMOVAL_BUDGET)?;
+    forget_finalization_at(registry, &receipt.data, server)?;
+    commit_finalization_at(registry, server)?;
+    Ok(data_kept)
+}
+
+#[cfg(windows)]
+pub fn commit_finalization(server: &Path) -> Result<()> {
+    commit_finalization_at(&registry()?, server)
+}
+
+#[cfg(windows)]
+fn commit_finalization_at(registry: &Path, server: &Path) -> Result<()> {
+    let receipt = read_finalization(registry, server)?;
+    if final_files(&install_directory(server)?)
+        .iter()
+        .any(|file| file.exists())
+        || record_path(&registry, &receipt.data).exists()
+    {
+        return Err("removal-finalization-pending".into());
+    }
+    write_finalization(&finalization_directory(server)?, "complete", &true)
+}
+
+/// Keep the installed removal entry points until ordinary files are gone.
+/// Open every final file for deletion before changing any disposition.
+#[cfg(all(windows, test))]
+fn remove_planned_files(plan: &RemovalPlan, budget: Duration) -> Result<()> {
+    remove_planned_files_with(plan, budget, || Ok(()))
+}
+
+#[cfg(windows)]
+fn remove_planned_files_with(
+    plan: &RemovalPlan,
+    budget: Duration,
+    before_final: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let last = final_files(&plan.install);
+    for file in &plan.files {
+        let relative = file
+            .strip_prefix(&plan.install)
+            .map_err(|_| "managed-install-marker-invalid")?;
+        let first = relative
+            .components()
+            .next()
+            .ok_or("managed-install-marker-invalid")?;
+        let first = first.as_os_str().to_string_lossy();
+        if first.eq_ignore_ascii_case("uninstall.exe") || first.eq_ignore_ascii_case(REMOVAL_RETRY)
+        {
+            return Err("managed-install-marker-invalid".into());
+        }
+    }
+    let same_path = |left: &Path, right: &Path| {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    };
+    for file in plan
+        .files
+        .iter()
+        .filter(|file| !last.iter().any(|last| same_path(file, last)))
+    {
+        remove_file_within(file, budget)?;
+    }
+    before_final()?;
+    remove_final_files(
+        &last
+            .into_iter()
+            .filter(|file| plan.files.iter().any(|owned| same_path(file, owned)))
+            .collect::<Vec<_>>(),
+        budget,
+    )
+}
+
+#[cfg(windows)]
+fn remove_final_files(files: &[PathBuf], budget: Duration) -> Result<()> {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows_sys::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{
+            FileDispositionInfo, SetFileInformationByHandle, DELETE, FILE_DISPOSITION_INFO,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        },
+    };
+    let started = Instant::now();
+    let handles = loop {
+        let opened = files
+            .iter()
+            .enumerate()
+            .filter_map(|(index, path)| {
+                match fs::OpenOptions::new()
+                    .access_mode(DELETE)
+                    .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                    .open(path)
+                {
+                    Ok(file) => Some(Ok((index, file))),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => Some(Err(format!(
+                        "removal-file-failed: {} ({error})",
+                        path.display()
+                    ))),
+                }
+            })
+            .collect::<Result<Vec<_>>>();
+        match opened {
+            Ok(handles) => break handles,
+            Err(_) if started.elapsed() < budget => std::thread::sleep(Duration::from_millis(50)),
+            Err(error) => return Err(error),
+        }
+    };
+    let disposition = |file: &fs::File, delete: bool| {
+        let info = FILE_DISPOSITION_INFO { DeleteFile: delete };
+        let result = unsafe {
+            SetFileInformationByHandle(
+                file.as_raw_handle() as HANDLE,
+                FileDispositionInfo,
+                (&info as *const FILE_DISPOSITION_INFO).cast(),
+                std::mem::size_of_val(&info) as u32,
+            )
+        };
+        if result == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    };
+    set_final_dispositions(handles.len(), budget, |index, delete| {
+        disposition(&handles[index].1, delete)
+    })
+    .map_err(|(index, error)| {
+        format!(
+            "removal-file-failed: {} ({error})",
+            files[handles[index].0].display()
+        )
+    })
+}
+
+#[cfg(windows)]
+fn set_final_dispositions(
+    count: usize,
+    budget: Duration,
+    mut disposition: impl FnMut(usize, bool) -> std::io::Result<()>,
+) -> std::result::Result<(), (usize, std::io::Error)> {
+    let mut failed = 0;
+    retry_transient(budget, || {
+        for index in 0..count {
+            if let Err(error) = disposition(index, true) {
+                failed = index;
+                for previous in 0..index {
+                    let _ = disposition(previous, false);
+                }
+                return Err(error);
+            }
+        }
+        Ok(())
+    })
+    .map_err(|error| (failed, error))
+}
+
+fn removal_profiles() -> Result<Vec<PathBuf>> {
+    Ok(platform::webview_data_dir()?
+        .into_iter()
+        .chain(platform::identifier_directories()?)
+        .collect())
+}
+
 pub fn delete_registered_data(root: &Path, server: &Path) -> Result<()> {
-    let registry = registry()?;
+    delete_registered_data_at(&registry()?, root, server, removal_profiles)
+}
+
+fn delete_registered_data_at(
+    registry: &Path,
+    root: &Path,
+    server: &Path,
+    profiles: impl FnOnce() -> Result<Vec<PathBuf>>,
+) -> Result<()> {
     let record = read_record(&record_path(&registry, root))?;
     if record.schema != 1
         || record.data != root
@@ -615,11 +1075,7 @@ pub fn delete_registered_data(root: &Path, server: &Path) -> Result<()> {
     }
     safe_data_tree(root)?;
     if !shared_profile {
-        let profiles: Vec<_> = platform::webview_data_dir()?
-            .into_iter()
-            .chain(platform::identifier_directories()?)
-            .collect();
-        remove_profiles(&profiles)?;
+        remove_profiles(&profiles()?)?;
     }
     platform::cleanup_update_helpers(root)?;
     // The installer guard publishes its release before its executable in manager-update exits.
@@ -650,8 +1106,35 @@ fn remove_data_files(root: &Path, budget: Duration) -> Result<()> {
 }
 
 pub fn forget_registration(root: &Path, server: &Path) -> Result<()> {
-    let registry = registry()?;
-    let path = record_path(&registry, root);
+    forget_registration_at(&registry()?, root, server)
+}
+
+fn forget_registration_at(registry: &Path, root: &Path, server: &Path) -> Result<()> {
+    forget_records_at(registry, root, server)
+}
+
+#[cfg(windows)]
+pub fn forget_finalization(root: &Path, server: &Path) -> Result<()> {
+    forget_finalization_at(&registry()?, root, server)
+}
+
+#[cfg(windows)]
+fn forget_finalization_at(registry: &Path, root: &Path, server: &Path) -> Result<()> {
+    let receipt = read_finalization(registry, server)?;
+    if receipt.data != root {
+        return Err("removal-registration-conflict".into());
+    }
+    if final_files(&install_directory(server)?)
+        .iter()
+        .any(|file| file.exists())
+    {
+        return Err("removal-finalization-pending".into());
+    }
+    forget_records_at(registry, root, server)
+}
+
+fn forget_records_at(registry: &Path, root: &Path, server: &Path) -> Result<()> {
+    let path = record_path(registry, root);
     if !path.exists() {
         return Ok(());
     }
@@ -929,6 +1412,122 @@ mod tests {
         register_at(&registry, &root, &server, &install).unwrap();
         (temp, root, server, registry)
     }
+    #[cfg(windows)]
+    #[test]
+    fn interrupted_finalization_resumes_each_partial_delete_and_after_forgetting() {
+        for (deleted, delete_data) in
+            (0..=4).flat_map(|deleted| [false, true].map(move |delete_data| (deleted, delete_data)))
+        {
+            let (_temp, root, server, registry) = fixture();
+            if delete_data {
+                fs::remove_dir_all(&root).unwrap();
+            }
+            let install = server.parent().unwrap();
+            let files = final_files(install);
+            for file in &files {
+                fs::write(file, b"synthetic").unwrap();
+            }
+            let helper = install.join("source-helper");
+            fs::write(&helper, b"synthetic helper").unwrap();
+            prepare_finalization(&registry, &root, &server, false, &helper).unwrap();
+            for file in files.iter().take(deleted.min(3)) {
+                fs::remove_file(file).unwrap();
+            }
+            if deleted == 4 {
+                forget_finalization_at(&registry, &root, &server).unwrap();
+                assert!(!finalization_directory(&server)
+                    .unwrap()
+                    .join("complete")
+                    .exists());
+            }
+            resume_finalization_at(&registry, &server, false, || Ok(Vec::new())).unwrap();
+            assert!(files.iter().all(|file| !file.exists()));
+            assert!(!record_path(&registry, &root).exists());
+            assert_eq!(
+                fs::read(finalization_directory(&server).unwrap().join("complete")).unwrap(),
+                b"true"
+            );
+            assert_eq!(root.exists(), !delete_data);
+            resume_finalization_at(&registry, &server, false, || Ok(Vec::new())).unwrap();
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn finalization_rejects_replaced_receipt_and_registration_without_deleting_files() {
+        let (_temp, root, server, registry) = fixture();
+        let install = server.parent().unwrap();
+        let files = final_files(install);
+        for file in &files {
+            fs::write(file, b"synthetic").unwrap();
+        }
+        let helper = install.join("source-helper");
+        fs::write(&helper, b"synthetic helper").unwrap();
+        prepare_finalization(&registry, &root, &server, false, &helper).unwrap();
+        assert_eq!(
+            forget_finalization_at(&registry, &root, &server).unwrap_err(),
+            "removal-finalization-pending"
+        );
+        assert!(record_path(&registry, &root).exists());
+        let receipt = finalization_directory(&server)
+            .unwrap()
+            .join("receipt.json");
+        let original = fs::read(&receipt).unwrap();
+        for malformed in [b"{".to_vec(), {
+            let mut extra: serde_json::Value = serde_json::from_slice(&original).unwrap();
+            extra["files"] = serde_json::json!([root.join("synthetic-user-file")]);
+            serde_json::to_vec(&extra).unwrap()
+        }] {
+            fs::write(&receipt, malformed).unwrap();
+            assert!(resume_finalization_at(&registry, &server, false, || Ok(Vec::new())).is_err());
+            assert!(forget_finalization_at(&registry, &root, &server).is_err());
+            assert!(record_path(&registry, &root).exists());
+            assert!(files.iter().all(|file| file.exists()));
+        }
+        let mut altered: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        altered["server"] = serde_json::json!(install.join("other-server"));
+        fs::write(&receipt, serde_json::to_vec(&altered).unwrap()).unwrap();
+        assert!(resume_finalization_at(&registry, &server, false, || Ok(Vec::new())).is_err());
+        fs::write(&receipt, &original).unwrap();
+        let data_path = finalization_directory(&server).unwrap().join("data-path");
+        let original_path = fs::read(&data_path).unwrap();
+        let mut changed_path = original_path.clone();
+        changed_path[0] ^= 1;
+        fs::write(&data_path, changed_path).unwrap();
+        assert!(resume_finalization_at(&registry, &server, true, || Ok(Vec::new())).is_err());
+        assert!(files.iter().all(|file| file.exists()));
+        assert!(root.exists());
+        fs::write(&data_path, original_path).unwrap();
+        fs::remove_file(record_path(&registry, &root)).unwrap();
+        assert!(resume_finalization_at(&registry, &server, false, || Ok(Vec::new())).is_err());
+        assert!(files.iter().all(|file| file.exists()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn removal_inventory_cannot_delete_the_retry_entry_point() {
+        let (_temp, root, server, registry) = fixture();
+        let mut plan = plan_at(&registry, &root, &server, false).unwrap();
+        let uninstaller = plan.install.join("UNINSTALL.EXE");
+        fs::write(&uninstaller, b"retry entry").unwrap();
+        plan.files.push(uninstaller.clone());
+        assert!(remove_planned_files(&plan, Duration::ZERO).is_err());
+        assert!(server.exists() && uninstaller.exists());
+        plan.files.pop();
+        let manager = plan.install.join("RISUNEST-SYNC-MANAGER.EXE");
+        fs::write(&manager, b"synthetic manager").unwrap();
+        plan.files.push(manager.clone());
+        assert!(remove_planned_files_with(&plan, Duration::ZERO, || {
+            assert!(
+                manager.exists(),
+                "final entry remains until the receipt is ready"
+            );
+            Err("synthetic-before-final-stop".into())
+        })
+        .is_err());
+        assert!(manager.exists());
+    }
+
     #[test]
     fn profiles_are_all_validated_before_any_are_removed() {
         let temp = tempfile::tempdir().unwrap();
@@ -1059,6 +1658,80 @@ mod tests {
 
     #[test]
     fn obsolete_cleanup_reads_released_file_lists_without_format_version_matching() {
+        let (_temp, _root, server, _registry) = fixture();
+        let install = server.parent().unwrap();
+        let marker_path = marker(install);
+        let current = fs::read(&marker_path).unwrap();
+        let mut intermediate: serde_json::Value = serde_json::from_slice(&current).unwrap();
+        preserve_install_baseline(&server).unwrap();
+        intermediate["files"] = serde_json::json!(["server", "middle.exe"]);
+        fs::write(&marker_path, intermediate.to_string()).unwrap();
+        fs::write(install.join("middle.exe"), "synthetic").unwrap();
+        preserve_install_baseline(&server).unwrap();
+        intermediate["files"] = serde_json::json!(["server", "later.exe"]);
+        fs::write(&marker_path, intermediate.to_string()).unwrap();
+        fs::write(install.join("later.exe"), "synthetic").unwrap();
+        preserve_install_baseline(&server).unwrap();
+        let mut owned = vec![PathBuf::from("server")];
+        include_install_baseline(install, &mut owned).unwrap();
+        assert!(
+            owned.contains(&PathBuf::from("middle.exe"))
+                && owned.contains(&PathBuf::from("later.exe"))
+        );
+        let baseline_path = install.join(INSTALL_BASELINE);
+        let accumulated = fs::read(&baseline_path).unwrap();
+        #[cfg(windows)]
+        for locked in [&marker_path, &baseline_path] {
+            use std::os::windows::fs::OpenOptionsExt;
+            let handle = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(locked)
+                .unwrap();
+            if locked == &marker_path {
+                assert!(!preserve_install_baseline(&server).unwrap());
+            } else {
+                assert!(preserve_install_baseline(&server).is_err());
+            }
+            drop(handle);
+            assert_eq!(fs::read(&baseline_path).unwrap(), accumulated);
+        }
+        fs::write(&marker_path, b"invalid current inventory").unwrap();
+        assert!(!preserve_install_baseline(&server).unwrap());
+        assert_eq!(fs::read(&baseline_path).unwrap(), accumulated);
+        for files in [
+            serde_json::json!([null]),
+            serde_json::json!(["server", "server"]),
+            serde_json::json!(["../outside"]),
+        ] {
+            let mut invalid: serde_json::Value = serde_json::from_slice(&current).unwrap();
+            invalid["files"] = files;
+            fs::write(&marker_path, invalid.to_string()).unwrap();
+            assert!(!preserve_install_baseline(&server).unwrap());
+            assert_eq!(fs::read(&baseline_path).unwrap(), accumulated);
+        }
+        fs::write(&marker_path, &current).unwrap();
+        fs::write(&baseline_path, b"invalid accumulated inventory").unwrap();
+        let mut owned = vec![PathBuf::from("server")];
+        include_install_baseline(install, &mut owned).unwrap();
+        assert_eq!(
+            owned,
+            [PathBuf::from("server"), PathBuf::from(INSTALL_BASELINE)]
+        );
+        preserve_install_baseline(&server).unwrap();
+        assert_eq!(
+            update::previous_owned_files(&baseline_path)
+                .unwrap()
+                .unwrap(),
+            [PathBuf::from("server")]
+        );
+        assert!(install.join("middle.exe").exists() && install.join("later.exe").exists());
+        fs::write(&baseline_path, accumulated).unwrap();
+        fs::write(&marker_path, current).unwrap();
+        assert!(remove_obsolete_owned_files(&server, &install.join(INSTALL_BASELINE)).unwrap());
+        assert!(!install.join("middle.exe").exists() && !install.join("later.exe").exists());
+        assert!(server.exists());
+
         let (temp, root, server, registry) = fixture();
         let previous = temp.path().join("previous.json");
         let old_file = server.with_file_name("old.exe");
@@ -1216,6 +1889,45 @@ mod tests {
                 "risunest-sync-server.exe",
             ],
         );
+        for locked in [
+            "risunest-sync-manager.exe",
+            "risunest-sync-manager-background.exe",
+            "risunest-sync-bundle.json",
+        ] {
+            let handle = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(install.join(locked))
+                .unwrap();
+            let files = [
+                "risunest-sync-manager.exe",
+                "risunest-sync-manager-background.exe",
+                "risunest-sync-bundle.json",
+            ]
+            .map(|name| install.join(name));
+            assert!(remove_final_files(&files, Duration::ZERO).is_err());
+            for file in files {
+                assert!(file.is_file(), "{} was removed early", file.display());
+            }
+            drop(handle);
+        }
+        let final_files = [
+            "risunest-sync-manager.exe",
+            "risunest-sync-manager-background.exe",
+            "risunest-sync-bundle.json",
+        ]
+        .map(|name| install.join(name));
+        for readonly in &final_files {
+            let original = fs::metadata(readonly).unwrap().permissions();
+            let mut permissions = original.clone();
+            permissions.set_readonly(true);
+            fs::set_permissions(readonly, permissions).unwrap();
+            assert!(remove_final_files(&final_files, Duration::ZERO).is_err());
+            for file in &final_files {
+                assert!(file.is_file(), "{} was removed early", file.display());
+            }
+            fs::set_permissions(readonly, original).unwrap();
+        }
         let handle = fs::OpenOptions::new()
             .read(true)
             .share_mode(0)
@@ -1239,6 +1951,67 @@ mod tests {
         remove_planned_files(&plan, Duration::from_secs(5)).unwrap();
         scan.join().unwrap();
         assert_eq!(fs::read_dir(&install).unwrap().count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn final_disposition_retries_roll_back_before_retry_and_stop_at_the_budget() {
+        for code in [5, 32, 87] {
+            let mut marked = [false; 2];
+            let mut fail = true;
+            let result = set_final_dispositions(2, Duration::from_millis(150), |index, delete| {
+                if index == 0 && delete {
+                    assert!(!marked[0]);
+                }
+                if index == 1 && delete && fail {
+                    fail = false;
+                    return Err(std::io::Error::from_raw_os_error(code));
+                }
+                marked[index] = delete;
+                Ok(())
+            });
+            assert_eq!(result.is_ok(), code != 87);
+            assert_eq!(marked, if code == 87 { [false; 2] } else { [true; 2] });
+        }
+        let mut marked = false;
+        let started = Instant::now();
+        let result = set_final_dispositions(2, Duration::from_millis(75), |index, delete| {
+            if index == 1 {
+                return Err(std::io::Error::from_raw_os_error(32));
+            }
+            if delete {
+                assert!(!marked);
+            }
+            marked = delete;
+            Ok(())
+        });
+        assert_eq!(result.unwrap_err().1.raw_os_error(), Some(32));
+        assert!(started.elapsed() >= Duration::from_millis(75));
+        assert!(!marked);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resumed_delete_data_uses_registration_and_keeps_data_after_forgetting() {
+        for registered in [false, true] {
+            let (_temp, root, server, registry) = fixture();
+            fs::write(root.join("metadata.sqlite"), b"synthetic").unwrap();
+            let install = server.parent().unwrap();
+            let helper = install.join("source-helper");
+            fs::write(&helper, b"synthetic").unwrap();
+            prepare_finalization(&registry, &root, &server, false, &helper).unwrap();
+            if !registered {
+                for file in final_files(install) {
+                    remove_file(&file).unwrap();
+                }
+                forget_finalization_at(&registry, &root, &server).unwrap();
+            }
+            let kept = resume_finalization_at(&registry, &server, true, || Ok(Vec::new())).unwrap();
+            assert_eq!(kept, !registered);
+            assert_eq!(root.join("metadata.sqlite").exists(), !registered);
+            assert_eq!(root.exists(), !registered);
+            assert!(!record_path(&registry, &root).exists());
+        }
     }
     #[cfg(windows)]
     #[test]

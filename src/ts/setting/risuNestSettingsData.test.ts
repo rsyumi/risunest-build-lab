@@ -30,4 +30,8 @@ it('renders every aggregate control in a settings group', () => {
     expect(still).toBeDefined()
     expect(still.condition).toBeUndefined()
     for (const format of ['webp', 'png', 'original']) expect(fps.condition?.({ db: { risunestInlayFormat: format } } as any)).toBe(format !== 'original')
+    // The sync status components read this field; the web build has no sync to show.
+    const syncUi = risuNestUiSettingsItems.find(item => item.id === 'risunest.ui.syncStatusUi')!
+    expect(syncUi).toMatchObject({ type: 'check', bindKey: 'risunestSyncStatusUi' })
+    expect(syncUi.condition?.({ db: {} } as any)).toBe(false)
 })

@@ -1,3 +1,4 @@
+import { PluginStorageObservation, type PluginStorageWriteCheck } from './pluginStorageProtection'
 import type { PluginStorageValueCursor } from "../storage/persistentDataStore"
 import { reconcilePluginListUpdate } from './pluginListUpdate'
 import { captureGenerationPublicWrite } from '../process/generationRequestPhase'
@@ -157,6 +158,7 @@ export interface PluginDatabaseAccessDependencies {
         conversations?: readonly ConversationMutation[],
         wholeMessages?: readonly PluginWholeMessageIntent[],
         projectionObserver?: PersistentUnitIntentProjectionObserver,
+        check?: PluginStorageWriteCheck,
     ): Promise<void>
     flushPendingData(reason: string): Promise<void>
     getCompatibilityDatabase(): Database
@@ -177,6 +179,7 @@ export interface PluginDatabaseAccessDependencies {
     getNavigationGeneration(): number
     getStorageAuthorityEpoch(): number
     assertPersistentMutationAllowed(expectedAuthorityEpoch?: number): void
+    storageObservation?: PluginStorageObservation
     readPluginStorageSnapshot(): Promise<Record<string, unknown>>
     prepareAuthoritativeDatabaseUpdate?(
         database: Record<string, unknown>,
@@ -599,6 +602,12 @@ export function applyPluginDatabaseUpdate(
 export function createPluginDatabaseAccess(
     dependencies: PluginDatabaseAccessDependencies,
 ): PluginDatabaseAccess {
+    const storageObservation = dependencies.storageObservation ?? new PluginStorageObservation(dependencies.owner)
+    const storageWriteCheck = (prepare: ReturnType<PluginStorageObservation['captureWrite']>, units: readonly PluginUnitMutation[]) => prepare(units.flatMap(unit => {
+        const [kind, owner, key] = JSON.parse(unit.key) as string[]
+        if (kind !== 'plugin' || owner !== dependencies.owner) return []
+        return [unit.type === 'set' ? { type: 'set' as const, owner, key, value: unit.value } : { type: 'delete' as const, owner, key }]
+    }))
     const readBaselines = new PluginReadBaselines(dependencies.owner, dependencies.getStorageAuthorityEpoch)
     const admissionDatabase = () => dependencies.snapshot(dependencies.getCompatibilityDatabase())
     const snapshotWithProvenance = <T>(value: T): T => {
@@ -825,7 +834,7 @@ export function createPluginDatabaseAccess(
 
     return {
         expireReadBaselines: () => readBaselines.expire(),
-        closeReadBaselines: () => readBaselines.close(),
+        closeReadBaselines: () => { readBaselines.close(); if (!dependencies.storageObservation) storageObservation.dispose() },
         async getFullObjectSnapshotStream(target, context) {
             const readAuthority = dependencies.getStorageAuthorityEpoch()
             throwIfFullObjectCallAborted(context.signal)
@@ -1209,6 +1218,7 @@ export function createPluginDatabaseAccess(
         },
 
         async getDatabaseSnapshotStream(includeOnly, allowedKeys) {
+            const observeStorage = storageObservation.beginSnapshot()
             const readAuthority = dependencies.getStorageAuthorityEpoch()
             const requestedKeys =
                 includeOnly === 'all'
@@ -1249,8 +1259,10 @@ export function createPluginDatabaseAccess(
                             continue
                         }
                         if (key === 'pluginCustomStorage') {
+                            observeStorage([])
                             yield { type: 'recordStart', key }
                             for await (const item of streamPinnedPluginValues(reader, dependencies.owner)) {
+                                observeStorage([item.key])
                                 yield { type: 'recordSet', key, entryKey: item.key, value: item.value }
                             }
                             continue
@@ -1305,6 +1317,7 @@ export function createPluginDatabaseAccess(
         },
 
         async getDatabaseSnapshot(includeOnly, allowedKeys) {
+            const observeStorage = storageObservation.beginSnapshot()
             const readAuthority = dependencies.getStorageAuthorityEpoch()
             const requestedKeys =
                 includeOnly === 'all'
@@ -1319,6 +1332,7 @@ export function createPluginDatabaseAccess(
                     if (key === 'pluginCustomStorage') {
                         await dependencies.flushPendingData('plugin-storage-snapshot')
                         result[key] = await dependencies.readPluginStorageSnapshot()
+                        observeStorage(Object.keys(result[key] as object))
                     } else {
                         result[key] = dependencies.snapshot(
                             (compatibilityDatabase as unknown as Record<string, unknown>)[key],
@@ -1376,7 +1390,9 @@ export function createPluginDatabaseAccess(
                     }
                     if (key === 'pluginCustomStorage') {
                         const storage: Record<string, unknown> = {}
+                        observeStorage([])
                         for await (const item of streamPinnedPluginValues(reader, dependencies.owner)) {
+                            observeStorage([item.key])
                             defineOwnEnumerableProperty(storage, item.key, dependencies.snapshot(item.value))
                         }
                         result[key] = storage
@@ -1391,6 +1407,7 @@ export function createPluginDatabaseAccess(
         },
 
         setDatabaseLite(database, allowedKeys) {
+            const prepareStorageWrite = storageObservation.captureWrite()
             const authority = dependencies.getStorageAuthorityEpoch()
             dependencies.assertPersistentMutationAllowed(authority)
             validatePluginDatabaseUpdate(database)
@@ -1400,13 +1417,14 @@ export function createPluginDatabaseAccess(
                 dependencies.assertPersistentMutationAllowed(authority)
                 const intents = readBaselines.intent(submitted, 'database', 'database', baseline)
                 const changes = databaseUnitChanges(intents.filter(intent => intent.path[0] !== 'plugins'), submitted, allowedKeys)
-                return dependencies.commitPersistentUnitIntent('plugin-setDatabaseLite', changes.units, [], changes.wholeMessages)
+                return dependencies.commitPersistentUnitIntent('plugin-setDatabaseLite', changes.units, [], changes.wholeMessages, undefined, storageWriteCheck(prepareStorageWrite, changes.units))
             }
             if (Object.hasOwn(submitted, 'pluginCustomStorage') && !readBaselines.hasRead('database', 'database')) return captureDatabaseAdmission(submitted).then(commit)
             return commit(admissionDatabase())
         },
 
         async setDatabase(database, allowedKeys) {
+            const prepareStorageWrite = storageObservation.captureWrite()
             const authorityEpoch = dependencies.getStorageAuthorityEpoch()
             dependencies.assertPersistentMutationAllowed(authorityEpoch)
             validatePluginDatabaseUpdate(database)
@@ -1449,7 +1467,7 @@ export function createPluginDatabaseAccess(
                 }
             }
             const changes = databaseUnitChanges(acceptedIntents, preparedUpdate, allowedKeys)
-            await dependencies.commitPersistentUnitIntent('plugin-setDatabase', changes.units, [], changes.wholeMessages)
+            await dependencies.commitPersistentUnitIntent('plugin-setDatabase', changes.units, [], changes.wholeMessages, undefined, storageWriteCheck(prepareStorageWrite, changes.units))
             dependencies.assertPersistentMutationAllowed(authorityEpoch)
 
         },

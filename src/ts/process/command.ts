@@ -1,3 +1,4 @@
+import { refuseGenerationWhilePluginsWait } from '../plugins/pluginStartupRefusal'
 import { get } from "svelte/store";
 import { getCurrentCharacter, getCurrentChat, getDatabase, setCurrentChat, setDatabase } from "../storage/database.svelte";
 import { selectedCharID } from "../stores.svelte";
@@ -195,6 +196,7 @@ async function processCommand(command:string, pipe:string, conversationOperation
             return pipe
         }
         case 'multisend':{
+            if (refuseGenerationWhilePluginsWait()) return pipe
             const splited = arg.split('|||')
             let clearMode = false
             if(splited[0] && splited[0].trim() === 'clear'){

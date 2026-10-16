@@ -15,6 +15,116 @@ CREATE TABLE external_lww_receives(request_id TEXT PRIMARY KEY,target TEXT NOT N
 CREATE TABLE external_lww_versions(target TEXT NOT NULL,key TEXT NOT NULL,stamp TEXT NOT NULL,identity TEXT NOT NULL,writer TEXT NOT NULL,seq TEXT NOT NULL,PRIMARY KEY(target,key,stamp,writer,seq));
 CREATE INDEX external_lww_versions_segment ON external_lww_versions(target,writer,seq);
 "#;
+
+#[cfg(test)]
+mod publication_write_probe {
+    use super::*;
+
+    fn publication(size: usize) -> SealedPublication {
+        SealedPublication {
+            target: "synthetic-target".into(), writer: "synthetic-writer".into(), seq: 1.into(), authority: 0.into(),
+            captured_at_ms: Some(1), object_id: "synthetic-object".into(), sha256: "b".repeat(64),
+            payload_sha256: "a".repeat(64), payload: "x".repeat(size), sealed: true,
+            entries: Vec::new(), bodies: Vec::new(), assets: Vec::new(), controls: Vec::new(),
+            reused_control_catalogs: Vec::new(), reused_assets: Vec::new(), asset_job: None,
+            data_catalogs: Vec::new(), asset_catalogs: Vec::new(), resume: None, dispatched: false, complete: false,
+        }
+    }
+
+    #[test]
+    fn publication_progress_preserves_legacy_json_without_rewriting_large_payloads() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = PersistentStore::open(directory.path()).unwrap();
+        let mut publication = publication(1024 * 1024);
+        let sealed = vec![73u8; 1024 * 1024];
+        store.device_store().unwrap().connection().execute(
+            "INSERT INTO external_lww_segments VALUES(?1,?2,'1','0',?3,?4,0)",
+            params![publication.target, publication.writer, serde_json::to_string(&publication).unwrap(), sealed],
+        ).unwrap();
+        publication.resume = Some(UploadState {data: crate::external_storage::contract::ResumeData::Secret("synthetic-session".into()),
+            confirmed_offset: 17.into(), expires_at_ms: Some(999.into())});
+        store.external_lww_persist(&publication, &sealed).unwrap();
+        store.device_store().unwrap().connection().execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+        publication.resume.as_mut().unwrap().confirmed_offset = 1001.into();
+        publication.dispatched = true;
+        store.external_lww_persist(&publication, &sealed).unwrap();
+        let wal = std::fs::metadata(directory.path().join("persistent/device.sqlite-wal")).unwrap().len();
+        assert!(wal < 64 * 1024, "progress rewrote {wal} bytes of frozen publication content");
+        let (stored, bytes) = store.external_lww_pending(&publication.target, &publication.writer).unwrap().unwrap();
+        assert_eq!(serde_json::to_value(&stored).unwrap(), serde_json::to_value(&publication).unwrap());
+        assert_eq!(bytes, sealed);
+        let kind: String = store.device_store().unwrap().connection().query_row(
+            "SELECT typeof(metadata) FROM external_lww_segments", [], |row|row.get(0)).unwrap();
+        assert_eq!(kind, "text");
+        store.device_store().unwrap().connection().execute("UPDATE external_lww_segments SET metadata=?1",
+            [serde_json::to_string(&stored).unwrap()]).unwrap();
+        assert!(store.external_lww_pending(&publication.target, &publication.writer).unwrap().unwrap().0.dispatched);
+        store.device_store().unwrap().connection().execute("UPDATE external_lww_segments SET metadata='{'", []).unwrap();
+        assert!(store.external_lww_persist(&publication, &sealed).is_err());
+    }
+
+    #[test]
+    fn publication_validation_leaves_the_device_store_available_to_another_writer() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = PersistentStore::open(directory.path()).unwrap();
+        let mut publication = publication(1024 * 1024);
+        let sealed = vec![73u8; 1024 * 1024];
+        store.external_lww_persist(&publication, &sealed).unwrap();
+        let writer = super::super::device_store::DeviceStore::open(&directory.path().join("persistent")).unwrap();
+        writer.connection().busy_timeout(std::time::Duration::ZERO).unwrap();
+        let outcome = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let observed = outcome.clone();
+        let mut attempted = false;
+        store.device_store().unwrap().connection().authorizer(Some(move |context: AuthContext<'_>| {
+            if !attempted && matches!(context.action, AuthAction::Read {table_name: "external_lww_segments", ..}) {
+                attempted = true;
+                *observed.lock().unwrap() = Some(writer.write_setting("nightlyWarned", &serde_json::json!(true)).map_err(|error|error.to_string()));
+            }
+            Authorization::Allow
+        })).unwrap();
+        publication.dispatched = true;
+        store.external_lww_persist(&publication, &sealed).unwrap();
+        store.device_store().unwrap().connection().authorizer(None::<fn(AuthContext<'_>) -> Authorization>).unwrap();
+        assert_eq!(outcome.lock().unwrap().take(), Some(Ok(())), "publication validation held the device writer lock");
+        assert_eq!(store.device_store().unwrap().read_setting("nightlyWarned").unwrap(), Some(serde_json::json!(true)));
+    }
+
+    #[test]
+    fn publication_refuses_a_state_change_after_its_validation_snapshot() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = PersistentStore::open(directory.path()).unwrap();
+        let mut publication = publication(4096);
+        let sealed = vec![73u8; 4096];
+        store.external_lww_persist(&publication, &sealed).unwrap();
+        let writer = super::super::device_store::DeviceStore::open(&directory.path().join("persistent")).unwrap();
+        let mut dispatched = publication.clone();
+        dispatched.dispatched = true;
+        let newer = serde_json::to_string(&dispatched).unwrap();
+        let outcome = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let observed = outcome.clone();
+        let mut attempted = false;
+        store.device_store().unwrap().connection().authorizer(Some(move |context: AuthContext<'_>| {
+            if !attempted && matches!(context.action, AuthAction::Transaction {operation: TransactionOperation::Begin}) {
+                attempted = true;
+                *observed.lock().unwrap() = Some(writer.connection().execute("UPDATE external_lww_segments SET metadata=?1", [&newer]).map_err(|error|error.to_string()));
+            }
+            Authorization::Allow
+        })).unwrap();
+        publication.resume = Some(UploadState {data: crate::external_storage::contract::ResumeData::Secret("stale-session".into()),
+            confirmed_offset: 17.into(), expires_at_ms: None});
+        let error = store.external_lww_persist(&publication, &sealed).unwrap_err();
+        store.device_store().unwrap().connection().authorizer(None::<fn(AuthContext<'_>) -> Authorization>).unwrap();
+        assert_eq!(outcome.lock().unwrap().take(), Some(Ok(1)));
+        assert_eq!(error.to_string(), "publication-state-changed");
+        let (saved, saved_bytes) = store.external_lww_pending(&publication.target, &publication.writer).unwrap().unwrap();
+        assert!(saved.dispatched);
+        assert!(saved.resume.is_none());
+        assert_eq!(saved_bytes, sealed);
+    }
+
+}
 /// Key prefix in `external_lww_objects` of the coverage a binding stage
 /// applied, kept until the first receive after its activation.
 const STAGE_PREFIX: &str = "stage/";
@@ -952,20 +1062,13 @@ impl PersistentStore {
         }) {
             return Err(super::lww::error("sealed-body-integrity"));
         }
-        let tx = self.device_store_mut()?.transaction()?;
-        let authority: String = tx.query_row(
-            "SELECT binding_authority FROM lww_clock WHERE singleton=1",
-            [],
-            |r| r.get(0),
-        )?;
-        if authority != publication.authority.0.to_string() {
-            return Err(super::lww::error("stale-binding-authority"));
-        }
-        let previous: Option<(Vec<u8>,String)> = tx.query_row("SELECT sealed,metadata FROM external_lww_segments WHERE target=?1 AND writer=?2 AND seq=?3",
+        // Validate and encode before taking the writer lock; the update below
+        // must still match this exact snapshot when the lock is acquired.
+        let previous: Option<(Vec<u8>,String)> = self.device_store()?.connection().query_row("SELECT sealed,metadata FROM external_lww_segments WHERE target=?1 AND writer=?2 AND seq=?3",
             params![publication.target,publication.writer,publication.seq.0.to_string()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-        if let Some((sealed, metadata)) = previous {
-            let previous: SealedPublication = serde_json::from_str(&metadata)?;
-            if previous.sealed && sealed != bytes {
+        if let Some((sealed, metadata)) = &previous {
+            let previous: SealedPublication = serde_json::from_str(metadata)?;
+            if previous.sealed && sealed.as_slice() != bytes {
                 return Err(super::lww::error("sealed-segment-integrity"));
             }
             if previous.entries != publication.entries {
@@ -1023,9 +1126,41 @@ impl PersistentStore {
                 return Err(super::lww::error("captured-payload-integrity"));
             }
         }
-        tx.execute("INSERT INTO external_lww_segments(target,writer,seq,authority,metadata,sealed,complete) VALUES(?1,?2,?3,?4,?5,?6,?7)
-            ON CONFLICT(target,writer,seq) DO UPDATE SET metadata=excluded.metadata,sealed=excluded.sealed,complete=excluded.complete",
-            params![publication.target,publication.writer,publication.seq.0.to_string(),publication.authority.0.to_string(),serde_json::to_string(publication)?,bytes,publication.complete])?;
+        let mut metadata = serde_json::to_string(publication)?;
+        // Stable row lengths let SQLite retain unchanged overflow pages. JSON
+        // whitespace preserves the released readers and their ordinary writes.
+        let capacity = previous.as_ref().map(|(_, stored)| stored.len())
+            .filter(|capacity| *capacity >= metadata.len())
+            .unwrap_or_else(|| metadata.len() + (metadata.len() / 16).max(4096));
+        metadata.extend(std::iter::repeat_n(' ', capacity - metadata.len()));
+        let replace_sealed = previous.as_ref().is_some_and(|(sealed, _)| sealed.as_slice() != bytes);
+        let tx = self.device_store_mut()?.transaction()?;
+        let authority: String = tx.query_row(
+            "SELECT binding_authority FROM lww_clock WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )?;
+        if authority != publication.authority.0.to_string() {
+            return Err(super::lww::error("stale-binding-authority"));
+        }
+        let changed = if let Some((sealed, stored)) = &previous {
+            if !replace_sealed {
+                tx.execute("UPDATE external_lww_segments SET metadata=?1,complete=?2
+                    WHERE target=?3 AND writer=?4 AND seq=?5 AND metadata=?6 AND sealed=?7",
+                    params![metadata,publication.complete,publication.target,publication.writer,publication.seq.0.to_string(),stored,sealed])?
+            } else {
+                tx.execute("UPDATE external_lww_segments SET metadata=?1,complete=?2,sealed=?8
+                    WHERE target=?3 AND writer=?4 AND seq=?5 AND metadata=?6 AND sealed=?7",
+                    params![metadata,publication.complete,publication.target,publication.writer,publication.seq.0.to_string(),stored,sealed,bytes])?
+            }
+        } else {
+            tx.execute("INSERT INTO external_lww_segments(target,writer,seq,authority,metadata,sealed,complete) VALUES(?1,?2,?3,?4,?5,?6,?7)
+                ON CONFLICT(target,writer,seq) DO NOTHING",
+                params![publication.target,publication.writer,publication.seq.0.to_string(),publication.authority.0.to_string(),metadata,bytes,publication.complete])?
+        };
+        if changed != 1 {
+            return Err(super::lww::error("publication-state-changed"));
+        }
         tx.commit()?;
         Ok(())
     }
@@ -1641,9 +1776,7 @@ mod asset_root_tests {
             crate::persistent_store::ASSET_GC_ROOT_COLLECTIONS.with(|count| count.set((0, 0)));
             assert!(f.a.residency_inventory_classification_test(false).unwrap().0.contains(&hash));
             crate::persistent_store::ASSET_GC_ROOT_COLLECTIONS.with(|count| assert_eq!(count.get(), (1, 0)));
-            crate::persistent_store::ASSET_GC_ROOT_COLLECTIONS.with(|count| count.set((0, 0)));
             f.a.asset_residency_release_unused(|| Ok(())).unwrap();
-            crate::persistent_store::ASSET_GC_ROOT_COLLECTIONS.with(|count| assert_eq!(count.get(), (1, 0)));
             assert!(Residency::open(f.directory_a.path()).unwrap().object(&hash, None).unwrap().is_some());
             if acknowledged {
                 held.fail_pack_after.store(2, Ordering::SeqCst);

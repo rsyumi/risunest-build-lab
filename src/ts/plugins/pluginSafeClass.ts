@@ -1,28 +1,28 @@
-import { getPluginDeviceKeyspace } from "./pluginDeviceKeyspace";
+import { getPluginDeviceKeyspace, type PluginDeviceKeyspace } from "./pluginDeviceKeyspace";
 
 /**
  * Device-local strings for one plugin. Every call is answered from that
  * plugin's keyspace alone, and a write settles only once the store has kept it.
  */
 export class SafeLocalStorage {
-    readonly #owner: string;
+    readonly #keyspace: PluginDeviceKeyspace;
 
-    constructor(owner: string) {
-        this.#owner = owner;
+    constructor(owner: string, keyspace = getPluginDeviceKeyspace(owner)) {
+        this.#keyspace = keyspace;
     }
 
     async getItem(key: string): Promise<string | null> {
-        return await getPluginDeviceKeyspace(this.#owner).getItem('string', key);
+        return await this.#keyspace.getItem('string', key);
     }
     async setItem(key: string, value: string): Promise<void> {
-        await getPluginDeviceKeyspace(this.#owner).setItem('string', key, value);
+        await this.#keyspace.setItem('string', key, value);
     }
     async removeItem(key: string): Promise<void> {
-        await getPluginDeviceKeyspace(this.#owner).removeItem('string', key);
+        await this.#keyspace.removeItem('string', key);
     }
     //not a standard localStorage method, but useful
     async keys(): Promise<string[]> {
-        return await getPluginDeviceKeyspace(this.#owner).keys('string');
+        return await this.#keyspace.keys('string');
     }
 
     async key(index: number): Promise<string | null> {
@@ -31,7 +31,7 @@ export class SafeLocalStorage {
     }
 
     async clear(): Promise<void> {
-        await getPluginDeviceKeyspace(this.#owner).clear('string');
+        await this.#keyspace.clear('string');
     }
 
     async length(): Promise<number> {
@@ -42,14 +42,14 @@ export class SafeLocalStorage {
 /** The same device keyspace, holding JSON values under their own space. */
 export class SafeLocalPluginStorage {
     __classType = 'REMOTE_REQUIRED' as const;
-    readonly #owner: string;
+    readonly #keyspace: PluginDeviceKeyspace;
 
-    constructor(owner: string) {
-        this.#owner = owner;
+    constructor(owner: string, keyspace = getPluginDeviceKeyspace(owner)) {
+        this.#keyspace = keyspace;
     }
 
     async getItem<T>(key: string): Promise<T | null> {
-        const stored = await getPluginDeviceKeyspace(this.#owner).getItem('json', key);
+        const stored = await this.#keyspace.getItem('json', key);
         if (stored === null) return null;
         try {
             return JSON.parse(stored) as T;
@@ -63,16 +63,16 @@ export class SafeLocalPluginStorage {
         if (typeof serialized !== 'string') {
             throw new TypeError('getLocalPluginStorage values must be JSON-serializable');
         }
-        await getPluginDeviceKeyspace(this.#owner).setItem('json', key, serialized);
+        await this.#keyspace.setItem('json', key, serialized);
     }
     async removeItem(key: string): Promise<void> {
-        await getPluginDeviceKeyspace(this.#owner).removeItem('json', key);
+        await this.#keyspace.removeItem('json', key);
     }
     async keys(): Promise<string[]> {
-        return await getPluginDeviceKeyspace(this.#owner).keys('json');
+        return await this.#keyspace.keys('json');
     }
     async clear(): Promise<void> {
-        await getPluginDeviceKeyspace(this.#owner).clear('json');
+        await this.#keyspace.clear('json');
     }
 }
 

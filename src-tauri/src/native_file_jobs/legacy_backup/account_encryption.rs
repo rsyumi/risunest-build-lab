@@ -38,9 +38,8 @@ pub(in crate::native_file_jobs) fn prepare_with_key(
     if entry.byte_length > MAX_METADATA_BYTES as u64 { return Err(invalid()); }
     let metadata: Value = serde_json::from_reader(BufReader::new(open_staged(entry).map_err(local_backup_error)?))
         .map_err(|_| invalid())?;
-    if metadata.get("type").and_then(Value::as_str) == Some("none") { return Ok(None); }
     if metadata.get("type").and_then(Value::as_str) != Some("account") {
-        return Err(NativeJobError::new("backup-encryption-unsupported", "Backup encryption type is unsupported"));
+        return Ok(None);
     }
     let timestamp = metadata.get("time").and_then(Value::as_f64)
         .filter(|time| time.is_finite() && *time >= 0.0 && time.fract() == 0.0 && *time <= 9_007_199_254_740_991.0)
@@ -286,7 +285,6 @@ mod tests {
             (r#"{"type":"account","time":1.5}"#, "backup-encryption-metadata-invalid"),
             (r#"{"type":"account","time":"1"}"#, "backup-encryption-metadata-invalid"),
             (r#"{"type":"account","time":9007199254740992}"#, "backup-encryption-metadata-invalid"),
-            (r#"{"type":"unknown","time":1}"#, "backup-encryption-unsupported"),
         ] {
             std::fs::write(&metadata_path, bytes).unwrap();
             let entries = [StagedLocalBackupEntry { logical_name: ENCRYPTION_ENTRY.into(), byte_length: bytes.len() as u64, sha256: String::new(), staged_path: Some(metadata_path.clone()) }];

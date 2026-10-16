@@ -116,6 +116,8 @@ impl Message {
 #[serde(rename_all = "camelCase")]
 pub struct Record {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     pub source: String,
     pub started_at: u64,
     pub elapsed_ms: u64,
@@ -146,6 +148,8 @@ impl Record {
 #[serde(rename_all = "camelCase")]
 pub struct ListItem {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     pub source: String,
     pub started_at: u64,
     pub elapsed_ms: u64,
@@ -162,6 +166,7 @@ impl From<&Record> for ListItem {
     fn from(r: &Record) -> Self {
         Self {
             id: r.id.clone(),
+            operation_id: r.operation_id.clone(),
             source: r.source.clone(),
             started_at: r.started_at,
             elapsed_ms: r.elapsed_ms,

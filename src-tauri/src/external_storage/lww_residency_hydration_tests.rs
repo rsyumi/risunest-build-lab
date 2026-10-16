@@ -609,3 +609,30 @@ fn interned_sources_share_objects_and_serialize_as_before() {
         assert_eq!(&serde_json::to_string(&decoded).unwrap(), encoded);
     }
 }
+
+#[test]
+fn visible_server_and_external_groups_start_in_display_order_without_splitting_shared_packs() {
+    use crate::server_sync::residency::{test_remote, HydrationSession};
+    for external_first in [true, false] {
+        let received = received(&[2, 1]);
+        let root = received.f.directory_b.path();
+        let first = &received.publications[0];
+        let background = &received.publications[1][0].0;
+        let server_body = b"synthetic mixed holder icon".to_vec();
+        let server_hash = risunest_sync_wire::hash(&server_body);
+        test_remote::hold(root, &[(&server_hash, server_body.len() as u64)]);
+        test_remote::serve(root, &server_hash, server_body);
+        let mut ordered = if external_first { vec![first[0].0.clone(), server_hash.clone()] } else { vec![server_hash.clone(), first[0].0.clone()] };
+        let priority = ordered.iter().cloned().collect();
+        ordered.extend([background.clone(), first[1].0.clone()]);
+        let mut groups = Vec::new();
+        let missing = HydrationSession::new(root, None).unwrap().hydrate_many_outcomes_prioritized(&ordered, &priority, &|| Ok(()), |hash, _| {
+            let group = if hash == server_hash { "server" } else if hash == background { "background" } else { "shared-pack" };
+            if groups.last() != Some(&group) { groups.push(group); }
+        }).unwrap();
+        assert!(missing.is_empty());
+        assert_eq!(groups, if external_first { vec!["shared-pack", "server", "background"] } else { vec!["server", "shared-pack", "background"] });
+        assert_resident(root, &received.publications.concat());
+        assert!(crate::asset_repository::PayloadCas::new(root).unwrap().stat_object(&server_hash).unwrap().is_some());
+    }
+}

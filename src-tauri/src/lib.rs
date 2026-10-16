@@ -72,6 +72,8 @@ mod trust_boundary;
 mod command_future_size;
 #[cfg(test)]
 mod test_memory;
+#[cfg(test)]
+mod test_process;
 #[cfg(windows)]
 mod windows_appearance;
 #[cfg(windows)]
@@ -745,6 +747,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         external_storage::connection_commands::external_storage_list_providers,
         external_storage::connection_commands::external_storage_prepare_connection,
         external_storage::connection_commands::external_storage_prepare_renewal,
+        external_storage::connection_commands::external_storage_change_endpoint,
         external_storage::connection_commands::external_storage_unlock_connection,
         external_storage::connection_commands::external_storage_commit_connection,
         external_storage::connection_commands::external_storage_begin_authorization,
@@ -1040,6 +1043,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_list_plugin_device_keys,
         persistent_store::commands::pds_list_plugin_device_storage,
         persistent_store::commands::pds_write_plugin_device_values,
+        persistent_store::commands::pds_plugin_device_sequence,
         persistent_store::commands::pds_begin_plugin_claim_session,
         persistent_store::commands::pds_claim_plugin_storage_value,
         persistent_store::commands::pds_close_plugin_claim_session,

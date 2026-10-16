@@ -51,8 +51,19 @@ fn wrapped_remote_source_spooling_and_hydration_finish_with_one_body_slot() {
         connection.provider=super::super::transfer_limit::wrap(f.directory_b.path(),"receiver",connection.provider).unwrap();
         let _installed=install_test_source_connection(f.directory_b.path(),Arc::new(connection)).unwrap();
         let scratch=tempfile::tempdir().unwrap();
-        let spool=tokio::time::timeout(std::time::Duration::from_secs(20),spool_frozen_remote_body(&FrozenBodySource::Standalone(sources[0].clone()),scratch.path(),&Cancellation::default())).await.expect("one-slot source spool deadlocked").unwrap();
+        let downloaded=Arc::new(std::sync::atomic::AtomicU64::new(0)); let observed=downloaded.clone();
+        let observer=Arc::new(move |bytes|{observed.fetch_add(bytes,std::sync::atomic::Ordering::Relaxed);});
+        let barrier=provider.inner.arm_partial_read_barrier("body-0",16).unwrap();
+        let source=FrozenBodySource::Standalone(sources[0].clone());let destination=scratch.path().to_owned();
+        let task=tokio::spawn(async move {spool_frozen_remote_body_observed(&source,&destination,&Cancellation::default(),Some(observer)).await});
+        tokio::time::timeout(std::time::Duration::from_secs(20),barrier.reached.notified()).await.expect("standalone first chunk did not arrive");
+        assert_eq!(downloaded.load(std::sync::atomic::Ordering::Relaxed),16,"a held response must expose its first chunk before completion");
+        assert!(!task.is_finished());
+        barrier.release();
+        let spool=tokio::time::timeout(std::time::Duration::from_secs(20),task).await.expect("one-slot source spool deadlocked").unwrap().unwrap();
+        assert_eq!(downloaded.load(std::sync::atomic::Ordering::Relaxed),sources[0].body.byte_length.0);
         assert_eq!(std::fs::read(spool.path()).unwrap(),b"synthetic standalone hydration 0");
+        assert_eq!(downloaded.load(std::sync::atomic::Ordering::Relaxed),sources[0].body.byte_length.0,"reading plaintext must not count as another download");
         let root=f.directory_b.path().to_owned();let hashes=sources.iter().map(|s|s.hash.clone()).collect::<Vec<_>>();
         tokio::time::timeout(std::time::Duration::from_secs(20),tokio::task::spawn_blocking(move ||hydrate_registered_many(&root,&hashes,&BTreeSet::new(),None,&||Ok(()),&mut |_,_|{}))).await.expect("one-slot hydration deadlocked").unwrap().unwrap();
         assert_eq!(provider.peak(),1);
@@ -80,4 +91,28 @@ fn standalone_hydration_settles_successful_siblings_before_returning_a_download_
         let cas=crate::asset_repository::PayloadCas::new(f.directory_b.path()).unwrap();
         for index in [0,2,3] {assert!(cas.stat_object(&sources[index].hash).unwrap().is_some());}
     });
+}
+
+#[test]
+fn standalone_connections_follow_display_rank_before_background_work() {
+    let f=CycleFixture::new();
+    let provider=Arc::new(DownloadProvider::new(4,&[]));
+    let mut sources=sources(&f,&provider,4);
+    sources[1].connection_id="other-receiver".into();
+    register(f.directory_b.path(),&sources[1]).unwrap();
+    let first=connection(&f,provider.clone(),None);
+    let mut second=connection(&f,provider.clone(),None);
+    second.stored.id="other-receiver".into();
+    let _first=install_test_source_connection(f.directory_b.path(),Arc::new(first)).unwrap();
+    let _second=install_test_source_connection(f.directory_b.path(),Arc::new(second)).unwrap();
+    let hashes=sources.iter().map(|source|source.hash.clone()).collect::<Vec<_>>();
+    let priority=hashes[..3].iter().cloned().collect();
+    let mut completed=Vec::new();
+    let unavailable=hydrate_registered_many(f.directory_b.path(),&hashes,&priority,None,&||Ok(()),&mut |hash,_|completed.push(hash.to_owned())).unwrap();
+    assert!(unavailable.is_empty());
+    assert_eq!(completed,hashes);
+    let cas=crate::asset_repository::PayloadCas::new(f.directory_b.path()).unwrap();
+    for (index,source) in sources.iter().enumerate() {
+        assert_eq!(cas.read_object(&source.hash).unwrap().unwrap(),format!("synthetic standalone hydration {index}").into_bytes());
+    }
 }

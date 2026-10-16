@@ -257,6 +257,10 @@ pub fn enabled() -> bool {
     global().is_some_and(|r| r.0.enabled.load(Ordering::Relaxed))
 }
 
+pub fn begin_operation(source: &str, method: &str, url: &str, headers: &http::HeaderMap, operation_id: uuid::Uuid) -> CaptureGuard {
+    CaptureGuard(global().map(|r| r.begin_operation(source, method, url, headers, Some(operation_id))).unwrap_or_default())
+}
+
 impl Recorder {
     pub fn open(recent: PathBuf, retained: PathBuf) -> Result<Self, String> {
         let (sender, receiver) = mpsc::sync_channel(QUEUE_EVENTS);
@@ -401,6 +405,16 @@ impl Recorder {
         url: &str,
         headers: &http::HeaderMap,
     ) -> Capture {
+        self.begin_operation(source, method, url, headers, None)
+    }
+    pub fn begin_operation(
+        &self,
+        source: &str,
+        method: &str,
+        url: &str,
+        headers: &http::HeaderMap,
+        operation_id: Option<uuid::Uuid>,
+    ) -> Capture {
         if !self.0.enabled.load(Ordering::Relaxed) {
             return Capture::default();
         }
@@ -456,6 +470,7 @@ impl Recorder {
         let shorten = |s: &str, n| s.chars().take(n).collect::<String>();
         let record = Record {
             id: signal.id.clone(),
+            operation_id: operation_id.map(|id| id.to_string()),
             source: shorten(source, 80),
             started_at: now(),
             elapsed_ms: 0,

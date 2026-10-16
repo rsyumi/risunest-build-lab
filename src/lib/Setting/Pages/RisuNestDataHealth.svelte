@@ -262,6 +262,7 @@
         'drop-alias': strings.actionDropAlias,
         'adopt-stored-payload': strings.actionAdoptStoredPayload,
         'normalize-records': strings.actionNormalizeRecords,
+        'select-first-conversation': strings.actionSelectFirstConversation,
         'keep-single-record': strings.actionKeepSingleRecord,
         'recover-orphans': strings.actionRecoverOrphans,
     }

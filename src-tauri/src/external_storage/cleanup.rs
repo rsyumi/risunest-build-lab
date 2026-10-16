@@ -555,6 +555,38 @@ async fn run_owned(
         } else if let Some(reason) = current_limit(context, request, time_not_before, owner, started, cancel)? {
             outcome.stop_reason = reason;
         } else {
+            if sent < request.limits.per_run && context.provider.supports_incomplete_cleanup() {
+                if !marker_placed { owner.place_marker(context, cancel).await?; }
+                if let Some(reason) = recheck(context, owner, view, &before, &jobs, cancel).await? {
+                    outcome.stop_reason = reason;
+                    return Ok(());
+                }
+                let mut protected = view.protected_jobs();
+                protected.push(request.job_id.to_owned());
+                let mut cursor = None;
+                loop {
+                    if let Some(reason) = current_limit(context, request, time_not_before, owner, started, cancel)? {
+                        outcome.stop_reason = reason;
+                        break;
+                    }
+                    if let Some(reason) = recheck(context, owner, view, &before, &jobs, cancel).await? {
+                        outcome.stop_reason = reason;
+                        break;
+                    }
+                    let page = leases::control_request(cancel, context.provider.cleanup_incomplete_objects(
+                        context.repository, &protected, cursor.as_deref(), request.limits.per_run - sent,
+                        &|deleting| owner.set_delete_in_flight(deleting), cancel,
+                    )).await?;
+                    sent = sent.saturating_add(page.removed as usize);
+                    outcome.deleted_objects = outcome.deleted_objects.saturating_add(page.removed);
+                    cursor = page.next_cursor;
+                    if cursor.is_none() { break; }
+                    if sent >= request.limits.per_run {
+                        outcome.stop_reason = StopReason::Limit;
+                        break;
+                    }
+                }
+            }
             GcStore::open(context.root)?.set_last_reachable_bytes(context.connection_id, marked.reachable_bytes)?;
         }
     }
@@ -1370,8 +1402,16 @@ pub(super) mod tests {
             assert_eq!(super::super::lww_residency::packed_source(f.directory_b.path(),&small[0]).unwrap().unwrap().packs,saved.packs);
             f.provider.seed(catalog_id,ObjectRole::Catalog,authentic);
             let frozen=super::super::lww_residency::FrozenBodySource::Packed(saved.clone());
-            let spool=super::super::lww_residency::spool_frozen_remote_body(&frozen,&scratch.join("frozen-destination"),&cancel).await.unwrap();
+            let downloaded=Arc::new(std::sync::atomic::AtomicU64::new(0));let observed=downloaded.clone();
+            let before_missing=f.provider.read_attempts(&old_pack);
+            let spool=super::super::lww_residency::spool_frozen_remote_body_observed(&frozen,&scratch.join("frozen-destination"),&cancel,Some(Arc::new(move |bytes| {
+                assert!(bytes>0);observed.fetch_add(bytes,std::sync::atomic::Ordering::Relaxed);
+            }))).await.unwrap();
+            let received=downloaded.load(std::sync::atomic::Ordering::Relaxed);
+            assert!(received>0,"the refreshed packed source must report downloaded bytes");
+            assert_eq!(f.provider.read_attempts(&old_pack),before_missing+1);
             assert_eq!(std::fs::read(spool.path()).unwrap(),b"synthetic retained pack entry 0");
+            assert_eq!(downloaded.load(std::sync::atomic::Ordering::Relaxed),received,"reading the local spool is not another download");
             assert!(crate::asset_repository::PayloadCas::new(f.directory_b.path()).unwrap().stat_object(&small[0]).unwrap().is_none());
             assert_eq!(super::super::lww_residency::packed_source(f.directory_b.path(),&small[0]).unwrap().unwrap().packs,saved.packs,"frozen backup custody never switches its saved source identity");
             let root=f.directory_b.path().to_path_buf();let hash=small[0].clone();
@@ -1381,6 +1421,7 @@ pub(super) mod tests {
             }).await.unwrap();
             let refreshed=super::super::lww_residency::packed_source(f.directory_b.path(),&small[0]).unwrap().unwrap();
             assert_eq!(refreshed.protected_snapshot,id);assert_ne!(refreshed.packs[0].header.object_id,old_pack);
+            assert_eq!(received,refreshed.packs.iter().map(|pack|pack.ciphertext_length).sum::<u64>());
         });
     }
     fn validate_generic_body(object:&RemoteObject,repository:&RepositoryHandle)->Result<()> {object.stored(repository).map(|_|())}
@@ -1716,6 +1757,50 @@ pub(super) mod tests {
         fn payload_deletes(&self) -> Vec<String> {
             self.provider.deletion_order().into_iter().filter(|id| id == "parent-catalog" || id == "child-pack").collect()
         }
+    }
+
+    #[test]
+    fn unfinished_provider_upload_is_removed_only_after_the_live_lease_releases() {
+        runtime().block_on(async {
+            let h=Harness::new();
+            let owner=match leases::admit(&h.context(),"active-upload",LeaseKind::Work,&Cancellation::default()).await.unwrap() {
+                Admission::Admitted(owner)=>owner,_=>panic!("work must be admitted"),
+            };
+            h.provider.seed("unfinished-pack",ObjectRole::Pack,Vec::new());
+            assert_eq!(h.run().await.unwrap().stop_reason,StopReason::Lease);
+            assert!(h.provider.holds("unfinished-pack"));
+            owner.release_all(&h.context()).await;
+            assert_eq!(h.run().await.unwrap().deleted_objects,1);
+            assert!(!h.provider.holds("unfinished-pack"));
+        });
+    }
+
+    #[test]
+    fn incomplete_scan_timeout_releases_protection_but_uncertain_delete_retains_it() {
+        runtime().block_on(async {
+            tokio::time::pause();
+            let h = Harness::new();
+            h.provider.seed("unfinished-pack", ObjectRole::Pack, Vec::new());
+            h.provider.state.lock().unwrap().incomplete_cleanup_delay = Some(Duration::from_secs(61));
+            assert_eq!(h.run().await.unwrap_err().kind, ErrorKind::Transient);
+            assert!(h.provider.holds("unfinished-pack"));
+            assert!(h.provider.objects_with_role(ObjectRole::Lease).is_empty());
+            h.provider.state.lock().unwrap().incomplete_cleanup_delay = Some(Duration::from_secs(31));
+            h.provider.state.lock().unwrap().incomplete_cleanup_empty_pages = 2;
+            let started = tokio::time::Instant::now();
+            assert_eq!(h.run().await.unwrap().deleted_objects, 1);
+            assert!(started.elapsed() > Duration::from_secs(60));
+            assert!(!h.provider.holds("unfinished-pack"));
+            h.provider.state.lock().unwrap().incomplete_cleanup_delay = None;
+            h.provider.state.lock().unwrap().incomplete_cleanup_empty_pages = 0;
+
+            h.provider.seed("unfinished-lost", ObjectRole::Pack, Vec::new());
+            h.provider.fail_delete("unfinished-lost", DeleteFault::AppliedThenLost);
+            assert_eq!(h.run().await.unwrap_err().kind, ErrorKind::Transient);
+            assert!(!h.provider.holds("unfinished-lost"));
+            assert!(!h.provider.objects_with_role(ObjectRole::Lease).is_empty());
+            assert_eq!(h.run().await.unwrap().stop_reason, StopReason::Lease);
+        });
     }
 
     #[test]

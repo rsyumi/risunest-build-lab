@@ -11,6 +11,7 @@ import {
     NativeFileJobActivationCommittedError,
     NativeFileJobActivationUnresolvedError,
     NativeFileJobError,
+    PORTABLE_BODIES_INCOMPLETE,
     resolveNativeFileJobStage,
     portableBodyRetryRequest,
     retryNativePortableRestoreBodies,
@@ -99,6 +100,21 @@ export interface SharedNativeFileOperationOptions {
 
 export const nativeFileOperation = writable<NativeFileOperationState | null>(null)
 export const nativeFileOperationOutcome = writable<NativeFileOperationOutcome | null>(null)
+
+export function recordRecoveredNativeFileOperation(status: NativeFileJobStatus): void {
+    nativeFileOperationOutcome.update(outcome => {
+        if (!outcome || outcome.status?.jobId !== status.jobId || activeOperation) return outcome
+        const pendingBodies = status.kind === 'restore-portable-backup' && status.portableBodyRetry?.pending
+        if (!['succeeded', 'failed', 'cancelled'].includes(status.state)) return {...outcome, status}
+        if (status.state === 'succeeded' && status.result && !pendingBodies) {
+            return {...outcome, status, state: 'succeeded', result: status.result, error: undefined,
+                warningCodes: mergeWarningCodes(outcome.warningCodes, status.result.warningCodes ?? [])}
+        }
+        const cause = new NativeFileJobError(status.error?.code ?? 'restore-failed', status.error?.message ?? 'Restore failed')
+        return {...outcome, status, state: status.state === 'cancelled' ? 'cancelled' : 'failed',
+            error: outcomeError(outcome.kind, status.activationRevision === undefined ? cause : new NativeFileJobActivationCommittedError(status.activationRevision, cause, pendingBodies ? PORTABLE_BODIES_INCOMPLETE : undefined))}
+    })
+}
 
 /**
  * Which surface draws a dialog-presented operation. The onboarding takes
@@ -335,7 +351,7 @@ function runSharedNativeFileOperationWithAdmission<T>(
     publishActiveState()
     const context: SharedNativeFileOperationContext = {
         signal: controller.signal,
-        onStatus: recordStatus,
+        onStatus: status => { if (activeController === controller) recordStatus(status) },
         setBlocking: (blocking) => updateActiveState({ blocking }),
         setSource: (source) => updateActiveState({ source }),
         setPartialWritesPossible: (value) => updateActiveState({ partialWritesPossible: value }),
@@ -365,7 +381,7 @@ function runSharedNativeFileOperationWithAdmission<T>(
             ...context,
             signal: task.signal ?? context.signal,
             onStatus: status => {
-                recordStatus(status)
+                context.onStatus(status)
                 task.progress(backgroundTaskPercent(status))
             },
             })

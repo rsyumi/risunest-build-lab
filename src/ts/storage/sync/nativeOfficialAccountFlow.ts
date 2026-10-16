@@ -1,8 +1,9 @@
 import type { Database } from '../database.svelte'
 import type { NativeAccountCredentialVault } from '../nativeAccountCredential'
 import type { DataRevision } from '../persistentDataStore'
+import type { PersistentDataRuntime } from '../persistentDataRuntime'
 import type { PinnedPublication } from '../saveCoordinator'
-import { NativeFileJobActivationCommittedError, syntheticNativeFileJobStatus, type NativeFileRestoreJobOptions } from '../nativeFileJobs'
+import { NativeFileJobActivationCommittedError, NativeFileJobActivationUnresolvedError, syntheticNativeFileJobStatus, type NativeFileRestoreJobOptions } from '../nativeFileJobs'
 import type { OfficialPublicationOptions } from './officialAccountSnapshot'
 import type { OfficialPullResult } from './officialAccountSnapshot'
 
@@ -17,6 +18,33 @@ export const nativeOfficialAccountKeys = {
 } as const
 
 export type NativeOfficialAccountCredential = NonNullable<Database['account']>
+
+export async function restoreNativeOfficialAccountCandidate(
+    runtime: Pick<PersistentDataRuntime, 'replacePersistentDatabase' | 'pendingWorkingSetRefreshRevision'>,
+    candidate: Database,
+    expectedRevision: DataRevision,
+    signal: AbortSignal | undefined,
+    warnings: string[],
+): Promise<{ revision: DataRevision }> {
+    try {
+        const outcome = await runtime.replacePersistentDatabase(candidate, 'native-official-compatibility-restore', {
+            upstreamImport: true,
+            upstreamImportWarnings: warnings,
+            expectedRevision,
+            signal,
+        })
+        if (outcome.projection === 'refresh-required') {
+            throw new NativeFileJobActivationCommittedError(outcome.revision, new Error('Restored account requires a working-set refresh'))
+        }
+        return { revision: outcome.revision }
+    } catch (error) {
+        if (error instanceof NativeFileJobActivationCommittedError) throw error
+        if (runtime.pendingWorkingSetRefreshRevision !== null) {
+            throw new NativeFileJobActivationUnresolvedError(error)
+        }
+        throw error
+    }
+}
 
 interface NativeOfficialAdapter {
     pull(signal?: AbortSignal): Promise<OfficialPullResult>
@@ -190,7 +218,8 @@ export function createNativeOfficialAccountFlowService(
                         ? await dependencies.adapter.pull(options.signal)
                         : nativeResult
                 } catch (error) {
-                    if (!(error instanceof NativeFileJobActivationCommittedError)) {
+                    if (!(error instanceof NativeFileJobActivationCommittedError)
+                        && !(error instanceof NativeFileJobActivationUnresolvedError)) {
                         try { await dependencies.clearRestoreAssets?.() } catch {}
                     }
                     throw error
@@ -275,11 +304,11 @@ export function createNativeOfficialAccountFlowService(
                 dependencies.resetAccountSession()
                 await dependencies.flushMetadata()
                 await dependencies.credentialVault.clear()
-                await dependencies.clearMetadata()
                 credential = null
                 credentialGeneration += 1
-                dependencies.adapter.resetAccountAssociation(null)
                 await dependencies.setRouting(null)
+                dependencies.adapter.resetAccountAssociation(null)
+                await dependencies.clearMetadata()
             })
         },
     }

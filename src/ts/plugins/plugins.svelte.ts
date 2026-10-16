@@ -1,3 +1,5 @@
+import { configurePluginStartup, pluginStartupGate } from './pluginStartupGate'
+import { setPluginStorageReloadHandler } from './pluginStorageProtection'
 import { writable } from "svelte/store";
 import { language } from "../../lang";
 import { getDatabase, setDatabase, setDatabaseLite } from "../storage/database.svelte";
@@ -456,13 +458,17 @@ export const pluginStorageStore = createPluginStorageStore({
     store: getPersistentDataStore,
     getStorageAuthorityEpoch: () => getPersistentStorageAuthorityEpoch(),
     assertPersistentMutationAllowed: (epoch) => assertPersistentMutationAllowed(epoch),
-    mutate: (mutations) => mutatePersistentPluginStorage('plugin-v3-storage', mutations),
+    mutate: (mutations, check) => mutatePersistentPluginStorage('plugin-v3-storage', mutations, check),
 })
 registerPluginStorageLifecycle(pluginStorageStore)
+setPluginStorageReloadHandler(requestPluginReloadAfterSync)
 
 const applyPluginLoad = createPluginLoadOrchestrator<RisuPlugin>({
     resetRegistry: resetPluginRuntimeRegistry,
-    loadV3: loadV3Plugins,
+    loadV3: async (plugins, isCurrent) => {
+        const started = await loadV3Plugins([...plugins], isCurrent)
+        if (started && isCurrent()) for (const listener of [...pluginStartListeners]) await listener()
+    },
 })
 const pluginLoadReentrancy = createPluginLoadReentrancyGuard((error) => console.error(error))
 let syncReload: ReturnType<typeof createDeferredPluginReload> | undefined
@@ -522,9 +528,20 @@ export function keepPluginsOffForThisStart() {
     pluginsOffForThisStart = true
 }
 
+const pluginStartListeners = new Set<() => void | Promise<void>>()
+export function afterPluginsStarted(listener: () => void | Promise<void>): () => void {
+    pluginStartListeners.add(listener)
+    return () => { pluginStartListeners.delete(listener) }
+}
+configurePluginStartup(() => getDatabase().plugins?.some(plugin => plugin.enabled && isSupportedPluginVersion(plugin)) ?? false, () => loadPlugins())
+
 export async function loadPlugins(whenIdle = false, isCurrent: () => boolean = () => true, interrupt = false) {
     if (!whenIdle) cancelPluginReloadAfterSync()
     if (pluginsOffForThisStart) return
+    if (!await pluginStartupGate.ensure()) return
+    if (!isCurrent() || pluginsOffForThisStart) return
+    const startupVersion = pluginStartupGate.version
+    const allowed = () => isCurrent() && startupVersion === pluginStartupGate.version && !pluginsOffForThisStart
     console.log('Loading plugins...')
     let db = getDatabase()
 
@@ -535,26 +552,25 @@ export async function loadPlugins(whenIdle = false, isCurrent: () => boolean = (
     )
 
     await applyPluginLoad(enabledPlugins.filter(isSupportedPluginVersion), () => {
-        if (!isCurrent()) return false
+        if (!allowed()) return false
         if (!whenIdle || prepareV3PluginsForReload(interrupt)) return true
         requestPluginReloadAfterSync()
         return false
-    }, isCurrent)
+    }, allowed)
 }
 
 export async function loadPluginsAfterAuthoritativeRestore(alreadyRestarted = false) {
     const { invalidatePluginDeviceKeyspaces } = await import('./pluginDeviceKeyspace')
     invalidatePluginDeviceKeyspaces()
-    try {
-        if (!alreadyRestarted) await loadPlugins()
-    } finally {
-        const { closePluginClaimEligibility } = await import('./pluginClaimSession')
-        await closePluginClaimEligibility()
-    }
+    const { closePluginClaimEligibility } = await import('./pluginClaimSession')
+    if (alreadyRestarted) return closePluginClaimEligibility()
+    const stop = afterPluginsStarted(async () => { stop(); await closePluginClaimEligibility() })
+    try { await loadPlugins() }
+    catch (error) { stop(); await closePluginClaimEligibility(); throw error }
 }
 
 function loadPluginsFromPlugin(): Promise<void> {
-    return pluginLoadReentrancy.settle(loadPlugins())
+    return pluginLoadReentrancy.settle(loadPlugins().then(() => undefined))
 }
 
 export type PluginV2ProviderArgument = {

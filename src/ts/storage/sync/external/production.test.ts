@@ -112,9 +112,10 @@ vi.mock('../../../plugins/apiV3/v3.svelte', () => ({
     invalidatePluginCachesAfterAuthorityReplacement: vi.fn(async () => {}),
     restartPluginsAfterAuthorityReplacement: mocks.reloadPlugins,
 }))
-vi.mock('../bindingRegistry', () => ({
+vi.mock('../bindingRegistry', async original => ({
+    ...await original<typeof import('../bindingRegistry')>(),
     prepareBoundLibraryReplacement: vi.fn(async () => ({
-        fence: mocks.bindingFence, assertAuthority: mocks.bindingAssert, resume: mocks.bindingResume,
+        fence: mocks.bindingFence, assertAuthority: mocks.bindingAssert, resume: mocks.bindingResume, release: () => {},
     })),
 }))
 vi.mock('../../committedWorkingSetContinuation', () => ({
@@ -275,6 +276,38 @@ describe('external storage production integration', () => {
         expect(mocks.reloadPlugins).toHaveBeenCalledOnce()
         expect(mocks.bindingResume).toHaveBeenCalledOnce()
         expect(mocks.bridge.startJob).not.toHaveBeenCalled()
+    })
+
+    it('releases an abandoned external restore when preparation and authority verification fail', async () => {
+        const production = await import('./production')
+        await production.installExternalStorageProduction()
+        const registry = await import('../bindingRegistry')
+        const actual = await vi.importActual<typeof import('../bindingRegistry')>('../bindingRegistry')
+        vi.mocked(registry.prepareBoundLibraryReplacement).mockImplementationOnce(actual.prepareBoundLibraryReplacement)
+        const { invoke } = await import('@tauri-apps/api/core')
+        const original = vi.mocked(invoke).getMockImplementation()!
+        const target = { kind: 'external' as const, connectionId: 'old-sync' }
+        let unavailable = false
+        vi.mocked(invoke).mockImplementation(async () => {
+            if (unavailable) throw new Error('Binding state unavailable')
+            return { target, libraryId: 'synthetic', targetAuthority: '1', selectionEpoch: '1', progress: null }
+        })
+        const unsupported = async (): Promise<never> => { throw new Error('Unexpected binding switch') }
+        const unregister = actual.registerSyncBindingTransport(target, {
+            inspectTarget: unsupported, pullAvailableState: unsupported, replaceFromTarget: unsupported,
+            publishInitialSharedState: unsupported, fenceOldJobs: async () => {},
+            resumeBinding: async () => {}, receiveAvailableChanges: async () => {},
+        })
+        mocks.fencePlugins.mockImplementationOnce(async () => {
+            expect(actual.isSyncBindingReplacementPending()).toBe(true)
+            unavailable = true
+            throw new Error('Plugin preparation failed')
+        })
+        try {
+            await expect(production.requestExternalStorageRestore('old-sync', 'snapshot', ['library'])).rejects.toThrow('Binding state unavailable')
+            expect(actual.isSyncBindingReplacementPending()).toBe(false)
+            expect(mocks.bridge.startJob).not.toHaveBeenCalled()
+        } finally { unregister(); vi.mocked(invoke).mockImplementation(original) }
     })
 
     it('keeps desktop work alive when the window becomes hidden', async () => {

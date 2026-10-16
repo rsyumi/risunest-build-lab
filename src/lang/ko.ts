@@ -96,6 +96,7 @@ export const languageKorean = {
     
         "invalidInlaysConfirm": (count: number) => `손상된 인레이 ${count}개는 복원되지 않습니다. 계속 복원하시겠습니까?`,
         omittedRestoreData: {
+            excludedCharacters: (count: number) => `그룹 캐릭터 및 임시 캐릭터 ${count}개는 복원되지 않습니다.`,
             data: (count: number) => `지원하지 않는 저장 데이터 ${count}개는 복원되지 않습니다.`,
             remote: (count: number) => `백업 외부에 저장된 데이터 ${count}개는 복원되지 않습니다.`,
             missing: (count: number) => `백업에 없는 저장 데이터 ${count}개는 복원되지 않습니다.`,
@@ -865,6 +866,7 @@ export const languageKorean = {
     "files": "파일",
     "backupConfirm": "정말로 백업을 저장하시겠습니까?",
     "backupLoadConfirm": "정말로 백업을 불러오시겠습니까? 현재 데이터가 모두 사라집니다!",
+    accountBackupUnavailable: "계정 백업의 일부 데이터를 가져오지 못해 복원하지 않았습니다.",
     "backupLoadConfirm2": "현재 데이터가 백업의 데이터로 교체됩니다. 자동 백업은 만들지 않습니다. 기존 데이터를 보관하려면 취소 후 직접 백업하세요. 계속하시겠습니까?",
     "importRisuSave": "RisuSave 파일 가져오기",
     "exportRisuSave": "RisuSave 파일 내보내기",
@@ -1738,6 +1740,21 @@ export const languageKorean = {
     nanoGPTManualInput: "수동 입력",
     nanoGPTManualModelSelect: "수동 모델 선택",
     risuNest: {
+        pluginStartup: {
+            delayLabel: '동기화 후 플러그인 불러오기',
+            delayHelp: '앱을 실행하면 동기화가 완료될 때까지 플러그인을 불러오지 않습니다. 체크를 해제하는 경우 플러그인 데이터가 이전 값으로 덮어씌워질 수 있습니다.',
+            waiting: '동기화가 완료되면 플러그인을 불러옵니다.',
+            loadNow: '플러그인 불러오기',
+            syncUnfinished: '동기화를 마치지 못해 플러그인을 불러오지 않았습니다.',
+            requestRefused: '플러그인을 불러온 뒤 다시 시도해주세요.',
+        },
+        syncStatus: {
+            menuLabel: '동기화',
+            saving: '저장 중',
+            saved: '저장 완료',
+            saveFailed: '저장 실패',
+        },
+
         backgroundDataFailed: '일부 데이터 변경을 완료하지 못했습니다.',
         scriptTimeout: 'Lua 스크립트 실행 시간이 초과되어 중단되었습니다.',
         localSaveFailure: {
@@ -2125,11 +2142,13 @@ export const languageKorean = {
                 refreshing: '화면에 반영하는 중',
                 publishing: '이 기기의 변경 서버에 올리는 중',
                 assets: '에셋 다운로드 중',
+                assetPolicy: '에셋 보관 방식 적용 중',
             },
-            stage: { preparing: '변경 내용 비교', downloading: '서버 내용 다운로드', applying: '받은 내용 적용', refreshing: '화면 반영', publishing: '변경 내용 업로드', assets: '에셋 다운로드' },
+            stage: { preparing: '변경 내용 비교', downloading: '서버 내용 다운로드', applying: '받은 내용 적용', refreshing: '화면 반영', publishing: '변경 내용 업로드', assets: '에셋 다운로드', assetPolicy: '에셋 보관 방식 적용' },
             paused: '일시 중지됨',
             registrationRequired: '새 등록 코드 필요',
             blocked: '자동 동기화 중지됨',
+            failed: '동기화 실패',
             errorHelp:
                 '동기화를 마치지 못했습니다. 이 기기에서 고친 내용은 그대로 있습니다. 다시 시도하세요.',
             "connectRowHelpScan": '서버에서 만든 등록 코드를 붙여넣거나 QR 코드를 스캔하세요. 기기마다 별도의 등록 코드가 필요합니다.',
@@ -2148,6 +2167,7 @@ export const languageKorean = {
             networkLogs: "네트워크 로그",
         },
         networkLog: {
+            "operation": "작업 ID",
             readersBusy: "로그를 읽고 있습니다. 잠시 후 다시 시도해주세요.",
             "title": "네트워크 로그",
             "recording": "네트워크 기록",
@@ -2244,6 +2264,8 @@ export const languageKorean = {
             messageSendKeyButton: '전송 버튼',
             chatEditPopup: '채팅 수정 팝업창 사용',
             chatEditPopupHelp: '채팅 수정 버튼을 누르면 팝업창에서 내용을 수정할 수 있도록 합니다.',
+            syncStatusUi: '동기화 UI 표시',
+            syncStatusUiHelp: '동기화 상태 아이콘을 표시하며, 동기화가 멈추거나 플러그인이 동기화를 기다리는 경우 알림을 표시합니다.',
         },
         textEditor: {
             open: '팝업창에서 수정',
@@ -2476,6 +2498,7 @@ export const languageKorean = {
             actionDropAlias: '파일 사용 중단',
             actionAdoptStoredPayload: '지금 파일 그대로 쓰기',
             actionNormalizeRecords: '값 다시 계산',
+            actionSelectFirstConversation: '첫 채팅 선택',
             actionKeepSingleRecord: '하나만 남기고 정리',
             actionRecoverOrphans: '주인 아래로 되돌리기',
             actionDiscards: '값이 삭제됨',
@@ -2592,7 +2615,7 @@ export const languageKorean = {
             stageReadingDatabase: '데이터베이스 읽는 중',
             stageDecodingDatabase: '데이터베이스 해석 중',
             stageRequestingBackupKey: '백업 키 요청 중',
-            stageDecryptingDatabase: '백업 암호 해제 중',
+            stageDecryptingDatabase: '백업 복호화 중',
             stageCleaningUp: '복원 완료, 임시 파일 정리 중',
             stageFinalizingStaging: '설정과 프리셋 저장 중',
             stageAssignPluginValues: '플러그인 값 할당',
@@ -2628,6 +2651,7 @@ export const languageKorean = {
             resultFailedAfterCommit:
                 '데이터는 가져왔지만 화면을 새로 고치지 못했습니다. 다른 변경을 하기 전에 화면 새로 고침을 선택해주세요.',
             resultActivationUnresolved: '복원 결과를 확인하지 못했습니다. 다른 변경을 하기 전에 화면 새로 고침을 선택해 결과를 확인해주세요.',
+            resultAssetsIncomplete: '데이터는 가져왔지만 일부 에셋을 가져오지 못했습니다.',
             errorDetails: '오류 상세',
             errorDetailsHide: '오류 상세 숨기기',
             copyDetails: '복사',
@@ -2660,6 +2684,8 @@ export const languageKorean = {
             titleExportBackup: 'RisuNest 백업 내보내기',
             titleExportCompatible: '호환 백업 내보내기',
             stagePreparingExport: '데이터 준비 중',
+            stageDownloadingExport: '파일 다운로드 중',
+            stageVerifyingExport: '백업 파일 확인 중',
             stageWritingExport: '백업 파일 쓰는 중',
             stagePublishingDestination: '선택한 위치에 저장하는 중',
             stageFinalizingExport: '마무리 중',
@@ -2674,6 +2700,7 @@ export const languageKorean = {
             "reasonExportRevisionConflict": '내보내는 동안 데이터가 변경되었습니다. 다시 내보내세요.',
             "reasonExportStoreError": '저장소 오류로 내보내지 못했습니다. 다시 시도해주세요.',
             "reasonDestination": '선택한 위치에 파일을 저장하지 못했습니다. 다른 위치를 선택해주세요.',
+            "reasonDestinationBusy": '다른 내보내기가 진행 중입니다. 내보내기가 끝난 후 다시 시도해주세요.',
             "reasonPlainJpeg": '캐릭터 카드가 들어 있지 않은 JPEG 파일입니다.',
             "reasonIncompletePublication": '파일을 끝까지 저장하지 못했습니다. 다시 내보내세요.',
             "reasonStorageFull": '저장 공간이 부족합니다. 공간을 확보한 후 다시 시도해주세요.',
@@ -2910,6 +2937,7 @@ export const languageKorean = {
         cancelAction: "취소",
         clockBlocked: "기기와 원격 간의 시간 차이가 있어 동기화가 중단되었습니다. 시간을 보정한 후 다시 시도해주세요.",
         writerCollision: "중복된 기기로 인해 동기화가 중단되었습니다. 동기화 서버의 기기 등록에서 새 등록 코드를 만들어 입력한 뒤 새 기기로 연결을 누르세요.",
+        writerCollisionNotConnected: "이 기기가 다른 등록 코드로 연결된 기록이 있습니다. 새 기기로 연결을 눌러주세요.",
         unitTooLarge: "이 기기에 서버로 보내기에 너무 큰 항목이 있어 동기화가 중단되었습니다. 해당 항목의 크기를 줄인 후 다시 시도해주세요.",
         newDeviceAction: "새 기기로 연결",
         restoreTitle: "백업을 복원하시겠습니까?",
@@ -2928,5 +2956,6 @@ export const languageKorean = {
         registrationUsedOnboarding: "이미 사용한 등록 코드로는 연결할 수 없습니다. 동기화 서버의 기기 등록에서 새 등록 코드를 만들어 입력해주세요.",
         bindingIncomplete: "연결이 완료되지 않았습니다. 연결하고 동기화를 눌러 연결을 마치세요.",
     },
+    characterSelectionFailed: "캐릭터를 선택할 수 없습니다. 다시 시도해주세요.",
     navigationBlockedWhileEditingPaused: "편집이 잠시 중단되어 캐릭터를 선택할 수 없습니다.",
 } satisfies DeepPartial<typeof import('./en').languageEnglish>

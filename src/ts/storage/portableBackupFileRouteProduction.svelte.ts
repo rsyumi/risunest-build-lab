@@ -16,7 +16,7 @@ import {
     selectPortableBackupRestore,
 } from './deviceBackup/selectionDialog'
 import { selectPluginValueAssignment } from './pluginValueAssignDialog'
-import { runSharedNativeFileOperation } from './nativeFileJobManager'
+import { recordRecoveredNativeFileOperation, runSharedNativeFileOperation } from './nativeFileJobManager'
 import {
     NativeFileJobError,
     runNativeArchiveExport,
@@ -226,7 +226,7 @@ export async function restoreBackupFromNativeSource(
                           })
                         : source
                 if (!input) return null
-                if (input.type === 'androidSeekable' || input.type === 'iosScoped') selectedCustody = input
+                if (input.type === 'androidSeekable' || input.type === 'iosScoped' || input.type === 'savedConflict') selectedCustody = input
                 if (input.type === 'desktopPath')
                     onSource(await nativeRestoreDeadline(describeDesktopSource(input.path), 'source metadata', undefined, undefined, undefined, joined.signal))
                 checkSignal(joined.signal)
@@ -278,6 +278,10 @@ export async function restoreBackupFromNativeSource(
                     },
                     beforeActivation: options.beforeActivation,
                     onNativeStatus: options.onNativeStatus,
+                    onRecoveredStatus(status) {
+                        recordRecoveredNativeFileOperation(status)
+                        options.onRecoveredStatus?.(status)
+                    },
                     afterRefresh: async (alreadyRestarted) => {
                         await loadPluginsAfterAuthoritativeRestore(alreadyRestarted)
                         await options.afterRefresh?.(alreadyRestarted)
@@ -297,11 +301,6 @@ export async function restoreBackupFromNativeSource(
                                         const selection =
                                             await selectPortableBackupRestore(
                                                 preview,
-                                                {
-                                                    firstRun:
-                                                        options.firstRun ??
-                                                        false,
-                                                },
                                             )
                                         return selection
                                     },

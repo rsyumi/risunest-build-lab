@@ -764,7 +764,8 @@ pub(super) fn prepare_legacy_restore_payloads_with_limits(
             if let pocket_risu::Entry::Legacy { id } = pocket_entry {
                 observer.item_started(&entry.logical_name);
                 match pocket_risu::prepare_legacy(entry, id, &pocket_metadata, cas, durable, cancellation) {
-                    Ok(alias) => {
+                    Ok(None) => skipped_inlays += 1,
+                    Ok(Some(alias)) => {
                         if !asset_keys.insert(("inlay".to_owned(), id.to_owned())) {
                             return Err(invalid("legacy backup contains a duplicate Inlay key"));
                         }
@@ -786,7 +787,8 @@ pub(super) fn prepare_legacy_restore_payloads_with_limits(
                     &pocket_metadata,
                     cancellation,
                 ) {
-                    Ok(alias) => alias,
+                    Ok(Some(alias)) => alias,
+                    Ok(None) => { skipped_inlays += 1; observer.item_done(); continue; }
                     Err(error) if error.code == LocalBackupErrorCode::DatabaseRestore => {
                         invalid_inlays.push(entry.logical_name.clone());
                         observer.item_done();

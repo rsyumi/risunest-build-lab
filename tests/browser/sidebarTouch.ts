@@ -5,7 +5,8 @@ if (new URLSearchParams(location.search).has('product')) {
     const { DBState } = await import('./sidebarProductAdapters.svelte')
     const { polyfill } = await import('mobile-drag-drop')
     polyfill({ forceApply: true })
-    Object.assign(window, { sidebarModel: DBState })
+    const { readRepresentativeImagePriority } = await import('../../src/ts/ui/representativeImagePriority')
+    Object.assign(window, { sidebarModel: DBState, sidebarImagePriority: readRepresentativeImagePriority })
     document.body.style.cssText = 'display:flex;height:640px;margin:0'
     mount(Sidebar, { target: document.body })
 } else {

@@ -89,6 +89,7 @@ export type WindowedChatListEditResult =
 export interface CharacterActivationOptions {
     prepare?(): Promise<{ database: Database; reason: string } | null>
     normalize?(character: CompleteCharacter): CompleteCharacter
+    onRetryExhausted?(navigationGeneration: number): void
 }
 
 export interface ConversationPublicationOptions {
@@ -1204,6 +1205,9 @@ export class ActiveWorkingSet {
                         this.navigationGeneration === expectedFallbackGeneration
                     )
                         continue
+                    if (this.navigationGeneration === expectedFallbackGeneration) {
+                        options.onRetryExhausted?.(this.navigationGeneration)
+                    }
                     return false
                 }
                 if (direct !== 'complete-fallback') return direct

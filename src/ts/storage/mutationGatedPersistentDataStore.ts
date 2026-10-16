@@ -50,7 +50,7 @@ export function createMutationGatedPersistentDataStore(
         readConversationWindow: (
             input: ConversationWindowQuery,
         ): Promise<Versioned<ConversationWindow> | null> => store.readConversationWindow(input),
-        queryPluginStorage: () => store.queryPluginStorage(),
+        queryPluginStorage: (owner) => store.queryPluginStorage(owner),
         readPluginStorage: (owner: string, key: string) => store.readPluginStorage(owner, key),
         listPluginStorage: () => store.listPluginStorage(),
         readPluginStorageValues: (query) => store.readPluginStorageValues(query),

@@ -7,7 +7,6 @@ export async function selectPortableBackupExport(): Promise<NativePortableSelect
 
 export async function selectPortableBackupRestore(
     preview: NativePortableRestorePreview,
-    _options: { firstRun?: boolean } = {},
 ): Promise<NativePortableSelection> {
     if (!preview.libraryIncluded || preview.repairRequired ||
         preview.deviceSections.length !== nativePortableDeviceSections.length ||

@@ -1,3 +1,4 @@
+import { PluginStorageObservation } from '../pluginStorageProtection'
 import { vi } from 'vitest'
 import { writable } from 'svelte/store'
 import type { LLMModel } from 'src/ts/model/types'
@@ -26,6 +27,7 @@ export type V3HostDatabase = {
 /** One plugin's storage, as `pluginStorageStore.forOwner` returns it. */
 export function ownedPluginStorageStub() {
     return {
+        observation: new PluginStorageObservation('test-plugin'), dispose: vi.fn(),
         getItem: vi.fn(), setItem: vi.fn(), removeItem: vi.fn(), clear: vi.fn(),
         key: vi.fn(), keys: vi.fn(), length: vi.fn(), snapshot: vi.fn(async () => ({})),
         mutate: vi.fn(),

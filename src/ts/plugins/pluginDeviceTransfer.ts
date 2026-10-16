@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { isTauriAndroid } from '../platform'
 import { ANDROID_LARGE_COMMIT_SIZE, sendAndroidCommit } from '../storage/androidCommitTransport'
-import type { PluginDeviceMutation, PluginDeviceSpace } from './pluginDeviceKeyspace'
+import type { PluginDeviceMutation, PluginDeviceSpace, PluginDeviceObservation } from './pluginDeviceKeyspace'
 
 export const PLUGIN_DEVICE_VALUE_BYTES = 512 * 1024 * 1024
 export const PLUGIN_DEVICE_PART_BYTES = 8 * 1024 * 1024
@@ -50,9 +50,9 @@ export function* pluginDeviceParts(value: string, limit = PLUGIN_DEVICE_PART_BYT
 }
 
 type NativeMutation = PluginDeviceMutation | { type: 'staged'; sessionId: string }
-function requestSize(owner: string, mutations: readonly NativeMutation[]): number {
+function requestSize(owner: string, mutations: readonly NativeMutation[], observations: readonly PluginDeviceObservation[]): number {
     const empty = mutations.map((mutation) => mutation.type === 'set' ? { ...mutation, value: '' } : mutation)
-    return encoder.encode(JSON.stringify({ owner, mutations: empty })).length
+    return encoder.encode(JSON.stringify({ owner, mutations: empty, observations })).length
         + mutations.reduce((size, mutation) => size + (mutation.type === 'set' ? pluginDeviceValueSize(mutation.value) - 2 : 0), 0)
 }
 
@@ -63,13 +63,13 @@ async function send<T>(command: string, request: Record<string, unknown>, bytes:
     return await invoke<T>(command, request)
 }
 
-export async function writeNativePluginDeviceValues(owner: string, mutations: readonly PluginDeviceMutation[]): Promise<void> {
-    if (mutations.length === 0) return
+export async function writeNativePluginDeviceValues(owner: string, mutations: readonly PluginDeviceMutation[], observations: readonly PluginDeviceObservation[] = []): Promise<PluginDeviceObservation[]> {
+    if (mutations.length === 0) return []
     if (mutations.length > 1024) throw new Error('Plugin device write batch is too large')
     const sizes = mutations.map((mutation) => mutation.type === 'set' ? pluginDeviceValueSize(mutation.value) : 0)
     const planned = mutations.map((mutation, index): NativeMutation => sizes[index] > PLUGIN_DEVICE_PART_BYTES
         ? { type: 'staged', sessionId: '00000000-0000-0000-0000-000000000000' } : mutation)
-    if (requestSize(owner, planned) > REQUEST_BYTES) throw new Error('Plugin device write batch is too large')
+    if (requestSize(owner, planned, observations) > REQUEST_BYTES) throw new Error('Plugin device write batch is too large')
     const sessions: string[] = []
     try {
         for (let index = 0; index < mutations.length; index++) {
@@ -89,7 +89,7 @@ export async function writeNativePluginDeviceValues(owner: string, mutations: re
             }
             planned[index] = { type: 'staged', sessionId }
         }
-        await send<void>('pds_write_plugin_device_values', { owner, mutations: planned }, requestSize(owner, planned), 'pds_plugin_write_android_finish')
+        return await send<PluginDeviceObservation[]>('pds_write_plugin_device_values', { owner, mutations: planned, observations }, requestSize(owner, planned, observations), 'pds_plugin_write_android_finish') ?? []
     } finally {
         await Promise.all(sessions.map((sessionId) => invoke('pds_abort_plugin_device_write', { owner, sessionId }).catch(() => undefined)))
     }

@@ -489,7 +489,7 @@ impl ExternalLwwEngine {
             if !retained.contains(&snapshot.snapshot_id) { continue; }
             let data=RemoteObject::from_stored(&snapshot.library.record_catalog,&self.repository)?;
             let stage=directory.join(format!("c{index}"));
-            let (records,objects)=super::snapshot_restore::download_checkpoint_data(&data,&stage,&self.root_key,self.provider.as_ref(),&self.repository,&super::phase_progress::PhaseProgress::silent(),cancel).await?;
+            let (records,objects)=super::snapshot_restore::download_checkpoint_data(&data,&stage,&self.root_key,Some(&super::runtime::connection_directory(&self.connection_root,&self.connection_id).join("package-cache")),self.provider.as_ref(),&self.repository,&super::phase_progress::PhaseProgress::silent(),cancel).await?;
             let mut proof=PublishedCatalog::create(&stage.join("proof.sqlite"))?;
             let content=super::content_store::ContentStore::open(&stage.join("external-storage")).map_err(error)?;
             for record in records {
@@ -538,7 +538,7 @@ impl ExternalLwwEngine {
             if catalog.include_segment(&payload)? {
                 for (hash,bytes) in &payload.message_pages { body_spool.push(hash,&URL_SAFE_NO_PAD.decode(bytes).map_err(error)?,crate::persistent_store::external_capture::BackupBodyRole::Control).map_err(error)?; }
                 let controls=super::snapshot_restore::download_control_catalogs(&payload.data_catalogs,
-                    &directory.join(format!("s{index}")),&self.root_key,self.provider.as_ref(),&self.repository,cancel).await?;
+                    &directory.join(format!("s{index}")),&self.root_key,Some(&super::runtime::connection_directory(&self.connection_root,&self.connection_id).join("package-cache")),self.provider.as_ref(),&self.repository,cancel).await?;
                 for control in controls {
                     let super::content_store::ObjectSource::File(path)=control.source else {return Err(segment::corrupt());};
                     let mut input=crate::trust_boundary::open_regular_source(&path).map_err(error)?;

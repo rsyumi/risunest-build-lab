@@ -29,11 +29,12 @@ vi.mock('../memory/hypamemory', () => ({ HypaProcesser: class {} }))
 
 import { GraphMemClient } from './graphmem'
 
-it('commits a written memory through the session that owns the selected conversation', async () => {
+const existingMemory = { name: 'existing', summary: 'preserved summary', connections: ['related'] }
+it.each([undefined, 'null', '{}', '1', '[]', JSON.stringify([existingMemory])])('appends memory while preserving valid existing entries for %s', async (stored) => {
     const conversation = {
         id: 'conversation',
         message: [],
-        scriptstate: { $graphmem_graph: '[]' },
+        scriptstate: stored === undefined ? {} : { $graphmem_graph: stored },
     } as unknown as Chat
     live.database = {
         characters: [{ chaId: 'character', chatPage: 0, chats: [conversation], defaultVariables: '' }],
@@ -52,6 +53,7 @@ it('commits a written memory through the session that owns the selected conversa
 
     expect(session.version).toBe(1)
     expect(JSON.parse(session.readChatVariable('graphmem_graph') as string)).toEqual([
+        ...(stored === JSON.stringify([existingMemory]) ? [existingMemory] : []),
         { name: 'place', summary: 'synthetic', connections: [] },
     ])
 })

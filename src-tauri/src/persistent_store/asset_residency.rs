@@ -114,6 +114,51 @@ struct Inventory {
     local: BTreeSet<String>,
     release_blocked: bool,
 }
+#[derive(Default)]
+struct InventoryCache {
+    library: Option<crate::asset_repository::migration_gc::AssetRootSet>,
+    roots: Vec<(&'static str, crate::asset_repository::migration_gc::AssetRootSet)>,
+    data_version: i64,
+    changes: i64,
+    device_version: i64,
+    device_changes: i64,
+    inventory: Option<Inventory>,
+}
+impl InventoryCache {
+    /// Recheck auxiliary roots and pins under repository exclusion. Only the immutable
+    /// library roots and their resolved inventory survive an unchanged observation.
+    fn current(&mut self, store: &PersistentStore) -> Result<&Inventory> {
+        let read = store.connection.unchecked_transaction()?;
+        let data_version = read.query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))?;
+        let changes = read.query_row("SELECT total_changes()", [], |row| row.get::<_, i64>(0))?;
+        let library_changed = self.library.is_none() || self.data_version != data_version || self.changes != changes;
+        if library_changed {
+            #[cfg(test)]
+            super::ASSET_GC_LIBRARY_ROOT_COLLECTIONS.with(|count| count.set(count.get() + 1));
+            self.library = Some(super::snapshot::collect_asset_roots(&store.connection)?);
+        }
+        let roots = store.collect_auxiliary_asset_gc_roots(true, false, None)?;
+        let device = store.device_store()?.connection();
+        let device_version = device.query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))?;
+        let device_changes = device.query_row("SELECT total_changes()", [], |row| row.get::<_, i64>(0))?;
+        if self.inventory.is_none() || self.roots != roots
+            || self.data_version != data_version || self.changes != changes
+            || self.device_version != device_version || self.device_changes != device_changes
+            || roots.iter().any(|(_, roots)| !roots.blockers.is_empty()) {
+            let mut complete = vec![("library", self.library.as_ref().unwrap().clone())];
+            complete.extend(roots.iter().cloned());
+            self.inventory = Some(store.residency_inventory_from(
+                PayloadCas::new(&store.repository_root)?, complete, BTreeSet::new(), true)?);
+        }
+        read.commit()?;
+        self.roots = roots;
+        self.data_version = data_version;
+        self.changes = changes;
+        self.device_version = device_version;
+        self.device_changes = device_changes;
+        Ok(self.inventory.as_ref().unwrap())
+    }
+}
 impl ResidencyStatus {
     pub(crate) fn has_remote_or_missing(&self) -> bool {
         self.remote_objects > 0 || self.unavailable_objects > 0
@@ -172,52 +217,172 @@ fn previous_storage_wanted(
     Ok(wanted)
 }
 
+#[derive(Default)]
+pub(super) struct CheckedRepresentativeImages {
+    generation: String,
+    removal_epoch: u64,
+    removal_source: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    hashes: BTreeSet<String>,
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RepresentativeImagePriority {
+    #[serde(default)]
+    pub(crate) ordered: Vec<String>,
+    #[serde(default)]
+    pub(crate) visible: Vec<String>,
+}
+
 impl PersistentStore {
-    fn representative_image_hashes(&self, selected_character_id: Option<&str>) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
+    fn representative_image_plan(&self, selected_character_id: Option<&str>, requested: Option<&RepresentativeImagePriority>) -> Result<(Vec<String>, BTreeSet<String>)> {
         let generation = super::active_generation(&self.connection)?;
-        let mut images = BTreeSet::new();
-        let mut priority = BTreeSet::new();
+        let mut aliases = std::collections::BTreeMap::new();
+        let mut characters = std::collections::BTreeMap::new();
         let mut query = self.connection.prepare_cached(
-            "SELECT c.character_id, a.object_hash FROM characters c
+            "SELECT c.character_id, c.image, a.object_hash FROM characters c
              JOIN asset_aliases a ON a.generation=c.generation AND a.kind='asset' AND a.logical_key=c.image
              WHERE c.generation=?1 AND c.trashed=0 AND a.object_hash IS NOT NULL",
         )?;
-        let rows = query.query_map([generation], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        let rows = query.query_map([&generation], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?;
         for row in rows {
-            let (character_id, hash) = row?;
-            if selected_character_id == Some(character_id.as_str()) { priority.insert(hash.clone()); }
-            images.insert(hash);
+            let (id, alias, hash) = row?;
+            characters.insert(id, hash.clone());
+            aliases.insert(alias, hash);
         }
+        let order: Option<String> = self.connection.query_row(
+            "SELECT CASE WHEN json_type(value, '$.characterOrder')='array'
+             THEN json_extract(value, '$.characterOrder') END FROM root WHERE generation=?1", [&generation], |row| row.get(0),
+        ).optional()?.flatten();
+        let order: Vec<serde_json::Value> = order.map(|order| serde_json::from_str(&order)).transpose()
+            .map_err(|_| SyncError::new("invalid-character-order", 409))?.unwrap_or_default();
+        let mut display = Vec::new();
+        let mut folder_alias = self.connection.prepare_cached(
+            "SELECT object_hash FROM asset_aliases WHERE generation=?1 AND kind='asset' AND logical_key=?2",
+        )?;
+        for item in &order {
+            if let Some(id) = item.as_str() {
+                if let Some(hash) = characters.get(id) { display.push(hash.clone()); }
+            } else {
+                if let Some(alias) = item.get("imgFile").and_then(serde_json::Value::as_str) {
+                    let hash: Option<String> = folder_alias.query_row(rusqlite::params![generation, alias], |row| row.get(0)).optional()?.flatten();
+                    if let Some(hash) = hash { display.push(hash.clone()); aliases.insert(alias.to_owned(), hash); }
+                }
+                if let Some(children) = item.get("data").and_then(serde_json::Value::as_array) {
+                    display.extend(children.iter().filter_map(|id| id.as_str().and_then(|id| characters.get(id))).cloned());
+                }
+            }
+        }
+        let mut priority = BTreeSet::new();
+        let mut images = Vec::new();
+        if let Some(requested) = requested {
+            for alias in &requested.visible {
+                if let Some(hash) = aliases.get(alias) { priority.insert(hash.clone()); images.push(hash.clone()); }
+            }
+            images.extend(requested.ordered.iter().filter_map(|alias| aliases.get(alias)).cloned());
+        }
+        if priority.is_empty() {
+            if let Some(hash) = selected_character_id.and_then(|id| characters.get(id)) { priority.insert(hash.clone()); }
+        }
+        images.extend(display);
+        images.extend(characters.into_values());
+        let mut seen = BTreeSet::new();
+        images.retain(|hash| seen.insert(hash.clone()));
         Ok((images, priority))
+    }
+
+    fn representative_image_hashes(&self, selected_character_id: Option<&str>) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
+        let (images, priority) = self.representative_image_plan(selected_character_id, None)?;
+        Ok((images.into_iter().collect(), priority))
+    }
+
+    fn check_representative_image_pages(
+        &self,
+        cas: &PayloadCas,
+        generation: &str,
+        images: &[String],
+        retained: &BTreeSet<String>,
+        page_size: usize,
+        check: &impl Fn() -> Result<()>,
+    ) -> Result<Vec<String>> {
+        let removal_source = cas.removal_epoch();
+        let mut pass_epoch = None;
+        let mut offset = 0;
+        let mut missing = Vec::new();
+        loop {
+            check()?;
+            let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
+            let current_generation = super::active_generation(&self.connection)?;
+            let epoch = removal_source.load(std::sync::atomic::Ordering::Acquire);
+            let mut cache = self.checked_representative_images.lock().map_err(|_| std::io::Error::other("checked-images-poisoned"))?;
+            if current_generation != generation {
+                cache.hashes.clear();
+                return Err(SyncError::new("binding-authority-changed", 409));
+            }
+            if cache.generation != generation || cache.removal_epoch != epoch { cache.hashes.clear(); }
+            cache.generation = generation.to_owned();
+            cache.removal_source = Some(std::sync::Arc::clone(&removal_source));
+            cache.removal_epoch = epoch;
+            if pass_epoch.is_some_and(|previous| previous != epoch) {
+                // A body from an earlier page may have been removed while the lock was released.
+                offset = 0;
+                missing.clear();
+            }
+            pass_epoch = Some(epoch);
+            if offset == 0 { cache.hashes.retain(|hash| retained.contains(hash)); }
+            if offset == images.len() { return Ok(missing); }
+            let end = (offset + page_size).min(images.len());
+            let page = images[offset..end].iter().filter(|hash| !cache.hashes.contains(*hash)).collect::<Vec<_>>();
+            let sizes = if page.is_empty() { Vec::new() } else { cas.stat_objects(page.iter().map(|hash| hash.as_str()))? };
+            if super::active_generation(&self.connection)? != generation {
+                cache.hashes.clear();
+                return Err(SyncError::new("binding-authority-changed", 409));
+            }
+            if removal_source.load(std::sync::atomic::Ordering::Acquire) != epoch {
+                cache.hashes.clear();
+                continue;
+            }
+            for (hash, size) in page.into_iter().zip(sizes) {
+                if size.is_some() { cache.hashes.insert(hash.clone()); } else { missing.push(hash.clone()); }
+            }
+            offset = end;
+        }
     }
 
     pub(crate) fn hydrate_representative_images(
         &self,
         cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
         selected_character_id: Option<&str>,
+        requested: Option<&RepresentativeImagePriority>,
         check: impl Fn() -> Result<()>,
         on_object_done: impl Fn(),
     ) -> Result<()> {
         check()?;
         let generation = super::active_generation(&self.connection)?;
-        let (images, priority) = self.representative_image_hashes(selected_character_id)?;
-        let check = || {
+        let (images, priority) = self.representative_image_plan(selected_character_id, requested)?;
+        let check_authority = || {
             check()?;
             if super::active_generation(&self.connection)? != generation {
                 return Err(SyncError::new("binding-authority-changed", 409));
             }
             Ok(())
         };
-        let (_, missing) = split_local(&PayloadCas::new(&self.repository_root)?, images, &check)?;
-        if missing.is_empty() { return check(); }
-        // An icon no storage holds is skipped and left to the data check, which reports it.
+        let cas = PayloadCas::new(&self.repository_root)?;
+        let retained = images.iter().cloned().collect::<BTreeSet<_>>();
+        let mut missing = self.check_representative_image_pages(&cas, &generation, &images, &retained, HOLDER_PAGE, &check)?;
+        if missing.is_empty() { return check_authority(); }
+        // An icon no storage holds remains retryable and is reported by the data check.
         let held = RemoteHolders::open(&self.repository_root)?.held(&missing)?;
-        let missing = missing.into_iter().zip(held).filter_map(|(hash, held)| held.then_some(hash)).collect::<Vec<_>>();
-        if missing.is_empty() { return check(); }
+        missing = missing.into_iter().zip(held).filter_map(|(hash, held)| held.then_some(hash)).collect();
+        if missing.is_empty() { return check_authority(); }
         let mut hydration = crate::server_sync::residency::HydrationSession::new(&self.repository_root, cancellation)?;
-        // One whose last holder went away during the pass is skipped the same way.
-        hydration.hydrate_many_outcomes_prioritized(&missing, &priority, &check, |_, _| on_object_done())?;
-        check()
+        let mut completed = Vec::new();
+        hydration.hydrate_many_outcomes_prioritized(&missing, &priority, &check_authority, |hash, _| {
+            completed.push(hash.to_owned()); on_object_done();
+        })?;
+        // Recheck completed images under the offload lock before remembering them.
+        self.check_representative_image_pages(&cas, &generation, &completed, &retained, HOLDER_PAGE, &check)?;
+        check_authority()
     }
 
     pub(crate) fn asset_object_byte_size(&self, hash: &str) -> super::StoreResult<Option<u64>> {
@@ -238,8 +403,9 @@ impl PersistentStore {
         };
         crate::external_storage::lww_residency::remove_connection_sources(&self.repository_root, connection_id, |orphans| {
             let rows = self.connection.unchecked_transaction().map_err(std::io::Error::other)?;
-            for hash in orphans {
-                if cas.stat_object(hash)?.is_some() {
+            let sizes = cas.stat_objects(orphans.iter().map(String::as_str))?;
+            for (hash, size) in orphans.iter().zip(sizes) {
+                if size.is_some() {
                     continue;
                 }
                 if let Some(residency) = &residency {
@@ -529,8 +695,10 @@ impl PersistentStore {
     /// The status, with what moving to `target` would download when one is given, read from
     /// one inventory.
     pub(crate) fn asset_residency_status_for_target(&self, target: Option<&PreviousStorageTarget>) -> Result<ResidencyStatus> {
+        self.residency_status_from(self.residency_status_inventory()?, target)
+    }
+    fn residency_status_from(&self, inventory: Inventory, target: Option<&PreviousStorageTarget>) -> Result<ResidencyStatus> {
         let residency = Residency::open(&self.repository_root)?;
-        let inventory = self.residency_status_inventory()?;
         let cas = PayloadCas::new(&self.repository_root)?;
         let mut connections = Connections::default();
         let (local_bytes, missing) = split_local(&cas, inventory.referenced, &|| Ok(()))?;
@@ -772,12 +940,12 @@ impl PersistentStore {
         let head = client.resolve_identity()?;
         check()?;
         config.endpoint = client.config().endpoint.clone();
-        let inventory = self.residency_inventory(false)?;
-        let candidates = inventory
-            .referenced
-            .difference(&inventory.local)
-            .cloned()
-            .collect::<Vec<_>>();
+        let mut inventory = InventoryCache::default();
+        let candidates = {
+            let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
+            let current = inventory.current(self)?;
+            current.referenced.difference(&current.local).cloned().collect::<Vec<_>>()
+        };
         let cas = PayloadCas::new(&self.repository_root)?;
         let mut evicted = 0;
         let mut objects = Vec::new();
@@ -826,7 +994,7 @@ impl PersistentStore {
             check()?;
             progress.stage(Stage::Preparing, 0, None);
             let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
-            let fresh = self.residency_inventory(true)?;
+            let fresh = inventory.current(self)?;
             progress.stage(Stage::Deleting, 0, Some(total));
             for (hash, size) in objects {
                 check()?;
@@ -845,8 +1013,12 @@ impl PersistentStore {
             }
         }
         progress.stage(Stage::Finalizing, total, None);
-        self.asset_residency_release_unused_cancelled(cancellation, &check)?;
-        let mut status = self.asset_residency_status()?;
+        self.release_unused_with_inventory(cancellation, &check, &mut inventory)?;
+        {
+            let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
+            inventory.current(self)?;
+        }
+        let mut status = self.residency_status_from(inventory.inventory.take().unwrap(), None)?;
         check()?;
         status.evicted_bytes = evicted;
         Ok(status)
@@ -862,15 +1034,17 @@ impl PersistentStore {
         cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
         check: impl Fn() -> Result<()>,
     ) -> Result<()> {
+        self.release_unused_with_inventory(cancellation, &check, &mut InventoryCache::default())
+    }
+    fn release_unused_with_inventory(
+        &self,
+        cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        check: &impl Fn() -> Result<()>,
+        inventory: &mut InventoryCache,
+    ) -> Result<()> {
         let mut residency = Residency::open(&self.repository_root)?;
         let cas = PayloadCas::new(&self.repository_root)?;
-        // Custody the library still uses is kept without asking the server.
-        // What remains is decided again under the mutation lock below.
         let revision = self.revision()?;
-        let used = self.residency_inventory(false)?;
-        if used.release_blocked {
-            return Ok(());
-        }
         let mut after = String::new();
         loop {
             let page = residency.page(&after)?;
@@ -878,17 +1052,22 @@ impl PersistentStore {
                 break;
             }
             let mut candidates = std::collections::BTreeMap::<String, Vec<String>>::new();
-            for (cursor, hash, _) in page {
-                check()?;
-                after = cursor.clone();
-                if used.referenced.contains(&hash) || used.local.contains(&hash) {
-                    continue;
+            {
+                let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
+                let used = inventory.current(self)?;
+                if used.release_blocked { return Ok(()); }
+                for (cursor, hash, _) in page {
+                    check()?;
+                    after = cursor.clone();
+                    if used.referenced.contains(&hash) || used.local.contains(&hash) {
+                        continue;
+                    }
+                    let context = cursor
+                        .split_once('/')
+                        .ok_or_else(|| SyncError::new("invalid-custody-cursor", 409))?
+                        .0;
+                    candidates.entry(context.to_owned()).or_default().push(hash);
                 }
-                let context = cursor
-                    .split_once('/')
-                    .ok_or_else(|| SyncError::new("invalid-custody-cursor", 409))?
-                    .0;
-                candidates.entry(context.to_owned()).or_default().push(hash);
             }
             for (context, hashes) in candidates {
                 check()?;
@@ -910,26 +1089,29 @@ impl PersistentStore {
                     if self.revision()? != revision {
                         return Ok(());
                     }
-                    let inventory = self.residency_inventory(true)?;
+                    let inventory = inventory.current(self)?;
                     if inventory.release_blocked {
                         return Ok(());
                     }
                     let mut objects = Vec::new();
-                    for hash in hashes {
+                    let sizes = cas.stat_objects(hashes.iter().map(String::as_str))?;
+                    let rows = self.connection.unchecked_transaction()?;
+                    for (hash, size) in hashes.into_iter().zip(sizes) {
                         if inventory.referenced.contains(&hash) || inventory.local.contains(&hash) {
                             continue;
                         }
                         let Some(object) = residency.begin_latest_release(&hash, &context)? else {
                             continue;
                         };
-                        if cas.stat_object(&hash)?.is_none() {
-                            self.connection.execute(
+                        if size.is_none() {
+                            rows.execute(
                                 "DELETE FROM asset_objects WHERE object_hash=?1",
                                 [&hash],
                             )?;
                         }
                         objects.push(object);
                     }
+                    rows.commit()?;
                     objects
                 };
                 if objects.is_empty() {
@@ -967,5 +1149,165 @@ impl PersistentStore {
         let local = roots.into_iter().filter(|(label, _)| *label == "server-conflict")
             .flat_map(|(_, roots)| roots.object_hashes).collect();
         Ok((referenced, local))
+    }
+}
+
+#[cfg(test)]
+mod representative_image_cache_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn representative_pages_release_the_media_lock_between_stats() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = PersistentStore::open(directory.path()).unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let images = [b"first synthetic icon", b"other synthetic icon"].iter()
+            .map(|bytes| cas.prepare_bytes(*bytes).unwrap().content_hash).collect::<Vec<_>>();
+        let retained = images.iter().cloned().collect();
+        let generation = super::super::active_generation(&store.connection).unwrap();
+        let (start_tx, start_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let media = std::thread::spawn(move || {
+            if start_rx.recv().is_ok() {
+                let guard = crate::asset_repository::coordinator::lock_repository_mutation().unwrap();
+                drop(guard);
+                let _ = done_tx.send(());
+            }
+        });
+        let boundary = Cell::new(0);
+        let result = store.check_representative_image_pages(&cas, &generation, &images, &retained, 1, &|| {
+            boundary.set(boundary.get() + 1);
+            if boundary.get() == 2 {
+                start_tx.send(()).unwrap();
+                done_rx.recv_timeout(std::time::Duration::from_secs(5))
+                    .map_err(|_| SyncError::new("media-lock-blocked-between-pages", 500))?;
+            }
+            Ok(())
+        });
+        drop(start_tx);
+        media.join().unwrap();
+        assert!(result.unwrap().is_empty());
+        assert!(boundary.get() >= 2);
+        assert!(store.check_representative_image_pages(&cas, &generation, &images, &retained, 1, &|| Ok(())).unwrap().is_empty());
+    }
+
+    #[test]
+    fn representative_pages_discard_cached_bodies_after_an_intervening_removal() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = PersistentStore::open(directory.path()).unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let first = cas.prepare_bytes(b"first synthetic icon").unwrap();
+        let other = cas.prepare_bytes(b"other synthetic icon").unwrap();
+        let images = vec![first.content_hash.clone(), other.content_hash.clone()];
+        let retained = images.iter().cloned().collect();
+        let generation = super::super::active_generation(&store.connection).unwrap();
+        let boundary = Cell::new(0);
+        let missing = store.check_representative_image_pages(&cas, &generation, &images, &retained, 1, &|| {
+            boundary.set(boundary.get() + 1);
+            if boundary.get() == 2 {
+                let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
+                cas.unlink_exact_object(&first.content_hash, first.byte_size, &first.physical_key)?;
+            }
+            Ok(())
+        }).unwrap();
+        assert_eq!(missing, [first.content_hash.clone()]);
+        let job = store.open_native_job_store().unwrap();
+        assert_eq!(job.check_representative_image_pages(&cas, &generation, &images, &retained, 1, &|| Ok(())).unwrap(), missing);
+        cas.prepare_bytes(b"first synthetic icon").unwrap();
+        assert!(job.check_representative_image_pages(&cas, &generation, &images, &retained, 1, &|| Ok(())).unwrap().is_empty());
+        crate::asset_repository::body_io::reset_body_io();
+        assert!(store.check_representative_image_pages(&cas, &generation, &images, &retained, 1, &|| Ok(())).unwrap().is_empty());
+        assert_eq!(crate::asset_repository::body_io::take_body_io().batch_stat_requests, 0);
+    }
+
+    #[test]
+    fn representative_pages_discard_cached_bodies_after_a_generation_change() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = PersistentStore::open(directory.path()).unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let images = [b"first synthetic icon", b"other synthetic icon"].iter()
+            .map(|bytes| cas.prepare_bytes(*bytes).unwrap().content_hash).collect::<Vec<_>>();
+        let retained = images.iter().cloned().collect();
+        let generation = super::super::active_generation(&store.connection).unwrap();
+        let boundary = Cell::new(0);
+        let result = store.check_representative_image_pages(&cas, &generation, &images, &retained, 1, &|| {
+            boundary.set(boundary.get() + 1);
+            if boundary.get() == 2 {
+                let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
+                store.connection.execute("UPDATE meta SET value='\"replacement-generation\"' WHERE key='activeGeneration'", [])?;
+            }
+            Ok(())
+        });
+        assert_eq!(result.unwrap_err().code, "binding-authority-changed");
+        assert!(store.checked_representative_images.lock().unwrap().hashes.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod inventory_cache_tests {
+    use super::*;
+    use crate::asset_repository::job_pins::{CasJobKind, CasJobOwner, CasObjectRole, CasReleaseOutcome, DurableCasJob};
+
+    #[test]
+    fn an_operation_reuses_library_roots_but_observes_auxiliary_roots_and_job_pins() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = PersistentStore::open(directory.path()).unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let payload = cas.prepare_bytes(b"synthetic cached inventory body").unwrap();
+        let mut cache = InventoryCache::default();
+        let read = |cache: &mut InventoryCache, store: &PersistentStore| {
+            let _guard = crate::asset_repository::coordinator::lock_repository_mutation().unwrap();
+            cache.current(store).map(|inventory| (inventory.referenced.clone(), inventory.local.clone()))
+        };
+        super::super::ASSET_GC_LIBRARY_ROOT_COLLECTIONS.with(|count| count.set(0));
+        assert!(!read(&mut cache, &store).unwrap().0.contains(&payload.content_hash));
+        read(&mut cache, &store).unwrap();
+        assert_eq!(super::super::ASSET_GC_LIBRARY_ROOT_COLLECTIONS.with(|count| count.get()), 1);
+
+        let mut archive = snapshot_archive::Archive::open(&store.snapshots_dir).unwrap();
+        let scratch = archive.scratch().unwrap();
+        std::fs::write(&scratch.path, b"synthetic archived bytes").unwrap();
+        let mut roots = crate::asset_repository::migration_gc::AssetRootSet::default();
+        roots.object_hashes.insert(payload.content_hash.clone());
+        let snapshot = archive.insert(&scratch.path, 0, "synthetic", roots).unwrap();
+        drop(archive);
+        assert!(read(&mut cache, &store).unwrap().0.contains(&payload.content_hash));
+        snapshot_archive::Archive::open(&store.snapshots_dir).unwrap().delete(&snapshot.id).unwrap();
+        assert!(!read(&mut cache, &store).unwrap().0.contains(&payload.content_hash));
+        assert_eq!(super::super::ASSET_GC_LIBRARY_ROOT_COLLECTIONS.with(|count| count.get()), 1);
+
+        let mut job = DurableCasJob::begin(directory.path(), "synthetic-cache-pin", CasJobKind::DirectAssetOrInlayWrite, CasJobOwner::for_test(), 1).unwrap();
+        let error = read(&mut cache, &store).unwrap_err();
+        assert_eq!(error.code, "asset-jobs-busy");
+        job.pin_existing(&cas, &payload.content_hash, b"synthetic cached inventory body".len() as u64, CasObjectRole::DirectObject).unwrap();
+        job.seal(&mut store, 1).unwrap();
+        assert!(read(&mut cache, &store).unwrap().1.contains(&payload.content_hash));
+        job.release(CasReleaseOutcome::Committed).unwrap();
+        assert!(!read(&mut cache, &store).unwrap().1.contains(&payload.content_hash));
+
+        store.device_store().unwrap().connection().execute(
+            "INSERT INTO external_lww_segments VALUES('synthetic','synthetic','1','1',?1,X'',0)",
+            [serde_json::json!({"assets":[{"contentHash":payload.content_hash}],"reusedAssets":[]}).to_string()],
+        ).unwrap();
+        let (referenced, local) = read(&mut cache, &store).unwrap();
+        assert!(referenced.contains(&payload.content_hash));
+        assert!(!local.contains(&payload.content_hash));
+        let before = (cache.data_version, cache.changes, cache.device_version, cache.device_changes);
+        let mut masked = DurableCasJob::begin(directory.path(), "synthetic-masked-pin", CasJobKind::DirectAssetOrInlayWrite, CasJobOwner::for_test(), 1).unwrap();
+        masked.pin_existing(&cas, &payload.content_hash, payload.byte_size, CasObjectRole::DirectObject).unwrap();
+        masked.seal(&mut store, 1).unwrap();
+        assert!(read(&mut cache, &store).unwrap().1.contains(&payload.content_hash));
+        assert_eq!((cache.data_version, cache.changes, cache.device_version, cache.device_changes), before, "the already registered body changes no database invalidation token");
+        masked.release(CasReleaseOutcome::Committed).unwrap();
+        assert!(!read(&mut cache, &store).unwrap().1.contains(&payload.content_hash));
+        store.device_store().unwrap().connection().execute("DELETE FROM external_lww_segments", []).unwrap();
+
+        store.connection.execute("INSERT INTO plugin_storage (generation,owner,storage_key,byte_size,ordinal,value) VALUES ('synthetic','synthetic','body',0,0,?1)",
+            [serde_json::json!({"object":payload.content_hash}).to_string()]).unwrap();
+        assert!(read(&mut cache, &store).unwrap().0.contains(&payload.content_hash));
+        let other = rusqlite::Connection::open(&store.database_path).unwrap();
+        other.execute("DELETE FROM plugin_storage WHERE generation='synthetic'", []).unwrap();
+        assert!(!read(&mut cache, &store).unwrap().0.contains(&payload.content_hash));
     }
 }

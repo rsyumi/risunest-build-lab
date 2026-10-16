@@ -3,7 +3,8 @@ use std::io::{self, BufRead, BufWriter, Seek, SeekFrom, Write};
 
 fn malformed() -> io::Error { io::Error::new(io::ErrorKind::InvalidData, "invalid legacy Inlay JSON") }
 fn parse_error(error: io::Error, cancellation: &dyn CancellationProbe) -> LocalBackupError {
-    if error.kind() == io::ErrorKind::InvalidData { LocalBackupError::new(super::super::LocalBackupErrorCode::UnsupportedFormat, "PocketRisu Inlay data is unreadable") }
+    if let Err(cancelled) = check_cancelled(cancellation) { return cancelled; }
+    if error.kind() == io::ErrorKind::InvalidData { invalid("PocketRisu Inlay data is unreadable") }
     else { super::super::cancellation_io(error, cancellation) }
 }
 fn byte(reader: &mut impl BufRead) -> io::Result<u8> {
@@ -153,7 +154,7 @@ pub(super) fn prepare(
     entry: &StagedLocalBackupEntry, id: &str, metadata: &MetadataIndex<'_>,
     cas: &super::super::PayloadCas, durable: &mut super::super::DurableCasJob,
     cancellation: &dyn CancellationProbe,
-) -> Result<AssetAlias, LocalBackupError> {
+) -> Result<Option<AssetAlias>, LocalBackupError> {
     let file = open_staged(entry)?;
     let mut reader = BufReader::with_capacity(64 * 1024, CancellationReader::new(file, cancellation));
     space(&mut reader).map_err(|error| parse_error(error, cancellation))?;
@@ -164,7 +165,7 @@ pub(super) fn prepare(
     let mut data = tempfile::NamedTempFile::new_in(directory).map_err(LocalBackupError::io)?;
     let mut writer = BufWriter::with_capacity(64 * 1024, data.as_file_mut());
     let extracted = extract(&mut reader, &mut writer);
-    if extracted.as_ref().is_err_and(|error| error.kind() == io::ErrorKind::InvalidData) && metadata.sidecars.contains_key(id) {
+    if extracted.as_ref().is_err_and(|error| error.kind() == io::ErrorKind::InvalidData) && (metadata.sidecars.contains_key(id) || metadata.legacy_info.contains_key(id)) {
         drop(writer);
         return raw(entry, id, metadata, cas, durable, cancellation);
     }
@@ -173,30 +174,41 @@ pub(super) fn prepare(
     let length = writer.stream_position().map_err(LocalBackupError::io)?;
     drop(writer);
     data.as_file().set_len(length).map_err(LocalBackupError::io)?;
-    if !has_data { return raw(entry, id, metadata, cas, durable, cancellation); }
-    let decoded_metadata: Metadata = serde_json::from_value(Value::Object(object)).map_err(|_| invalid("PocketRisu Inlay metadata is invalid"))?;
-    let mut payload = BufReader::with_capacity(64 * 1024, data.reopen().map_err(LocalBackupError::io)?);
-    let prepared = if decoded_metadata.inlay_type == "signature" {
-        durable.prepare_reader(cas, &mut CancellationReader::new(payload, cancellation), super::super::CasObjectRole::DirectObject)
-    } else {
-        if payload.fill_buf().map_err(LocalBackupError::io)?.starts_with(b"data:") {
-            while byte(&mut payload).map_err(LocalBackupError::io)? != b',' {}
+    if !has_data {
+        if !metadata.sidecars.contains_key(id) && !metadata.legacy_info.contains_key(id) {
+            return Err(invalid("PocketRisu Inlay data is not a string"));
         }
-        durable.prepare_reader(cas, &mut CancellationReader::new(Base64Input::new(payload), cancellation), super::super::CasObjectRole::DirectObject)
-    }.map_err(|error| parse_error(error, cancellation))?;
+        return raw(entry, id, metadata, cas, durable, cancellation);
+    }
+    let mut decoded_metadata = super::metadata_for(id, "", Some(&object), metadata, cancellation)?;
+    let signature = object.get("type").and_then(Value::as_str) == Some("signature");
+    let mut payload = BufReader::with_capacity(64 * 1024, data.reopen().map_err(LocalBackupError::io)?);
+    if !signature && payload.fill_buf().map_err(LocalBackupError::io)?.starts_with(b"data:") {
+        while byte(&mut payload).map_err(LocalBackupError::io)? != b',' {}
+    }
+    let mut decoded: Box<dyn Read> = if signature { Box::new(payload) } else { Box::new(Base64Input::new(payload)) };
+    let mut prefix = Vec::new();
+    if !signature && decoded_metadata.inlay_type != "signature" && super::media_type(&decoded_metadata.ext).is_none() {
+        decoded.by_ref().take(32).read_to_end(&mut prefix).map_err(|error| parse_error(error, cancellation))?;
+        let Some(ext) = super::image_extension(&prefix) else { return Ok(None); };
+        decoded_metadata.ext = ext.into();
+        decoded_metadata.inlay_type = "image".into();
+    }
+    let prepared = durable.prepare_reader(cas, &mut CancellationReader::new(io::Cursor::new(prefix).chain(decoded), cancellation), super::super::CasObjectRole::DirectObject)
+        .map_err(|error| parse_error(error, cancellation))?;
     let mut retained = Map::new();
     if let Some(provenance) = metadata.provenance.get(id) {
         retained.insert("pocketRisu".to_owned(), Value::Object(read_metadata(provenance, cancellation)?));
     }
-    finish_alias(id, &prepared.content_hash, prepared.byte_size, decoded_metadata, retained)
+    finish_alias(id, &prepared.content_hash, prepared.byte_size, decoded_metadata, retained).map(Some)
 }
 
 fn raw(
     entry: &StagedLocalBackupEntry, id: &str, metadata: &MetadataIndex<'_>,
     cas: &super::super::PayloadCas, durable: &mut super::super::DurableCasJob, cancellation: &dyn CancellationProbe,
-) -> Result<AssetAlias, LocalBackupError> {
-    let alias = super::prepare(entry, id, "", metadata, cancellation)?;
+) -> Result<Option<AssetAlias>, LocalBackupError> {
+    let Some(alias) = super::prepare(entry, id, "", metadata, cancellation)? else { return Ok(None); };
     durable.prepare_reader(cas, &mut CancellationReader::new(open_staged(entry)?, cancellation), super::super::CasObjectRole::DirectObject)
         .map_err(|error| super::super::cancellation_io(error, cancellation))?;
-    Ok(alias)
+    Ok(Some(alias))
 }

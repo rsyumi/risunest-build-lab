@@ -4,7 +4,7 @@ import { languageEnglish } from 'src/lang/en'
 import type { PlatformShape } from 'src/ts/platform.testSupport'
 import type { AppCleanupStatus } from 'src/ts/storage/appCleanup'
 
-const idle = (): AppCleanupStatus => ({ pending: false, mode: null, error: null, canCancel: false, profile: null, namedProfiles: false })
+const idle = (): AppCleanupStatus => ({ pending: false, mode: null, error: null, canCancel: false, profile: null, namedProfiles: false, cleanupFolder: 'C:/synthetic/cleanup' })
 const mocks = vi.hoisted(() => ({
     invoke: vi.fn(),
     platform: { runtime: 'tauri', os: 'windows' } as PlatformShape,

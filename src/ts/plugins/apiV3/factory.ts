@@ -337,7 +337,7 @@ await (async function() {
                     port.onmessage = null;
                     port.close();
                 }
-            });
+            }, { highWaterMark: 0 });
         }
 
         if (obj.__type === 'STREAM_PORT') return reconstruct(obj);
@@ -603,6 +603,7 @@ await (async function() {
 
 // risuFetch takes GlobalFetchArgs, which names its signal abortSignal.
 const requestSignalKeys = new Map([['nativeFetch', 'signal'], ['risuFetch', 'abortSignal']]);
+export const UNREAD_PLUGIN_STREAM_TIMEOUT_MS = 60_000;
 
 export class SandboxHost {
     private iframe: HTMLIFrameElement;
@@ -642,7 +643,7 @@ export class SandboxHost {
 
     public isIdle(): boolean {
         return this.terminated || (this.guestReportedSettled && this.pendingHostCalls === 0
-            && this.pendingCallbacks.size === 0 && this.activeStreamCleanups.size === 0);
+            && this.pendingCallbacks.size === 0 && this.activeStreamCleanups.size === this.unreadStreamCleanups.size);
     }
 
     public beginUnload(): void {
@@ -659,6 +660,7 @@ export class SandboxHost {
     // 'close' event in stable browsers, so without these the other side of an
     // active stream would wait forever once the iframe is gone.
     private activeStreamCleanups = new Set<() => void>();
+    private unreadStreamCleanups = new Set<() => void>();
 
     constructor(apiFactory: any) {
         this.apiFactory = apiFactory;
@@ -888,12 +890,15 @@ export class SandboxHost {
             let credits = 0;
             let reading = false;
             let finished = false;
+            let unreadTimeout: ReturnType<typeof setTimeout>;
 
             const finish = () => {
                 finished = true;
+                clearTimeout(unreadTimeout);
                 ch.port1.onmessage = null;
                 ch.port1.close();
                 this.activeStreamCleanups.delete(cleanup);
+                this.unreadStreamCleanups.delete(cleanup);
                 this.activityListener?.();
             };
 
@@ -903,6 +908,11 @@ export class SandboxHost {
                 finish();
             };
             this.activeStreamCleanups.add(cleanup);
+            this.unreadStreamCleanups.add(cleanup);
+            unreadTimeout = setTimeout(() => {
+                try { ch.port1.postMessage({ done: true, error: 'Unread plugin response expired' }); } catch (_) {}
+                cleanup();
+            }, UNREAD_PLUGIN_STREAM_TIMEOUT_MS);
             this.activityListener?.();
             cleanups.push(cleanup);
 
@@ -930,6 +940,8 @@ export class SandboxHost {
                     reader.cancel();
                     finish();
                 } else if (e.data?.pull) {
+                    clearTimeout(unreadTimeout);
+                    if (this.unreadStreamCleanups.delete(cleanup)) this.activityListener?.();
                     credits++;
                     pump();
                 }

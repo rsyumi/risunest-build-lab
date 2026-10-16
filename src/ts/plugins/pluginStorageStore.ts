@@ -1,3 +1,4 @@
+import { PluginStorageObservation, type PluginStorageWriteCheck } from './pluginStorageProtection'
 import {
     type PersistentDataStore,
     type PluginStorageMutation,
@@ -18,11 +19,13 @@ interface PluginStorageStoreDependencies {
     store: PersistentDataStore | (() => PersistentDataStore)
     getStorageAuthorityEpoch(): number
     assertPersistentMutationAllowed(expectedAuthorityEpoch?: number): void
-    mutate(mutations: PluginStorageMutation[]): Promise<void>
+    mutate(mutations: PluginStorageMutation[], check?: PluginStorageWriteCheck): Promise<void>
 }
 
 /** What a plugin sees. Every call is confined to the plugin that made it. */
 export interface PluginOwnerStorage {
+    readonly observation: PluginStorageObservation
+    dispose(): void
     getItem(key: string): Promise<unknown | null>
     setItem(key: string, value: unknown): Promise<void>
     removeItem(key: string): Promise<void>
@@ -381,6 +384,7 @@ export function createPluginStorageStore(
     const mutate = async (
         owner: string,
         mutations: readonly OwnerScopedStorageMutation[],
+        observation: PluginStorageObservation,
     ) => {
         if (mutations.length === 0) return
         const authorityEpoch = dependencies.getStorageAuthorityEpoch()
@@ -392,10 +396,11 @@ export function createPluginStorageStore(
                   ? { type: 'delete', owner, key: mutation.key }
                   : { type: 'set', owner, key: mutation.key, value: clonePluginStorageValue(mutation.value) },
         )
+        const check = observation.prepareWrite(normalized)
         await initialize()
         dependencies.assertPersistentMutationAllowed(authorityEpoch)
         const expectedAuthorityGeneration = authorityGeneration
-        await dependencies.mutate(normalized)
+        await dependencies.mutate(normalized, check)
         if (expectedAuthorityGeneration !== authorityGeneration) return
         for (const mutation of normalized) applyCommittedMutation(mutation)
     }
@@ -406,48 +411,55 @@ export function createPluginStorageStore(
         Object.fromEntries([...(index.get(owner)?.keys() ?? [])].map((key) => [key, true])),
     )
 
-    const forOwner = (owner: string): PluginOwnerStorage => ({
-        getItem: (key) => read(owner, key),
-        async setItem(key, value) {
-            await mutate(owner, [{ type: 'set', key, value }])
-        },
-        async removeItem(key) {
-            await mutate(owner, [{ type: 'delete', key }])
-        },
-        async clear() {
-            await mutate(owner, [{ type: 'clear' }])
-        },
-        async key(position) {
-            await initialize()
-            return orderedKeys(owner)[position] ?? null
-        },
-        async keys() {
-            await initialize()
-            return orderedKeys(owner)
-        },
-        async length() {
-            await initialize()
-            return index.get(owner)?.size ?? 0
-        },
-        async snapshot() {
-            const lease = await acquirePinnedPluginStorageLease()
-            return withPersistentRevisionLease(lease, async (reader) => {
-                const storage: Record<string, unknown> = {}
-                let afterKey: PluginStorageValueCursor | undefined
-                do {
-                    const page = await reader.readPluginStorageValues({ owner, afterKey })
-                    if (page.revision !== reader.revision) throw new Error('Plugin storage revision changed')
-                    for (const item of page.items) {
-                        if (item.owner !== owner) throw new Error('Plugin storage owner changed')
-                        defineOwnEnumerableProperty(storage, item.key, structuredClone(item.value))
-                    }
-                    afterKey = page.nextCursor ?? undefined
-                } while (afterKey)
-                return storage
-            })
-        },
-        mutate: (mutations) => mutate(owner, mutations),
-    })
+    const forOwner = (owner: string): PluginOwnerStorage => {
+        const observation = new PluginStorageObservation(owner)
+        return {
+            observation,
+            dispose: () => observation.dispose(),
+            getItem: (key) => { observation.observe(key); return read(owner, key) },
+            async setItem(key, value) {
+                await mutate(owner, [{ type: 'set', key, value }], observation)
+            },
+            async removeItem(key) {
+                await mutate(owner, [{ type: 'delete', key }], observation)
+            },
+            async clear() {
+                await mutate(owner, [{ type: 'clear' }], observation)
+            },
+            async key(position) {
+                await initialize()
+                return orderedKeys(owner)[position] ?? null
+            },
+            async keys() {
+                await initialize()
+                return orderedKeys(owner)
+            },
+            async length() {
+                await initialize()
+                return index.get(owner)?.size ?? 0
+            },
+            async snapshot() {
+                const observe = observation.beginSnapshot()
+                const lease = await acquirePinnedPluginStorageLease()
+                return withPersistentRevisionLease(lease, async (reader) => {
+                    const storage: Record<string, unknown> = {}
+                    let afterKey: PluginStorageValueCursor | undefined
+                    do {
+                        const page = await reader.readPluginStorageValues({ owner, afterKey })
+                        if (page.revision !== reader.revision) throw new Error('Plugin storage revision changed')
+                        for (const item of page.items) {
+                            if (item.owner !== owner) throw new Error('Plugin storage owner changed')
+                            defineOwnEnumerableProperty(storage, item.key, structuredClone(item.value))
+                        }
+                        afterKey = page.nextCursor ?? undefined
+                    } while (afterKey)
+                    observe(Object.keys(storage))
+                    return storage
+                })
+            },
+            mutate: (mutations) => mutate(owner, mutations, observation),
+        }
+    }
 
     return {
         forOwner,

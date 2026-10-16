@@ -37,20 +37,36 @@ export async function setToggleValue(key: string, value: string): Promise<void> 
 }
 
 /** Applies preset values outside a toggle binding. Outside local mode they replace the chat's local overrides, as setToggleValue does. */
-export async function applyGlobalToggleValues(values: ToggleValues, keys: readonly string[]): Promise<void> {
+export async function applyGlobalToggleValues(values: ToggleValues, keys: readonly string[]): Promise<boolean> {
     try {
         const conversation = captureChatBindingTarget()?.conversation
         const replaced = [...keys, ...Object.keys(values)]
             .filter((key) => key.startsWith('toggle_') && conversation?.GLGlobalVariables?.[key] !== undefined)
         if (conversation && !conversation.useLocallySetGlobalVariables && replaced.length > 0) {
-            if (conversationMutationBlockedByGeneration(conversation.id)) return
+            if (conversationMutationBlockedByGeneration(conversation.id)) return false
             const overrides = { ...conversation.GLGlobalVariables }
             for (const key of replaced) delete overrides[key]
             await updateChatBinding(conversation, { GLGlobalVariables: overrides })
         }
         applyToggleValues(DBState.db.globalChatVariables, values, keys)
+        return true
     } catch (error) {
         reportFailure(error)
+        return false
+    }
+}
+
+export async function applyLocalToggleValues(values: ToggleValues, keys: readonly string[]): Promise<boolean> {
+    try {
+        const conversation = captureChatBindingTarget()?.conversation
+        if (!conversation || conversationMutationBlockedByGeneration(conversation.id)) return false
+        const overrides = { ...conversation.GLGlobalVariables }
+        applyToggleValues(overrides, values, keys)
+        await updateChatBinding(conversation, { GLGlobalVariables: overrides })
+        return true
+    } catch (error) {
+        reportFailure(error)
+        return false
     }
 }
 

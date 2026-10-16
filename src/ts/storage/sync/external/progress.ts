@@ -53,6 +53,13 @@ export function externalProgressFor(value: ReadonlyMap<string, ExternalOperation
     const progress = binding?.state === 'running' ? binding : current?.visible || current?.previous ? current : binding
     return progress?.visible ? progress : progress?.previous
 }
+/** The running sync or binding attempt, including a short check that the progress panel keeps hidden. */
+export function externalSyncAttempt(value: ReadonlyMap<string, ExternalOperationProgress>, id: string) {
+    const binding = value.get(key(id, 'binding'))
+    if (binding?.state === 'running') return binding
+    const sync = value.get(key(id, 'sync'))
+    return sync?.state === 'running' ? sync : undefined
+}
 export function clearExternalProgress(connectionId: string) {
     for (const kind of ['sync', 'binding', 'download', 'export'] as const) operations.delete(key(connectionId, kind))
     emit()

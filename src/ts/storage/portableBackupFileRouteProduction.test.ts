@@ -35,11 +35,12 @@ vi.mock('../alert', () => ({ alertConfirm: m.confirm, alertNormal: vi.fn() }))
 vi.mock('../plugins/plugins.svelte', () => ({
     loadPluginsAfterAuthoritativeRestore: m.after,
 }))
-vi.mock('./androidSafBridge', () => ({
+vi.mock('./androidSafBridge', async original => ({
+    ...(await original<typeof import('./androidSafBridge')>()),
     discardAndroidSafSource: m.discard,
     pickAndroidPortableBackupSource: vi.fn(),
     materializeAndroidBackupSource: m.materializeAndroid,
-}))
+} satisfies typeof import('./androidSafBridge')))
 vi.mock('./iosFiles', async (original) => ({...(await original<object>()),pickIOSBackupSource:vi.fn(),materializeIOSBackupSource:m.materializeIOS,discardIOSFile:m.discardIOS}))
 vi.mock('./deviceBackup/selectionDialog', () => ({
     selectPortableBackupExport: m.chooseExport,
@@ -268,11 +269,11 @@ describe('common backup file production route', () => {
             .resolves.toEqual({ ...committed, warningCodes: ['cleanup-failed'] })
         expect(m.portable).toHaveBeenCalledTimes(1)
     })
-    it('discards invalid seekable custody without materializing',async()=>{
+    it.each(['iosScoped', 'savedConflict'] as const)('discards invalid %s custody without materializing',async type=>{
         m.invoke.mockImplementation(async(command)=>{if(command==='native_backup_source_format')throw new Error('invalid-catalog');return true})
-        await expect(restoreBackupFromNativeSource({type:'iosScoped',token:'synthetic-invalid'})).rejects.toThrow('invalid-catalog')
+        await expect(restoreBackupFromNativeSource({type,token:'synthetic-invalid'})).rejects.toThrow('invalid-catalog')
         expect(m.materializeIOS).not.toHaveBeenCalled()
-        expect(m.invoke).toHaveBeenLastCalledWith('native_portable_source_discard',{source:{type:'iosScoped',token:'synthetic-invalid'}})
+        expect(m.invoke).toHaveBeenLastCalledWith('native_portable_source_discard',{source:{type,token:'synthetic-invalid'}})
     })
     it.each(['portable', 'block-risu-save', 'local-backup'])(
         'uses detected %s independently of filename',
@@ -369,9 +370,7 @@ describe('common backup file production route', () => {
         }
         m.chooseRestore.mockResolvedValue({ library: true, deviceSections: [] })
         await m.portable.mock.calls[0][2].choosePortableSections(preview)
-        expect(m.chooseRestore).toHaveBeenCalledExactlyOnceWith(preview, {
-            firstRun: true,
-        })
+        expect(m.chooseRestore).toHaveBeenCalledExactlyOnceWith(preview)
     })
     it('full native restoration delegates sync lifecycle to the shared guard', async () => {
         await restoreBackupFromNativeSource({

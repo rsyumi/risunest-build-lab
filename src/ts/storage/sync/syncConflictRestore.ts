@@ -11,6 +11,8 @@ import {
 } from '../persistentDataRuntime.svelte'
 import { decodeRisuSave } from '../risuSave'
 import { hasLibraryCharacters } from '../libraryCharacters'
+import { presentFileOperationError } from '../fileOperationErrorPresentation'
+import type { NativeFileJobSource } from '../nativeFileJobs'
 import {
     getSyncConflictBackupStore,
     type SyncConflictBackupEntry,
@@ -38,20 +40,29 @@ export async function openSyncConflictBackups(): Promise<void> {
     const entry = entries[Number(selected)]
     if (!entry) return
     if (isTauri) {
+        const callStartedAt = Date.now()
         try {
             const { invoke } = await import('@tauri-apps/api/core')
             const { nativeRestoreDeadline } = await import('../nativeRestoreDeadline')
             const { restoreBackupFromNativeSource } = await import('../portableBackupFileRouteProduction.svelte')
-            await restoreBackupFromNativeSource(({signal}) => nativeRestoreDeadline(
-                invoke('native_conflict_backup_source', { backupId: entry.id }),
-                'saved backup lookup', undefined, undefined, undefined, signal,
-            ), {
+            const { holdServerSyncAfterRestore } = await import('./serverSyncProduction')
+            await restoreBackupFromNativeSource(async ({signal, onSource}) => {
+                const source = await nativeRestoreDeadline(
+                    invoke<NativeFileJobSource>('native_conflict_backup_source', { backupId: entry.id }),
+                    'saved backup lookup', undefined,
+                    source => invoke('native_portable_source_discard', {source}).then(() => {}), undefined, signal,
+                )
+                onSource({name: entryLabel(entry), bytes: entry.byteLength})
+                return source
+            }, {
                 confirmationWarnings: [language.syncConflictRestoreScope],
+                holdServerSyncAfterRestore: true,
+                onNativeStatus(status) {
+                    if (status.state === 'succeeded' && status.result) holdServerSyncAfterRestore()
+                },
             })
         } catch (cause) {
-            if (cause instanceof DOMException && cause.name === 'AbortError') return
-            const code = typeof cause === 'object' && cause !== null && 'code' in cause ? cause.code : undefined
-            alertError(code === 'sync-unavailable' ? language.risuNest.backup.syncUnavailable : language.risuNest.backup.actionFailed)
+            presentFileOperationError('import', cause, callStartedAt)
         }
         return
     }

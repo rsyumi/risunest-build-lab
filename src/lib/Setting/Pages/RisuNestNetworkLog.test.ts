@@ -30,6 +30,26 @@ beforeEach(async () => {
 })
 afterEach(async () => { await unmount(component); host.remove() })
 describe('native network settings', () => {
+    it('groups interleaved retries by their operation while leaving old records separate', async () => {
+        const original = mock.call.getMockImplementation()!
+        mock.call.mockImplementation(async request => request.op === 'list' ? {
+            items: ['retry-2', 'legacy', 'retry-1'].map(id => ({
+                ...record, ...record.request, id, status: 503, capturedBytes: 0,
+                ...(id === 'legacy' ? {} : { operationId: 'synthetic-operation' }),
+            })), hasMore: false, recentBytes: 0, retainedBytes: 0, warning: null,
+        } : original(request))
+        refreshButton().click()
+        await settle()
+        const groups = [...host.querySelectorAll('.request-group')]
+        expect(groups).toHaveLength(2)
+        expect(groups[0].querySelectorAll('.request-row')).toHaveLength(2)
+        expect(groups[0].textContent).toContain('synthetic-operation')
+        expect(groups[1].querySelectorAll('.request-row')).toHaveLength(1)
+        groups[0].querySelectorAll<HTMLButtonElement>('.request-row')[1].click()
+        await settle()
+        expect(mock.call).toHaveBeenCalledWith({ op: 'detail', id: 'retry-1' })
+    })
+
     it('shows opt-in defaults and records once enabled', async () => {
         const inputs = [...host.querySelectorAll<HTMLInputElement>('input[type=checkbox]')]
         expect(inputs.map(input => input.checked)).toEqual([false, false, true, false])

@@ -73,9 +73,14 @@ async function connect(onProgress) {
     };
   });
   let sequence = 0;
+  let runtimeExceptions = 0;
   const pending = new Map();
   ws.onmessage = ({ data }) => {
     const message = JSON.parse(data);
+    if (message.method === "Runtime.exceptionThrown") {
+      runtimeExceptions++;
+      return;
+    }
     if (
       message.method === "Runtime.bindingCalled" &&
       message.params.name === "__streamingSmokeProgress" &&
@@ -129,11 +134,12 @@ async function connect(onProgress) {
       ],
     });
     await call("Page.enable");
+    await call("Runtime.enable");
     const identity = await evaluate(
       `window.__TAURI_INTERNALS__?.invoke('plugin:app|identifier')`,
     );
     assert.equal(identity, packageName);
-    return { call, evaluate, close };
+    return { call, evaluate, close, errorCounts: () => ({ runtimeExceptions }) };
   } catch (error) {
     close();
     throw error;
@@ -144,9 +150,14 @@ async function main() {
   assert.ok(adb, "--adb path required");
   const profile = options.profile ?? "smoke";
   assert.ok(
-    ["smoke", "stress", "persistence-spike", "persistence", "viewport", "hypa-summary", "lease-release"].includes(profile),
+    ["smoke", "stress", "persistence-spike", "persistence", "viewport", "hypa-summary", "lease-release", "parser-context"].includes(profile),
     "Unknown profile",
   );
+  const parserAssets = Number(options.assets ?? 1000);
+  if (profile === "parser-context") {
+    assert.ok(Number.isSafeInteger(parserAssets) && parserAssets >= 0, "Invalid synthetic asset count");
+    assert.ok(["true", "false"].includes(options.baseline ?? "false"), "Invalid baseline flag");
+  }
   android.assertAvd(run(serial, ["emu", "avd", "name"]).stdout);
   assert.equal(
     run(serial, ["shell", "getprop", "sys.boot_completed"]).stdout.trim(),
@@ -160,6 +171,15 @@ async function main() {
     assert.match(
       run(serial, ["shell", "pm", "clear", packageName]).stdout,
       /Success/,
+    );
+  }
+  const androidApi = Number(run(serial, ["shell", "getprop", "ro.build.version.sdk"]).stdout.trim());
+  if (androidApi >= 33) {
+    run(serial, ["shell", "pm", "grant", packageName, "android.permission.POST_NOTIFICATIONS"]);
+    assert.match(
+      run(serial, ["shell", "dumpsys", "package", packageName]).stdout,
+      /android\.permission\.POST_NOTIFICATIONS: granted=true/,
+      "Synthetic notification permission was not granted",
     );
   }
   let client;
@@ -205,8 +225,10 @@ async function main() {
     });
     const result = await client
       .evaluate(
-        `window.__streamingSmoke.run(${JSON.stringify(profile)})`,
-        ["persistence", "hypa-summary", "lease-release"].includes(profile) ? 300000 : 60000,
+        profile === "parser-context"
+          ? `window.__streamingSmoke.parserScreen(${parserAssets}, ${options.baseline === "true"}).then(value => ({ passed: value.selected && value.rows > 0, cases: [{ id: 'parser-context-switch', ...value }] }))`
+          : `window.__streamingSmoke.run(${JSON.stringify(profile)})`,
+        ["persistence", "hypa-summary", "lease-release", "parser-context"].includes(profile) ? 300000 : 60000,
       )
       .catch(() => ({
         passed: false,
@@ -305,6 +327,13 @@ async function main() {
         result.assertion = "reload-or-restart-failed";
       }
     }
+    if (profile === "parser-context") {
+      result.pageErrors = client.errorCounts();
+      if (result.pageErrors.runtimeExceptions > 0) {
+        result.passed = false;
+        result.assertion = "runtime-exception-observed";
+      }
+    }
     const report = {
       timestamp: new Date().toISOString(),
       synthetic: true,
@@ -313,9 +342,8 @@ async function main() {
       profile,
       avd,
       serial,
-      androidApi: Number(
-        run(serial, ["shell", "getprop", "ro.build.version.sdk"]).stdout.trim(),
-      ),
+      androidApi,
+      notificationPermission: androidApi >= 33 ? "granted" : "not-required",
       apkSha256: createHash("sha256")
         .update(await readFile(apk))
         .digest("hex"),

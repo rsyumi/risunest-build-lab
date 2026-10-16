@@ -94,7 +94,8 @@ async function reconcileExportInBackground(
     }
     try {
         const handoffId = androidSafHandoffId(status)
-        if (handoffId && await dependencies.androidSafExportId?.() === handoffId) {
+        const destinationOwner = await dependencies.androidSafExportId?.()
+        if (destinationOwner === status.jobId || (handoffId && destinationOwner === handoffId)) {
             retainNativeJob = true
             return
         }

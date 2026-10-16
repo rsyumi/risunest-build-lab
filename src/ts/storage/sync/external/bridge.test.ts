@@ -23,9 +23,11 @@ describe('ExternalStorageBridge', () => {
         const invoke = vi.fn(async () => ({}))
         const bridge = new ExternalStorageBridge({ supported: () => true, invoke })
         await bridge.prepareRenewal('existing')
+        await bridge.changeEndpoint('existing', 'https://moved.example/dav')
         await bridge.unlockConnection('existing', 'synthetic-recovery')
         expect(invoke.mock.calls).toEqual([
             ['external_storage_prepare_renewal', { connectionId: 'existing' }],
+            ['external_storage_change_endpoint', { connectionId: 'existing', endpoint: 'https://moved.example/dav' }],
             ['external_storage_unlock_connection', { connectionId: 'existing', recoveryKey: 'synthetic-recovery' }],
         ])
     })

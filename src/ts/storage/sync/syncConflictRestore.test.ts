@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { language } from 'src/lang'
 
@@ -67,7 +68,7 @@ describe('openSyncConflictBackups', () => {
         vi.resetModules()
         mocks.native.enabled = false
         mocks.nativeSource.mockReset().mockResolvedValue({type:"desktopPath",path:"synthetic-conflict.risudat"})
-        mocks.nativeRestore.mockReset().mockImplementation(async source => {await source({signal:new AbortController().signal});return {warningCodes:[]}})
+        mocks.nativeRestore.mockReset().mockImplementation(async source => {await source({signal:new AbortController().signal, onSource:vi.fn()});return {warningCodes:[]}})
         mocks.beginReplacement.mockReset().mockResolvedValue(mocks.release)
         mocks.confirmReplacement.mockReset().mockResolvedValue(undefined)
         mocks.release.mockReset()
@@ -173,13 +174,49 @@ describe('openSyncConflictBackups', () => {
 
     it('restores a native saved conflict backup by ID without loading the database in JavaScript', async () => {
         mocks.native.enabled = true
+        mocks.nativeSource.mockResolvedValue({type:'savedConflict', token:'opaque-native-token'})
+        const sources: Array<{name: string; bytes: number}> = []
+        mocks.nativeRestore.mockImplementation(async source => {
+            expect(await source({signal:new AbortController().signal, onSource:(value: typeof sources[number]) => sources.push(value)}))
+                .toEqual({type:'savedConflict', token:'opaque-native-token'})
+        })
         await (await import('./syncConflictRestore')).openSyncConflictBackups()
+        expect(sources).toEqual([{name:expect.stringContaining(language.syncBackupSideRemote), bytes:3}])
+        expect(sources[0].name).not.toContain('opaque-native-token')
         expect(mocks.nativeSource).toHaveBeenCalledWith('native_conflict_backup_source', {backupId:'backup'})
-        expect(mocks.nativeRestore).toHaveBeenCalledWith(expect.any(Function), {confirmationWarnings:[language.syncConflictRestoreScope]})
+        expect(mocks.nativeRestore).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({confirmationWarnings:[language.syncConflictRestoreScope]}))
         expect(mocks.backupStore.read).not.toHaveBeenCalled()
         expect(mocks.decodeRisuSave).not.toHaveBeenCalled()
         expect(mocks.replacePersistentDatabase).not.toHaveBeenCalled()
         expect(mocks.alertConfirm).not.toHaveBeenCalled()
+    })
+
+    it('holds sync as soon as the native commit is known and preserves the hold while reattaching', async () => {
+        mocks.native.enabled = true
+        mocks.nativeRestore.mockImplementation(async (_source, options) => {
+            await options.onNativeStatus({state:'running'})
+            expect(mocks.hold).not.toHaveBeenCalled()
+            await options.onNativeStatus({state:'succeeded', result:{revision:8}})
+            expect(mocks.hold).toHaveBeenCalledOnce()
+            expect(options.holdServerSyncAfterRestore).toBe(true)
+        })
+        await (await import('./syncConflictRestore')).openSyncConflictBackups()
+        expect(mocks.hold).toHaveBeenCalledOnce()
+    })
+
+    it('shows a managed failure once and preserves the specific admission error', async () => {
+        mocks.native.enabled = true
+        const {nativeFileOperationOutcome, NativeFileOperationBusyError} = await import('../nativeFileJobManager')
+        mocks.nativeRestore.mockImplementation(async () => {
+            nativeFileOperationOutcome.set({kind:'import', startedAt:Date.now(), finishedAt:Date.now(), state:'failed', observedStages:[], warningCodes:[], partialWritesPossible:false})
+            throw Error('Already shown')
+        })
+        await (await import('./syncConflictRestore')).openSyncConflictBackups()
+        expect(mocks.alertError).not.toHaveBeenCalled()
+        nativeFileOperationOutcome.set(null)
+        mocks.nativeRestore.mockRejectedValue(new NativeFileOperationBusyError())
+        await (await import('./syncConflictRestore')).openSyncConflictBackups()
+        expect(mocks.alertError).toHaveBeenCalledExactlyOnceWith(language.risuNest.backup.fileBusy)
     })
 
     it.each(['cancelled','sync-unavailable','restore-failed'])('preserves native %s outcomes', async code => {

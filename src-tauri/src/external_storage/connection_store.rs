@@ -262,6 +262,24 @@ impl ConnectionStore {
         tx.commit().map_err(storage)?;
         Ok(connection)
     }
+    pub fn replace_endpoint(&mut self, expected: &StoredConnection, endpoint: String) -> Result<StoredConnection> {
+        let tx = self.0.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage)?;
+        let encoded: String = tx.query_row("SELECT value FROM connections WHERE id=?1", [&expected.id], |row| row.get(0))
+            .optional().map_err(storage)?.ok_or_else(|| ProviderError::new(ErrorKind::NotFound))?;
+        let mut connection = decode(&encoded)?;
+        if connection.config != expected.config || connection.credential_ref != expected.credential_ref
+            || connection.root_key_ref != expected.root_key_ref || connection.descriptor != expected.descriptor {
+            return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+        }
+        connection.config.endpoint = endpoint;
+        connection.verified_at_ms = super::runtime::now_ms();
+        let encoded = serde_json::to_string(&connection).map_err(storage)?;
+        decode(&encoded)?;
+        tx.execute("UPDATE connections SET value=?2 WHERE id=?1", params![expected.id, encoded]).map_err(storage)?;
+        tx.commit().map_err(storage)?;
+        Ok(connection)
+    }
+
     pub fn replace_credential(
         &mut self,
         id: &str,

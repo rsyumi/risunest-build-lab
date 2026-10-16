@@ -1,3 +1,4 @@
+import { androidSafReservationFixture } from '../../tests/support/androidSafReservation'
 import { describe, expect, it, vi } from 'vitest'
 import type { AndroidSafDestinationRequest } from './storage/androidSafBridge'
 import { createStreamingScreenshotArchive } from './chatScreenshotArchive'
@@ -168,11 +169,45 @@ describe('native screenshot archive writer', () => {
 })
 
 describe('Android screenshot archive writer', () => {
+    it.each(['open', 'close', 'abort'] as const)('preserves the producer failure when %s also fails to release its reservation', async phase => {
+        const picker = androidSafReservationFixture()
+        picker.failRelease()
+        const {dependencies} = androidHarness()
+        dependencies.reserveDestination = picker.reserve
+        const failure = Object.assign(new Error('producer'), {code: 'producer-failed'})
+        let result: Promise<unknown>
+        if (phase === 'open') {
+            dependencies.invoke.mockRejectedValueOnce(failure)
+            result = createAndroidScreenshotArchiveWriter('synthetic.zip', dependencies)
+        } else {
+            const writer = await createAndroidScreenshotArchiveWriter('synthetic.zip', dependencies)
+            dependencies.invoke.mockRejectedValueOnce(failure)
+            result = phase === 'close' ? writer.close() : writer.abort()
+        }
+        await expect(result).rejects.toBe(failure)
+        expect(failure).toMatchObject({code: 'producer-failed', warningCodes: ['partial-destination-may-remain']})
+    })
+    it('does not start a screenshot writer until its destination is selected', async () => {
+        const picker = androidSafReservationFixture()
+        picker.bridge.reserveExport.mockImplementation(() => {})
+        const {dependencies} = androidHarness()
+        dependencies.reserveDestination = picker.reserve
+        const opening = createAndroidScreenshotArchiveWriter('synthetic.zip', dependencies)
+        await vi.waitFor(() => expect(picker.bridge.reserveExport).toHaveBeenCalled())
+        expect(dependencies.invoke).not.toHaveBeenCalled()
+        picker.select(picker.bridge.reserveExport.mock.calls[0][0])
+        const writer = await opening
+        await writer.abort()
+        expect(picker.bridge.releaseExport).toHaveBeenCalled()
+        expect(dependencies.copyToAndroidSaf).not.toHaveBeenCalled()
+    })
+
     function androidHarness() {
         const calls: Array<[string, Record<string, unknown> | undefined]> = []
         const dependencies = {
             warn: vi.fn(),
             acknowledgeAndroidSafExport: vi.fn(() => true),
+            reserveDestination: androidSafReservationFixture().reserve,
             copyToAndroidSaf: vi.fn(async (_request: AndroidSafDestinationRequest) => ({
                 requestId: 'saf-request-1',
                 bytes: 7,
@@ -214,6 +249,7 @@ describe('Android screenshot archive writer', () => {
             { destination: null },
         ])
         expect(dependencies.copyToAndroidSaf).toHaveBeenCalledExactlyOnceWith({
+            reservation: expect.objectContaining({jobId: '11111111-1111-4111-8111-111111111111'}),
             sourcePath: expect.stringContaining('archive.zip.part'),
             suggestedName: 'chat.zip',
             signal: expect.any(AbortSignal),
@@ -481,6 +517,27 @@ describe('Android screenshot publication recovery', () => {
         })).rejects.toThrow('cleanup failed')
 
         expect(acknowledge).not.toHaveBeenCalled()
+    })
+
+    it('cancels an unfinished reserved writer after renderer loss before releasing its receipt', async () => {
+        let open = true
+        let saved: unknown = {...terminal, state: 'cancelled', copyStarted: false}
+        const result = await recoverAndroidScreenshotPublication({
+            getStatus: () => JSON.stringify(saved),
+            invoke: async (command, args) => {
+                expect(args?.jobId).toBe(terminal.exportId)
+                if (command === 'native_file_job_screenshot_output_cancel') { open = false; return 'cancelled' }
+                if (command === 'native_file_job_screenshot_output_release' && open) throw new Error('invalid-state')
+            },
+            acknowledgeAndroidSafExport: async (id) => {
+                expect(id).toBe(terminal.requestId)
+                if (open) return false
+                saved = null
+                return true
+            },
+        })
+        expect(result).toMatchObject({state: 'cancelled', copyStarted: false})
+        expect(saved).toBeNull()
     })
 
     it('ignores recovered RisuSave terminals', async () => {

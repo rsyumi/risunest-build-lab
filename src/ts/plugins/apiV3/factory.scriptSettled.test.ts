@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { SandboxHost } from './factory'
+import { SandboxHost, UNREAD_PLUGIN_STREAM_TIMEOUT_MS } from './factory'
 import { invoke } from '@tauri-apps/api/core'
 import { consoleLog } from '../../consoleLog'
 const platform = vi.hoisted(() => ({ native: false }))
@@ -228,7 +228,7 @@ describe('sandbox script completion', () => {
         host.terminate()
     })
 
-    it('reports busy until a host call and its delivered stream finish', async () => {
+    it('counts a delivered stream as busy only once the plugin reads it', async () => {
         let finish!: (stream: ReadableStream) => void
         const host = new SandboxHost({ ...bridgeStubs(), stream: () => new Promise(resolve => { finish = resolve }) })
         const changed = vi.fn()
@@ -238,13 +238,58 @@ describe('sandbox script completion', () => {
         expect(host.isIdle()).toBe(false)
         const cancel = vi.fn()
         finish(new ReadableStream({ cancel }))
-        await (child as any).result
-        expect(host.isIdle()).toBe(false)
-        await (await (child as any).result).cancel()
+        const stream = await (child as any).result
+        await vi.waitFor(() => expect(host.isIdle()).toBe(true))
+        const reader = stream.getReader()
+        const pending = reader.read()
+        await vi.waitFor(() => expect(host.isIdle()).toBe(false))
+        await reader.cancel()
+        expect(await pending).toEqual({ done: true, value: undefined })
         await vi.waitFor(() => expect(host.isIdle()).toBe(true))
         expect(cancel).toHaveBeenCalledOnce()
         expect(changed).toHaveBeenCalled()
         host.terminate()
+    })
+
+    it('releases an unread response without blocking plugin reload and rejects a late read', async () => {
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+        const cancel = vi.fn()
+        const host = new SandboxHost({ ...bridgeStubs(), nativeFetch: () => ({ status: 200, body: new ReadableStream({ cancel }) }) })
+        try {
+            const child = await runGuest(host, `globalThis.response = await risuai.nativeFetch('https://synthetic.invalid')`)
+            await vi.waitFor(() => expect((child as any).response?.status).toBe(200))
+            expect(host.isIdle()).toBe(true)
+            await vi.advanceTimersByTimeAsync(UNREAD_PLUGIN_STREAM_TIMEOUT_MS)
+            expect(cancel).toHaveBeenCalledOnce()
+            await expect((child as any).response.body.getReader().read()).rejects.toThrow('Unread plugin response expired')
+        } finally {
+            host.terminate()
+            vi.useRealTimers()
+        }
+    })
+
+    it('keeps a consumed response alive through backpressure and cancels it on unload', async () => {
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+        const cancel = vi.fn()
+        const host = new SandboxHost({ ...bridgeStubs(), stream: () => new ReadableStream({ cancel }) })
+        try {
+            const child = await runGuest(host, `globalThis.response = await risuai.stream()`)
+            await vi.waitFor(() => expect((child as any).response).toBeDefined())
+            const reader = (child as any).response.getReader()
+            const pending = reader.read()
+            await vi.waitFor(() => expect(host.isIdle()).toBe(false))
+            await vi.advanceTimersByTimeAsync(UNREAD_PLUGIN_STREAM_TIMEOUT_MS * 2)
+            expect(cancel).not.toHaveBeenCalled()
+            expect(host.isIdle()).toBe(false)
+            host.terminate()
+            await reader.cancel()
+            await pending
+            expect(cancel).toHaveBeenCalledOnce()
+            expect(vi.getTimerCount()).toBe(0)
+        } finally {
+            host.terminate()
+            vi.useRealTimers()
+        }
     })
 
     // Each method reads the signal field of the host function it reaches.

@@ -8,7 +8,7 @@ vi.mock('../storage/persistentDataStoreFactory', () => ({
 }))
 vi.mock('../parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
 vi.mock('./apiV3/v3.svelte', () => ({
-    loadV3Plugins: vi.fn(async () => undefined),
+    loadV3Plugins: vi.fn(async () => true),
     customV3ProviderMetaStore: [],
 }))
 
@@ -118,6 +118,7 @@ describe('authoritative restore plugin initialization', () => {
         let observed: unknown
         vi.mocked(loadV3Plugins).mockImplementationOnce(async () => {
             observed = await pluginStorageStore.forOwner(UNOWNED_PLUGIN_OWNER).getItem('pm_store')
+            return true
         })
         await loadPluginsAfterAuthoritativeRestore()
         expect(observed).toEqual({

@@ -147,12 +147,12 @@ pub(super) fn run_job(
                 if job.is_cancel_requested() {
                     return;
                 }
-                if let Err(error) = job.set_progress(JobProgress {
+                if let Err(error) = job.set_export_progress(JobProgress {
                     completed_bytes,
                     total_bytes: None,
                     completed_items: 0,
                     total_items: Some(2),
-                }) {
+                }, completed_bytes, None) {
                     *progress_failure.borrow_mut() = Some(error);
                 }
             },
@@ -176,12 +176,12 @@ pub(super) fn run_job(
     if let Err(error) = job.set_phase(JobPhase::UploadingDatabase) {
         return finish_payload_cleanup(payload, Err(job_control_error(&job, error)));
     }
-    if let Err(error) = job.set_progress(JobProgress {
+    if let Err(error) = job.set_export_progress(JobProgress {
         completed_bytes: payload.bytes,
         total_bytes: Some(payload.bytes.saturating_mul(2)),
         completed_items: 1,
         total_items: Some(2),
-    }) {
+    }, 0, Some(payload.bytes)) {
         return finish_payload_cleanup(payload, Err(job_control_error(&job, error)));
     }
 
@@ -597,7 +597,7 @@ fn classify_response(
             "official publication response is not UTF-8",
         )
     })?;
-    if text.is_empty() || text.len() > MAX_REPLACEMENT_STRING_BYTES {
+    if text.len() > MAX_REPLACEMENT_STRING_BYTES {
         return Err(NativeJobError::new(
             "invalid-response",
             "official publication replacement key is invalid",
@@ -637,7 +637,7 @@ fn classify_response(
         session,
         save_date: save_date.to_owned(),
         status,
-        replacement_key: text,
+        replacement_key: if text.is_empty() { DATABASE_KEY.to_owned() } else { text },
         warning,
         reload_session,
     })
@@ -645,12 +645,12 @@ fn classify_response(
 
 fn record_uploaded_bytes(job: &JobControl, added: u64) -> Result<(), String> {
     let progress = job.status().progress;
-    job.set_progress(JobProgress {
+    job.set_export_progress(JobProgress {
         completed_bytes: progress.completed_bytes.saturating_add(added).min(progress.total_bytes.unwrap_or(u64::MAX)),
         total_bytes: progress.total_bytes,
         completed_items: 1,
         total_items: Some(2),
-    })
+    }, progress.completed_bytes.saturating_add(added).min(progress.total_bytes.unwrap_or(u64::MAX)).saturating_sub(progress.total_bytes.unwrap_or(0) / 2), progress.total_bytes.map(|total| total / 2))
 }
 
 struct PublicationPayloadReader {
@@ -1145,6 +1145,11 @@ mod tests {
         assert_eq!(error.code, "invalid-response");
         assert!(error.message.len() <= 512);
         assert!(!error.message.contains("secret"));
+        let empty_json = classify_response(
+            200, false, true, Some(Vec::new()), "account-1", None, "date",
+        )
+        .unwrap_err();
+        assert_eq!(empty_json.code, "invalid-response");
     }
 
     #[test]
@@ -1393,7 +1398,7 @@ mod tests {
                 body: br#"{"sessionNumber":"server-session"}"#.to_vec(),
             },
             MockResponse {
-                status: 304,
+                status: 200,
                 headers: Vec::new(),
                 body: Vec::new(),
             },
@@ -1415,11 +1420,12 @@ mod tests {
 
         assert!(matches!(
             result,
-            OfficialPublicationAttemptResult::NotModified {
-                status: 304,
+            OfficialPublicationAttemptResult::Written {
+                status: 200,
                 session: Some(ref session),
+                ref replacement_key,
                 ..
-            } if session == "server-session"
+            } if session == "server-session" && replacement_key == DATABASE_KEY
         ));
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 2);

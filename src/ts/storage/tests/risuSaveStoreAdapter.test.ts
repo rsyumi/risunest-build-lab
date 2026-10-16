@@ -10,7 +10,7 @@ import {
     type PersistentRoot,
 } from '../persistentDataStore'
 import { createLeaseStub, createStoreStub } from '../persistentDataStore.testSupport'
-import { decodeRisuSave, encodeRisuSaveBlock, RisuSaveType } from '../risuSave'
+import { decodeRisuSave, encodeRisuSaveBlock, magicRisuSaveHeader, RisuSaveType } from '../risuSave'
 import {
     streamRisuSaveFromLease,
     streamRisuSaveFromStore,
@@ -133,6 +133,20 @@ describe('RisuSave persistent store adapter', () => {
         ).resolves.toEqual(
             Uint8Array.from([1, 0, 4, 114, 111, 111, 116, 2, 0, 0, 0, 123, 125]),
         )
+    })
+
+    it.each([false, true])('ignores upstream SaveKV type 12 blocks while preserving named plugin metadata (kv first=%s)', async (first) => {
+        const meta = { version: 1, owners: { synthetic: { enabled: true } } }
+        const blocks = await Promise.all([
+            encodeRisuSaveBlock({compression: false, type: RisuSaveType.PLUGIN_STORAGE_META, name: 'pluginStorageMeta', data: JSON.stringify(meta)}),
+            encodeRisuSaveBlock({compression: false, type: RisuSaveType.PLUGIN_STORAGE_META, name: 'kv:synthetic', data: JSON.stringify({unexpected: 'SaveKV'})}),
+        ])
+        if (first) blocks.reverse()
+        const bytes = new Uint8Array(magicRisuSaveHeader.length + blocks.reduce((sum, block) => sum + block.length, 0))
+        bytes.set(magicRisuSaveHeader)
+        let offset = magicRisuSaveHeader.length
+        for (const block of blocks) { bytes.set(block, offset); offset += block.length }
+        expect((await decodeRisuSave(bytes)).pluginStorageMeta).toEqual(meta)
     })
 
     it.each(risuSaveFixtures)(

@@ -98,6 +98,8 @@ export interface OfficialAccountSnapshotDependencies {
     account: Pick<AccountStorage, 'readItem' | 'writeItem'>
     cold: OfficialColdStorageTransport
     prepareCandidate(database: Database): Promise<Database>
+    /** Explicit native restores use the runtime's confirmed and fenced replacement path. */
+    restoreCandidate?(database: Database, expectedRevision: DataRevision, signal?: AbortSignal): Promise<{ revision: DataRevision }>
     markPublished(revision: DataRevision): Promise<void> | void
     ledger: OfficialAssetLedger
     /** Persists the published association so a restart can tell local from remote progress. */
@@ -639,7 +641,7 @@ export class OfficialAccountSnapshotAdapter implements OfficialRevisionPublisher
         const databaseFingerprint = await fingerprintDatabase(result.bytes)
         throwIfAborted(signal)
         let decoded: Database | null = null
-        if (association) {
+        if (association && !this.dependencies.restoreCandidate) {
             const remoteChanged = association.databaseFingerprint !== databaseFingerprint
             if (!remoteChanged && association.revision === expectedRevision) {
                 return { kind: 'unchanged' }
@@ -688,10 +690,9 @@ export class OfficialAccountSnapshotAdapter implements OfficialRevisionPublisher
         // Referenced assets load lazily on use, matching the upstream client;
         // a missing one degrades that item instead of failing the whole pull.
         throwIfAborted(signal)
-        const activated = await this.dependencies.store.replaceFromDatabase(
-            candidate,
-            expectedRevision,
-        )
+        const activated = this.dependencies.restoreCandidate
+            ? await this.dependencies.restoreCandidate(candidate, expectedRevision, signal)
+            : await this.dependencies.store.replaceFromDatabase(candidate, expectedRevision)
         this.rememberAssociation(this.dependencies.getAccountId ? accountId : candidate.account?.id ?? accountId, {
             revision: activated.revision,
             databaseFingerprint,

@@ -36,6 +36,7 @@ use crate::publication_upload::{
 
 pub(crate) struct PersistentStoreState {
     store: Mutex<Option<PersistentStore>>,
+    status_store: Mutex<Option<(String, PersistentStore)>>,
     snapshot_operations: Mutex<()>,
     renderer_gate: Arc<RendererGate>,
     archive_operations: Mutex<HashMap<String, Arc<AtomicBool>>>,
@@ -195,6 +196,18 @@ impl PersistentStoreState {
         with_store_mutex_admitted(self, operation, PersistentStore::open_native_job_store)
     }
 
+    pub(crate) fn with_status_job_store<T>(&self, operation: impl FnOnce(&PersistentStore) -> T) -> StoreResult<T> {
+        let permit = self.admit_renderer_operation()?;
+        let mut cached = self.status_store.lock().map_err(|_| renderer_gate_error())?;
+        with_store_mutex_admitted(self, &permit, |store| {
+            if cached.as_ref().is_none_or(|(instance, _)| instance != &store.gc_instance) {
+                *cached = Some((store.gc_instance.clone(), store.open_native_job_store()?));
+            }
+            Ok(())
+        })?;
+        Ok(operation(&cached.as_ref().unwrap().1))
+    }
+
     pub(crate) fn acquire_cleanup_maintenance(&self, timeout: std::time::Duration) -> StoreResult<DeviceMaintenanceGuard> {
         let deadline = std::time::Instant::now() + timeout;
         let mut state = self.renderer_gate.state.lock().map_err(|_| renderer_gate_error())?;
@@ -213,6 +226,7 @@ impl PersistentStoreState {
             state = waited.0;
         }
         drop(state);
+        self.status_store.lock().map_err(|_| renderer_gate_error())?.take();
         self.store.lock().map_err(|_| renderer_gate_error())?.take();
         Ok(maintenance)
     }
@@ -221,6 +235,7 @@ impl PersistentStoreState {
         let maintenance = self
             .try_acquire_renderer_maintenance()?
             .ok_or_else(renderer_gate_error)?;
+        self.status_store.lock().map_err(|_| renderer_gate_error())?.take();
         // No new operation can enter between draining and closing the store.
         // Reopening after the guard is released refreshes the connection after
         // native restore and discards leases owned by the previous renderer.
@@ -303,6 +318,7 @@ impl Default for PersistentStoreState {
     fn default() -> Self {
         Self {
             store: Mutex::new(None),
+            status_store: Mutex::new(None),
             snapshot_operations: Mutex::new(()),
             renderer_gate: Arc::new(RendererGate::default()),
             archive_operations: Mutex::new(HashMap::new()),
@@ -787,8 +803,9 @@ pub(crate) fn pds_read_conversation_message_metadata_window(
 pub(crate) fn pds_query_plugin_storage(
     state: State<'_, PersistentStoreState>,
     lease: Option<String>,
+    owner: Option<String>,
 ) -> Result<PluginStorageCatalog, StoreError> {
-    logged("pds_query_plugin_storage", with_store(state, |store| store.query_plugin_storage(lease.as_deref())))
+    logged("pds_query_plugin_storage", with_store(state, |store| store.query_plugin_storage_for_owner(lease.as_deref(), owner.as_deref())))
 }
 
 #[tauri::command(async)]
@@ -1868,23 +1885,31 @@ pub(crate) fn pds_list_plugin_device_storage(
 }
 
 #[tauri::command(async)]
+pub(crate) fn pds_plugin_device_sequence(
+    state: State<'_, PersistentStoreState>, owner: String, space: String, key: String,
+) -> Result<String, StoreError> {
+    logged("pds_plugin_device_sequence", with_store(state, |store| store.device_store()?.plugin_device_sequence(&owner, &space, &key)))
+}
+
+#[tauri::command(async)]
 pub(crate) fn pds_write_plugin_device_values(
     app: AppHandle,
     state: State<'_, PersistentStoreState>,
     owner: String,
     mutations: Vec<PluginDeviceMutation>,
-) -> Result<(), StoreError> {
+    observations: Option<Vec<super::device_store::plugin_values::PluginDeviceObservation>>,
+) -> Result<Vec<super::device_store::plugin_values::PluginDeviceObservation>, StoreError> {
     logged("pds_write_plugin_device_values", (|| {
-        let changed = with_store_mut(state, |store| {
+        let (changed, observed) = with_store_mut(state, |store| {
             let device = store.device_store_mut()?;
             let before = device.revision()?;
-            device.write_plugin_device_values(&owner, &mutations)?;
-            Ok(device.revision()? != before)
+            let observed = device.write_plugin_device_values_observed(&owner, &mutations, &observations.unwrap_or_default(), super::device_store::plugin_values::text_value::PART_BYTES as u64, super::device_store::plugin_values::text_value::REQUEST_BYTES)?;
+            Ok((device.revision()? != before, observed))
         })?;
         if changed {
             crate::server_sync::events::notify_device_changed(&app);
         }
-        Ok(())
+        Ok(observed)
     })())
 }
 
@@ -2047,7 +2072,8 @@ fn read_section_participation(
     })
 }
 
-fn set_section_participation(
+fn set_section_participation<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &PersistentStoreState,
     section: &str,
     participating: bool,
@@ -2057,11 +2083,14 @@ fn set_section_participation(
             message: "unknown device section".to_owned(),
         });
     };
-    with_store_mutex_mut(state, |store| {
-        store
-            .device_store_mut()?
-            .set_section_participating(section, participating)
-    })
+    let changed = with_store_mutex_mut(state, |store| {
+        let device = store.device_store_mut()?;
+        let before = device.section_state(section)?.participating;
+        device.set_section_participating(section, participating)?;
+        Ok(before != participating)
+    })?;
+    if changed { crate::server_sync::events::notify_device_changed(app); }
+    Ok(())
 }
 
 /// Which sections this device currently exchanges with a remote.
@@ -2074,11 +2103,12 @@ pub(crate) fn pds_read_section_participation(
 
 #[tauri::command(async)]
 pub(crate) fn pds_set_section_participating(
+    app: AppHandle,
     state: State<'_, PersistentStoreState>,
     section: String,
     participating: bool,
 ) -> Result<(), StoreError> {
-    logged("pds_set_section_participating", set_section_participation(&state, &section, participating))
+    logged("pds_set_section_participating", set_section_participation(&app, &state, &section, participating))
 }
 
 #[cfg(test)]
@@ -2466,7 +2496,10 @@ mod tests {
         })
         .unwrap();
 
+        state.with_status_job_store(|store| store.connection.execute_batch("CREATE TEMP TABLE synthetic_status_connection (value INTEGER)")).unwrap().unwrap();
+        assert!(state.status_store.lock().unwrap().is_some());
         let maintenance = state.acquire_device_maintenance().unwrap();
+        assert!(state.status_store.lock().unwrap().is_none());
         assert!(state.store.lock().unwrap().is_none());
         assert!(state.admit_renderer_operation().is_err());
         assert!(state.acquire_device_maintenance().is_err());
@@ -3086,6 +3119,7 @@ mod tests {
             store: Mutex::new(Some(
                 PersistentStore::open(directory.path()).expect("open persistent store"),
             )),
+            status_store: Mutex::new(None),
             snapshot_operations: Mutex::new(()),
             renderer_gate: Arc::new(RendererGate::default()),
             archive_operations: Mutex::new(HashMap::new()),
@@ -3284,6 +3318,12 @@ mod tests {
     /// row the user changed.
     #[test]
     fn local_data_command_sets_device_sections_participating() {
+        use tauri::Listener;
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let changes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let received = changes.clone();
+        app.listen("risu-server-sync-device-changed", move |_| { received.fetch_add(1, std::sync::atomic::Ordering::Relaxed); });
         let directory = tempdir().unwrap();
         let state = PersistentStoreState::default();
         open_renderer_persistent_store(&state, directory.path()).unwrap();
@@ -3297,14 +3337,17 @@ mod tests {
             vec![("hypa", true), ("local-plugins", false)]
         );
 
-        set_section_participation(&state, "local-plugins", true).unwrap();
+        set_section_participation(app.handle(), &state, "local-plugins", true).unwrap();
+        assert_eq!(changes.load(std::sync::atomic::Ordering::Relaxed), 1);
+        set_section_participation(app.handle(), &state, "local-plugins", true).unwrap();
+        assert_eq!(changes.load(std::sync::atomic::Ordering::Relaxed), 1);
         assert!(with_store_mutex(&state, |store| Ok(store
             .device_store()?
             .section_state(super::super::device_store::Section::LocalPlugins)?
             .participating))
         .unwrap());
 
-        assert!(set_section_participation(&state, "hypa", false).is_err());
+        assert!(set_section_participation(app.handle(), &state, "hypa", false).is_err());
         assert_eq!(
             read_section_participation(&state)
                 .unwrap()
@@ -3315,7 +3358,7 @@ mod tests {
         );
 
         assert!(matches!(
-            set_section_participation(&state, "library", true),
+            set_section_participation(app.handle(), &state, "library", true),
             Err(StoreError::Validation { .. })
         ));
     }

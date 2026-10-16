@@ -247,7 +247,6 @@ pub(crate) async fn control_request_with_timeout<T>(
 pub(crate) struct PageTracker {
     cursors: BTreeSet<String>,
     locators: BTreeSet<String>,
-    empty_page_seen: bool,
 }
 impl PageTracker {
     pub(crate) fn accept(
@@ -256,10 +255,6 @@ impl PageTracker {
         objects: &[ObjectReceipt],
         next: Option<&str>,
     ) -> Result<()> {
-        if objects.is_empty() && next.is_some() {
-            if self.empty_page_seen { return Err(corrupt()); }
-            self.empty_page_seen = true;
-        }
         for object in objects {
             object.locator.validate_for(repository)?;
             if !object.complete || object.byte_length == 0
@@ -1094,6 +1089,11 @@ mod tests {
             for index in 0..101 {
                 let (id, bytes) = h.foreign(LeaseKind::Work, index, NOW);
                 h.provider.seed(&id, ObjectRole::Lease, bytes);
+            }
+            for cursor in ["empty-1", "empty-2", "empty-3"] {
+                h.provider.script_page(Collection::Leases, Ok(super::super::contract::ObjectPage {
+                    objects: vec![], next_cursor: Some(cursor.into()),
+                }));
             }
             let survey = survey(&h.context(), &Cancellation::default()).await.unwrap();
             assert_eq!(survey.leases.len(), 101);

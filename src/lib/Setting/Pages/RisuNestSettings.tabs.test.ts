@@ -38,6 +38,7 @@ vi.mock('../RisuNest/LocalDataReset.svelte', child('local-data-reset'))
 vi.mock('./ServerSyncSettings.svelte', child('server-sync'))
 vi.mock('../ExternalStorage/ExternalStorageSettings.svelte', child('external-storage'))
 vi.mock('./RisuNestLocalData.svelte', child('local-data'))
+vi.mock('./RisuNestPluginStartup.svelte', child('plugin-startup'))
 vi.mock('./RisuNestNetworkLog.svelte', child('network-log'))
 vi.mock('./RisuNestPluginData.svelte', child('plugin-data'))
 
@@ -115,7 +116,7 @@ describe('RisuNest settings tabs', () => {
             'storage-dashboard', 'inlay-inventory', 'image-geometry', 'data-health', 'backup-restore', 'local-data-reset',
         ])
         open('sync')
-        expect(panelChildren()).toEqual(['server-sync', 'external-storage', 'local-data'])
+        expect(panelChildren()).toEqual(['server-sync', 'external-storage', 'plugin-startup', 'local-data'])
         open('plugin-data')
         expect(panelChildren()).toEqual(['plugin-data'])
         open('network-logs')

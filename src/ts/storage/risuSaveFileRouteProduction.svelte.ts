@@ -10,6 +10,7 @@ import { isTauri, isTauriIOS, isTauriAndroid, isTauriDesktop } from '../platform
 import {
     acknowledgeAndroidSafExport,
     copyNativeExportToAndroidSaf,
+    reserveAndroidSafDestination,
     markAndroidSafExportPublicationReady,
 } from './androidSafBridge'
 import {
@@ -123,6 +124,7 @@ const productionDependencies: RisuSaveFileRouteDependencies = {
     },
     withFlushedExport: withFlushedRisuSaveExport,
     copyAndroidExport: copyNativeExportToAndroidSaf,
+    reserveAndroidDestination: reserveAndroidSafDestination,
     markAndroidExportReady: markAndroidSafExportPublicationReady,
     acknowledgeAndroidExport: acknowledgeAndroidSafExport,
     reloadPlugins: loadPlugins,

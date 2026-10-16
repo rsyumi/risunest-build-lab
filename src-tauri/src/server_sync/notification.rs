@@ -2,7 +2,7 @@ use super::{client::ServerConfig, Result, SyncError};
 use futures::{SinkExt, StreamExt};
 use risunest_sync_wire::lww::SeqNotification;
 use std::time::Duration;
-use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http, Message};
 
 #[cfg(test)]
 #[derive(Default, serde::Serialize)]
@@ -24,6 +24,7 @@ pub(crate) fn reset_frame_counters() -> std::sync::Arc<FrameCounters> {
 
 pub(crate) async fn run(
     config: ServerConfig,
+    operation_id: Option<uuid::Uuid>,
     mut notice: impl FnMut(SeqNotification),
     connected: impl Fn(bool),
 ) -> Result<()> {
@@ -58,7 +59,7 @@ pub(crate) async fn run(
             .parse()
             .map_err(|_| SyncError::new("invalid-library", 400))?,
     );
-    let capture = risunest_network_log::begin("sync-websocket", "WS", url.as_str(), request.headers());
+    let capture = begin_capture(url.as_str(), request.headers(), operation_id);
     let secure = url.scheme() == "wss";
     let result = async {
         let connector = if secure {
@@ -89,6 +90,7 @@ pub(crate) async fn run(
             pong_timeout,
             capture,
             url.to_string(),
+            operation_id,
             #[cfg(test)]
             counters,
         )
@@ -106,6 +108,7 @@ async fn run_socket<S>(
     pong_timeout: Duration,
     mut capture: risunest_network_log::CaptureGuard,
     url: String,
+    operation_id: Option<uuid::Uuid>,
     #[cfg(test)] counters: Option<std::sync::Arc<FrameCounters>>,
 ) -> Result<()>
 where
@@ -123,7 +126,7 @@ where
             .unwrap_or(tokio::time::Instant::now() + Duration::from_secs(3600));
         tokio::select! {
             frame=socket.next()=> {
-                refresh_capture(&mut capture, &mut observing, &url);
+                refresh_capture(&mut capture, &mut observing, &url, operation_id);
                 if let Some(Ok(message)) = &frame { record_message(&capture, risunest_network_log::Side::Response, message); }
                 match frame {
                 Some(Ok(Message::Text(body)))=> {
@@ -150,7 +153,7 @@ where
                 }
             },
             _=interval.tick()=> {
-                refresh_capture(&mut capture, &mut observing, &url);
+                refresh_capture(&mut capture, &mut observing, &url, operation_id);
                 serial=serial.checked_add(1).ok_or_else(||SyncError::new("notification-overflow",409))?;
                 let bytes=serial.to_be_bytes().to_vec();
                 capture.append_message(risunest_network_log::Side::Request, &bytes, Some("ping"));
@@ -166,10 +169,16 @@ where
     result
 }
 
-fn refresh_capture(capture: &mut risunest_network_log::CaptureGuard, observing: &mut bool, url: &str) {
+fn begin_capture(url: &str, headers: &http::HeaderMap, operation_id: Option<uuid::Uuid>) -> risunest_network_log::CaptureGuard {
+    match operation_id {
+        Some(id) => risunest_network_log::begin_operation("sync-websocket", "WS", url, headers, id),
+        None => risunest_network_log::begin("sync-websocket", "WS", url, headers),
+    }
+}
+fn refresh_capture(capture: &mut risunest_network_log::CaptureGuard, observing: &mut bool, url: &str, operation_id: Option<uuid::Uuid>) {
     let enabled = risunest_network_log::enabled();
     if enabled && (!*observing || capture.was_stopped()) {
-        *capture = risunest_network_log::begin("sync-websocket", "WS", url, &Default::default());
+        *capture = begin_capture(url, &Default::default(), operation_id);
         capture.mark_partial();
     }
     *observing = enabled;
@@ -205,8 +214,15 @@ mod tests {
     }
     #[tokio::test]
     async fn native_websocket_uses_headers_delivers_seq_and_answers_real_ping() {
+        let _guard = crate::network_log::TEST_RECORDER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let logs = tempfile::tempdir().unwrap();
+        let recorder = risunest_network_log::Recorder::open(logs.path().join("recent"), logs.path().join("retained")).unwrap();
+        recorder.configure(risunest_network_log::Settings { enabled: true, ..Default::default() }).unwrap();
+        risunest_network_log::install(recorder.clone());
+        let operation_id = uuid::Uuid::new_v4();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let capture_url = format!("ws://{}/notify", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut socket = tokio_tungstenite::accept_hdr_async(
@@ -252,15 +268,27 @@ mod tests {
         let copy = received.clone();
         let connected = Arc::new(Mutex::new(Vec::new()));
         let connections = connected.clone();
+        let recording = recorder.clone();
         let error = run(
             config(endpoint),
-            move |frame| copy.lock().unwrap().push(frame),
+            Some(operation_id),
+            move |frame| {
+                copy.lock().unwrap().push(frame);
+                recording.configure(Default::default()).unwrap();
+                recording.configure(risunest_network_log::Settings { enabled: true, ..Default::default() }).unwrap();
+            },
             move |value| connections.lock().unwrap().push(value),
         )
         .await
         .unwrap_err();
         assert_eq!(error.code, "websocket-unavailable");
         server.await.unwrap();
+        let captures = recorder.list(risunest_network_log::Query { search: capture_url, ..Default::default() }).unwrap().items
+            .into_iter().filter(|item| item.operation_id.as_deref() == Some(operation_id.to_string().as_str())).collect::<Vec<_>>();
+        assert_eq!(captures.len(), 2, "resuming capture on the same socket keeps its operation identity");
+        assert!(captures.iter().any(|item| item.incomplete));
+        recorder.configure(Default::default()).unwrap();
+        recorder.shutdown();
         assert_eq!(
             *received.lock().unwrap(),
             vec![SeqNotification::Seq { seq: 1.into() }]
@@ -289,6 +317,7 @@ mod tests {
             Duration::from_millis(20),
             risunest_network_log::Capture::default().guard(),
             "ws://synthetic.invalid/notify".into(),
+            None,
             Some(frames.clone()),
         );
         tokio::pin!(run);

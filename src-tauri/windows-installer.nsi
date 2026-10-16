@@ -78,6 +78,7 @@ Var NoShortcutMode
 Var WixMode
 Var OldMainBinaryName
 Var ExistingVersionRelation
+Var ExistingLocationUnavailable
 Var RequestedInstallDir
 
 Name "${PRODUCTNAME}"
@@ -190,6 +191,7 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 Var ReinstallPageCheck
 Page custom PageReinstall PageLeaveReinstall
 Function PageReinstall
+  ${IfThen} $ExistingLocationUnavailable = 1 ${|} Abort ${|}
   ${If} $ExistingNsis != ""
     Call SkipIfPassive
     ${If} $ExistingVersionRelation = 0
@@ -498,6 +500,26 @@ FunctionEnd
   !include "{{this}}"
 {{/each}}
 
+Function SetDefaultInstallLocation
+    ; Set default install location
+    !if "${INSTALLMODE}" == "perMachine"
+      ${If} ${RunningX64}
+        !if "${ARCH}" == "x64"
+          StrCpy $INSTDIR "$PROGRAMFILES64\${PRODUCTNAME}"
+        !else if "${ARCH}" == "arm64"
+          StrCpy $INSTDIR "$PROGRAMFILES64\${PRODUCTNAME}"
+        !else
+          StrCpy $INSTDIR "$PROGRAMFILES\${PRODUCTNAME}"
+        !endif
+      ${Else}
+        StrCpy $INSTDIR "$PROGRAMFILES\${PRODUCTNAME}"
+      ${EndIf}
+    !else if "${INSTALLMODE}" == "currentUser"
+      StrCpy $INSTDIR "$LOCALAPPDATA\${PRODUCTNAME}"
+    !endif
+
+FunctionEnd
+
 Function .onInit
   StrCpy $RequestedInstallDir $INSTDIR
   ${GetOptions} $CMDLINE "/P" $PassiveMode
@@ -522,22 +544,7 @@ Function .onInit
   !insertmacro SetContext
 
   ${If} $INSTDIR == "${PLACEHOLDER_INSTALL_DIR}"
-    ; Set default install location
-    !if "${INSTALLMODE}" == "perMachine"
-      ${If} ${RunningX64}
-        !if "${ARCH}" == "x64"
-          StrCpy $INSTDIR "$PROGRAMFILES64\${PRODUCTNAME}"
-        !else if "${ARCH}" == "arm64"
-          StrCpy $INSTDIR "$PROGRAMFILES64\${PRODUCTNAME}"
-        !else
-          StrCpy $INSTDIR "$PROGRAMFILES\${PRODUCTNAME}"
-        !endif
-      ${Else}
-        StrCpy $INSTDIR "$PROGRAMFILES\${PRODUCTNAME}"
-      ${EndIf}
-    !else if "${INSTALLMODE}" == "currentUser"
-      StrCpy $INSTDIR "$LOCALAPPDATA\${PRODUCTNAME}"
-    !endif
+    Call SetDefaultInstallLocation
 
     Call RestorePreviousInstallLocation
   ${EndIf}
@@ -593,6 +600,18 @@ Function .onInit
       Call InitializationFailure
     ${EndIf}
     StrCpy $INSTDIR $0
+    !insertmacro CheckInstallVolume
+    ${If} $1 = -1
+      StrCpy $InstallFailureMessage "$(InstallVolumeMissing)"
+      ${If} ${Silent}
+      ${OrIf} $PassiveMode = 1
+        Call InitializationFailure
+      ${EndIf}
+      StrCpy $ExistingNsis ""
+      StrCpy $ExistingLocationUnavailable 1
+      Call SetDefaultInstallLocation
+      Return
+    ${EndIf}
     ${If} ${Silent}
     ${OrIf} $PassiveMode = 1
       ${If} $RequestedInstallDir != "${PLACEHOLDER_INSTALL_DIR}"
@@ -640,8 +659,10 @@ FunctionEnd
 
 Function InitializationFailure
   DetailPrint "$InstallFailureMessage"
-  IfSilent +2
+  ${IfNot} ${Silent}
+  ${AndIf} $PassiveMode != 1
     MessageBox MB_OK|MB_ICONSTOP "$InstallFailureMessage"
+  ${EndIf}
   SetErrorLevel 1
   Quit
 FunctionEnd
@@ -956,7 +977,9 @@ Section Uninstall
 
 
   ; Delete uninstaller
-  Delete "$INSTDIR\uninstall.exe"
+  !ifndef RISUNEST_DEFER_UNINSTALL_TEARDOWN
+    Delete "$INSTDIR\uninstall.exe"
+  !endif
 
   {{#each resources_ancestors}}
   RMDir /REBOOTOK "$INSTDIR\\{{this}}"
@@ -992,6 +1015,7 @@ Section Uninstall
     ${EndIf}
   ${EndIf}
 
+  !ifndef RISUNEST_DEFER_UNINSTALL_TEARDOWN
   ; Remove registry information for add/remove programs
   !if "${INSTALLMODE}" == "both"
     DeleteRegKey SHCTX "${UNINSTKEY}"
@@ -999,6 +1023,8 @@ Section Uninstall
     DeleteRegKey HKLM "${UNINSTKEY}"
   !else
     DeleteRegKey HKCU "${UNINSTKEY}"
+  !endif
+
   !endif
 
   ; Removes the Autostart entry for ${PRODUCTNAME} from the HKCU Run key if it exists.
@@ -1031,6 +1057,60 @@ Section Uninstall
 
   !ifmacrodef NSIS_HOOK_POSTUNINSTALL
     !insertmacro NSIS_HOOK_POSTUNINSTALL
+  !endif
+
+  !ifdef RISUNEST_DEFER_UNINSTALL_TEARDOWN
+    !if "${INSTALLMODE}" == "both"
+      ${If} $MultiUser.InstallMode == "AllUsers"
+        SetShellVarContext all
+      ${Else}
+        SetShellVarContext current
+      ${EndIf}
+      !define RISUNEST_UNINSTALL_REG_ROOT SHCTX
+    !else if "${INSTALLMODE}" == "perMachine"
+      !define RISUNEST_UNINSTALL_REG_ROOT HKLM
+    !else
+      !define RISUNEST_UNINSTALL_REG_ROOT HKCU
+    !endif
+    ClearErrors
+    DeleteRegKey ${RISUNEST_UNINSTALL_REG_ROOT} "${UNINSTKEY}"
+    ${If} ${Errors}
+      !if "${INSTALLMODE}" == "perMachine"
+        StrCpy $2 0x80000002
+      !else if "${INSTALLMODE}" == "both"
+        ${If} $MultiUser.InstallMode == "AllUsers"
+          StrCpy $2 0x80000002
+        ${Else}
+          StrCpy $2 0x80000001
+        ${EndIf}
+      !else
+        StrCpy $2 0x80000001
+      !endif
+      System::Call 'advapi32::RegOpenKeyExW(p r2, w "${UNINSTKEY}", i 0, i 0, *p .r1) i.r0'
+      ${If} $0 == 0
+        System::Call 'advapi32::RegCloseKey(p r1)'
+      ${EndIf}
+      ${If} $0 != 2
+        SetErrorLevel 1
+        Abort "removal-uninstall-registration-failed"
+      ${EndIf}
+    ${EndIf}
+    ClearErrors
+    Delete "$INSTDIR\uninstall.exe"
+    ${If} ${Errors}
+      ; _?= runs the uninstaller in place; its caller removes that image after exit.
+      StrCmp $EXEPATH "$INSTDIR\uninstall.exe" sync_uninstall_image_retained
+      WriteRegStr ${RISUNEST_UNINSTALL_REG_ROOT} "${UNINSTKEY}" "DisplayName" "${PRODUCTNAME}"
+      WriteRegStr ${RISUNEST_UNINSTALL_REG_ROOT} "${UNINSTKEY}" "UninstallString" "$\"$INSTDIR\uninstall.exe$\""
+      WriteRegStr ${RISUNEST_UNINSTALL_REG_ROOT} "${UNINSTKEY}" "InstallLocation" "$\"$INSTDIR$\""
+      WriteRegDWORD ${RISUNEST_UNINSTALL_REG_ROOT} "${UNINSTKEY}" "NoModify" 1
+      WriteRegDWORD ${RISUNEST_UNINSTALL_REG_ROOT} "${UNINSTKEY}" "NoRepair" 1
+      SetErrorLevel 1
+      Abort "removal-uninstaller-delete-failed"
+    ${EndIf}
+    sync_uninstall_image_retained:
+    !undef RISUNEST_UNINSTALL_REG_ROOT
+    !insertmacro NSIS_HOOK_FINALUNINSTALL
   !endif
 
   ; Auto close if passive mode or updating
