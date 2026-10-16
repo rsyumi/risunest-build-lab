@@ -278,6 +278,20 @@ describe('loadLoreBookV3Prompt characterization', () => {
         expect(session.readChatVariable('__internal_da_flagged')).toBe('true')
     })
 
+    test.each([true, false])('does not carry match flags from an earlier entry (activated: %s)', async (matched) => {
+        setLorebook([
+            { key: matched ? 'alpha' : 'absent', content: '@@keep_activate_after_match\n@@dont_activate_after_match\nflagged', id: 'flagged' },
+            { key: 'alpha', content: 'plain', id: 'plain' },
+        ], [{ role: 'user', data: 'alpha' }])
+        const conversation = DBState.db.characters[0].chats[0]
+        live.session = new ActiveConversationSession({
+            characterId: 'character-test', conversationId: 'conversation-test', conversation, storeRevision: 0,
+        })
+        await activePrompts()
+        expect(live.session.readChatVariable('__internal_ka_plain')).toBeUndefined()
+        expect(live.session.readChatVariable('__internal_da_plain')).toBeUndefined()
+    })
+
     test('reads lore depth from the pinned operation instead of the live DBState array', async () => {
         setLorebook(
             [{ key: 'pinned', content: 'matched-pinned-history' }],

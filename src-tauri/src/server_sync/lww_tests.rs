@@ -1869,3 +1869,42 @@ fn a_stamp_beyond_a_new_clock_sample_stops_receiving_without_advancing() {
     assert_eq!(server_cursor(&store), None);
     assert_ne!(store.read_root(None).unwrap().value["language"], "ja");
 }
+
+
+#[test]
+fn receive_frontier_survives_retry_and_old_page_readers() {
+    let server = LocalServerFixture::new();
+    let (_a, mut a) = local();
+    let (_b, mut b) = local();
+    let ca = server.client(&a);
+    let cb = server.client(&b);
+    a.commit(&WorkingSetCommit {
+        expected_revision: a.revision().unwrap(),
+        unit_mutations: Some((0..300).map(|index| UnitMutation::Set {
+            key: UnitKey::new(&["plugin", "synthetic", &format!("key-{index}")]).unwrap(),
+            value: serde_json::json!(index),
+        }).collect()),
+        ..Default::default()
+    }).unwrap();
+    drain_publications(&ca, &mut a, &[]).unwrap();
+    let page = { let request = header(&b); cb.receive_page_with_frontier(&mut b, &request) }.unwrap();
+    assert!(page.more);
+    let frontier = page.receive_frontier.unwrap();
+    assert!(page.page.progress.cursor < frontier);
+    let encoded = serde_json::to_string(&page).unwrap();
+    let old: crate::persistent_store::lww::StageReceive = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(old.changes.len(), page.page.changes.len());
+    let retried = { let request = header(&b); cb.receive_page_with_frontier(&mut b, &request) }.unwrap();
+    assert_eq!(retried.receive_frontier, Some(frontier));
+    assert!(retried.more);
+    let legacy = serde_json::to_string(&old).unwrap();
+    cb.log.0.execute("UPDATE receive_pages SET body=?1", [legacy]).unwrap();
+    let legacy_retry = { let request = header(&b); cb.receive_page_with_frontier(&mut b, &request) }.unwrap();
+    assert!(legacy_retry.more);
+    assert!(legacy_retry.receive_frontier.is_none());
+    receive(&cb, &mut b);
+    let complete = { let request = header(&b); cb.receive_page_with_frontier(&mut b, &request) }.unwrap();
+    assert!(!complete.more);
+    assert_eq!(complete.receive_frontier, Some(complete.page.progress.cursor));
+    assert_eq!(b.query_plugin_storage(None).unwrap().items.len(), 300);
+}

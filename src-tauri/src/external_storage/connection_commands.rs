@@ -964,6 +964,50 @@ pub(crate) fn external_storage_prepare_renewal(
     })())
 }
 
+#[tauri::command]
+pub(crate) async fn external_storage_change_endpoint(
+    app: AppHandle,
+    state: State<'_, ConnectionCommandState>,
+    connection_id: String,
+    endpoint: String,
+) -> Result<ConnectionResult> {
+    logged("external_storage_change_endpoint", async move {
+        let _cleanup_guard = state.admit()?;
+        let root = connection_root(&app)?;
+        let stored = ConnectionStore::open(&root)?.read(&connection_id)?;
+        let key = read_root_key(secrets::repository_key_vault(&root).as_ref(), &stored.root_key_ref).await?;
+        change_endpoint(&root, &stored, endpoint, |config| connection::dependencies_for_config(&root, config), &key, &Cancellation::default()).await
+    }.await)
+}
+
+pub(super) async fn change_endpoint(
+    root: &std::path::Path,
+    stored: &StoredConnection,
+    endpoint: String,
+    dependencies: impl FnOnce(&super::contract::ConnectionConfig) -> Result<Dependencies>,
+    key: &[u8; 32],
+    cancel: &Cancellation,
+) -> Result<ConnectionResult> {
+    if !matches!(stored.config.provider.as_str(), "webdav" | "s3") {
+        return Err(ProviderError::new(ErrorKind::Unsupported));
+    }
+    let mut config = stored.config.clone();
+    config.endpoint = endpoint.trim().to_owned();
+    let provider = connection::provider_for(&config, dependencies(&config)?)?;
+    let (handle, capabilities) = provider.open_repository(&config, &SecretRef(stored.credential_ref.clone()),
+        super::contract::OpenMode::Existing, cancel).await?;
+    if handle.repository_id != stored.provider_repository_id
+        || handle.connection_identity != stored.descriptor_locator.connection_identity {
+        return Err(ProviderError::new(ErrorKind::RepositoryMismatch));
+    }
+    require_repository_strategy(&capabilities, stored.descriptor.publication_strategy)?;
+    descriptor::read(root, provider.as_ref(), &handle, &stored.descriptor_locator, &stored.descriptor, key, cancel).await
+        .map_err(|error| if error.kind == ErrorKind::NotFound { ProviderError::new(ErrorKind::RepositoryMismatch) } else { error })?;
+    cancel.check()?;
+    let connection = ConnectionStore::open(root)?.replace_endpoint(stored, config.endpoint)?;
+    Ok(ConnectionResult { connection: connection::summary(&connection), recovery: None })
+}
+
 async fn renew_connection(
     app: &AppHandle,
     connection_id: &str,
@@ -2842,6 +2886,55 @@ mod tests {
         let requests = server.requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
         assert!(requests[0].headers.starts_with("GET /synthetic-bucket?"), "{}", requests[0].headers.lines().next().unwrap_or_default());
+    }
+
+    #[test]
+    fn changing_an_s3_address_uses_the_new_http_origin_before_repository_verification() {
+        use super::super::{fake::MemoryVault, wire_fixture::{Reply, WireServer}};
+        for previous in ["http://previous.invalid:9000", "https://previous.invalid"] {
+            let server = WireServer::start(vec![Reply::Http {
+                status: 403,
+                headers: vec![("Content-Type".into(), "application/xml".into())],
+                body: b"<Error><Code>AccessDenied</Code></Error>".to_vec(),
+            }]);
+            let root = tempfile::tempdir().unwrap();
+            let mut stored = renewal_fixture();
+            stored.config.provider = "s3".into();
+            stored.config.profile = Some("generic".into());
+            stored.config.endpoint = previous.into();
+            stored.config.location = BTreeMap::from([
+                ("bucket".into(), "synthetic-bucket".into()),
+                ("prefix".into(), "risunest".into()),
+                ("region".into(), "us-east-1".into()),
+                ("addressing".into(), "path".into()),
+            ]);
+            let secret = connection::encode_secret("s3", ProviderSecretInput::S3 {
+                access_key_id: "AKIASYNTHETICEXAMPLE".into(), secret_access_key: "synthetic/secret/key".into(),
+            }).unwrap();
+            stored.config.account_id = secret.account_id.clone().unwrap();
+            ConnectionStore::open(root.path()).unwrap().insert(&stored).unwrap();
+            let endpoint = format!(" {} ", server.url.origin().ascii_serialization());
+            for use_previous in [true, false] {
+                let failure = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(
+                    change_endpoint(root.path(), &stored, endpoint.clone(), |config| {
+                        let config = if use_previous { &stored.config } else { config };
+                        let mut dependencies = connection::dependencies_for_config(root.path(), config)?;
+                        dependencies.vault = Arc::new(MemoryVault::with(&stored.credential_ref, &secret.bytes.0));
+                        Ok(dependencies)
+                    }, &[7; 32], &Cancellation::default()),
+                ).err().expect("address replacement must fail before a repository is authenticated");
+                if use_previous {
+                    assert_eq!(failure.kind, ErrorKind::Unsupported);
+                    assert!(server.requests.lock().unwrap().is_empty());
+                } else {
+                    assert_eq!(failure.http_status, Some(403), "{previous}: {failure:?}");
+                    assert_ne!(failure.kind, ErrorKind::Unsupported);
+                    assert_eq!(server.requests.lock().unwrap().len(), 1);
+                }
+            }
+            let reread = ConnectionStore::open(root.path()).unwrap().read(&stored.id).unwrap();
+            assert_eq!(serde_json::to_value(reread).unwrap(), serde_json::to_value(stored).unwrap());
+        }
     }
 
     #[test]

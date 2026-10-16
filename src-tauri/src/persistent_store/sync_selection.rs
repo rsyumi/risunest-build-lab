@@ -651,7 +651,7 @@ impl super::PersistentStore {
                 result
             }.map_err(|e| invalid(&e.to_string()))?;
         }
-        let frozen = super::lww::FrozenRows::new()?;
+        let frozen = super::lww::FrozenRows::new(&self.repository_root)?;
         for change in changes { frozen.insert(super::lww::intent_rows::target_row(change)?)?; }
         let encoded = super::lww::source_digest_rows(&frozen)?;
         let existing: Option<(String,String,String)> = self.connection.query_row("SELECT inspection_id,receive_id,changes FROM lww_binding_stages WHERE staging_id=?1", [staging_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
@@ -718,10 +718,10 @@ impl super::PersistentStore {
         if receive != request.receive_id || epoch.as_deref() != Some(request.expected_selection_epoch.as_str()) || stage_library != request.library_id || stage_target != request.target_id { return Err(invalid("Stale or wrong-target replacement stage")); }
         if request.header.request_id != request.receive_id { return Err(invalid("Binding receive request identity changed")); }
         let library_committed:bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM lww_requests WHERE request_id=?1)", [&request.header.request_id], |r| r.get(0))?;
-        let changes = super::lww::binding_source_rows(&self.connection, &request.staging_id)?;
+        let changes = super::lww::binding_source_rows(&self.connection, &self.repository_root, &request.staging_id)?;
         // The stage catalog is proved once, inside the activation transaction.
         if !library_committed {
-            super::lww::validate_binding_source_rows(&self.connection,&request.staging_id,&request.header,&changes)?;
+            super::lww::validate_binding_source_rows(&self.connection,&self.repository_root,&request.staging_id,&request.header,&changes)?;
         }
         self.lww_replace_target_rows(&request.header,&request.staging_id,&changes)
     }
@@ -738,8 +738,8 @@ fn validate_binding_inspection_stages(store: &super::PersistentStore, inspection
         store.prepare_replace_commit(&staging,None)?;
         validate_binding_stage_content(&store.connection,&staging)?;
         let source_header = super::lww::Header { binding_authority:authority,request_id:receive };
-        let changes = super::lww::binding_source_rows(&store.connection, &staging)?;
-        super::lww::validate_binding_source_rows(&store.connection,&staging,&source_header,&changes)?;
+        let changes = super::lww::binding_source_rows(&store.connection, &store.repository_root, &staging)?;
+        super::lww::validate_binding_source_rows(&store.connection,&store.repository_root,&staging,&source_header,&changes)?;
     }
     Ok(())
 }

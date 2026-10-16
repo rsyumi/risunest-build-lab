@@ -3,6 +3,8 @@ import {
   AndroidSafDestinationError,
   acknowledgeAndroidSafExport,
   copyNativeExportToAndroidSaf,
+  reserveAndroidSafDestination,
+  withAndroidSafDestination,
   getAndroidSafExportSourceId,
   getAndroidSafExportStatus,
   listenAndroidSafDestinationEvents,
@@ -118,6 +120,7 @@ export function rememberPortableExport(
     | { type: "desktopPath" }
     | { type: "androidSaf" | "iosFiles"; suggestedName: string },
   store: PortableExportIntentStore = createPortableExportIntentStore(),
+  requestId?: string,
 ): void {
   store.write({
     schema: "risunest.portable-export-intent/v1",
@@ -132,6 +135,7 @@ export function rememberPortableExport(
       ? { suggestedName: destination.suggestedName }
       : {}),
     phase: "waiting-native",
+    ...(destination.type === "androidSaf" && requestId ? {requestId} : {}),
   });
 }
 
@@ -256,7 +260,7 @@ export async function resumePendingPortableExport(
         "missing-android-handoff",
         intent.jobId,
       );
-    const continuing = intent.phase === "publishing";
+    const continuing = intent.phase === "publishing" || !!intent.requestId;
     if (!continuing) {
       intent = {
         ...intent,
@@ -393,6 +397,11 @@ async function resumeAndroidPortablePublication(
       if (terminal) return finish(terminal);
       const active = await getAndroidSafExportSourceId(bridge);
       if (settled) return;
+      if (active === intent.jobId && intent.phase === "waiting-native") {
+        await bridge.releaseExport?.(intent.requestId!);
+        const interrupted = await read();
+        if (interrupted) return finish(interrupted);
+      }
       if (!active || !result.handoffPath?.includes(active)) {
         const completed = await read();
         if (settled) return;
@@ -415,27 +424,31 @@ export function portableAndroidPublicationDependencies(): Pick<
 > {
   return {
     async publishAndroid(intent, result) {
-      const copied = await copyNativeExportToAndroidSaf(
-        {
-          sourcePath: result.handoffPath!,
-          suggestedName: intent.suggestedName!,
-          deferAcknowledgement: true,
-        },
-        {
-          createRequestId: () => intent.requestId!,
-          bridge: productionAndroidBridge(),
-          addEventListener: (name, listener) =>
-            window.addEventListener(name, listener),
-          removeEventListener: (name, listener) =>
-            window.removeEventListener(name, listener),
-        },
-      );
-      return {
-        requestId: intent.requestId!,
-        state: "succeeded",
-        bytes: copied.bytes,
-        warningCodes: copied.warningCodes,
+      const dependencies = {
+        createRequestId: () => intent.requestId!,
+        bridge: productionAndroidBridge(),
+        addEventListener: (name: string, listener: (event: Event) => void) => window.addEventListener(name, listener),
+        removeEventListener: (name: string, listener: (event: Event) => void) => window.removeEventListener(name, listener),
       };
+      const reservation = await reserveAndroidSafDestination(intent.suggestedName!, "risuSave", undefined, dependencies);
+      return withAndroidSafDestination(reservation, async () => {
+        await reservation.bind(intent.jobId);
+        const copied = await copyNativeExportToAndroidSaf(
+          {
+            reservation,
+            sourcePath: result.handoffPath!,
+            suggestedName: intent.suggestedName!,
+            deferAcknowledgement: true,
+          },
+          dependencies,
+        );
+        return {
+          requestId: intent.requestId!,
+          state: "succeeded",
+          bytes: copied.bytes,
+          warningCodes: copied.warningCodes,
+        };
+      });
     },
     resumeAndroid: resumeAndroidPortablePublication,
     acknowledgeAndroid: acknowledgeAndroidSafExport,

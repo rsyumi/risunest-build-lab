@@ -89,6 +89,9 @@ fn patched_collections_capture_deletions_and_keep_unrelated_records_out() {
 #[test]
 fn character_field_batch_preserves_unedited_body_and_filters_local_statics() {
     let (_directory, mut store) = fixture();
+    store.connection.execute_batch("CREATE TEMP TABLE detail_writes (bytes INTEGER);
+        CREATE TEMP TRIGGER count_detail_writes AFTER UPDATE OF detail ON characters
+        BEGIN INSERT INTO detail_writes VALUES (length(CAST(NEW.detail AS BLOB))); END;").unwrap();
     hash_work::reset_hash_work();
     store.commit(&WorkingSetCommit {
         expected_revision: 1,
@@ -110,6 +113,8 @@ fn character_field_batch_preserves_unedited_body_and_filters_local_statics() {
     assert_eq!(shared(&store, &["character", "synthetic-character", "name"]), Some(json!("After")));
     assert_eq!(shared(&store, &["character", "synthetic-character", "creatorNotes"]), None);
     assert_eq!(shared(&store, &["character", "synthetic-character", "statics"]), Some(json!({"tokens":7})));
+    let writes: i64 = store.connection.query_row("SELECT count(*) FROM detail_writes", [], |row| row.get(0)).unwrap();
+    assert_eq!(writes, 1, "one local commit rewrites the large character body once");
 }
 
 #[test]
@@ -143,15 +148,21 @@ fn compact_root_intent_recovers_before_and_after_library_commit_exactly_once() {
 #[test]
 fn root_patch_and_later_unit_edit_keep_order_and_reject_stale_revisions() {
     let (_directory, mut store) = fixture();
+    store.connection.execute_batch("CREATE TEMP TABLE root_writes (bytes INTEGER);
+        CREATE TEMP TRIGGER count_root_writes AFTER UPDATE OF value ON root
+        BEGIN INSERT INTO root_writes VALUES (length(CAST(NEW.value AS BLOB))); END;").unwrap();
     let input = WorkingSetCommit {
         expected_revision: 1,
         root_mutations: Some(vec![RootMutation::Set { key: "language".into(), value: json!("ko") }]),
-        unit_mutations: Some(vec![set(&["root", "language"], json!("ja"))]),
+        unit_mutations: Some(vec![set(&["root", "language"], json!("ja")), set(&["root", "username"], json!("synthetic"))]),
         ..Default::default()
     };
     store.commit(&input).unwrap();
     assert_eq!(store.read_root(None).unwrap().value["language"], "ja");
     assert_eq!(shared(&store, &["root", "language"]), Some(json!("ja")));
+    assert_eq!(store.read_root(None).unwrap().value["username"], "synthetic");
+    assert_eq!(store.connection.query_row("SELECT count(*) FROM root_writes", [], |row| row.get::<_,i64>(0)).unwrap(), 2,
+        "the root patch and the following group each write once");
     assert!(matches!(store.commit(&input), Err(StoreError::RevisionConflict { expected: 1, actual: 2 })));
     assert_eq!(store.read_root(None).unwrap().value["language"], "ja");
 }

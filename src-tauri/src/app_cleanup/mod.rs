@@ -140,7 +140,7 @@ pub(crate) fn closing(app: &AppHandle) -> bool {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Status {
     pending: bool, mode: Option<Mode>, error: Option<String>, can_cancel: bool,
-    profile: Option<String>, named_profiles: bool,
+    profile: Option<String>, named_profiles: bool, cleanup_folder: String,
 }
 
 #[tauri::command]
@@ -148,7 +148,7 @@ pub(crate) fn app_cleanup_status(app: AppHandle) -> Result<Status> {
     logged("app_cleanup_status", (|| {
         let state = app.try_state::<CleanupState>().ok_or("cleanup-state-unavailable")?;
         let (profile, named_profiles) = state.profile_status();
-        let status = |pending, mode, error, can_cancel| Status { pending, mode, error, can_cancel, profile: profile.clone(), named_profiles };
+        let status = |pending, mode, error, can_cancel| Status { pending, mode, error, can_cancel, profile: profile.clone(), named_profiles, cleanup_folder: state.paths.control.to_string_lossy().into_owned() };
         if let Some(error) = &state.unavailable {
             return Ok(status(state.pending.load(Ordering::Acquire), None, Some(error.clone()), false));
         }

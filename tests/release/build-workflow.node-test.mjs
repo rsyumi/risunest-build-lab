@@ -253,6 +253,19 @@ test("Android prepares Gradle before builds and bounds SDK and download retries"
   }
 });
 
+test("iOS portable source tests run before the simulator release gate", () => {
+  const start = workflow.indexOf("\n  app-ios-tests:\n");
+  const job = workflow.slice(start, workflow.indexOf("\n  sync-gui-tests:\n", start));
+  const verify = contents => {
+    const install = contents.indexOf("pnpm install --frozen-lockfile");
+    const swift = contents.indexOf("pnpm ios:test:portable-source");
+    const simulator = contents.indexOf("bash scripts/ios-native-tests.sh");
+    assert.ok(install >= 0 && swift > install && simulator > swift);
+  };
+  verify(job);
+  assert.throws(() => verify(job.replace("pnpm ios:test:portable-source", "")));
+});
+
 test("APT retries downloads internally and failed index refreshes remain failures", () => {
   for (const name of ["release", "native-check", "linux-package-check", "pr-check"]) {
     const contents = readFileSync(new URL(`../../.github/workflows/${name}.yml`, import.meta.url), "utf8");

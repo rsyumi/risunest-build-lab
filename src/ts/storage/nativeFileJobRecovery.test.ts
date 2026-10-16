@@ -109,15 +109,15 @@ describe('native file job bootstrap reconciliation', () => {
         expect(result.pendingRestoreAcknowledgements).toEqual(['portable'])
     })
 
-    it('acknowledges failed restores immediately', async () => {
+    it.each(['corrupt-input', 'activation-outcome-unresolved'])('continues startup past a failed restore (%s)', async code => {
         const forgotten: string[] = []
         const failed = restoreStatus('restore-failed', 'failed', 'complete')
-        failed.error = { code: 'corrupt-input', message: 'bad file' }
+        failed.error = { code, message: 'synthetic failure' }
 
         const pending = await reconcileNativeRestoresBeforeBootstrap({
             invoke: vi.fn(async (command, args) => {
                 if (command === 'native_file_job_list') return [
-                    failed,
+                    failed, restoreStatus('restore-committed', 'succeeded', 'complete'),
                 ]
                 if (command === 'native_file_job_forget') {
                     forgotten.push(String(args?.jobId))
@@ -128,7 +128,7 @@ describe('native file job bootstrap reconciliation', () => {
             wait: vi.fn(async () => undefined),
         })
 
-        expect(pending).toEqual([])
+        expect(pending).toEqual(['restore-committed'])
         expect(forgotten).toEqual(['restore-failed'])
     })
 
@@ -489,11 +489,11 @@ describe('native file job bootstrap reconciliation', () => {
         expect(calls).toEqual(['native_file_job_list'])
     })
 
-    it('preserves a character CharX handoff still owned by persisted Android SAF state', async () => {
+    it.each(['source', 'job'] as const)('preserves a character CharX handoff owned by persisted Android SAF %s identity', async (owner) => {
         const calls: string[] = []
         const exportId = '123e4567-e89b-42d3-a456-426614174004'
         const handoffPath = `C:\\app\\native-file-jobs\\handoffs\\risu-charx-${exportId}.charx`
-        const androidSafExportId = vi.fn(() => exportId)
+        const androidSafExportId = vi.fn(() => owner === 'job' ? 'charx-export' : exportId)
         const dependencies = {
             invoke: vi.fn(async (command: string) => {
                 calls.push(command)

@@ -1,3 +1,4 @@
+import type { PluginStorageWriteCheck } from '../plugins/pluginStorageProtection'
 import { captureMaterializedCharacter, diffMaterializedCharacter, diffRecordCollection, recordCollections, diffFields } from './persistentUnitCapture'
 import { isTauri } from '../platform'
 import { Mutex } from '../mutex'
@@ -509,6 +510,7 @@ export interface PreparedUnitIntent {
 }
 
 export interface PersistentReplacementOptions {
+    signal?: AbortSignal
     upstreamImport?: boolean
     upstreamImportWarnings?: string[]
     firstRun?: boolean
@@ -1673,6 +1675,7 @@ export class SaveCoordinator {
     mutatePersistentPluginStorage(
         reason: string,
         mutations: readonly PluginStorageMutation[],
+        check?: PluginStorageWriteCheck,
     ): Promise<void> {
         this.assertInitialized()
         this.assertPersistentMutationAllowed()
@@ -1707,10 +1710,16 @@ export class SaveCoordinator {
                 liveBeforeCommit === null
                     ? null
                     : capturePluginMutationScope(liveBeforeCommit, committedMutations)
+            const clearOwners = new Set(committedMutations.filter(mutation => mutation.type === 'clear').map(mutation => mutation.owner))
+            const clearedKeys = check && clearOwners.size
+                ? (await Promise.all([...clearOwners].map(owner => this.dependencies.store.queryPluginStorage(owner))))
+                    .flatMap(catalog => catalog.items) : []
+            check?.validate()
             const committed = await this.commitRoutine({
                 expectedRevision: revision,
                 pluginStorage: committedMutations,
             })
+            check?.committed(clearedKeys)
             this.currentRevision = committed.revision
             this.dirtyGeneration++
             if (baseline !== null) {
@@ -2773,6 +2782,9 @@ export class SaveCoordinator {
         }
         while (true) {
             localState.settled = false
+            if (this.pendingCharacterAddition && !this.pendingCharacterAddition.locallyAdded) {
+                await this.commitPendingCharacterAddition(publishOfficial)
+            }
             const generation = this.dirtyGeneration
             const captured = this.capture()
             const pendingConversationMutations = [...this.pendingConversationMutations]
@@ -2933,9 +2945,7 @@ export class SaveCoordinator {
 
             let replacementIsAddition = false
             if (addition) {
-                if (!addition.pending.locallyAdded) {
-                    commit.addCharacter = addition.character
-                } else if (
+                if (
                     addition.canonical !== addition.pending.baseline &&
                     !commit.replaceCharacter &&
                     !commit.conversations
@@ -3084,11 +3094,7 @@ export class SaveCoordinator {
                     if (replacementIsAddition && addition) {
                         addition.pending.baseline = addition.canonical
                     }
-                    if (commit.addCharacter && addition) {
-                        addition.pending.locallyAdded = true
-                        addition.pending.baseline = addition.canonical
-                    }
-                    if (addition && (commit.addCharacter || replacementIsAddition)) {
+                    if (addition && replacementIsAddition) {
                         this.materializedBaselines.set(addition.pending.characterId, addition.character)
                         if (!this.dependencies.canonicalCapture?.materializedCharacters) {
                             const json = this.dependencies.canonicalCapture?.characters?.().get(addition.pending.characterId)
@@ -4993,7 +4999,7 @@ export class SaveCoordinator {
         }
     }
 
-    commitPersistentUnitIntent(reason: string, unitMutations: readonly PersistentUnitMutation[], conversations: readonly ConversationMutation[] = [], wholeMessages: readonly WholeMessageIntent[] = [], onCommitted?: (revision: DataRevision) => Promise<void>): Promise<DataRevision> {
+    commitPersistentUnitIntent(reason: string, unitMutations: readonly PersistentUnitMutation[], conversations: readonly ConversationMutation[] = [], wholeMessages: readonly WholeMessageIntent[] = [], onCommitted?: (revision: DataRevision) => Promise<void>, check?: PluginStorageWriteCheck): Promise<DataRevision> {
         this.assertPersistentMutationAllowed()
         const mutations = canonicalClone([...unitMutations])
         const ranges = canonicalClone([...conversations])
@@ -5010,7 +5016,7 @@ export class SaveCoordinator {
                         start: 0, deleteCount: metadata?.value.totalMessages ?? 0, messages: target.messages })
                 }
                 return { unitMutations: mutations, conversations: [...ranges, ...replacements] }
-            }, onCommitted))!
+            }, async revision => { check?.committed(); await onCommitted?.(revision) }, check))!
         })
     }
 
@@ -5029,7 +5035,7 @@ export class SaveCoordinator {
         })
     }
 
-    private async commitUnitIntentAttempts(prepare: (revision: DataRevision) => Promise<PreparedUnitIntent | null>, onCommitted?: (revision: DataRevision) => Promise<void>): Promise<DataRevision | null> {
+    private async commitUnitIntentAttempts(prepare: (revision: DataRevision) => Promise<PreparedUnitIntent | null>, onCommitted?: (revision: DataRevision) => Promise<void>, check?: PluginStorageWriteCheck): Promise<DataRevision | null> {
         while (true) {
             const revision = this.revision
             const prepared = await prepare(revision)
@@ -5037,6 +5043,7 @@ export class SaveCoordinator {
             if (!prepared.unitMutations.length && !prepared.conversations.length) return revision
             let committedRevision: DataRevision | undefined
             try {
+                check?.validate()
                 const result = await this.dependencies.store.commit({ expectedRevision: revision, unitMutations: [...prepared.unitMutations], conversations: [...prepared.conversations] })
                 committedRevision = result.revision
                 this.currentRevision = result.revision
@@ -5066,6 +5073,56 @@ export class SaveCoordinator {
         if (immutable) return { pending, character: immutable, canonical: immutable }
         const canonical = canonicalJson(value)
         return { pending, character: JSON.parse(canonical) as CompleteCharacter, canonical }
+    }
+
+    private async commitPendingCharacterAddition(publishOfficial: boolean): Promise<void> {
+        const pending = this.pendingCharacterAddition!
+        let addition: NonNullable<ReturnType<SaveCoordinator['capturePendingAddition']>>
+        let committed: { revision: DataRevision }
+        try {
+            addition = this.capturePendingAddition()!
+            committed = await this.commitFlush({ expectedRevision: this.revision, addCharacter: addition.character })
+        } catch (error) {
+            const refusal = error as { code?: string; name?: string }
+            const permanent = refusal?.code === 'validation' || refusal?.code === 'unsaveable-value' || refusal?.code === 'payload-too-large'
+                || refusal?.name === 'UnsaveableValueError' || refusal?.name === 'PayloadTooLargeError'
+            if (permanent && this.committedRefreshRevision === null) {
+                let stored: Awaited<ReturnType<PersistentDataStore['readCharacter']>>
+                try { stored = await this.dependencies.store.readCharacter(pending.characterId) }
+                catch (readError) { this.reportBackgroundError(readError); throw error }
+                if (stored) {
+                    this.markCommittedWorkingSetRefreshRequired(stored.revision, error)
+                    throw error
+                }
+                const root = canonicalClone(this.dependencies.captureRoot())
+                removeCharacterIdFromOrder(root, pending.characterId)
+                this.dependencies.publishCharacterMutation?.({ revision: this.revision, root,
+                    characterId: pending.characterId, kind: 'delete', character: null })
+                this.pendingCharacterAddition = null
+                this.materializedBaselines.delete(pending.characterId)
+                this.materializedCanonicalBaselines.delete(pending.characterId)
+                if (this.characterBaselineId === pending.characterId) this.setCharacterBaseline(this.capture())
+            }
+            throw error
+        }
+        pending.locallyAdded = true
+        pending.baseline = addition.canonical
+        this.currentRevision = committed.revision
+        this.materializedBaselines.set(pending.characterId, addition.character)
+        if (this.dependencies.captureSelectedCharacter()?.chaId === pending.characterId) {
+            this.characterBaseline = typeof addition.canonical === 'string' ? addition.canonical : canonicalJson(addition.character)
+            this.characterBaselineId = pending.characterId
+        }
+        if (this.windowedCharacterBaseline) {
+            this.setWindowedCharacterBaseline(this.windowedCharacterBaseline, committed.revision,
+                this.windowedCharacterBaseline.authority.persistedSessionVersion)
+            if (this.pendingWindowedActivationChange) this.pendingWindowedActivationChange.authority.storeRevision = committed.revision
+        } else this.dependencies.onStorageOnlyRevision?.(committed.revision)
+        this.dependencies.onLocalRevision?.(committed.revision)
+        if (this.dependencies.officialPublisher) {
+            if (publishOfficial) await this.stagePublication(committed.revision)
+            else this.deferPublication(committed.revision)
+        }
     }
 
     private beginReservedAddition(reserved: ReservedCharacterAddition): void {

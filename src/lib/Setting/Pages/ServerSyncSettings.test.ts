@@ -14,7 +14,6 @@ vi.mock('src/ts/storage/sync/serverSyncProduction', () => ({
 }))
 vi.mock('src/ts/storage/sync/serverAssetResidency', () => ({ getAssetResidencyStatus: f.status, setAssetResidencyPolicy: f.policy, evictLocalAssets: f.evict, cancelLocalAssetCleanup: f.cancel, cancelAssetResidencyOperation: f.cancel }))
 vi.mock('src/ts/storage/sync/serverSyncRegistration', () => ({ parseServerRegistration: () => ({ endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' }) }))
-vi.mock('src/ts/storage/sync/serverSyncRegistrationInbox', () => ({ serverRegistrationInbox: { changed: { subscribe: () => () => {} }, releaseConsumed: vi.fn() } }))
 vi.mock('src/ts/storage/sync/serverSyncQr', () => ({ get canScanServerRegistration() { return f.scan }, createServerQrScanner: () => f.scanner }))
 vi.mock('src/ts/storage/sync/bindingRegistry', () => ({ bindSyncTarget: f.bind }))
 vi.mock('src/ts/storage/sync/bindingNative', () => ({ createNativeSyncBindingBridge: () => ({ state: f.bindingState }) }))
@@ -28,7 +27,8 @@ vi.mock('src/ts/gui/nativeFileJobDialogModel', async importOriginal => ({ format
 vi.mock('src/ts/process/templates/templates', () => ({ prebuiltPresets: {} }))
 vi.mock('src/ts/storage/database.svelte', () => ({ setPreset: f.preset }))
 vi.mock('src/ts/storage/nativeFileJobManager', async () => { const { writable } = await import('svelte/store'); return { cancelActiveNativeFileOperation: vi.fn(), dismissNativeFileOperationOutcome: vi.fn(), nativeFileJobHost: writable('dialog'), nativeFileOperation: writable(null), nativeFileOperationOutcome: writable(null) } })
-vi.mock('src/ts/storage/officialAccountMessage', () => ({ isExpectedHubMessage: vi.fn(), resolveExpectedOfficialAccountMessageUrl: vi.fn() }))
+vi.mock('src/ts/storage/persistentDataRuntime.svelte', async () => ({ persistentWorkingSetRefreshRevision: (await import('svelte/store')).readable(null) }))
+vi.mock('src/ts/storage/officialAccountMessage',() => ({ isExpectedHubMessage: vi.fn(), resolveExpectedOfficialAccountMessageUrl: vi.fn() }))
 vi.mock('src/ts/storage/portableBackupFileRouteProduction.svelte', () => ({ restoreBackupFromSystemPicker: vi.fn() }))
 vi.mock('src/ts/storage/risuSaveFileRouteProduction.svelte', () => ({ importRisuSaveFromSystemPicker: vi.fn() }))
 vi.mock('src/ts/storage/sync/external/bridge', () => ({ getExternalStorageBridge: () => ({}) }))
@@ -37,6 +37,7 @@ vi.mock('src/lib/Setting/ExternalStorage/ConnectionForm.svelte', () => ({ defaul
 vi.mock('src/lib/Others/Onboarding/onboardingWeave', () => ({ observeOnboardingWeave: () => () => {} }))
 vi.mock('src/ts/stores.svelte', () => ({ DBState: f.state }))
 import ServerSyncSettings from './ServerSyncSettings.svelte'
+import { serverRegistrationInbox } from 'src/ts/storage/sync/serverSyncRegistrationInbox'
 import { assetCleanupProgress, type AssetCleanupState } from 'src/ts/storage/sync/serverAssetCleanupProgress'
 import type { AssetResidencyStatus } from 'src/ts/storage/sync/serverAssetResidency'
 import { assetResidencyStatus } from 'src/ts/storage/sync/serverAssetResidency.testSupport'
@@ -46,6 +47,7 @@ import Onboarding from 'src/lib/Others/Onboarding/Onboarding.svelte'
 let component: ReturnType<typeof mount> | undefined
 let host: HTMLDivElement
 beforeEach(() => {
+    serverRegistrationInbox.clear()
     assetCleanupProgress.set(undefined)
     vi.clearAllMocks(); f.native = true; f.scan = false; f.os = 'windows'; f.listeners.clear(); f.view = { status: { configured: false }, paused: false }; host = document.createElement('div'); document.body.append(host)
     for (const mock of [f.disconnect, f.hold, f.release, f.status, f.policy, f.evict, f.cancel, f.checkbox, f.action, f.complete, f.ensure]) mock.mockReset()
@@ -154,6 +156,14 @@ it.each(['', 'server-unreachable', 'clock-skew', 'unauthorized'])('offers no new
     expect(findButton(languageEnglish.lwwSync.newDeviceAction)).toBeUndefined()
 })
 describe('a registration code the server refuses', () => {
+    it.each([false, true])('describes a writer collision for the current connection state (bound=%s)', async bound => {
+        f.view = { status: { configured: true, bound }, paused: true, error: 'writer-collision' }
+        component = mount(ServerSyncSettings, { target: host })
+        await settle()
+        expect(host.querySelector('[role="alert"]')?.textContent).toBe(bound
+            ? languageEnglish.lwwSync.writerCollision : languageEnglish.lwwSync.writerCollisionNotConnected)
+        expect(f.connect).not.toHaveBeenCalled()
+    })
     const usedCodes = ['registration-used', 'registration-integrity', 'registration-not-new']
     it.each(usedCodes.flatMap(error => [{ error, tone: 'settings' as const }, { error, tone: 'onboarding' as const }]))('asks for a new registration code for "$error" in $tone', async ({ error, tone }) => {
         f.view = { status: { configured: true, bound: false }, paused: true, error }
@@ -256,6 +266,15 @@ describe('a registration code the server refuses', () => {
             expect(host.textContent).toContain(languageEnglish.risuNest.serverSync.reviewTitle)
             expect(host.querySelector('[role="alert"]')).toBeNull()
             expect(f.dismiss).toHaveBeenCalledOnce()
+        })
+        it('drops the refusal once a registration link delivers a new code', async () => {
+            component = mount(ServerSyncSettings, { target: host, props: { connectTarget: refusal('registration-used') } })
+            await registration(); click(languageEnglish.risuNest.serverSync.connect); await settle()
+            expect(host.querySelector('[role="alert"]')?.textContent).toBe(languageEnglish.lwwSync.registrationUsed)
+            serverRegistrationInbox.stage('synthetic-new-registration-link')
+            await settle()
+            expect(host.textContent).toContain(languageEnglish.risuNest.serverSync.reviewTitle)
+            expect(host.querySelector('[role="alert"]')).toBeNull()
         })
         it.each(['server-unreachable', 'device-credential-unavailable', 'clock-skew'])('keeps the "%s" connection failure when a new code is read', async error => {
             component = mount(ServerSyncSettings, { target: host, props: { connectTarget: refusal(error) } })
@@ -1027,14 +1046,16 @@ describe('layout', () => {
         { name: 'connected', view: { status: { configured: true, bound: true }, paused: false, error: '' }, label: sync.ready, tone: 'connected' },
         { name: 'running', view: { status: { configured: true, bound: true }, paused: false, running: true, error: '' }, label: sync.running, tone: 'working' },
         { name: 'paused', view: { status: { configured: true, bound: true }, paused: true, error: '' }, label: sync.paused, tone: 'paused' },
-        { name: 'stopped by an error', view: { status: { configured: true, bound: true }, paused: true, error: 'unit-too-large' }, label: sync.blocked, tone: 'attention' },
+        { name: 'failing and retrying', view: { status: { configured: true, bound: true }, paused: false, error: 'server-unreachable' }, label: sync.failed, tone: 'failed', notice: 'info' },
+        { name: 'stopped by an error', view: { status: { configured: true, bound: true }, paused: true, error: 'unit-too-large' }, label: sync.blocked, tone: 'attention', notice: 'danger' },
         { name: 'revoked', view: { status: { configured: true, bound: true }, paused: true, error: 'unauthorized' }, label: sync.registrationRequired, tone: 'attention' },
-    ])('labels the connection state when $name', async ({ view, label, tone }) => {
+    ])('labels the connection state when $name', async ({ view, label, tone, notice }) => {
         f.view = view
         component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
         await settle()
         expect(statusText()).toBe(label)
         expect(host.querySelector('[data-tone]')?.getAttribute('data-tone')).toBe(tone)
+        if (notice) expect(host.querySelector('[data-notice][role]')?.getAttribute('data-notice')).toBe(notice)
     })
     it('leaves the section heading and the sync storage to the settings page', async () => {
         const cache = { totalBytes: 2, cacheBytes: 1, protectedBytes: 0, reclaimableBytes: 1, ledgerBytes: 1, databaseBytes: 0, blockedReason: null }

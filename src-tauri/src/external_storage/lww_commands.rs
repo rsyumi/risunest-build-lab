@@ -517,7 +517,7 @@ async fn publish_round(
 }
 
 /// One page per call: pages from the last listing come first, and a new
-/// listing runs only once every one of them is finished. Returns the page
+/// listing runs on the next round after every page is finished. Returns the page
 /// and whether this call found a page finished and recorded the sync time.
 async fn receive_page(
     store: &mut crate::persistent_store::PersistentStore,
@@ -529,7 +529,7 @@ async fn receive_page(
 ) -> Result<(Option<StageReceive>, bool)> {
     let mut finished = 0;
     let mut page = next_receive_page(store, queue, authority, &mut finished)?;
-    if page.is_none() {
+    if page.is_none() && finished == 0 {
         *queue = engine.receive_requests_cached(store, authority, checkpoints, cancel).await?.into();
         page = next_receive_page(store, queue, authority, &mut finished)?;
     }
@@ -1019,12 +1019,21 @@ mod tests {
             f.b.lww_stage_receive(&page).unwrap();
             f.b.lww_apply_receive(&ApplyReceive { header: page.header.clone(), generating: Vec::new() }).unwrap();
             f.b.lww_finish_receive(&page.header).unwrap();
+            f.a.commit(&WorkingSetCommit {
+                expected_revision: f.a.revision().unwrap(),
+                unit_mutations: Some(vec![UnitMutation::Set {
+                    key: UnitKey::new(&["root", "language"]).unwrap(), value: serde_json::json!("en"),
+                }]),
+                ..Default::default()
+            }).unwrap();
+            publish_round(&mut f.sender, &mut f.a, DecimalU64(0), &[], None, &cancel).await.unwrap();
             let (next, recorded) = receive_page(&mut f.b, &f.receiver, &mut queue, &checkpoints, DecimalU64(0), &cancel).await.unwrap();
             assert!(next.is_none());
             assert!(recorded);
             let recorded_at = last_sync(f.directory_b.path(), "receiver").expect("a finished page records the sync time");
-            let (quiet, recorded) = receive_page(&mut f.b, &f.receiver, &mut queue, &checkpoints, DecimalU64(0), &cancel).await.unwrap();
-            assert!(quiet.is_none() && !recorded);
+            let (following, recorded) = receive_page(&mut f.b, &f.receiver, &mut queue, &checkpoints, DecimalU64(0), &cancel).await.unwrap();
+            assert!(following.is_some(), "the next round receives arrivals after the captured listing");
+            assert!(!recorded);
             assert_eq!(last_sync(f.directory_b.path(), "receiver"), Some(recorded_at));
 
             let summary = serde_json::to_value(super::super::connection::summary(

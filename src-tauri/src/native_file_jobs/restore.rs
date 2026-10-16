@@ -751,10 +751,16 @@ fn stream_legacy_characters<S: TrackedSource>(
             JsonSlot::Value(value) => value,
             JsonSlot::Undefined => Value::Null,
         };
-        if upstream_import::exclude_record(&character, excluded) { continue; }
+        if upstream_import::exclude_record(&character, excluded) {
+            job.record_restore_omission("excludedCharacters", 1).map_err(|error| job_error(job, error))?;
+            continue;
+        }
         character = sink.prepare_character(character).map_err(store_error)?;
         if !sink.expands_cold_payloads() { omit_unavailable_cold(&mut character, job)?; }
-        if upstream_import::exclude_record(&character, excluded) { continue; }
+        if upstream_import::exclude_record(&character, excluded) {
+            job.record_restore_omission("excludedCharacters", 1).map_err(|error| job_error(job, error))?;
+            continue;
+        }
         if !prepare_legacy_character(&mut character, &mut character_ids) { continue; }
         retained += 1;
         pocket_features::character(&mut character, &format!("character:{index}"));
@@ -1426,12 +1432,14 @@ fn parse_and_stage<R: Read>(
                     )));
                 }
                 if upstream_import::exclude_record(&value, &mut excluded) {
+                    job.record_restore_omission("excludedCharacters", 1).map_err(|error| job_error(job, error))?;
                     reader.counts.blocks += 1;
                     reader.complete_item()?;
                     continue;
                 }
                 value = sink.prepare_character(value).map_err(store_error)?;
                 if upstream_import::exclude_record(&value, &mut excluded) {
+                    job.record_restore_omission("excludedCharacters", 1).map_err(|error| job_error(job, error))?;
                     reader.counts.blocks += 1;
                     reader.complete_item()?;
                     continue;
@@ -1920,6 +1928,7 @@ fn read_character_json<R: Read>(reader: &mut R, seed: CharacterSeed<'_>) -> Resu
         return Err(<serde_json::Error as de::Error>::custom("character block name does not match chaId"));
     }
     if upstream_import::excluded_character(metadata.kind.as_deref(), metadata.character_id.as_deref()) {
+        seed.job.record_restore_omission("excludedCharacters", 1).map_err(<serde_json::Error as de::Error>::custom)?;
         seed.retained.set(false);
         return Ok(());
     }
@@ -1933,6 +1942,7 @@ fn read_character_json<R: Read>(reader: &mut R, seed: CharacterSeed<'_>) -> Resu
             let mut payload = File::open(path).map_err(|error| staging_io(error, seed.staging_error))?;
             if let Some(metadata) = read_character_metadata(&mut payload, &seed, true)? {
                 if upstream_import::excluded_character(metadata.kind.as_deref(), metadata.character_id.as_deref()) {
+                    seed.job.record_restore_omission("excludedCharacters", 1).map_err(<serde_json::Error as de::Error>::custom)?;
                     seed.retained.set(false);
                     return Ok(());
                 }
@@ -3002,6 +3012,8 @@ mod tests {
 
     struct StoreSink {
         store: Mutex<PersistentStore>,
+        incremental: bool,
+        prepared_characters: std::collections::HashMap<String, Value>,
         fail_character_batches: bool,
         record_activation: bool,
         lose_commit_reply: bool,
@@ -3062,7 +3074,12 @@ mod tests {
         }
 
         fn supports_incremental_characters(&self) -> bool {
-            true
+            self.incremental
+        }
+
+        fn prepare_character(&self, character: Value) -> StoreResult<Value> {
+            Ok(character.get("chaId").and_then(Value::as_str)
+                .and_then(|id| self.prepared_characters.get(id)).cloned().unwrap_or(character))
         }
 
         fn expands_cold_payloads(&self) -> bool { self.cold_payloads.is_some() }
@@ -3196,6 +3213,8 @@ mod tests {
             directory,
             StoreSink {
                 store: Mutex::new(store),
+                incremental: true,
+                prepared_characters: Default::default(),
                 fail_character_batches: false,
                 record_activation: false,
                 lose_commit_reply: false,
@@ -3306,8 +3325,9 @@ mod tests {
 
     #[test]
     fn upstream_import_discards_groups_and_rooms_before_staging_their_chats() {
-        for compressed in [false, true] {
-            let (directory, sink) = fixture();
+        for (compressed, incremental) in [(false, false), (true, false), (false, true), (true, true)] {
+            let (directory, mut sink) = fixture();
+            sink.incremental = incremental;
             let mut blocks = valid_blocks();
             blocks[0] = block(1, false, "root", &json!({
                 "__directory": ["preset", "modules", "loadouts", "plugins", "pluginStorage", "char-1", "group", "§temp", "config"],
@@ -3326,19 +3346,25 @@ mod tests {
             let result = restore_block_risu_save_path(&source, 1, &job, &sink).unwrap();
             let restored = sink.store.lock().unwrap().materialize(Some(2)).unwrap();
             assert_eq!(result.character_count, 1);
+            assert_eq!(job.status().incomplete_restore_preview.unwrap().omissions.excluded_characters, 2);
+            assert!(result.warning_codes.contains(&"excluded-backup-characters:2".to_owned()));
+            assert_eq!(job.status().detail.unwrap().counts.skipped, 0);
             assert_eq!(restored["characters"].as_array().unwrap().len(), 1);
             assert_eq!(restored["characters"][0]["chaId"], "char-1");
             assert_eq!(restored["characterOrder"], json!([{"id":"folder","data":["char-1"]}]));
             assert_eq!(restored["loadouts"][0]["characterIds"], json!(["char-1"]));
             assert_eq!(restored["messageNameTemplate"], "{{char}}: {{slot}}");
             assert_eq!(restored["botPresets"][0]["namedMessageRole"], "system");
-            assert_eq!(sink.incremental_character_calls.load(Ordering::Acquire), 1);
+            assert_eq!(sink.incremental_character_calls.load(Ordering::Acquire), usize::from(incremental));
         }
     }
 
     #[test]
     fn upstream_import_discards_a_group_restored_from_a_cold_character() {
+        for incremental in [false, true] {
         let (directory, mut sink) = fixture();
+        sink.incremental = incremental;
+        sink.prepared_characters.insert("char-1".to_owned(), json!({"chaId":"char-1","name":"Group","type":"group","chats":[]}));
         sink.cold_payloads = Some(std::collections::HashMap::from([
             write_cold_payload(directory.path(), "character", &json!({"character":{
                 "chaId":"char-1","name":"Group","chats":[cold_chat("unused")],"type":"group"
@@ -3348,8 +3374,41 @@ mod tests {
         let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
         let result = restore_block_risu_save_path(&source, 1, &job, &sink).unwrap();
         assert_eq!(result.character_count, 0);
+        assert_eq!(job.status().incomplete_restore_preview.unwrap().omissions.excluded_characters, 1);
+        assert!(result.warning_codes.contains(&"excluded-backup-characters:1".to_owned()));
         assert_eq!(sink.incremental_character_calls.load(Ordering::Acquire), 0);
         assert!(sink.unavailable_cold.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn legacy_import_counts_each_excluded_character_once_before_and_after_cold_expansion() {
+        for historical_json in [false, true] {
+        let (directory, mut sink) = fixture();
+        sink.prepared_characters.insert("cold".to_owned(), json!({"chaId":"cold","type":"group","chats":[]}));
+        let database = json!({"characters":[
+            {"chaId":"kept","type":"character","name":"Kept","chats":[]},
+            {"chaId":"§temp","type":"group","name":"Both","chats":[]},
+            {"type":"group","name":"Without ID","chats":[]},
+            {"chaId":"cold","type":"character","name":"Prepared","chats":[]}
+        ], "botPresets":[], "characterOrder":["§temp","cold","kept"]});
+        let payload = super::legacy_stream_tests::messagepack_bytes(&super::legacy_stream_tests::messagepack_from_json(&database));
+        let source = directory.path().join("excluded-legacy.risudat");
+        let bytes = if historical_json {
+            let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(&serde_json::to_vec(&database).unwrap()).unwrap();
+            encoder.finish().unwrap()
+        } else { legacy_wire(7, &payload) };
+        fs::write(&source, bytes).unwrap();
+        let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+        let result = restore_risu_save(&source, 1, &job, &sink).unwrap();
+        assert_eq!(result.character_count, 1);
+        assert_eq!(job.status().incomplete_restore_preview.unwrap().omissions.excluded_characters, 3);
+        assert!(result.warning_codes.contains(&"excluded-backup-characters:3".to_owned()));
+        let restored = sink.store.lock().unwrap().materialize(Some(2)).unwrap();
+        assert_eq!(restored["characters"][0]["name"], "Kept");
+        assert_eq!(restored["characterOrder"], json!(["kept"]));
+        }
     }
 
     #[test]
@@ -4797,7 +4856,8 @@ mod tests {
         let mut projection = None;
         for format in fixture["formats"].as_array().unwrap() {
             let bytes = base64::engine::general_purpose::STANDARD.decode(format["bytes"].as_str().unwrap()).unwrap();
-            for mode in ["standalone", "archive", "encrypted"] {
+            for mode in ["standalone", "archive", "encrypted", "{}", "null", "[]", "true", r#""synthetic""#,
+                r#"{"type":"none"}"#, r#"{"type":"synthetic"}"#, r#"{"type":42}"#] {
                 let archived = mode != "standalone";
                 let encrypted = mode == "encrypted";
                 let (directory, mut sink) = self::fixture();
@@ -4814,10 +4874,15 @@ mod tests {
                         let metadata = directory.path().join("metadata");
                         fs::write(&metadata, br#"{"type":"account","time":1}"#).unwrap();
                         write_container_entry(&mut output, "encryption.risudat", &metadata);
+                    } else if mode != "archive" {
+                        let metadata = directory.path().join("metadata");
+                        fs::write(&metadata, mode).unwrap();
+                        write_container_entry(&mut output, "encryption.risudat", &metadata);
                     }
                     write_container_entry(&mut output, "database.risudat", &source);
                     drop(output);
-                    restore_container_payloads_with_key(&archive, directory.path(), &mut sink, &job, RestoreLimits::default(), fixture["key"].as_str()).unwrap();
+                    let key = if encrypted { fixture["key"].as_str() } else { None };
+                    restore_container_payloads_with_key(&archive, directory.path(), &mut sink, &job, RestoreLimits::default(), key).unwrap();
                 } else {
                     restore_risu_save(&source, 1, &job, &sink).unwrap();
                 }
@@ -4830,6 +4895,28 @@ mod tests {
                 if let Some(expected) = &projection { assert_eq!(&restored, expected, "{format}"); }
                 else { projection = Some(restored); }
             }
+        }
+    }
+
+    #[test]
+    fn readable_non_account_metadata_does_not_allow_an_invalid_database() {
+        for metadata in ["{}", "null", r#"{"type":"synthetic"}"#] {
+            let (directory, mut sink) = fixture();
+            let before = sink.store.lock().unwrap().materialize(None).unwrap();
+            let source = directory.path().join("invalid.risudat");
+            fs::write(&source, b"not a database").unwrap();
+            let meta = directory.path().join("metadata");
+            fs::write(&meta, metadata).unwrap();
+            let archive = directory.path().join("invalid.bin");
+            let mut output = File::create(&archive).unwrap();
+            write_container_entry(&mut output, "encryption.risudat", &meta);
+            write_container_entry(&mut output, "database.risudat", &source);
+            drop(output);
+            let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+            let failure = restore_container_payloads_with_key(&archive, directory.path(), &mut sink, &job, RestoreLimits::default(), None).unwrap_err();
+            assert!(!failure.to_string().contains("backup-encryption-unsupported"));
+            assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 1);
+            assert_eq!(sink.store.lock().unwrap().materialize(None).unwrap(), before);
         }
     }
 
@@ -4911,6 +4998,8 @@ mod tests {
         let exported_path = PathBuf::from(&exported.path);
         let sink = StoreSink {
             store: Mutex::new(store),
+            incremental: true,
+            prepared_characters: Default::default(),
             fail_character_batches: false,
             record_activation: false,
             lose_commit_reply: false,

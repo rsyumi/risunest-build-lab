@@ -15,6 +15,7 @@ const stages = {
   obsolete: 'Removing obsolete RisuNest Sync program files...',
   files: 'Removing RisuNest Sync program files...',
   prepare: 'Stopping RisuNest Sync and preparing the installation...',
+  baseline: 'Stopping RisuNest Sync and preparing the installation...',
   schedule: 'Applying scheduled update settings...',
   autostart: 'Registering automatic server startup...',
   start: 'Starting RisuNest Sync and checking the server response...',
@@ -23,6 +24,7 @@ const stages = {
   cleanup: 'Stopping the server and removing startup and update tasks...',
   data: 'Removing RisuNest Sync server data...',
   forget: 'Removing RisuNest Sync installation registration...',
+  commit: 'Removing RisuNest Sync installation registration...',
   'finish-removal': 'Finishing RisuNest Sync removal...',
   update: 'Stopping RisuNest Sync for the update...',
   app: 'Removing RisuNest application data...',
@@ -33,6 +35,7 @@ function commandStage(command) {
   if (command.includes('obsolete-files')) return 'obsolete';
   if (command.includes('remove-files')) return 'files';
   if (command.includes('installer removal-check')) return 'check';
+  if (command.includes('installer preserve-files')) return 'baseline';
   if (command.includes('installer prepare')) return 'prepare';
   if (command.includes('schedule reconcile')) return 'schedule';
   if (command.includes('autostart install')) return 'autostart';
@@ -42,6 +45,8 @@ function commandStage(command) {
   if (command.includes('uninstall lock-held')) return 'cleanup';
   if (command.includes('installer delete-data')) return 'data';
   if (command.includes('forget-removal')) return 'forget';
+  if (command.includes('commit-removal')) return 'commit';
+  if (command.includes('resume-removal')) return 'files';
   throw new Error(`Unrecognized synthetic manager command: ${command}`);
 }
 
@@ -219,18 +224,18 @@ SectionEnd
     const expectStages = (result, names, overrides = {}) => {
       assert.deepEqual(result.progress, names.map(name => [name, overrides[name] ?? stages[name]]));
     };
-    expectStages(run('sync', 'install'), ['prepare', 'register', 'obsolete', 'schedule', 'autostart', 'start', 'finish']);
+    expectStages(run('sync', 'install'), ['prepare', 'baseline', 'register', 'obsolete', 'schedule', 'autostart', 'start', 'finish']);
     expectStages(run('sync', 'fresh', { existing: false }), ['register', 'schedule', 'autostart', 'start']);
     const removing = { prepare: 'Stopping RisuNest Sync and preparing removal...', finish: 'Preparing to remove RisuNest Sync server data...' };
-    expectStages(run('sync', 'preserve', { remove: true }), ['check', 'prepare', 'cleanup', 'files', 'finish-removal', 'forget'], removing);
-    expectStages(run('sync', 'delete', { remove: true, deleteData: true }), ['check', 'prepare', 'cleanup', 'finish', 'data', 'files', 'forget'], removing);
+    expectStages(run('sync', 'preserve', { remove: true }), ['check', 'prepare', 'cleanup', 'files', 'finish-removal', 'forget', 'commit'], removing);
+    expectStages(run('sync', 'delete', { remove: true, deleteData: true }), ['check', 'prepare', 'cleanup', 'finish', 'data', 'files', 'forget', 'commit'], removing);
     expectStages(run('sync', 'update', { remove: true, update: true, deleteData: true }), ['update']);
     expectStages(run('app', 'app-delete', { remove: true, deleteData: true }), ['app']);
     expectStages(run('app', 'app-preserve', { remove: true }), []);
     expectStages(run('app', 'app-update', { remove: true, update: true, deleteData: true }), []);
 
     for (const [stage, message] of [
-      ['register', /installation could not be registered/], ['obsolete', /program files could not be removed/], ['prepare', /prepared for installation/], ['schedule', /Scheduled update settings could not be applied/],
+      ['baseline', /prepared for installation/], ['register', /installation could not be registered/], ['obsolete', /program files could not be removed/], ['prepare', /prepared for installation/], ['schedule', /Scheduled update settings could not be applied/],
       ['autostart', /Automatic server startup could not be registered/], ['start', /could not be started or verified/],
       ['finish', /installation could not be finalized/],
     ]) {
@@ -244,7 +249,7 @@ SectionEnd
     for (const [stage, message] of [
       ['files', /removal is incomplete/], ['check', /removal checks did not pass/], ['prepare', /prepared for removal/],
       ['cleanup', /could not stop the server or remove/], ['finish', /preparing to remove server data/],
-      ['data', /server data could not be completely removed/], ['forget', /installation registration could not be removed/], ['update', /prepared for the update/],
+      ['data', /server data could not be completely removed/], ['forget', /installation registration could not be removed/], ['commit', /installation registration could not be removed/], ['update', /prepared for the update/],
     ]) {
       const result = run('sync', `remove-fail-${stage}`, { remove: true, deleteData: true, update: stage === 'update', fail: stage });
       assert.match(result.failure, message);

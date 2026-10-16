@@ -799,6 +799,12 @@ async fn run_inner_locked(root: &Path, server: &Path, mode: RunMode) -> Result<R
     }
     let prior_status = status.clone();
     let installed_files = validate_installed_marker(&install, env!("CARGO_PKG_VERSION"))?;
+    #[cfg(windows)]
+    let installed_files = {
+        let mut files = installed_files;
+        crate::removal::include_install_baseline(&install, &mut files)?;
+        files
+    };
     status.deferred_until = None;
     transition(root, &mut status, UpdatePhase::Checking, None)?;
 

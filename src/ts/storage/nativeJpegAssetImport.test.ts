@@ -4,6 +4,7 @@ import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
 vi.mock('./persistentDataRuntime.svelte', () => ({
     acquireDestructiveReplacementFence: vi.fn(),
     capturePersistentMutationToken: vi.fn(),
+    getPersistentDataRuntime: vi.fn(),
 }))
 
 import {
@@ -14,6 +15,7 @@ import type { NativeFileJobActivationCommittedError } from './nativeFileJobs'
 import type { Database } from './database.svelte'
 import { IndexedDbPersistentDataStore } from './indexedDbPersistentDataStore'
 import { capturePersistentPluginStorage, capturePersistentPresets, capturePersistentRoot, createPersistentDataRuntime } from './persistentDataRuntime'
+import { registerCommittedWorkingSetContinuation, retryCommittedWorkingSetRefreshWithContinuation } from './committedWorkingSetContinuation'
 
 function dependencies(statuses: unknown[]): NativeJpegAssetImportDependencies {
     const invoke = vi.fn(async (command: string) => {
@@ -32,6 +34,7 @@ function dependencies(statuses: unknown[]): NativeJpegAssetImportDependencies {
             refreshCommittedWorkingSet: vi.fn(async () => undefined),
             release: vi.fn(),
         })),
+        getRuntime: () => ({ markCommittedWorkingSetRefreshRequired: vi.fn(), getStorageAuthorityEpoch: () => 0 }),
     }
 }
 
@@ -177,7 +180,7 @@ describe('native JPEG asset import', () => {
         expect(acquiredFence.release).toHaveBeenCalledOnce()
     })
 
-    it('reports the committed import once as a local revision', async () => {
+    it.each(['success', 'lost-poll', 'no-commit', 'revision-read-failed', 'late-commit', 'unresolved-until-retry', 'continuation-in-flight'] as const)('reconciles the native revision before releasing the import fence (%s)', async (outcome) => {
         const initial = {
             username: 'User', botPresets: [], pluginCustomStorage: {},
             characters: [{ type: 'character', chaId: 'character-1', name: 'Character', chatPage: 0, chats: [] }],
@@ -206,36 +209,107 @@ describe('native JPEG asset import', () => {
         await runtime.initializeActiveWorkingSet(database)
         const before = runtime.revision
         let committed = 0
+        let statusReads = 0
+        let allowCompletion = false
+        let forgotten = false
+        const nativeCommit = async () => {
+            expect(() => runtime.assertPersistentMutationAllowed()).toThrow(/replacement is active/i)
+            committed = (await store.commit({ expectedRevision: before,
+                unitMutations: [{ type: 'set', key: JSON.stringify(['character', 'character-1', 'notes']), value: 'image' }],
+            })).revision
+        }
         const deps: NativeJpegAssetImportDependencies = {
             async invoke(command, args) {
                 if (command === 'native_file_job_start') {
                     // The native job commits the new image at the fenced revision.
-                    const request = (args as { request: { expectedRevision: number } }).request
-                    committed = (await store.commit({
-                        expectedRevision: request.expectedRevision,
-                        unitMutations: [{ type: 'set', key: JSON.stringify(['character', 'character-1', 'notes']), value: 'image' }],
-                    })).revision
+                    expect((args as { request: { expectedRevision: number } }).request.expectedRevision).toBe(before)
+                    if (!['no-commit', 'late-commit', 'unresolved-until-retry', 'continuation-in-flight'].includes(outcome)) await nativeCommit()
                     return { jobId: 'jpeg-job' }
                 }
-                if (command === 'native_file_job_status') return {
+                if (command === 'native_file_job_status') {
+                    statusReads++
+                    if (outcome === 'revision-read-failed') vi.spyOn(store, 'readRoot').mockRejectedValue(new Error('revision unavailable'))
+                    if (outcome === 'late-commit' && statusReads > 1) await nativeCommit()
+                    if (outcome !== 'success' && !(outcome === 'late-commit' && statusReads > 1) && !allowCompletion) throw new Error('status unavailable')
+                    return {
                     jobId: 'jpeg-job', kind: 'import-jpeg-asset', state: 'succeeded', phase: 'complete',
                     progress: { completedBytes: 4, totalBytes: 4, completedItems: 1, totalItems: 1 },
                     result: { revision: committed, sourceBytes: 4, sourceSha256: 'b'.repeat(64), characterCount: 1, presetCount: 0, warningCodes: [] },
+                    }
                 }
-                if (command === 'native_file_job_forget') return true
+                if (command === 'native_file_job_cancel') {
+                    if (outcome === 'unresolved-until-retry' || outcome === 'continuation-in-flight') throw new Error('cancel unavailable')
+                    return outcome === 'late-commit' ? 'tooLate' : outcome === 'no-commit' ? 'requested' : 'terminal'
+                }
+                if (command === 'native_file_job_forget') { forgotten = true; return true }
                 throw new Error(`Unexpected command: ${command}`)
             },
             wait: async () => undefined,
             captureMutationToken: (reason) => runtime.capturePersistentMutationToken(reason),
             acquireFence: (token) => runtime.acquireDestructiveReplacementFence(token),
+            getRuntime: () => runtime,
         }
 
-        await expect(importNativeJpegAsset({
+        if (outcome === 'continuation-in-flight') {
+            let entered!: () => void, finish!: () => void
+            const running = new Promise<void>(resolve => { entered = resolve })
+            const held = new Promise<void>(resolve => { finish = resolve })
+            runtime.markCommittedWorkingSetRefreshRequired(before, new Error('earlier recovery'))
+            registerCommittedWorkingSetContinuation(before, runtime, runtime.getStorageAuthorityEpoch(), async () => { entered(); await held }, undefined, true)
+            const recovery = retryCommittedWorkingSetRefreshWithContinuation(runtime)
+            await running
+            expect(runtime.pendingWorkingSetRefreshRevision).toBeNull()
+            const nativeCommands = vi.spyOn(deps, 'invoke')
+            try {
+                await expect(importNativeJpegAsset({
+                    source: { type: 'desktopPath', path: 'synthetic-during-recovery.jpg' },
+                    displayName: 'synthetic-during-recovery.jpg',
+                    destination: { kind: 'current-character-image', characterId: 'character-1' },
+                }, {}, deps)).rejects.toMatchObject({ name: 'PersistentMutationFencedError' })
+                expect(nativeCommands).not.toHaveBeenCalled()
+            } finally { finish(); await recovery }
+            expect(() => runtime.assertPersistentMutationAllowed()).not.toThrow()
+            return
+        }
+
+        const imported = importNativeJpegAsset({
             source: { type: 'desktopPath', path: 'C:\\chosen\\portrait.jpg' },
             displayName: 'portrait.jpg',
             destination: { kind: 'current-character-image', characterId: 'character-1' },
-        }, {}, deps)).resolves.toMatchObject({ revision: before + 1 })
-
-        expect(onLocalRevision).toHaveBeenCalledExactlyOnceWith(before + 1)
+        }, {}, deps)
+        if (outcome === 'success') await expect(imported).resolves.toMatchObject({ revision: before + 1 })
+        else await expect(imported).rejects.toThrow('status unavailable')
+        if (outcome === 'unresolved-until-retry') {
+            expect(forgotten).toBe(false)
+            expect(runtime.pendingWorkingSetRefreshRevision).toBe(before)
+            expect(() => runtime.assertPersistentMutationAllowed()).toThrow(/replacement is active/i)
+            const nativeCommands = vi.spyOn(deps, 'invoke')
+            await expect(importNativeJpegAsset({
+                source: { type: 'desktopPath', path: 'synthetic-second.jpg' },
+                displayName: 'synthetic-second.jpg',
+                destination: { kind: 'current-character-image', characterId: 'character-1' },
+            }, {}, deps)).rejects.toThrow(/replacement is active/i)
+            expect(nativeCommands).not.toHaveBeenCalled()
+            await expect(runtime.retryCommittedWorkingSetRefresh()).rejects.toThrow(/replacement is active/i)
+            await expect(retryCommittedWorkingSetRefreshWithContinuation(runtime)).rejects.toMatchObject({ code: 'native-job-outcome-unknown' })
+            expect(() => runtime.assertPersistentMutationAllowed()).toThrow(/replacement is active/i)
+            await nativeCommit()
+            allowCompletion = true
+            await expect(retryCommittedWorkingSetRefreshWithContinuation(runtime)).resolves.toMatchObject({ projection: 'applied', revision: before + 1 })
+            expect(runtime.pendingWorkingSetRefreshRevision).toBeNull()
+            expect(() => runtime.assertPersistentMutationAllowed()).not.toThrow()
+            expect(onLocalRevision).toHaveBeenCalledExactlyOnceWith(before + 1)
+            expect(forgotten).toBe(true)
+            return
+        }
+        if (outcome === 'success' || outcome === 'lost-poll' || outcome === 'late-commit') expect(onLocalRevision).toHaveBeenCalledExactlyOnceWith(before + 1)
+        else expect(onLocalRevision).not.toHaveBeenCalled()
+        if (outcome === 'lost-poll' || outcome === 'revision-read-failed' || outcome === 'late-commit') {
+            expect(runtime.pendingWorkingSetRefreshRevision).toBe(outcome === 'revision-read-failed' ? before : before + 1)
+            expect(() => runtime.assertPersistentMutationAllowed()).toThrow(/replacement is active/i)
+        } else {
+            expect(runtime.pendingWorkingSetRefreshRevision).toBeNull()
+            expect(() => runtime.assertPersistentMutationAllowed()).not.toThrow()
+        }
     })
 })

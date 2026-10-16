@@ -30,6 +30,8 @@ export interface BindingContext {
     state: SyncBindingState
     signal: AbortSignal
     mode?: BindingMode
+    /** Reattach the transport without restarting automatic work after a restore. */
+    holdAutomaticSync?: boolean
 }
 export interface NewDeviceBindingPreparation {
     authorizationId: string
@@ -57,6 +59,7 @@ export class PreviousStorageFilesDownloadError extends Error {
     }
 }
 export interface SyncBindingTransport {
+    heldForCommittedRestore?(): boolean
     observeBinding?(operation: () => Promise<BindingOutcome>): Promise<BindingOutcome>
     setConfirmationPending?(waiting: boolean): void
     receiveAvailableChanges?(context: BindingContext): Promise<void>
@@ -175,6 +178,11 @@ export function createSyncBindingFlow(dependencies: SyncBindingDependencies) {
         catch (registrationError) { throw new AggregateError([error, registrationError], 'Sync binding recovery registration failed') }
     }
     return {
+        invalidateCurrentResume(state: SyncBindingState): void {
+            if (active && active.context.state.targetAuthority === state.targetAuthority &&
+                active.context.state.selectionEpoch === state.selectionEpoch && active.context.state.libraryId === state.libraryId &&
+                sameTarget(active.context.state.target, state.target)) active.resumed = false
+        },
         async resumeCurrent(expectedTarget: BindingTarget): Promise<void> {
             if (running) throw new Error('A sync binding change is already running')
             running = true
@@ -366,7 +374,7 @@ export function createSyncBindingFlow(dependencies: SyncBindingDependencies) {
                     }
                     const next = await dependencies.gate.runTransition(async () => {
                         await check(context)
-                        activationAttempted = true
+                        activationAttempted = switchRequired || !!staged
                         return activate()
                     })
                     const nextContext = bindingContext(next, controller.signal, mode)
@@ -401,11 +409,13 @@ export function createSyncBindingFlow(dependencies: SyncBindingDependencies) {
                             sameTarget(current.target, originalState.target) && current.libraryId === originalState.libraryId
                     } catch { /* Recovery requires a verified unchanged native binding. */ }
                 }
-                if (unchanged) {
+                if (!activatedContext) {
                     try {
-                        if (activationGuard) { await activationGuard.abortUnchanged(); activationGuard = undefined }
-                        if (pluginsFenced) { pluginsFenced = false; await dependencies.plugins.restart() }
-                        if (jobsFenced) { jobsFenced = false; await resumeOld(mode) }
+                        let libraryUnchanged = !activationAttempted
+                        if (unchanged && activationGuard) { await activationGuard.abortUnchanged(); activationGuard = undefined; libraryUnchanged = true }
+                        if (libraryUnchanged && pluginsFenced) { pluginsFenced = false; await dependencies.plugins.restart() }
+                        if (unchanged && libraryUnchanged && jobsFenced) { jobsFenced = false; await resumeOld(mode) }
+                        if (!libraryUnchanged && activationAttempted && resumeActivated) registerFailure(error, resumeAfterRefresh)
                     } catch (recoveryError) {
                         if (activationGuard && activationAttempted && resumeActivated) registerFailure(recoveryError, resumeAfterRefresh)
                         throw new AggregateError([error, recoveryError], 'Sync binding failed while resuming local state')

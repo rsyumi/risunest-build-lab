@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 import { DBState } from 'src/ts/stores.svelte'
 import MobileCharacters from './MobileCharacters.svelte'
+import { readRepresentativeImagePriority } from 'src/ts/ui/representativeImagePriority'
 
 class TestIntersectionObserver {
     static instance: TestIntersectionObserver | undefined
@@ -124,6 +125,7 @@ describe('MobileCharacters', () => {
             summary('char-a', 'Alpha', 10),
             summary('char-trash', 'Trash', 20, 1),
         ]
+        for (const character of DBState.db.characters) character.image = `assets/${character.chaId}.png`
         const target = document.createElement('div')
         document.body.append(target)
 
@@ -136,6 +138,7 @@ describe('MobileCharacters', () => {
         expect([...target.querySelectorAll('[data-character-id]')].map(
             (row) => row.getAttribute('data-character-id'),
         )).toEqual(['char-a', 'char-b', 'char-z'])
+        expect(readRepresentativeImagePriority()).toEqual({ ordered: ['assets/char-a.png', 'assets/char-b.png', 'assets/char-z.png'], visible: [] })
     })
 
     it('reveals fallback pages in batches while preserving catalog order', async () => {
@@ -143,6 +146,7 @@ describe('MobileCharacters', () => {
         DBState.db.characters = Array.from({ length: 100 }, (_, index) =>
             summary(`char-${index}`, `Character ${index}`, index),
         )
+        for (const character of DBState.db.characters) character.image = `assets/${character.chaId}.png`
         const target = document.createElement('div')
         document.body.append(target)
 
@@ -154,6 +158,7 @@ describe('MobileCharacters', () => {
 
         expect(target.querySelectorAll('[data-character-id]')).toHaveLength(48)
         expect(characterMocks.getCharImage).toHaveBeenCalledTimes(48)
+        expect(readRepresentativeImagePriority()?.ordered).toEqual(Array.from({ length: 48 }, (_, index) => `assets/char-${99 - index}.png`))
         const loadMore = target.querySelector<HTMLButtonElement>(
             '[data-load-more-sentinel] button',
         )
@@ -164,6 +169,7 @@ describe('MobileCharacters', () => {
         const rows = [...target.querySelectorAll('[data-character-id]')]
         expect(rows).toHaveLength(96)
         expect(characterMocks.getCharImage).toHaveBeenCalledTimes(96)
+        expect(readRepresentativeImagePriority()?.ordered).toHaveLength(96)
         expect(rows[0].getAttribute('data-character-id')).toBe('char-99')
         expect(rows[95].getAttribute('data-character-id')).toBe('char-4')
         const firstRow = rows[0] as HTMLButtonElement

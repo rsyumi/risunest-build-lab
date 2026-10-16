@@ -1,6 +1,7 @@
 import type { SettingItem } from './types'
 import { MAX_INLAY_DIMENSION, normalizeInlayEncodeOptions } from '../storage/blobStore'
 import { getDeviceSettings, subscribeDeviceSettings, updateDeviceSettings, type MessageSendKey } from '../storage/deviceSettings'
+import { isTauri } from '../platform'
 
 /** Unit shown beside a numeric control, keyed by setting id. */
 export const risuNestSettingUnits: Record<string, string> = {
@@ -37,6 +38,14 @@ export const risuNestUiSettingsItems: SettingItem[] = [
         labelKey: 'risuNest.ui.chatEditPopup',
         helpKey: 'risuNest.ui.chatEditPopupHelp',
         bindKey: 'risunestChatEditPopup',
+    },
+    {
+        id: 'risunest.ui.syncStatusUi',
+        type: 'check',
+        labelKey: 'risuNest.ui.syncStatusUi',
+        helpKey: 'risuNest.ui.syncStatusUiHelp',
+        bindKey: 'risunestSyncStatusUi',
+        condition: () => isTauri,
     },
 ]
 

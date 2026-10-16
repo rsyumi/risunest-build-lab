@@ -10,6 +10,7 @@ import {
     replaceCaptureMedia,
 } from './chatScreenshotCapture'
 import type { ChatScreenshotJob } from './chatScreenshotRange'
+import { AndroidSafDestinationError } from './storage/androidSafBridge'
 
 const htmlToImageMocks = vi.hoisted(() => ({
     toBlob: vi.fn(async () => new Blob(['png'], { type: 'image/png' })),
@@ -210,13 +211,14 @@ describe('bounded chat screenshot capture', () => {
         const deps = harness()
         const controller = new AbortController()
         deps.encoder.prepare.mockImplementationOnce(async () => controller.abort())
+        deps.archive.abort.mockRejectedValueOnce(new AndroidSafDestinationError('synthetic', 'destination-cleanup-failed', ['partial-destination-may-remain'], 'cleanup failed'))
 
         await expect(
             captureChatScreenshot(job(CHAT_SCREENSHOT_BATCH_SIZE + 1), {
                 ...deps,
                 signal: controller.signal,
             }),
-        ).rejects.toMatchObject({ name: 'AbortError' })
+        ).rejects.toMatchObject({ name: 'AbortError', warningCodes: ['partial-destination-may-remain'] })
 
         expect(deps.encoder.encodeTile).not.toHaveBeenCalled()
         expect(deps.archive.abort).toHaveBeenCalledOnce()

@@ -714,13 +714,13 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         return { items, revision, nextCursor }
     }
 
-    async queryPluginStorage(): Promise<PluginStorageCatalog> {
+    async queryPluginStorage(owner?: string): Promise<PluginStorageCatalog> {
         const transaction = this.requireDatabase().transaction(
             ['meta', 'pluginStorageMetadata'],
             'readonly',
         )
         const { revision, generation } = await this.readActive(transaction)
-        return this.queryPluginStorageFromTransaction(transaction, revision, generation)
+        return this.queryPluginStorageFromTransaction(transaction, revision, generation, owner)
     }
 
     async readPluginStorage(owner: string, key: string): Promise<Versioned<unknown> | null> {
@@ -1340,7 +1340,7 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
                 await this.validateSnapshotLease(transaction, lease, generation, revision)
                 return this.readPluginStorageValuesFromTransaction(transaction, revision, generation, query)
             },
-            queryPluginStorage: async () => {
+            queryPluginStorage: async (owner) => {
                 assertActive()
                 const transaction = this.requireDatabase().transaction(
                     ['meta', 'pluginStorageMetadata'],
@@ -1351,6 +1351,7 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
                     transaction,
                     revision,
                     generation,
+                    owner,
                 )
             },
             readPluginStorage: async (owner, key) => {
@@ -1858,9 +1859,12 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         transaction: IDBTransaction,
         revision: DataRevision,
         generation: string,
+        owner?: string,
     ): Promise<PluginStorageCatalog> {
+        const metadata = transaction.objectStore('pluginStorageMetadata')
         const records = (await requestResult(
-            transaction.objectStore('pluginStorageMetadata').index('byGeneration').getAll(generation),
+            owner === undefined ? metadata.index('byGeneration').getAll(generation)
+                : metadata.index('byOwnerOrdinal').getAll(this.keyRangeFactory.bound([generation, owner], [generation, owner, []])),
         )) as StoredPluginStorageMetadata[]
         await transactionDone(transaction)
         return {

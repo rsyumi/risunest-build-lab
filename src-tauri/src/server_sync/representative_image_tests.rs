@@ -63,13 +63,26 @@ fn remote_policy_fetches_only_current_representatives_and_reuses_them_after_rest
     crate::asset_repository::body_io::reset_body_io();
     hydrate(&store).unwrap();
     let work = crate::asset_repository::body_io::take_body_io();
-    assert_eq!((work.stat_requests, work.batch_stat_requests), (0, 1));
+    assert_eq!((work.stat_requests, work.batch_stat_requests), (0, 0));
     assert!(work.domains.is_empty(), "checking retained representatives does not open their bodies");
+    let temporary = tempfile::tempdir().unwrap();
+    let other = PayloadCas::new(temporary.path()).unwrap();
+    let body = other.prepare_bytes(b"unrelated temporary object").unwrap();
+    other.unlink_exact_object(&body.content_hash, body.byte_size, &crate::asset_repository::object_physical_key(&body.content_hash)).unwrap();
+    crate::asset_repository::body_io::reset_body_io();
+    hydrate(&store.open_native_job_store().unwrap()).unwrap();
+    assert_eq!(crate::asset_repository::body_io::take_body_io().batch_stat_requests, 0, "job stores share only this live repository's checks");
+    let equivalent = PayloadCas::new(root.path().join(".")).unwrap();
+    equivalent.unlink_exact_object(main.object_hash.as_ref().unwrap(), main.size as u64, &crate::asset_repository::object_physical_key(main.object_hash.as_ref().unwrap())).unwrap();
+    hydrate(&store).unwrap();
+    assert_eq!(cas.read_object(main.object_hash.as_ref().unwrap()).unwrap().unwrap(), b"synthetic representative");
     drop(core);
     drop(server);
     drop(store);
     let reopened = PersistentStore::open(root.path()).unwrap();
+    crate::asset_repository::body_io::reset_body_io();
     hydrate(&reopened).expect("an already-local representative needs no server");
+    assert_eq!(crate::asset_repository::body_io::take_body_io().batch_stat_requests, 1, "a new store rechecks physical presence");
     assert_eq!(PayloadCas::new(root.path()).unwrap().read_object(main.object_hash.as_ref().unwrap()).unwrap().unwrap(), b"synthetic representative");
 }
 
@@ -91,6 +104,13 @@ fn offload_tracks_replacement_alias_overwrite_trash_and_deletion_without_changin
     assert_eq!(store.asset_residency_evict(|| Ok(())).unwrap().evicted_bytes, old.size as u64);
     assert!(cas.stat_object(old.object_hash.as_ref().unwrap()).unwrap().is_none());
     assert!(store.read_asset_alias("asset", &old.key, None).unwrap().is_some());
+    replace(&mut store, character("first", &old.key));
+    hydrate(&store).unwrap();
+    assert_eq!(cas.read_object(old.object_hash.as_ref().unwrap()).unwrap().unwrap(), b"old synthetic image");
+    replace(&mut store, character("first", &new.key));
+    hydrate(&store).unwrap();
+    store.asset_residency_evict(|| Ok(())).unwrap();
+
     // Keep another logical reference so the previous body remains an offload candidate.
     // Unreferenced bodies belong to ordinary asset GC instead.
     put_asset(&mut store, "assets/previous-new.png", b"new synthetic image");
@@ -337,4 +357,120 @@ fn a_device_joining_with_remote_assets_fetches_received_representatives_and_foll
     assert!(held(&next));
     assert!(!held(&main), "cleanup no longer keeps the replaced image");
     assert!(!held(&emotion));
+}
+
+#[test]
+fn closed_folder_images_are_hydrated_and_retained_with_character_icons() {
+    let server = LocalServerFixture::new();
+    let (_root, mut store) = local();
+    let core = server.client(&store);
+    let image = put_asset(&mut store, "assets/closed-folder.png", b"synthetic closed folder");
+    drain_publications(&core, &mut store, &[]).unwrap();
+    store.asset_residency_set_policy(AssetPolicy::Remote, || Ok(())).unwrap();
+    store.asset_residency_evict(|| Ok(())).unwrap();
+    store.commit(&WorkingSetCommit { expected_revision: store.revision().unwrap(), root_mutations: Some(vec![
+        crate::persistent_store::RootMutation::Set { key: "characterOrder".into(), value: json!([{"id":"folder", "name":"Folder", "imgFile":image.key,"data":[]}]) }
+    ]), ..Default::default() }).unwrap();
+    hydrate(&store).unwrap();
+    let cas = PayloadCas::new(store.repository_root()).unwrap();
+    assert_eq!(cas.read_object(image.object_hash.as_ref().unwrap()).unwrap().unwrap(), b"synthetic closed folder");
+    assert_eq!(store.asset_residency_evict(|| Ok(())).unwrap().evicted_bytes, 0);
+}
+
+#[test]
+fn non_array_character_order_keeps_representatives_available() {
+    let server = LocalServerFixture::new();
+    let (_root, mut store) = local();
+    let core = server.client(&store);
+    let image = put_asset(&mut store, "assets/order-fallback.png", b"synthetic order fallback");
+    drain_publications(&core, &mut store, &[]).unwrap();
+    store.asset_residency_set_policy(AssetPolicy::Remote, || Ok(())).unwrap();
+    store.asset_residency_evict(|| Ok(())).unwrap();
+    add(&mut store, character("order-fallback", &image.key));
+    let cas = PayloadCas::new(store.repository_root()).unwrap();
+    for order in [Value::Null, json!(false), json!(7), json!("unexpected"), json!({"unexpected": true})] {
+        store.commit(&WorkingSetCommit { expected_revision: store.revision().unwrap(), root_mutations: Some(vec![
+            crate::persistent_store::RootMutation::Set { key: "characterOrder".into(), value: order }
+        ]), ..Default::default() }).unwrap();
+        hydrate(&store).unwrap();
+        assert_eq!(status(&store)["localBytes"], image.size);
+        assert_eq!(store.asset_residency_evict(|| Ok(())).unwrap().evicted_bytes, 0);
+        assert_eq!(cas.read_object(image.object_hash.as_ref().unwrap()).unwrap().unwrap(), b"synthetic order fallback");
+    }
+}
+
+#[test]
+fn visible_images_precede_selected_images_and_follow_display_order_instead_of_hash_order() {
+    let server = LocalServerFixture::new();
+    let (_root, mut store) = local();
+    let core = server.client(&store);
+    let mut assets = (0..3).map(|index| put_asset(&mut store, &format!("assets/rank-{index}.png"), format!("synthetic rank {index}").as_bytes())).collect::<Vec<_>>();
+    assets.sort_by(|a,b|b.object_hash.cmp(&a.object_hash));
+    drain_publications(&core, &mut store, &[]).unwrap();
+    store.asset_residency_set_policy(AssetPolicy::Remote, || Ok(())).unwrap();
+    store.asset_residency_evict(|| Ok(())).unwrap();
+    for (index,asset) in assets.iter().enumerate() { add(&mut store, character(&format!("rank-{index}"), &asset.key)); }
+    let priority = crate::persistent_store::asset_residency::RepresentativeImagePriority {
+        ordered: assets.iter().map(|asset|asset.key.clone()).collect(),
+        visible: vec![assets[0].key.clone(), assets[1].key.clone()],
+    };
+    let cas = PayloadCas::new(store.repository_root()).unwrap();
+    let done = std::cell::Cell::new(0);
+    super::commands::hydrate_binding_assets_ordered(&store, &header(&store), Arc::new(AtomicBool::new(false)), Some("rank-2"), Some(&priority), || {
+        let index = done.get();
+        assert!(cas.stat_object(assets[index].object_hash.as_ref().unwrap()).unwrap().is_some());
+        for later in &assets[index+1..] { assert!(cas.stat_object(later.object_hash.as_ref().unwrap()).unwrap().is_none()); }
+        done.set(index+1);
+    }).unwrap();
+    assert_eq!(done.get(), 3);
+}
+
+#[test]
+#[ignore = "synthetic icon-cache timing, run separately in a quiet slot"]
+fn representative_image_cache_small_and_1000_trend() {
+    use crate::persistent_store::{AssetAlias, asset_object_catalog::AssetObjectRegistration};
+    for count in [10, 1000] {
+        let (root, mut store) = local();
+        let cas = PayloadCas::new(root.path()).unwrap();
+        let mut aliases = Vec::new();
+        let mut registrations = Vec::new();
+        let mut characters = Vec::new();
+        for index in 0..count {
+            let bytes = format!("synthetic icon trend {index}").into_bytes();
+            let object = cas.prepare_bytes(&bytes).unwrap();
+            let key = format!("assets/icon-{index}.png");
+            registrations.push(AssetObjectRegistration { object_hash: object.content_hash.clone(), byte_size: object.byte_size });
+            aliases.push(AssetAlias { key: key.clone(), object_hash: Some(object.content_hash), kind: "asset".into(), size: bytes.len() as i64,
+                mime: "image/png".into(), name: "synthetic".into(), ext: "png".into(), inlay_type: None, width: None, height: None, metadata: json!({}) });
+            characters.push(character(&format!("icon-{index}"), &key));
+        }
+        store.asset_object_catalog().register(&registrations, 1).unwrap();
+        let staging = store.replace_begin().unwrap().staging_id;
+        store.replace_put_root(&staging, &json!({"characterOrder":characters.iter().map(|character|character["chaId"].clone()).collect::<Vec<_>>()})).unwrap();
+        store.replace_put_presets(&staging, &[]).unwrap();
+        store.replace_add_characters(&staging, &characters).unwrap();
+        store.replace_put_asset_aliases(&staging, &aliases).unwrap();
+        store.replace_commit(&staging, Some(store.revision().unwrap())).unwrap();
+        let server = LocalServerFixture::new();
+        let _core = server.client(&store);
+        store.asset_residency_set_policy(AssetPolicy::Remote, || Ok(())).unwrap();
+        drop(store);
+        let mut cold = Vec::new();
+        let mut warm = Vec::new();
+        let mut warm_stats = Vec::new();
+        for _ in 0..5 {
+            let store = PersistentStore::open(root.path()).unwrap();
+            let start = std::time::Instant::now();
+            hydrate(&store).unwrap();
+            cold.push(start.elapsed().as_micros());
+            crate::asset_repository::body_io::reset_body_io();
+            let job = store.open_native_job_store().unwrap();
+            let start = std::time::Instant::now();
+            hydrate(&job).unwrap();
+            warm.push(start.elapsed().as_micros());
+            warm_stats.push(crate::asset_repository::body_io::take_body_io().batch_stat_requests);
+        }
+        println!("W2_ICON_TREND {}", json!({"icons":count,"samples":5,"coldCheckUs":cold,"warmJobCheckUs":warm,"warmBatchStats":warm_stats}));
+        assert!(warm_stats.iter().all(|count| *count == 0));
+    }
 }

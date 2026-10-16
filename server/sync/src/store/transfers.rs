@@ -208,6 +208,48 @@ mod tests {
         bytes
     }
 
+    #[test]
+    fn sparse_delta_candidates_fall_back_to_exact_full_transfers() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::init(directory.path()).unwrap();
+        let registration = store.add_device().unwrap();
+        let device = store
+            .authenticate(&registration.library_id, &registration.token)
+            .unwrap();
+        for size in [1024 * 1024, delta::MAX_TARGET_BYTES] {
+            let base = vec![b'a'; size];
+            let mut target = vec![b'b'; size];
+            target[..64].copy_from_slice(&base[..64]);
+            let base_hash = hash(&base);
+            let target_hash = hash(&target);
+            store.put_object(&device, &base_hash, &base).unwrap();
+            store.put_object(&device, &target_hash, &target).unwrap();
+            let encoded = store
+                .transfer_objects(
+                    &device,
+                    &[TransferRequest {
+                        target: target_hash.clone(),
+                        bases: vec![base_hash],
+                    }],
+                )
+                .unwrap();
+            let frames = transfer::decode(&encoded).unwrap();
+            match frames.as_slice() {
+                [Frame::Full(bytes)] => assert_eq!(*bytes, target),
+                [Frame::FullRequired {
+                    hash,
+                    size: returned_size,
+                }] => {
+                    assert!(size > PREFERRED_BATCH_BYTES);
+                    assert_eq!(hash, &target_hash);
+                    assert_eq!(*returned_size, size as u64);
+                    assert_eq!(store.get_object(hash).unwrap(), target);
+                }
+                other => panic!("expected a full transfer fallback, got {other:?}"),
+            }
+        }
+    }
+
     /// A27. Once the reply is full the remaining targets are declined from
     /// their recorded size, so no further body is read and discarded.
     #[test]

@@ -2,7 +2,7 @@
     interface Props {
         label: string
         /** `working` pulses its dot; `attention` and `connected` tint the badge. */
-        tone: 'idle' | 'connected' | 'working' | 'paused' | 'attention'
+        tone: 'idle' | 'connected' | 'working' | 'paused' | 'failed' | 'attention'
     }
 
     let { label, tone }: Props = $props()
@@ -54,7 +54,8 @@
         background: var(--risu-theme-success-500);
         opacity: 1;
     }
-    .status[data-tone='attention'] .status-dot {
+    .status[data-tone='attention'] .status-dot,
+    .status[data-tone='failed'] .status-dot {
         opacity: 1;
     }
     .status[data-tone='paused'] .status-dot {

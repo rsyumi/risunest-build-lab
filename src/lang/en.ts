@@ -99,6 +99,7 @@ export const languageEnglish = {
     
         "invalidInlaysConfirm": (count: number) => `Damaged inlay entries (${count}) will not be restored. Continue restoring?`,
         omittedRestoreData: {
+            excludedCharacters: (count: number) => `Group characters and temporary characters (${count}) will not be restored.`,
             data: (count: number) => `Unsupported saved data (${count}) will not be restored.`,
             remote: (count: number) => `Data stored outside this backup (${count}) will not be restored.`,
             missing: (count: number) => `Missing saved data (${count}) will not be restored.`,
@@ -999,6 +1000,7 @@ export const languageEnglish = {
     files: "Files",
     backupConfirm: "Do you really want to save backup?",
     backupLoadConfirm: "Do you really want to load backup? All datas will be lost!",
+    accountBackupUnavailable: "The account backup was not restored because some data could not be retrieved.",
     backupLoadConfirm2: "Your current data will be replaced by the backup. No automatic backup will be created. To keep your current data, cancel and back it up first. Continue?",
     importRisuSave: "Import RisuSave file",
     exportRisuSave: "Export RisuSave file",
@@ -1922,6 +1924,21 @@ export const languageEnglish = {
     skipSavingAssetsOnWebSync: "Skip Saving Assets on Web Sync",
     applyAdditionalParamsToAll: "Apply Additional Parameters to All Models",
     risuNest: {
+        pluginStartup: {
+            delayLabel: 'Load plugins after sync',
+            delayHelp: 'Plugins load after synchronization completes when the app starts. Turning this off may cause plugin data to be overwritten with older values.',
+            waiting: 'Plugins will load after synchronization.',
+            loadNow: 'Load plugins',
+            syncUnfinished: 'Plugins have not loaded because synchronization did not finish.',
+            requestRefused: 'Try again after plugins load.',
+        },
+        syncStatus: {
+            menuLabel: 'Sync',
+            saving: 'Saving',
+            saved: 'Saved',
+            saveFailed: 'Save failed',
+        },
+
         backgroundDataFailed: 'Some changes to the data could not be completed.',
         scriptTimeout: 'A Lua script took too long and was stopped.',
         localSaveFailure: {
@@ -2310,11 +2327,13 @@ export const languageEnglish = {
                 refreshing: 'Updating the screen',
                 publishing: 'Uploading this device’s changes',
                 assets: 'Downloading assets',
+                assetPolicy: 'Applying asset storage policy',
             },
-            stage: { preparing: 'Compare changes', downloading: 'Download server content', applying: 'Apply received changes', refreshing: 'Update the screen', publishing: 'Upload changes', assets: 'Download assets' },
+            stage: { preparing: 'Compare changes', downloading: 'Download server content', applying: 'Apply received changes', refreshing: 'Update the screen', publishing: 'Upload changes', assets: 'Download assets', assetPolicy: 'Apply asset storage policy' },
             paused: 'Paused',
             registrationRequired: 'New registration code required',
             blocked: 'Automatic sync stopped',
+            failed: 'Sync failed',
             errorHelp:
                 'Sync could not finish. Your edits on this device are unchanged. Try again.',
             "connectRowHelpScan": 'Paste the registration code from the server or scan its QR code. Each device needs its own registration code.',
@@ -2333,6 +2352,7 @@ export const languageEnglish = {
             networkLogs: "Network logs",
         },
         networkLog: {
+            "operation": "Operation ID",
             readersBusy: "A log is being read. Please try again shortly.",
             "title": "Network logs",
             "recording": "Record network requests",
@@ -2429,6 +2449,8 @@ export const languageEnglish = {
             messageSendKeyButton: 'Send button',
             chatEditPopup: 'Edit chat messages in a popup',
             chatEditPopupHelp: 'Pressing the chat edit button lets you edit the message in a popup.',
+            syncStatusUi: 'Show sync UI',
+            syncStatusUiHelp: 'Shows the sync status icon, and a notice when sync stops or plugins are waiting for sync.',
         },
         textEditor: {
             open: 'Edit in popup',
@@ -2661,6 +2683,7 @@ export const languageEnglish = {
             actionDropAlias: 'Stop using the file',
             actionAdoptStoredPayload: 'Use the file as it is now',
             actionNormalizeRecords: 'Recalculate the values',
+            actionSelectFirstConversation: 'Select the first chat',
             actionKeepSingleRecord: 'Keep one and drop the rest',
             actionRecoverOrphans: 'Put them back under an owner',
             actionDiscards: 'deletes the value',
@@ -2814,6 +2837,7 @@ export const languageEnglish = {
             resultFailedAfterCommit:
                 'The data was imported, but the screen could not be refreshed. Select Refresh screen before making more changes.',
             resultActivationUnresolved: 'The restore result could not be confirmed. Select Refresh screen to check it before making more changes.',
+            resultAssetsIncomplete: 'The data was imported, but some assets could not be imported.',
             errorDetails: 'Error details',
             errorDetailsHide: 'Hide error details',
             copyDetails: 'Copy',
@@ -2845,6 +2869,8 @@ export const languageEnglish = {
             titleExportBackup: 'Export RisuNest backup',
             titleExportCompatible: 'Export compatible backup',
             stagePreparingExport: 'Preparing data',
+            stageDownloadingExport: 'Downloading files',
+            stageVerifyingExport: 'Checking backup file',
             stageWritingExport: 'Writing backup file',
             stagePublishingDestination: 'Saving to the chosen location',
             stageFinalizingExport: 'Finishing',
@@ -2859,6 +2885,7 @@ export const languageEnglish = {
             "reasonExportRevisionConflict": 'The data changed during export. Export again.',
             "reasonExportStoreError": 'A storage error stopped the export. Try again.',
             "reasonDestination": 'The file could not be saved at this location. Choose another location.',
+            "reasonDestinationBusy": 'Another export is in progress. Try again after it finishes.',
             "reasonPlainJpeg": 'This JPEG does not contain a character card.',
             "reasonIncompletePublication": 'The file was not saved completely. Export again.',
             "reasonStorageFull": 'There is not enough storage. Free up space and try again.',
@@ -3097,6 +3124,7 @@ export const languageEnglish = {
         cancelAction: "Cancel",
         clockBlocked: "Sync stopped because the device and remote times differ. Correct the time and try again.",
         writerCollision: "Sync stopped because another device uses the same identity. Register a new device on the sync server, enter the new registration code, then press Connect as new device.",
+        writerCollisionNotConnected: "This device was connected with another registration code. Press Connect as new device.",
         unitTooLarge: "Sync stopped because an item on this device is too large to send to the server. Make the large item smaller and try again.",
         newDeviceAction: "Connect as new device",
         restoreTitle: "Restore the backup?",
@@ -3115,6 +3143,7 @@ export const languageEnglish = {
         registrationUsedOnboarding: "This registration code was already used, so this device cannot connect with it. Register a new device on the sync server, then enter the new registration code.",
         bindingIncomplete: "The connection was not completed. Press Connect and sync to finish it.",
     },
+    characterSelectionFailed: "The character could not be selected. Please try again.",
     navigationBlockedWhileEditingPaused: "Editing is paused, so a character cannot be selected.",
 } satisfies I18nTranslation;
 

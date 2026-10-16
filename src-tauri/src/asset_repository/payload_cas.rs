@@ -14,6 +14,18 @@ use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
 
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 
+fn removal_epoch_for(root: &Path) -> io::Result<std::sync::Arc<std::sync::atomic::AtomicU64>> {
+    use std::sync::{Arc, Mutex, OnceLock, Weak, atomic::AtomicU64};
+    static EPOCHS: OnceLock<Mutex<HashMap<PathBuf, Weak<AtomicU64>>>> = OnceLock::new();
+    let mut epochs = EPOCHS.get_or_init(Default::default).lock().map_err(|_| io::Error::other("CAS removal epochs poisoned"))?;
+    // The map owns no roots. Only live handles and their checked-image caches do.
+    epochs.retain(|_, epoch| epoch.strong_count() != 0);
+    if let Some(epoch) = epochs.get(root).and_then(Weak::upgrade) { return Ok(epoch); }
+    let epoch = Arc::new(AtomicU64::new(0));
+    epochs.insert(root.to_owned(), Arc::downgrade(&epoch));
+    Ok(epoch)
+}
+
 #[cfg(test)]
 std::thread_local! {
     static ROOT_PATH_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -77,6 +89,7 @@ impl StagedPayload {
 #[derive(Debug)]
 pub struct PayloadCas {
     repository_root: PathBuf,
+    removal_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Read-only batching for GC preview. Every batch revalidates its fixed ancestry and touched
@@ -140,9 +153,14 @@ impl PayloadCas {
         let metadata = fs::symlink_metadata(&repository_root)?;
         ensure_real_directory(&repository_root, &metadata)?;
         let repository_root = fs::canonicalize(repository_root)?;
-        let cas = Self { repository_root };
+        let removal_epoch = removal_epoch_for(&repository_root)?;
+        let cas = Self { repository_root, removal_epoch };
         cas.ensure_repository_root()?;
         Ok(cas)
+    }
+
+    pub(crate) fn removal_epoch(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> {
+        std::sync::Arc::clone(&self.removal_epoch)
     }
 
     pub(crate) fn into_read_scan(self) -> PayloadCasReadScan {
@@ -1031,6 +1049,7 @@ impl PayloadCas {
             return exact_object_changed();
         }
         fs::remove_file(&path)?;
+        self.removal_epoch.fetch_add(1, std::sync::atomic::Ordering::Release);
         let parent = path.parent().ok_or_else(|| {
             io::Error::new(
                 ErrorKind::InvalidData,

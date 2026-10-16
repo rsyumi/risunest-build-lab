@@ -183,10 +183,14 @@ fn commit_inner(
             }
             super::lww::validate_local_targets(transaction,input)?;
             reject_archived_targets(transaction, active, input)?;
-            let owner_input = owner_validation_commit(transaction, active, input)?;
-            validate_changed_owner_shapes(transaction, active, &owner_input)?;
+            let mut previous_root = None;
+            let owner_input = owner_validation_commit(transaction, active, input, &mut previous_root)?;
+            if owner_input.root.is_some() && previous_root.is_none() {
+                previous_root = Some(replacement_root(transaction, active)?);
+            }
+            validate_changed_owner_shapes(transaction, active, &owner_input, previous_root.as_ref())?;
             validate_owner_heads_for_commit(&owner_input)?;
-            let retained = retained_commit_owner_heads(transaction, active, &owner_input)?;
+            let retained = retained_commit_owner_heads(transaction, active, &owner_input, previous_root.as_ref())?;
             let mut conversation_orders = BTreeSet::new();
             for mutation in input.conversations.iter().flatten() {
                 match mutation {
@@ -243,9 +247,7 @@ fn commit_inner(
                 }
                 replace_character(transaction, generation, character)?;
             }
-            for mutation in input.unit_mutations.as_deref().unwrap_or_default() {
-                super::lww::apply_mutation(transaction, generation, mutation)?;
-            }
+            super::lww::apply_mutations(transaction, generation, input.unit_mutations.as_deref().unwrap_or_default())?;
             for mutation in input.conversations.as_deref().unwrap_or_default() {
                 apply_conversation_mutation(transaction, generation, mutation)?;
             }
@@ -306,6 +308,7 @@ fn owner_validation_commit<'a>(
     connection: &Connection,
     generation: &str,
     input: &'a WorkingSetCommit,
+    previous_root: &mut Option<Value>,
 ) -> StoreResult<std::borrow::Cow<'a, WorkingSetCommit>> {
     use super::lww::UnitMutation;
     let mut projected = std::borrow::Cow::Borrowed(input);
@@ -357,7 +360,10 @@ fn owner_validation_commit<'a>(
             _ => continue,
         };
         let projected = projected.to_mut();
-        if projected.root.is_none() { projected.root = Some(replacement_root(connection, generation)?); }
+        if projected.root.is_none() {
+            if previous_root.is_none() { *previous_root = Some(replacement_root(connection, generation)?); }
+            projected.root = previous_root.clone();
+        }
         let root = projected.root.as_mut().unwrap().as_object_mut().ok_or_else(|| validation("Root must be an object"))?;
         let Some(id) = id else {
             if let Some(next) = next { root.insert(collection.into(), next.clone()); }
@@ -400,13 +406,15 @@ fn owner_validation_commit<'a>(
     Ok(projected)
 }
 
-fn validate_changed_owner_shapes(connection: &Connection, generation: &str, input: &WorkingSetCommit) -> StoreResult<()> {
+fn validate_changed_owner_shapes(connection: &Connection, generation: &str, input: &WorkingSetCommit, previous_root: Option<&Value>) -> StoreResult<()> {
     let validate = |next: &Value, previous: &Value, character_id: Option<&str>| -> StoreResult<()> {
-        let old_parents = super::record_projection::owner_parents(previous, character_id)?;
+        let mut old_parents = HashMap::new();
+        for (owner, parent, property) in super::record_projection::owner_parents(previous, character_id)? {
+            old_parents.entry(serde_json::to_string(&owner)?).or_insert(parent.get(property));
+        }
         for (owner, parent, property) in super::record_projection::owner_parents(next, character_id)? {
             let value = parent.get(property);
-            let old = old_parents.iter().find(|(old_owner, _, _)| old_owner == &owner)
-                .and_then(|(_, parent, _)| parent.get(property));
+            let old = old_parents.get(&serde_json::to_string(&owner)?).copied().flatten();
             if value == old { continue; }
             if let Some(value) = value {
                 let values = value.as_array().ok_or_else(|| validation(format!(
@@ -419,7 +427,7 @@ fn validate_changed_owner_shapes(connection: &Connection, generation: &str, inpu
         Ok(())
     };
     if let Some(root) = &input.root {
-        validate(root, &replacement_root(connection, generation)?, None)?;
+        validate(root, previous_root.expect("root owner comparison"), None)?;
     }
     for character in input.character.iter().chain(input.character_details.iter().flatten())
         .chain(input.replace_character.iter()).chain(input.add_character.iter()) {
@@ -489,13 +497,20 @@ fn owner_entries<'a>(
 
 fn validate_owner_heads_for_commit(input: &WorkingSetCommit) -> StoreResult<()> {
     let mut identities = HashSet::new();
+    let root_parents = root_owner_parents(input.root.as_ref())?;
     for head in input.asset_owner_heads.as_deref().unwrap_or_default() {
         head.validate()?;
         let identity = head.owner.storage_identity();
         if !identities.insert(identity) {
             return Err(validation("Duplicate asset owner head"));
         }
-        let entries = owner_entries(input, &head.owner)?;
+        let entries = if matches!(head.owner, AssetOwnerLocator::CharacterAdditionalAssets { .. }) {
+            owner_entries(input, &head.owner)?
+        } else {
+            root_parents.get(&serde_json::to_string(&head.owner.logical())?)
+                .ok_or_else(|| validation("Root asset owner occurrence does not exist"))?
+                .get("assets").map(|value| value.as_array().ok_or_else(|| validation("Asset owner property must be an array when present"))).transpose()?
+        };
         if head.present != entries.is_some() {
             return Err(validation(
                 "Asset owner head property presence does not match its parent",
@@ -510,10 +525,21 @@ fn validate_owner_heads_for_commit(input: &WorkingSetCommit) -> StoreResult<()> 
     Ok(())
 }
 
+fn root_owner_parents(root: Option<&Value>) -> StoreResult<HashMap<String, &Value>> {
+    let mut parents = HashMap::new();
+    if let Some(root) = root {
+        for (owner, parent, _) in super::record_projection::owner_parents(root, None)? {
+            parents.entry(serde_json::to_string(&owner)?).or_insert(parent);
+        }
+    }
+    Ok(parents)
+}
+
 fn retained_commit_owner_heads(
     connection: &Connection,
     generation: &str,
     input: &WorkingSetCommit,
+    previous_root: Option<&Value>,
 ) -> StoreResult<Vec<AssetOwnerHead>> {
     if input.root.is_none()
         && input.character.is_none()
@@ -523,11 +549,8 @@ fn retained_commit_owner_heads(
     {
         return Ok(Vec::new());
     }
-    let old_root = if input.root.is_some() {
-        replacement_root(connection, generation)?
-    } else {
-        serde_json::json!({})
-    };
+    let old_parents = root_owner_parents(previous_root)?;
+    let new_parents = root_owner_parents(input.root.as_ref())?;
     let character_ids = input
         .character
         .iter()
@@ -543,7 +566,6 @@ fn retained_commit_owner_heads(
         Some(input.root.is_some()),
         &character_ids,
     )? {
-        let original_owner = head.owner.clone();
         match &head.owner {
             AssetOwnerLocator::CharacterAdditionalAssets { character_id } => {
                 if input.delete_character_ids.as_deref().unwrap_or_default().contains(character_id) {
@@ -551,7 +573,13 @@ fn retained_commit_owner_heads(
                 }
             }
             AssetOwnerLocator::RootModuleAssets { .. } | AssetOwnerLocator::PersonaEmbeddedModuleAssets { .. } => {
-                if input.root.as_ref().and_then(|root|head.owner.root_parent(root)).is_none() {continue;}
+                let identity = serde_json::to_string(&head.owner.logical())?;
+                if let (Some(old), Some(new)) = (old_parents.get(&identity), new_parents.get(&identity)) {
+                    let old = old.get("assets");
+                    let new = new.get("assets");
+                    if old == new && old.is_none_or(Value::is_array) { retained.push(head); }
+                }
+                continue;
             }
         }
         let Ok(entries) = owner_entries(input, &head.owner) else {
@@ -561,7 +589,7 @@ fn retained_commit_owner_heads(
             Some(entries) => ReplacementOwnerTuple::Present(entries.clone()),
             None => ReplacementOwnerTuple::Absent,
         });
-        if replacement_owner_tuple(connection, generation, &old_root, &original_owner)? == new_tuple
+        if replacement_owner_tuple(connection, generation, &serde_json::json!({}), &head.owner)? == new_tuple
         {
             retained.push(head);
         }
@@ -577,13 +605,14 @@ fn replace_changed_owner_heads(
     retained: &[AssetOwnerHead],
 ) -> StoreResult<()> {
     if input.root.is_some() {
-        transaction.execute(
-            "DELETE FROM asset_owner_heads
-             WHERE generation = ?1 AND owner_kind IN (
-                 'root-module-assets', 'persona-embedded-module-assets'
-             )",
-            [generation],
-        )?;
+        let kept = retained.iter().map(|head| head.owner.storage_identity()).collect::<HashSet<_>>();
+        for head in selected_replacement_owner_heads(transaction, generation, Some(true), &[])? {
+            let (kind, locator) = head.owner.storage_identity();
+            if !kept.contains(&(kind, locator.clone())) {
+                transaction.execute("DELETE FROM asset_owner_heads WHERE generation=?1 AND owner_kind=?2 AND owner_locator=?3",
+                    params![generation, kind, locator])?;
+            }
+        }
     }
     let mut character_ids = HashSet::new();
     for character in input
@@ -610,6 +639,7 @@ fn replace_changed_owner_heads(
     }
     for head in retained
         .iter()
+        .filter(|head| matches!(head.owner, AssetOwnerLocator::CharacterAdditionalAssets { .. }))
         .chain(input.asset_owner_heads.as_deref().unwrap_or_default())
     {
         put_asset_owner_head(transaction, generation, head)?;
@@ -630,7 +660,10 @@ fn put_asset_owner_head(
          ON CONFLICT(generation, owner_kind, owner_locator) DO UPDATE SET
             present = excluded.present,
             manifest_hash = excluded.manifest_hash,
-            entry_count = excluded.entry_count",
+            entry_count = excluded.entry_count
+         WHERE asset_owner_heads.present IS NOT excluded.present
+            OR asset_owner_heads.manifest_hash IS NOT excluded.manifest_hash
+            OR asset_owner_heads.entry_count IS NOT excluded.entry_count",
         params![
             generation,
             owner_kind,
@@ -1487,9 +1520,7 @@ fn replacement_owner_tuple(
     root: &Value,
     owner: &AssetOwnerLocator,
 ) -> StoreResult<Option<ReplacementOwnerTuple>> {
-    let root = root
-        .as_object()
-        .ok_or_else(|| validation("Replacement root must be an object"))?;
+    if !root.is_object() { return Err(validation("Replacement root must be an object")); }
     match owner {
         AssetOwnerLocator::CharacterAdditionalAssets { character_id } => {
             let detail: Option<String> = connection
@@ -1506,8 +1537,7 @@ fn replacement_owner_tuple(
             replacement_owner_tuple_from_parent(&serde_json::from_str(&detail)?, "additionalAssets")
         }
         AssetOwnerLocator::RootModuleAssets { .. } | AssetOwnerLocator::PersonaEmbeddedModuleAssets { .. } => {
-            let root=Value::Object(root.clone());
-            let Some(module)=owner.root_parent(&root) else{return Ok(None)};
+            let Some(module)=owner.root_parent(root) else{return Ok(None)};
             replacement_owner_tuple_from_parent(module,"assets")
         }
     }
@@ -1599,6 +1629,7 @@ pub(super) struct ReplacementProof<'a> {
 
 pub(super) fn replace_commit_lww(
     connection: &mut Connection,
+    root: &std::path::Path,
     staging_id: &str,
     header: &super::lww::Header,
     stamp: &risunest_sync_wire::stamp::Stamp,
@@ -1610,7 +1641,7 @@ pub(super) fn replace_commit_lww(
     selection_change: Option<&super::sync_selection::BindingSelectionChange>,
     replacement_proof: Option<ReplacementProof<'_>>,
 ) -> StoreResult<RevisionResult> {
-    let rows = super::lww::FrozenRows::new()?;
+    let rows = super::lww::FrozenRows::new(root)?;
     if target {
         for change in received { rows.insert(super::lww::intent_rows::target_row(change)?)?; }
     } else {
@@ -1618,11 +1649,12 @@ pub(super) fn replace_commit_lww(
             rows.insert(super::lww::intent_rows::replacement_row(key, value, true)?)?;
         }
     }
-    replace_commit_lww_rows(connection, staging_id, header, stamp, digest, &rows, target, received_authority, selection_change, replacement_proof)
+    replace_commit_lww_rows(connection, root, staging_id, header, stamp, digest, &rows, target, received_authority, selection_change, replacement_proof)
 }
 
 pub(super) fn replace_commit_lww_rows(
     connection: &mut Connection,
+    root: &std::path::Path,
     staging_id: &str,
     header: &super::lww::Header,
     stamp: &risunest_sync_wire::stamp::Stamp,
@@ -1655,7 +1687,7 @@ pub(super) fn replace_commit_lww_rows(
     }
     if target {
         super::sync_selection::validate_binding_stage_content(&transaction,staging_id)?;
-        super::lww::validate_binding_source_rows(&transaction,staging_id,header,changes)?;
+        super::lww::validate_binding_source_rows(&transaction,root,staging_id,header,changes)?;
     }
     let active=active_generation(&transaction)?;
     if target {super::lww::preserve_local_root(&transaction,&active,staging_id)?;}

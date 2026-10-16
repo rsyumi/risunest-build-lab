@@ -76,6 +76,20 @@ function resumeFixture() {
 }
 
 describe("portable file-job restart handoff", () => {
+  it("reuses a destination selected before its native job across restart and acknowledgement retry", async () => {
+    const fixture = resumeFixture();
+    const requestId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    rememberPortableExport("synthetic-job", {type: "androidSaf", suggestedName: "synthetic.risunest"}, fixture.store, requestId);
+    expect(fixture.store.read()).toMatchObject({phase: "waiting-native", requestId});
+    fixture.dependencies.acknowledgeAndroid = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true);
+    await expect(resumePendingPortableExport(fixture.dependencies)).rejects.toMatchObject({code: "destination-acknowledgement-pending"});
+    expect(fixture.store.read()).toMatchObject({phase: "published", requestId});
+    await expect(resumePendingPortableExport(fixture.dependencies)).resolves.toMatchObject({sourceBytes: 1234});
+    expect(fixture.publishAndroid).not.toHaveBeenCalled();
+    expect(fixture.resumeAndroid).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({requestId}), expect.anything());
+    expect(fixture.store.read()).toBeNull();
+  });
+
   it("persists iOS publication before acknowledgement and retries cleanup without republishing", async () => {
     const fixture = resumeFixture();
     rememberPortableExport("synthetic-job", { type: "iosFiles", suggestedName: "synthetic.risunest" }, fixture.store);

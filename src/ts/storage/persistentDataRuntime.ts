@@ -1,3 +1,5 @@
+import { advancePluginStorageRemoteChanges, fenceUnknownPluginStorageDrain } from '../plugins/pluginStorageProtection'
+import type { PluginStorageWriteCheck } from '../plugins/pluginStorageProtection'
 import { canonicalJson, canonicalClone } from './saveCoordinatorHelpers'
 import {claimCommittedWorkingSetRecovery, continueCommittedWorkingSetRefresh, hasRetryableCommittedWorkingSetContinuation, rebaseCommittedWorkingSetContinuation, registerCommittedWorkingSetContinuation} from './committedWorkingSetContinuation'
 import { diffRootMutations } from './rootMutation'
@@ -267,7 +269,7 @@ export interface PersistentDataRuntimeStateAdapter {
     captureCharacterIndex?(): ReadonlyMap<string, CompleteCharacter>
     beforeCapture?(): void
     afterRemoteApply?(): void
-    /** Root fields that projected units left without a value take the value a load gives them. */
+    /** Received root fields take the normalized value a load gives them. */
     fillRootFieldDefaults?(fields: readonly string[]): void
     /** Root fields whose working-set value changed when stored units were projected into it. */
     afterRemoteRootChange?(fields: ReadonlySet<string>): void
@@ -378,7 +380,7 @@ export interface PersistentDataRuntime {
     refreshActivatedLibraryUnderPause(token: PersistentMutationToken): Promise<CommittedApplyOutcome>
     applyLwwReceive(request: LwwStageReceive): Promise<LwwApplyResult>
     drainLwwDeferred(expectedAuthorityEpoch?: number): Promise<void>
-    commitPersistentUnitIntent(reason: string, mutations: readonly PersistentUnitMutation[], conversations?: readonly ConversationMutation[], wholeMessages?: readonly WholeMessageIntent[], projectionObserver?: PersistentUnitIntentProjectionObserver): Promise<void>
+    commitPersistentUnitIntent(reason: string, mutations: readonly PersistentUnitMutation[], conversations?: readonly ConversationMutation[], wholeMessages?: readonly WholeMessageIntent[], projectionObserver?: PersistentUnitIntentProjectionObserver, check?: PluginStorageWriteCheck): Promise<void>
     /** Prepares at the revision the commit expects, through a reader pinned there; `null` commits nothing. */
     commitPreparedUnitIntent(reason: string, prepare: (reader: PersistentRevisionReader) => Promise<PreparedUnitIntent | null>): Promise<DataRevision | null>
 
@@ -455,6 +457,7 @@ export interface PersistentDataRuntime {
     mutatePersistentPluginStorage(
         reason: string,
         mutations: readonly PluginStorageMutation[],
+        check?: PluginStorageWriteCheck,
     ): Promise<void>
     mutatePersistentPresets(
         reason: string,
@@ -550,7 +553,7 @@ export interface PersistentDestructiveReplacementFence {
         revision: DataRevision,
         options?: PersistentCommittedWorkingSetRefreshOptions,
     ): Promise<CommittedApplyOutcome>
-    release(): void
+    release(options?: { verifyStoreRevision: boolean }): void | Promise<void>
 }
 
 export interface PersistentCommittedWorkingSetRefreshOptions {
@@ -748,14 +751,16 @@ export function createPersistentDataRuntime(
         coordinator.assertPersistentMutationAllowed()
         const prepare = options?.prepare
         const normalize = options?.normalize
+        const onRetryExhausted = options?.onRetryExhausted
         if (!prepare) {
             return workingSet.activateCharacter(
                 id,
-                normalize ? { normalize } : undefined,
+                normalize || onRetryExhausted ? { normalize, onRetryExhausted } : undefined,
             )
         }
         return workingSet.activateCharacter(id, {
             normalize,
+            onRetryExhausted,
             async prepare() {
                 const prepared = await prepare()
                 if (!prepared) return null
@@ -1203,6 +1208,14 @@ export function createPersistentDataRuntime(
         if (reopened) void Promise.resolve().then(() => workingSet.activateConversation(reopened))
             .catch((error) => dependencies.onBackgroundError?.(error))
     }
+    const fenceReceivedPluginStorage = (keys: readonly string[]) => {
+        for (const unit of keys) {
+            const [kind, owner, key] = JSON.parse(unit) as string[]
+            if (kind === 'plugin') dependencies.state.onPluginStorageChanged?.(owner, key)
+            else if (kind === 'plugin-local') dependencies.state.onPluginDeviceStorageChanged?.(owner)
+        }
+        advancePluginStorageRemoteChanges(keys)
+    }
     const drainLwwDeferred = async (authorityEpoch = coordinator.storageAuthorityEpoch): Promise<void> => {
         coordinator.assertPersistentMutationAllowed(authorityEpoch)
         if (!dependencies.store.lwwBindingState || !dependencies.store.lwwDrainDeferred) return
@@ -1212,7 +1225,14 @@ export function createPersistentDataRuntime(
             coordinator.assertPersistentMutationAllowed(authorityEpoch)
             const database = dependencies.state.captureWorkingSetDatabase?.()
             const baseline = database ? captureLwwWorkingSetBaseline(database, dependencies.state.captureRoot(), dependencies.state.capturePresets?.() ?? null, coordinator.captureMaterializedBaseline(), coordinator.capturePresetRecordBaseline()) : undefined
-            const result = await dependencies.store.lwwDrainDeferred!({ bindingAuthority: binding.targetAuthority, requestId: crypto.randomUUID(), generating: generating() })
+            let result: LwwApplyResult
+            try {
+                result = await dependencies.store.lwwDrainDeferred!({ bindingAuthority: binding.targetAuthority, requestId: crypto.randomUUID(), generating: generating() })
+            } catch (error) {
+                fenceUnknownPluginStorageDrain()
+                throw error
+            }
+            fenceReceivedPluginStorage(result.pluginStorageChangedKeys ?? result.affectedKeys)
             try {
                 coordinator.assertPersistentMutationAllowed(authorityEpoch)
                 await projectAppliedUnits(result, baseline)
@@ -1283,7 +1303,13 @@ export function createPersistentDataRuntime(
                 const baseline = database && staged.changes.length > 0 ? captureLwwWorkingSetBaseline(database, dependencies.state.captureRoot(), dependencies.state.capturePresets?.() ?? null, coordinator.captureMaterializedBaseline(), coordinator.capturePresetRecordBaseline()) : undefined
                 await store.lwwStageReceive(staged)
                 const header = { bindingAuthority: staged.bindingAuthority, requestId: staged.requestId }
-                const result = await store.lwwApplyReceive({ ...header, generating: generating() })
+                let result: LwwApplyResult
+                try { result = await store.lwwApplyReceive({ ...header, generating: generating() }) }
+                catch (error) {
+                    fenceReceivedPluginStorage(staged.changes.map(change => change.key))
+                    throw error
+                }
+                fenceReceivedPluginStorage(result.pluginStorageChangedKeys ?? result.affectedKeys)
                 try { await projectAppliedUnits(result, baseline) }
                 catch (error) { coordinator.markCommittedWorkingSetRefreshRequired(result.revision, error); throw error }
                 finally { await store.lwwFinishReceive(header) }
@@ -1291,7 +1317,7 @@ export function createPersistentDataRuntime(
             })
         },
         drainLwwDeferred,
-        async commitPersistentUnitIntent(reason, mutations, conversations, wholeMessages, projectionObserver) {
+        async commitPersistentUnitIntent(reason, mutations, conversations, wholeMessages, projectionObserver, check) {
             // Translation reads the effective identity records, so unsaved mirror
             // edits reach them first.
             dependencies.state.beforeCapture?.()
@@ -1301,7 +1327,7 @@ export function createPersistentDataRuntime(
             await coordinator.commitPersistentUnitIntent(reason, translated, conversations, wholeMessages, async (revision) => {
                 try { await projectAppliedUnits({ revision, affectedKeys, heldKeys: [], deferredKeys: [] }, undefined, true, false, projectionObserver) }
                 catch (error) { coordinator.markCommittedWorkingSetRefreshRequired(revision, error); throw error }
-            })
+            }, check)
         },
         async commitPreparedUnitIntent(reason, prepare) {
             dependencies.state.beforeCapture?.()
@@ -1452,6 +1478,7 @@ export function createPersistentDataRuntime(
         fenceNavigation: () => workingSet.fenceNavigation(),
         invalidateNavigation: () => workingSet.invalidateNavigation(),
         replacePersistentDatabase: async (database, reason, options) => {
+            options?.signal?.throwIfAborted()
             if (
                 !options?.authoritative &&
                 hasIncompletePersistentWorkingSet(database, workingSetResidency)
@@ -1469,18 +1496,21 @@ export function createPersistentDataRuntime(
                 const binding = await prepareBoundLibraryReplacement()
                 const {acquireUpstreamImportPause, confirmUpstreamLibraryReplacement} = await import('./upstreamReplacement')
                 if (!(await confirmUpstreamLibraryReplacement(binding.bound, options.upstreamImportWarnings, options))) throw new DOMException('Import cancelled', 'AbortError')
+                options.signal?.throwIfAborted()
                 const plugins = await import('../plugins/apiV3/v3.svelte')
                 let pause: Awaited<ReturnType<typeof acquireUpstreamImportPause>>
+                let pluginsFenced = false
                 try {
                     await binding.fence()
+                    pluginsFenced = true
                     await plugins.fencePluginExecutionForAuthorityReplacement()
                     pause = await acquireUpstreamImportPause(runtime, reason)
                 } catch (error) {
                     try {
+                        if (pluginsFenced) await plugins.restartPluginsAfterAuthorityReplacement()
                         await binding.assertAuthority()
-                        await plugins.restartPluginsAfterAuthorityReplacement()
                         await binding.resume()
-                    } catch {}
+                    } catch {} finally { binding.release() }
                     throw error
                 }
                 let committed = false
@@ -1500,6 +1530,7 @@ export function createPersistentDataRuntime(
                         throw new PersistentMutationFencedError()
                     }
                     await binding?.assertAuthority()
+                    options.signal?.throwIfAborted()
                     const result = await dependencies.store.replaceFromDatabase(candidate, pause.fence.revision, [], options.pluginStorageValues,
                         binding.bound ? {bindingAuthority:binding.state.targetAuthority,requestId:crypto.randomUUID()} : undefined)
                     committed = true
@@ -1515,9 +1546,11 @@ export function createPersistentDataRuntime(
                     let abortedUnchanged = false
                     if (!committed) {
                         try {
+                            const unchanged = await dependencies.store.readRoot()
+                            if (unchanged.revision !== pause.fence.revision || coordinator.revision !== pause.fence.revision) throw new PersistentMutationFencedError()
+                            await plugins.restartPluginsAfterAuthorityReplacement()
                             await pause.abortUnchanged(async () => { await binding.assertAuthority() })
                             abortedUnchanged = true
-                            await plugins.restartPluginsAfterAuthorityReplacement()
                             await binding.resume()
                         } catch { await pause.finish() }
                     } else await pause.finish()
@@ -1538,8 +1571,8 @@ export function createPersistentDataRuntime(
                 options,
             )
         },
-        mutatePersistentPluginStorage: (reason, mutations) =>
-            coordinator.mutatePersistentPluginStorage(reason, mutations),
+        mutatePersistentPluginStorage: (reason, mutations, check) =>
+            coordinator.mutatePersistentPluginStorage(reason, mutations, check),
         mutatePersistentPresets: (reason, mutate) =>
             coordinator.mutatePersistentPresets(reason, mutate),
         appendPersistentRootModule: (reason, input, signal) =>
@@ -1630,6 +1663,7 @@ export function createPersistentDataRuntime(
             const owner = await coordinator.acquireDestructiveReplacementFence(expected)
             const heldRevision = coordinator.revision
             let released = false
+            let releasing: Promise<void> | undefined
             return {
                 revision: heldRevision,
                 refreshCommittedWorkingSet(revision, options) {
@@ -1646,19 +1680,33 @@ export function createPersistentDataRuntime(
                     }
                     return refreshCommittedWorkingSet(revision, owner, options)
                 },
-                release() {
+                release(options) {
+                    if (releasing) return releasing
                     if (released) return
-                    coordinator.releaseDestructiveReplacementFence(owner)
-                    released = true
-                    // Nothing else can commit while the fence is held, so a later
-                    // revision is the holder's own change and sync must send it.
-                    const committed = coordinator.revision
-                    if (committed <= heldRevision) return
-                    try {
-                        dependencies.onLocalRevision?.(committed)
-                    } catch (error) {
-                        dependencies.onBackgroundError?.(error)
+                    const finish = () => {
+                        coordinator.releaseDestructiveReplacementFence(owner)
+                        released = true
+                        // Nothing else can commit while the fence is held, so a later
+                        // revision is the holder's own change and sync must send it.
+                        const committed = coordinator.revision
+                        if (committed <= heldRevision) return
+                        try {
+                            dependencies.onLocalRevision?.(committed)
+                        } catch (error) {
+                            dependencies.onBackgroundError?.(error)
+                        }
                     }
+                    if (!options?.verifyStoreRevision || coordinator.revision > heldRevision) return finish()
+                    releasing = (async () => {
+                        try {
+                            const latest = await dependencies.store.readRoot()
+                            if (latest.revision > coordinator.revision) coordinator.markCommittedWorkingSetRefreshRequired(
+                                latest.revision, new Error('Native commit completed without a working-set acknowledgement'))
+                        } catch (error) {
+                            coordinator.markCommittedWorkingSetRefreshRequired(coordinator.revision, error)
+                        } finally { finish() }
+                    })()
+                    return releasing
                 },
             }
         },

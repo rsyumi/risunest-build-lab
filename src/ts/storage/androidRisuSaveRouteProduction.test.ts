@@ -41,11 +41,38 @@ import {
     dispatchAndroidOpenedSpoolBatch,
     importAndroidOpenedPreparedContent,
     restoreAndroidOpenedBackupSource,
+    registerAndroidRisuSaveRoute,
     type AndroidOpenedSpoolDispatchDependencies,
 } from './androidRisuSaveRouteProduction.svelte'
 import type { PreparedNativeContent, PreparedNativeContentReceipt } from './nativeFileJobs'
+import type { AndroidSafJavascriptBridge } from './androidSafBridge'
 
 describe('Android opened spool production route', () => {
+    it('alerts the existing partial-file text once for a native-reconciled RisuSave terminal', async () => {
+        const terminal = {
+            requestId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            exportId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', sourceKind: 'risuSave',
+            state: 'failed', code: 'destination-interrupted', copyStarted: true,
+            publicationPrerequisitesComplete: true, warningCodes: ['partial-destination-may-remain'],
+        }
+        const acknowledge = vi.fn(async (_requestId: string) => true)
+        const bridge = {copyExport: () => {}, getExportStatus: () => JSON.stringify(terminal),
+            acknowledgeExport: acknowledge} satisfies AndroidSafJavascriptBridge
+        const target = Object.assign(new EventTarget(), {RisuSafBridge: bridge})
+        vi.stubGlobal('window', target)
+        vi.mocked(alertError).mockClear()
+        try {
+            registerAndroidRisuSaveRoute()
+            await vi.waitFor(() => expect(alertError).toHaveBeenCalledExactlyOnceWith(language.screenshotPartialDestinationMayRemain))
+            window.dispatchEvent(new CustomEvent('risu-android-saf-destination', {detail: terminal}))
+            window.dispatchEvent(new CustomEvent('risu-android-saf-destination', {detail: {...terminal,
+                requestId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', warningCodes: []}}))
+            await vi.waitFor(() => expect(acknowledge).toHaveBeenCalledTimes(2))
+            expect(alertError).toHaveBeenCalledExactlyOnceWith(language.screenshotPartialDestinationMayRemain)
+        } finally {
+            vi.unstubAllGlobals()
+        }
+    })
     it.each(['backup.RISUNEST', 'compatible.BIN', 'block.RISUDAT'])(
         'delegates %s token and source metadata to the common restore owner without nesting operations',
         async (displayName) => {

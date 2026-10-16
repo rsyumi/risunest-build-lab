@@ -10,6 +10,9 @@ import type {
 
 const english = {
     staging: languageEnglish.risuNest.serverSync.staging,
+    cameraDenied: 'Camera permission was denied. Try again or paste the connection settings.',
+    cameraUnavailable: 'Could not scan the QR code. Try again or paste the connection settings.',
+    changeAddress: 'Change server address', saveAddress: 'Save',
     title: 'External storage',
     help: 'Upload backups to a cloud service or your own server. All data is encrypted on this device before it is uploaded.',
     unsupported: 'External storage is available in the Android and desktop apps.',
@@ -206,6 +209,9 @@ const english = {
 }
 
 const korean: typeof english = {
+    cameraDenied: '카메라 권한이 허용되지 않았습니다. 다시 시도하거나 연결 설정을 붙여넣어 주세요.',
+    cameraUnavailable: '카메라로 QR 코드를 읽지 못했습니다. 다시 시도하거나 연결 설정을 붙여넣어 주세요.',
+    changeAddress: '서버 주소 변경', saveAddress: '저장',
     staging: languageKorean.risuNest.serverSync.staging,
     title: '외부 저장소',
     help: '클라우드나 개인 서버에 백업을 올릴 수 있습니다. 모든 데이터는 업로드하기 전 이 기기에서 암호화됩니다.',
@@ -456,6 +462,9 @@ export function externalErrorMessage(
     strings: ExternalStorageStrings,
     value: unknown,
 ): string {
+    const code = value instanceof Error ? value.message : value
+    if (code === 'qr-camera-permission-denied' || code === 'qr-camera-permission-blocked') return strings.cameraDenied
+    if (code === 'qr-camera-unavailable' || code === 'qr-scan-timeout' || code === 'qr-scan-busy') return strings.cameraUnavailable
     const summary = externalErrorSummary(strings, value)
     const details: string[] = []
     if (typeof value === 'string' && value.trim()) details.push(value)

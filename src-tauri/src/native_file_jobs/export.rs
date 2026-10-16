@@ -5,6 +5,29 @@ use crate::persistent_store::{PreparedRisuSaveExport, StoreError};
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 
+pub(super) struct ProgressWriter<'a, W> {
+    inner: W,
+    job: &'a JobControl,
+    bytes: u64,
+}
+impl<'a, W> ProgressWriter<'a, W> {
+    pub(super) fn new(inner: W, job: &'a JobControl) -> Self { Self { inner, job, bytes: 0 } }
+}
+impl ProgressWriter<'_, std::fs::File> {
+    pub(super) fn sync_all(&self) -> std::io::Result<()> { self.inner.sync_all() }
+}
+impl<W: std::io::Write> std::io::Write for ProgressWriter<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(bytes)?;
+        self.bytes = self.bytes.saturating_add(written as u64);
+        if !self.job.is_cancel_requested() {
+            self.job.set_export_bytes(self.bytes, None).map_err(std::io::Error::other)?;
+        }
+        Ok(written)
+    }
+    fn flush(&mut self) -> std::io::Result<()> { self.inner.flush() }
+}
+
 pub(crate) fn export_block_risu_save(
     mut prepared: PreparedRisuSaveExport,
     destination_path: &Path,
@@ -44,12 +67,12 @@ pub(crate) fn export_block_risu_save(
             if job.is_cancel_requested() {
                 return;
             }
-            if let Err(error) = job.set_progress(JobProgress {
+            if let Err(error) = job.set_export_progress(JobProgress {
                 completed_bytes,
                 total_bytes: None,
                 completed_items: completed,
                 total_items: Some(total),
-            }) {
+            }, completed_bytes, None) {
                 if !job.is_cancel_requested() {
                     *progress_failure.borrow_mut() = Some(error);
                 }
@@ -117,12 +140,12 @@ pub(crate) fn export_block_risu_save(
         );
     };
     let total_bytes = encoded.bytes.saturating_mul(2);
-    if let Err(error) = job.set_progress(JobProgress {
+    if let Err(error) = job.set_export_progress(JobProgress {
         completed_bytes: encoded.bytes,
         total_bytes: Some(total_bytes),
         completed_items: completed_items.get(),
         total_items: total_items.get(),
-    }) {
+    }, 0, Some(encoded.bytes)) {
         return finish_export_cleanup(
             Err(if job.is_cancel_requested() {
                 cancelled("export cancelled before destination publication")
@@ -146,12 +169,12 @@ pub(crate) fn export_block_risu_save(
             if job.is_cancel_requested() {
                 return;
             }
-            if let Err(error) = job.set_progress(JobProgress {
+            if let Err(error) = job.set_export_progress(JobProgress {
                 completed_bytes: encoded.bytes.saturating_add(progress.copied_bytes),
                 total_bytes: Some(total_bytes),
                 completed_items: completed_items.get(),
                 total_items: total_items.get(),
-            }) {
+            }, progress.copied_bytes, Some(encoded.bytes)) {
                 if !job.is_cancel_requested() {
                     *phase_failure.borrow_mut() = Some(error);
                 }

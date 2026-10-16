@@ -189,6 +189,7 @@ describe('SqlitePersistentDataStore', () => {
         await store.readConversationMetadata('char-a', 'conv-long')
         await store.readConversationWindow(windowQuery)
         await store.queryPluginStorage()
+        await store.queryPluginStorage('test-plugin')
         await store.readPluginStorage('test-plugin', 'memory')
         await store.readAssetAlias({ kind: alias.kind, key: alias.key })
         await store.listAssetAliases({ kind: 'asset', limit: 2, cursor: 'alias-cursor' })
@@ -216,6 +217,7 @@ describe('SqlitePersistentDataStore', () => {
             ],
             ['pds_read_conversation_window', { query: windowQuery }],
             ['pds_query_plugin_storage', {}],
+            ['pds_query_plugin_storage', { owner: 'test-plugin' }],
             ['pds_read_plugin_storage', { owner: 'test-plugin', key: 'memory' }],
             ['pds_read_asset_alias', { kind: 'asset', key: alias.key }],
             [
@@ -573,6 +575,7 @@ describe('SqlitePersistentDataStore', () => {
             limit: 10,
         })
         await lease.queryPluginStorage()
+        await lease.queryPluginStorage('test-plugin')
         await lease.readPluginStorage('test-plugin', 'memory')
         await lease.readAssetAlias({ kind: 'asset', key: 'assets/pinned.bin' })
         await lease.listAssetAliases({ kind: 'asset', limit: 2 })
@@ -613,6 +616,7 @@ describe('SqlitePersistentDataStore', () => {
                 },
             ],
             ['pds_query_plugin_storage', { lease: 'lease-7' }],
+            ['pds_query_plugin_storage', { lease: 'lease-7', owner: 'test-plugin' }],
             ['pds_read_plugin_storage', { owner: 'test-plugin', key: 'memory', lease: 'lease-7' }],
             [
                 'pds_read_asset_alias',
@@ -628,11 +632,12 @@ describe('SqlitePersistentDataStore', () => {
             ],
             ['pds_release_revision', { lease: 'lease-7' }],
         ])
+        mocks.invoke.mockClear()
         await expect(lease.readRoot()).rejects.toBeInstanceOf(SnapshotReleasedError)
         await expect(lease.readConversationMetadata('char-a', 'conv-long')).rejects.toBeInstanceOf(
             SnapshotReleasedError,
         )
-        expect(mocks.invoke).toHaveBeenCalledTimes(16)
+        expect(mocks.invoke).not.toHaveBeenCalled()
     })
 
 

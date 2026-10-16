@@ -66,6 +66,27 @@ describe('QR scan session', () => {
         expect(h.api.cancel).toHaveBeenCalledOnce()
     })
 
+    it('gives the camera a full timeout after a long permission prompt', async () => {
+        vi.useFakeTimers()
+        const h = harness()
+        let grant!: (permission: string) => void
+        h.api.checkPermissions.mockResolvedValue('prompt')
+        h.api.requestPermissions.mockReturnValue(new Promise(resolve => { grant = resolve }))
+        h.api.scan.mockImplementation(waiting)
+        const pending = h.scanner.scan()
+        const result = expect(pending).rejects.toThrow('qr-scan-timeout')
+        await vi.advanceTimersByTimeAsync(90_000)
+        expect(h.api.cancel).not.toHaveBeenCalled()
+        expect(h.view).not.toHaveBeenCalled()
+        grant('granted')
+        await settle()
+        await vi.advanceTimersByTimeAsync(59_999)
+        expect(h.hide).not.toHaveBeenCalled()
+        await vi.advanceTimersByTimeAsync(1)
+        await result
+        expect(h.hide).toHaveBeenCalledOnce()
+    })
+
     it('ends on a timeout and restores the page', async () => {
         vi.useFakeTimers()
         const h = harness()

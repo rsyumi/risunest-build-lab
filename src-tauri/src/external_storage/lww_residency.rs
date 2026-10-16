@@ -508,6 +508,12 @@ fn remote_error(error:ProviderError)->crate::server_sync::SyncError {
 pub(crate) fn hydrate_registered_many(root:&Path,digests:&[String],priority:&BTreeSet<String>,
     cancellation:Option<Arc<std::sync::atomic::AtomicBool>>,check:&dyn Fn()->crate::server_sync::Result<()>,
     opened:&mut dyn FnMut(&str,crate::server_sync::residency::HydrationOutcome))->crate::server_sync::Result<Vec<String>> {
+    hydrate_registered_many_scheduled(root,digests,priority,cancellation,check,opened,&mut |_,_|Ok(()))
+}
+pub(crate) fn hydrate_registered_many_scheduled(root:&Path,digests:&[String],priority:&BTreeSet<String>,
+    cancellation:Option<Arc<std::sync::atomic::AtomicBool>>,check:&dyn Fn()->crate::server_sync::Result<()>,
+    opened:&mut dyn FnMut(&str,crate::server_sync::residency::HydrationOutcome),
+    before_group:&mut dyn FnMut(&str,&mut dyn FnMut(&str,crate::server_sync::residency::HydrationOutcome))->crate::server_sync::Result<()>) -> crate::server_sync::Result<Vec<String>> {
     use crate::persistent_store::asset_object_catalog::{AssetObjectRegistration,ASSET_OBJECT_CATALOG_MAX_PAGE};
     use crate::server_sync::residency::HydrationOutcome;
     let cancel=cancellation.map(Cancellation::with_external_flag).unwrap_or_default();
@@ -575,48 +581,58 @@ pub(crate) fn hydrate_registered_many(root:&Path,digests:&[String],priority:&BTr
         #[cfg(test)]
         hydration_tests::crash_point(root,hydration_tests::CrashPoint::AfterRegistration)?;
     }
+    enum Work { Packed(Vec<PackedOutline>), Standalone(Vec<Source>) }
+    let positions=digests.iter().enumerate().map(|(index,hash)|(*hash,index)).collect::<BTreeMap<_,_>>();
+    let rank=|hash:&str|(!priority.contains(hash),positions.get(hash).copied().unwrap_or(usize::MAX));
     let mut groups=Vec::new();
-    for (connection,outlines) in packed {for group in pack_groups(outlines,priority) {groups.push((connection.clone(),group));}}
-    groups.sort_by_key(|(_,group)|!group.iter().any(|outline|priority.contains(&outline.hash)));
-    let (selected,background):(Vec<_>,Vec<_>)=standalone.into_iter().partition(|source:&Source|priority.contains(&source.hash));
-    let mut connections=BTreeMap::new();
-    // Selected standalone bodies precede background pack groups.
-    for (connection,sources) in by_connection(selected) {
-        publisher.checked()?;
-        let connection=source_connection(&mut connections,&connection,&cancel).map_err(remote_error)?;
-        hydrate_standalone(connection,sources,scratch.path(),&publisher,opened)?;
+    for (connection,outlines) in packed {
+        for mut group in pack_groups(outlines,priority) {
+            group.sort_by_key(|outline|rank(&outline.hash));
+            groups.push((rank(&group[0].hash),connection.clone(),Work::Packed(group)));
+        }
     }
-    for (connection,outlines) in groups {
+    for source in standalone {
+        let connection=(source.connection_root.clone(),source.connection_id.clone(),source.library_id.clone());
+        groups.push((rank(&source.hash),connection,Work::Standalone(vec![source])));
+    }
+    groups.sort_by_key(|(rank,_,_)|*rank);
+    let mut scheduled:Vec<(ConnectionKey,Work)>=Vec::new();
+    for (_,connection,work) in groups {
+        match (scheduled.last_mut(),work) {
+            (Some((previous,Work::Standalone(batch))),Work::Standalone(mut sources)) if *previous==connection && priority.contains(&batch[0].hash)==priority.contains(&sources[0].hash)=>batch.append(&mut sources),
+            (_,work)=>scheduled.push((connection,work)),
+        }
+    }
+    let mut connections=BTreeMap::new();
+    for (connection,work) in scheduled {
         publisher.checked()?;
-        // Full sources are read one group at a time, so a hydration never holds every source at once.
-        let mut sources=remote.packed(&connection.2,outlines.iter().map(|outline|outline.hash.as_str())).map_err(hydration_error)?;
-        let mut interner=ObjectInterner::default();
-        let mut group=Vec::with_capacity(outlines.len());
-        for outline in outlines {
-            match sources.remove(&outline.hash) {
-                Some(source) if source.hash==outline.hash && source.connection_root==connection.0 && source.connection_id==connection.1
-                    =>group.push(source.interned(&mut interner)),
-                _=>unavailable.push(outline.hash),
+        let first=match &work { Work::Standalone(sources)=>&sources[0].hash, Work::Packed(outlines)=>&outlines[0].hash };
+        before_group(first,opened)?;
+        match work {
+            Work::Standalone(sources)=>{
+                let connection=source_connection(&mut connections,&connection,&cancel).map_err(remote_error)?;
+                hydrate_standalone(connection,sources,scratch.path(),&publisher,opened)?;
+            }
+            Work::Packed(outlines)=>{
+                // Read full sources one shared-pack group at a time.
+                let mut sources=remote.packed(&connection.2,outlines.iter().map(|outline|outline.hash.as_str())).map_err(hydration_error)?;
+                let mut interner=ObjectInterner::default();
+                let mut group=Vec::with_capacity(outlines.len());
+                for outline in outlines {
+                    match sources.remove(&outline.hash) {
+                        Some(source) if source.hash==outline.hash && source.connection_root==connection.0 && source.connection_id==connection.1
+                            =>group.push(source.interned(&mut interner)),
+                        _=>unavailable.push(outline.hash),
+                    }
+                }
+                drop(sources);
+                if group.is_empty() {continue;}
+                let opened_source=source_connection(&mut connections,&connection,&cancel).map_err(remote_error)?;
+                hydrate_pack_group(root,opened_source,group,scratch.path(),&publisher,opened)?;
             }
         }
-        drop(sources);
-        if group.is_empty() {continue;}
-        let opened_source=source_connection(&mut connections,&connection,&cancel).map_err(remote_error)?;
-        hydrate_pack_group(root,opened_source,group,scratch.path(),&publisher,opened)?;
-    }
-    for (connection,sources) in by_connection(background) {
-        publisher.checked()?;
-        let connection=source_connection(&mut connections,&connection,&cancel).map_err(remote_error)?;
-        hydrate_standalone(connection,sources,scratch.path(),&publisher,opened)?;
     }
     check()?;Ok(unavailable)
-}
-fn by_connection(sources:Vec<Source>)->BTreeMap<ConnectionKey,Vec<Source>> {
-    let mut connections=BTreeMap::<ConnectionKey,Vec<Source>>::new();
-    for source in sources {
-        connections.entry((source.connection_root.clone(),source.connection_id.clone(),source.library_id.clone())).or_default().push(source);
-    }
-    connections
 }
 /// A source connection, opened once for every group a hydration reads through it.
 struct OpenedSource {
@@ -908,10 +924,24 @@ pub(crate) fn hydrate(
 }
 
 pub(crate) async fn spool_verified_remote_body(root:&Path,hash:&str,destination:&Path,cancel:&Cancellation)->Result<Option<tempfile::NamedTempFile>> {
+    spool_verified_remote_body_observed(root,hash,destination,cancel,None).await
+}
+pub(crate) async fn spool_verified_remote_body_observed(root:&Path,hash:&str,destination:&Path,cancel:&Cancellation,observer:Option<std::sync::Arc<dyn Fn(u64)+Send+Sync>>)->Result<Option<tempfile::NamedTempFile>> {
     let Some(source)=freeze_remote_body(root,hash)? else {return Ok(None)};
-    spool_frozen_remote_body(&source,destination,cancel).await.map(Some)
+    spool_frozen_remote_body_observed(&source,destination,cancel,observer).await.map(Some)
 }
 pub(crate) async fn spool_frozen_remote_body(source:&FrozenBodySource,destination:&Path,cancel:&Cancellation)->Result<tempfile::NamedTempFile> {
+    spool_frozen_remote_body_observed(source,destination,cancel,None).await
+}
+pub(super) async fn spool_frozen_remote_body_observed(source:&FrozenBodySource,destination:&Path,cancel:&Cancellation,observer:Option<std::sync::Arc<dyn Fn(u64)+Send+Sync>>)->Result<tempfile::NamedTempFile> {
+    let high_water=std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let progress=|| {
+        let observer=observer.clone(); let high_water=high_water.clone();
+        super::phase_progress::PhaseProgress::new(move |reading| {
+            let previous=high_water.fetch_max(reading.bytes,std::sync::atomic::Ordering::Relaxed);
+            if reading.bytes>previous {if let Some(observer)=&observer {observer(reading.bytes-previous);}}
+        })
+    };
     let (hash,connection_root,connection_id,library_id)=match source {
         FrozenBodySource::Standalone(source)=>(&source.hash,&source.connection_root,&source.connection_id,&source.library_id),
         FrozenBodySource::Packed(source)=>(&source.hash,&source.connection_root,&source.connection_id,&source.library_id),
@@ -929,10 +959,12 @@ pub(crate) async fn spool_frozen_remote_body(source:&FrozenBodySource,destinatio
         std::fs::create_dir_all(destination).map_err(local)?;
         let mut output=tempfile::NamedTempFile::new_in(destination).map_err(local)?;
         if let FrozenBodySource::Standalone(source)=&source {
-            spool_standalone(source,&mut output,destination,&key,provider.as_ref(),&repository,cancel).await?;
+            let progress=progress();
+            let scratch=download_standalone_observed(source,destination,provider.as_ref(),&repository,cancel,Some(&progress)).await?;
+            open_standalone(source,&mut output,&scratch.path().join("ciphertext"),&key)?;
         } else if let FrozenBodySource::Packed(source)=&source {
             let scratch=tempfile::tempdir_in(destination).map_err(local)?;
-            let path=match super::snapshot_restore::download_packed_body_file(hash,source.byte_length,source.chunks.clone(),source.packs.clone(),scratch.path(),&key,provider.as_ref(),&repository,cancel).await {
+            let path=match super::snapshot_restore::download_packed_body_file_observed(hash,source.byte_length,source.chunks.clone(),source.packs.clone(),scratch.path(),&key,provider.as_ref(),&repository,&progress(),cancel).await {
                 Err(error) if error.kind==ErrorKind::NotFound => {
                     let (current_repository,_)=provider.open_repository(&stored.config,&SecretRef(stored.credential_ref.clone()),OpenMode::Existing,cancel).await?;
                     if current_repository.repository_id!=repository.repository_id || current_repository.connection_identity!=repository.connection_identity {return Err(segment::corrupt());}
@@ -944,7 +976,7 @@ pub(crate) async fn spool_frozen_remote_body(source:&FrozenBodySource,destinatio
                     let mut refreshed=engine.refresh_packed_sources(std::slice::from_ref(source),&scratch.path().join("current-catalogs"),cancel).await?;
                     let refreshed=refreshed.pop().ok_or_else(segment::corrupt)?;
                     if let Some(reason)=owner.recheck(&protection,cancel).await? {return Err(super::leases::yield_error(reason));}
-                    super::snapshot_restore::download_packed_body_file(hash,source.byte_length,refreshed.chunks,refreshed.packs,&scratch.path().join("current-source"),&key,provider.as_ref(),&repository,cancel).await?
+                    super::snapshot_restore::download_packed_body_file_observed(hash,source.byte_length,refreshed.chunks,refreshed.packs,&scratch.path().join("current-source"),&key,provider.as_ref(),&repository,&progress(),cancel).await?
                 }
                 other=>other?,
             };
@@ -957,27 +989,33 @@ pub(crate) async fn spool_frozen_remote_body(source:&FrozenBodySource,destinatio
         Ok(output)
     }).await
 }
-/// Downloads one standalone body, checks its ciphertext and opens it into
-/// `output`, which then holds exactly the verified plaintext.
-async fn spool_standalone(source:&Source,output:&mut tempfile::NamedTempFile,destination:&Path,key:&[u8;32],provider:&dyn Provider,
-    repository:&RepositoryHandle,cancel:&Cancellation)->Result<()> {
-    let scratch=download_standalone(source,destination,provider,repository,cancel).await?;
-    open_standalone(source,output,&scratch.path().join("ciphertext"),key)
-}
 async fn download_standalone(source:&Source,destination:&Path,provider:&dyn Provider,
     repository:&RepositoryHandle,cancel:&Cancellation)->Result<tempfile::TempDir> {
+    download_standalone_observed(source,destination,provider,repository,cancel,None).await
+}
+async fn download_standalone_observed(source:&Source,destination:&Path,provider:&dyn Provider,
+    repository:&RepositoryHandle,cancel:&Cancellation,progress:Option<&super::phase_progress::PhaseProgress>)->Result<tempfile::TempDir> {
     cancel.check()?;
     let scratch=tempfile::tempdir_in(destination).map_err(local)?;
     let locator=source.body.locator.as_ref().ok_or_else(segment::corrupt)?;
     locator.validate_for(repository)?;
     let cipher=scratch.path().join("ciphertext");
     let mut sink=super::transfer::SpoolSink::create(&cipher,source.body.byte_length.0)?;
+    let streamed=progress.map(|phase| {
+        phase.plan(1,source.body.byte_length.0);
+        let streamed=super::phase_progress::DownloadProgress::new(phase);
+        let observed=streamed.clone();
+        sink.observe(std::sync::Arc::new(move |bytes|observed.advance(bytes)));
+        streamed
+    });
     let receipt=match provider.read_object(repository,locator,None,&mut sink,cancel).await? {
         ReadReceipt::Body(receipt)=>receipt,
         ReadReceipt::NotModified(_)=>return Err(segment::corrupt()),
     };
     if receipt.locator!=*locator || !receipt.complete || receipt.byte_length!=source.body.byte_length.0 || !sink.is_verified() {return Err(segment::corrupt());}
     let _verified=super::transfer::SpoolSource::verified(&cipher,source.body.byte_length.0,&source.body.sha256)?;
+    if let Some(streamed)=streamed {streamed.commit(source.body.byte_length.0);}
+    if let Some(progress)=progress {progress.flush();}
     Ok(scratch)
 }
 fn open_standalone(source:&Source,output:&mut tempfile::NamedTempFile,cipher:&Path,key:&[u8;32])->Result<()> {

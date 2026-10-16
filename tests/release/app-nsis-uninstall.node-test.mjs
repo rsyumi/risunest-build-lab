@@ -65,6 +65,41 @@ SectionEnd
   } finally { rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
 
+test("destination checks distinguish an absent drive from a missing directory", { skip }, () => {
+  const root = mkdtempSync(join(tmpdir(), "risunest-nsis-volume-"));
+  try {
+    const drive = [..."ZYXWVUTSRQPONMLKJIHGFED"].find(letter => !existsSync(`${letter}:\\`));
+    assert.ok(drive, "an unused drive letter is required");
+    const include = resolve("src-tauri/windows-common.nsh");
+    const missingFolder = join(root, "missing", "nested");
+    const script = join(root, "volume.nsi");
+    writeFileSync(script, String.raw`Unicode true
+RequestExecutionLevel user
+SilentInstall silent
+OutFile "${quote(join(root, "volume.exe"))}"
+!include LogicLib.nsh
+!include "${quote(include)}"
+Section
+  FileOpen $9 "$EXEDIR\results" w
+  StrCpy $INSTDIR "${quote(missingFolder)}"
+  !insertmacro CheckInstallVolume
+  FileWrite $9 "$1|"
+  StrCpy $INSTDIR "${drive}:\missing\folder"
+  !insertmacro CheckInstallVolume
+  FileWrite $9 "$1|"
+  FileClose $9
+SectionEnd
+`);
+    const compiled = spawnSync(compiler, ["/V2", script], { encoding: "utf8", windowsHide: true, timeout: 30000 });
+    assert.equal(compiled.status, 0, `${compiled.stdout}\n${compiled.stderr}`);
+    assert.equal(spawnSync(join(root, "volume.exe"), ["/S"], { timeout: 30000, windowsHide: true }).status, 0);
+    const [present, absent] = readFileSync(join(root, "results"), "utf8").split("|");
+    assert.notEqual(present, "-1");
+    assert.equal(absent, "-1");
+    assert.equal(existsSync(missingFolder), false);
+  } finally { rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
+});
+
 test("missing or misfiled Korean installer strings fail compilation", { skip }, () => {
   const root = mkdtempSync(join(tmpdir(), "risunest-nsis-language-"));
   try {

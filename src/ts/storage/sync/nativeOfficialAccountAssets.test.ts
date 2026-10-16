@@ -3,24 +3,35 @@ import { createNativeOfficialAccountAssets } from './nativeOfficialAccountAssets
 import type { BlobStore } from '../blobStore'
 import type { PersistentRoot } from '../persistentDataStore'
 import { createLeaseStub, createStoreStub } from '../persistentDataStore.testSupport'
+import { nativeOfficialAccountKeys } from './nativeOfficialAccountFlow'
 import type { NativeDeviceSettings } from '../nativeDeviceSettings'
 import type { AccountStorage } from '../accountStorage'
 
-vi.mock('./officialAccountSnapshot', () => ({
-    collectPinnedReferences: async () => ({ assets: ['assets/avatar', 'assets/emotion', 'assets/background', 'assets/missing'] }),
+vi.mock('../database.svelte', () => ({
+    getDatabase: () => { throw new Error('Asset recovery must use the pinned store') },
+    presetTemplate: {},
 }))
-vi.mock('./nativeOfficialAccountFlow', () => ({ nativeOfficialAccountKeys: { pendingAssets: 'pending' } }))
-vi.mock('../persistentRecordIterator', () => ({
-    withPersistentRevisionLease: async (lease: { release(): void }, work: (reader: unknown) => Promise<unknown>) => {
-        try { return await work(lease) } finally { lease.release() }
-    },
-}))
+vi.mock('../../globalApi.svelte', () => ({ forageStorage: {} }))
 
 function harness() {
     const values = new Map<string, Uint8Array>()
-    let marker: unknown = null
-    const settings = { get: vi.fn(async () => marker), set: vi.fn(async (_key, value) => { marker = value }) } as unknown as NativeDeviceSettings
-    const lease = createLeaseStub({ release: vi.fn(async () => {}) })
+    const storedSettings = new Map<string, unknown>()
+    const settings: NativeDeviceSettings = {
+        get: async key => storedSettings.get(key) ?? null,
+        readMany: async keys => keys.map(key => storedSettings.get(key) ?? null),
+        set: async (key, value) => { storedSettings.set(key, value) },
+        patch: async () => { throw new Error('unexpected patch') },
+    }
+    const lease = createLeaseStub({
+        revision: 7,
+        readRoot: async () => ({ revision: 7, value: {
+            userIcon: 'assets/avatar', customBackground: 'assets/background',
+            modules: [{ assets: [['emotion', 'assets/emotion'], ['missing', 'assets/missing']] }],
+        } as unknown as PersistentRoot }),
+        queryPluginStorage: async () => ({ revision: 7, items: [] }),
+        queryCharacters: async () => ({ revision: 7, items: [] }),
+        release: vi.fn(async () => {}),
+    })
     const store = createStoreStub({ readRoot: async () => ({ revision: 7, value: {} as PersistentRoot }), acquireRevision: async () => lease })
     const blobs = {
         stat: vi.fn(async key => values.has(key) ? {} : null),
@@ -47,7 +58,7 @@ describe('native restored account assets', () => {
             expect(h.ledger.record).toHaveBeenCalledWith(key, key)
         }
         expect(h.lease.release).toHaveBeenCalledOnce()
-        expect(await h.settings.get('pending')).toEqual({ accountId: 'account' })
+        expect(await h.settings.get(nativeOfficialAccountKeys.pendingAssets)).toEqual({ accountId: 'account' })
     })
 
     it('resumes after interruption and isolates a different signed-in account', async () => {
@@ -60,7 +71,7 @@ describe('native restored account assets', () => {
         expect(h.readItem).toHaveBeenCalledOnce()
         h.readItem.mockImplementation(async () => ({ kind: 'value', bytes: Uint8Array.of(4) }))
         await expect(resumed.complete('account')).resolves.toBe(0)
-        expect(await h.settings.get('pending')).toBeNull()
+        expect(await h.settings.get(nativeOfficialAccountKeys.pendingAssets)).toBeNull()
         expect(h.values.size).toBe(4)
     })
 
@@ -70,6 +81,6 @@ describe('native restored account assets', () => {
         vi.mocked(h.blobs.read).mockResolvedValue(Uint8Array.of(9))
         await expect(h.assets.complete('account')).rejects.toThrow('verification failed')
         expect(h.ledger.record).not.toHaveBeenCalled()
-        expect(await h.settings.get('pending')).toEqual({ accountId: 'account' })
+        expect(await h.settings.get(nativeOfficialAccountKeys.pendingAssets)).toEqual({ accountId: 'account' })
     })
 })

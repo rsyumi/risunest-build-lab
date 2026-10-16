@@ -8,6 +8,16 @@ enum NativeFileStateError: LocalizedError {
 struct NativeFileState {
     let staging: URL
 
+    static func discardStagedFile(_ file: URL, staging: URL) throws {
+        let folder = file.resolvingSymlinksInPath().deletingLastPathComponent()
+        let root = staging.resolvingSymlinksInPath()
+        guard UUID(uuidString: folder.lastPathComponent) != nil,
+              folder.deletingLastPathComponent() == root || folder.deletingLastPathComponent() == root.appendingPathComponent("custody", isDirectory: true) else {
+            throw CocoaError(.fileReadInvalidFileName)
+        }
+        try FileManager.default.removeItem(at: folder)
+    }
+
     func receiptURL(_ id: String) throws -> URL {
         guard UUID(uuidString: id) != nil else { throw CocoaError(.fileReadInvalidFileName) }
         return staging.appendingPathComponent("receipts/\(id).json")

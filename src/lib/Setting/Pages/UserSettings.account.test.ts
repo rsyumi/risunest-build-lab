@@ -38,7 +38,14 @@ function handler(name: string, marker = 'unMigrationAccount') {
 
 function setup() {
     const account = { token: 'synthetic', useSync: true }
+    const storage = new Map([['fallbackRisuToken', 'synthetic-fallback']])
+    const session = { value: 'synthetic-session' as string | null }
     const dependencies = {
+        localStorage: {
+            getItem: (key: string) => storage.get(key) ?? null,
+            removeItem: (key: string) => { storage.delete(key) },
+        },
+        resetAccountStorageSession: vi.fn(() => { session.value = null }),
         isTauri: false,
         nativeAccountBusy: false,
         $accountUnmigrationBusy: false,
@@ -48,10 +55,23 @@ function setup() {
         alertError: vi.fn(),
         language: { accountUnmigration: { failed: 'Local transition failed. Please retry.' } },
     }
-    return { account, dependencies }
+    return { account, dependencies, session }
 }
 
 describe('web account settings actions', () => {
+    it('clears fallback credentials and the account storage session on local-only logout', async () => {
+        const { dependencies, session } = setup()
+        dependencies.DBState.db.account!.useSync = false
+        dependencies.forageStorage.isAccount = false
+
+        await handler('onclick')(dependencies)()
+
+        expect(dependencies.DBState.db.account).toBeUndefined()
+        expect(dependencies.localStorage.getItem('fallbackRisuToken')).toBeNull()
+        expect(session.value).toBeNull()
+        expect(dependencies.unMigrationAccount).not.toHaveBeenCalled()
+    })
+
     it('awaits logout materialization without deleting the live account, and reports failure', async () => {
         const { account, dependencies } = setup()
         let reject!: (error: Error) => void
@@ -72,6 +92,8 @@ describe('web account settings actions', () => {
         await operation
         expect(dependencies.DBState.db.account).toBe(account)
         expect(dependencies.alertError).toHaveBeenCalledOnce()
+        expect(dependencies.localStorage.getItem('fallbackRisuToken')).toBe('synthetic-fallback')
+        expect(dependencies.resetAccountStorageSession).not.toHaveBeenCalled()
     })
 
     it('starts unmigration when the checkbox changes to unchecked and reports failure', async () => {
@@ -81,6 +103,8 @@ describe('web account settings actions', () => {
         expect(dependencies.unMigrationAccount).toHaveBeenCalledOnce()
         expect(dependencies.DBState.db.account).toBe(account)
         expect(dependencies.alertError).toHaveBeenCalledOnce()
+        expect(dependencies.localStorage.getItem('fallbackRisuToken')).toBe('synthetic-fallback')
+        expect(dependencies.resetAccountStorageSession).not.toHaveBeenCalled()
     })
 
     it('does not start a duplicate logout while unmigration is busy', async () => {

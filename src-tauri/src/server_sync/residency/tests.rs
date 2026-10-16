@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn concurrent_first_open_preserves_a_single_valid_store() {
+    for _ in 0..8 {
+        let root = tempfile::tempdir().unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let open = || {
+                barrier.wait();
+                let store = Residency::open(root.path()).unwrap();
+                let version: i64 = store.db.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+                assert_eq!(version, 1);
+            };
+            let first = scope.spawn(open);
+            let second = scope.spawn(open);
+            first.join().unwrap();
+            second.join().unwrap();
+        });
+        Residency::open(root.path()).unwrap();
+    }
+}
+
+#[test]
 fn cancelled_waiter_leaves_the_active_hydration_lock_intact() {
     let lock = std::sync::Mutex::new(());
     let active = lock.lock().unwrap();
@@ -215,7 +236,21 @@ fn invalid_confirmation_is_atomic_and_unknown_schema_is_rejected() {
         .is_err());
     store.db.execute_batch("PRAGMA user_version=2").unwrap();
     drop(store);
-    assert!(Residency::open(root.path()).is_err());
+    assert_eq!(Residency::open(root.path()).err().unwrap().code, "incompatible-residency-store");
+
+    let foreign = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(foreign.path().join("server-sync")).unwrap();
+    let db = crate::sqlite_open::open(Residency::path(foreign.path())).unwrap();
+    db.execute_batch("CREATE TABLE unrelated(value TEXT)").unwrap();
+    assert_eq!(Residency::open(foreign.path()).err().unwrap().code, "invalid-residency-store");
+    assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name='unrelated'", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+
+    let corrupt = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(corrupt.path().join("server-sync")).unwrap();
+    let path = Residency::path(corrupt.path());
+    std::fs::write(&path, b"synthetic invalid sqlite").unwrap();
+    assert_eq!(Residency::open(corrupt.path()).err().unwrap().code, "local-metadata");
+    assert_eq!(std::fs::read(path).unwrap(), b"synthetic invalid sqlite");
 }
 
 fn log_path(root: &Path) -> PathBuf {

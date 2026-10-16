@@ -73,10 +73,11 @@ impl<'de> Visitor<'de> for CharactersSeed<'_, '_> {
         let mut ids = HashSet::new();
         while let Some(mut value) = seq.next_element::<Value>()? {
             if self.database.job.is_cancel_requested() { return Err(de::Error::custom("restore cancelled")); }
-            if upstream_import::exclude_record(&value, self.excluded) { continue; }
+            if upstream_import::exclude_record(&value, self.excluded) { self.database.job.record_restore_omission("excludedCharacters", 1).map_err(de::Error::custom)?; continue; }
             value = self.database.sink.prepare_character(value).map_err(de::Error::custom)?;
             if !self.database.sink.expands_cold_payloads() { omit_unavailable_cold(&mut value, self.database.job).map_err(de::Error::custom)?; }
-            if upstream_import::exclude_record(&value, self.excluded) || !prepare_legacy_character(&mut value, &mut ids) { continue; }
+            if upstream_import::exclude_record(&value, self.excluded) { self.database.job.record_restore_omission("excludedCharacters", 1).map_err(de::Error::custom)?; continue; }
+            if !prepare_legacy_character(&mut value, &mut ids) { continue; }
             pocket_features::character(&mut value, &format!("character:{count}"));
             assign_legacy_chat_ids(std::slice::from_mut(&mut value));
             self.database.sink.add_characters(self.database.staging_id, &[value]).map_err(de::Error::custom)?;

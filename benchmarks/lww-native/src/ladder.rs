@@ -477,8 +477,9 @@ fn run_group()->Result<(),String> {
         "server"=>{server_group(&recorder,&library,&work,&settings);Ok(())},
         "backup"=>{backup_group(&recorder,&library,&work,&settings);Ok(())},
         "maintenance"=>{maintenance_group(&recorder,&library,&work,&settings);Ok(())},
+        "eviction"=>{eviction_group(&recorder,&library,&work,&settings);Ok(())},
         "serverless"=>{serverless_group(&recorder,&library,&work,&settings);Ok(())},
-        _=>Err("RISUNEST_LADDER_GROUP must be server, backup, maintenance or serverless".to_owned()),
+        _=>Err("RISUNEST_LADDER_GROUP must be server, backup, maintenance, serverless or eviction".to_owned()),
     };
     if std::env::var("RISUNEST_LADDER_KEEP_WORK").as_deref()!=Ok("1") {
         if let Err(error)=std::fs::remove_dir_all(&work) {eprintln!("LADDER-CLEANUP-FAILED {}: {error}",work.display());}
@@ -798,6 +799,46 @@ fn portable_restore(backup:&Path,root:&Path,store:PersistentStore,settings:&Sett
     if !adopted {errors.push("restore was not adopted".into());}
     if restored!=missing.len() as u64 {errors.push("missing bodies were not all restored".into());}
     if errors.is_empty() {Ok(line)} else {Err(format!("{}; line {line}",errors.join("; ")))}
+}
+
+fn eviction_group(recorder:&Recorder,library:&Path,work:&Path,settings:&Settings) {
+    let server=LocalServerFixture::new();
+    let mut source:Option<PersistentStore>=None;
+    let mut sender:Option<LwwClient>=None;
+    let ready=recorder.phase("eviction-prepare",true,|| {
+        let fork=fork_library(library,&work.join("source"))?;
+        let mut store=PersistentStore::open(&work.join("source")).text()?;
+        let client=server.client(&store);
+        let config=client.client.config();
+        bind(&mut store,SyncTarget::Server(server.endpoint.clone()),&server.endpoint,&config.library_id);
+        queue_unit_state(&mut store,256)?;
+        while server_sync::lww_tests::publish_cycle(&client,&mut store,&[]).text()?.is_some() {}
+        receive_until_idle(&client,&mut store)?;
+        store.asset_residency_set_policy(server_sync::residency::AssetPolicy::Remote,||Ok(())).text()?;
+        source=Some(store);sender=Some(client);
+        Ok(json!({"setup":fork}))
+    });
+    recorder.phase("eviction",ready,|| {
+        let store=source.as_ref().ok_or("source absent")?;
+        let io=sender.as_ref().ok_or("sender absent")?.client.test_io.clone().ok_or("sender counters absent")?;
+        let before=serde_json::to_value(store.asset_residency_status().text()?).text()?;
+        io.reset();reset_observers();
+        crate::persistent_store::ASSET_GC_LIBRARY_ROOT_COLLECTIONS.with(|count|count.set(0));
+        let window=Window::start(settings.sample);
+        let status=store.asset_residency_evict(||Ok(())).text()?;
+        let (elapsed,memory)=window.stop();
+        let observers=take_observers(HashTotals::default());
+        let inventories=crate::persistent_store::ASSET_GC_LIBRARY_ROOT_COLLECTIONS.with(|count|count.get());
+        let status=serde_json::to_value(status).text()?;
+        let objects=status["remoteObjects"].as_u64().ok_or("remote count absent")?
+            .checked_sub(before["remoteObjects"].as_u64().ok_or("previous remote count absent")?).ok_or("remote count decreased")?;
+        let line=json!({"elapsedMs":elapsed,"memory":memory,"counts":{"evictedObjects":objects,"evictedBytes":status["evictedBytes"],
+            "libraryInventories":inventories,"http":server_io(&io),"observers":observers,"residency":status},"sqlite":sqlite_sizes(store.repository_root())});
+        if objects==0 {return Err(format!("eviction removed no synthetic bodies: {line}"));}
+        Ok(line)
+    });
+    drop((sender,source));
+    drop(server);
 }
 
 fn maintenance_group(recorder:&Recorder,library:&Path,work:&Path,settings:&Settings) {

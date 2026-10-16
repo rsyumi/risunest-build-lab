@@ -1956,7 +1956,8 @@ impl ExternalLwwEngine {
                 .map_err(store_error)?;
         }
         let hashes=super::snapshot_restore::admit_data_catalogs(
-            &payload.data_catalogs,store,&self.target_scope(),&self.root_key,self.provider.as_ref(),&self.repository,cancel,
+            &payload.data_catalogs,store,&self.target_scope(),&self.root_key,
+            Some(&super::runtime::connection_directory(&self.connection_root,&self.connection_id).join("package-cache")),self.provider.as_ref(),&self.repository,cancel,
         ).await?;
         for hash in hashes {
             store.external_lww_witness_object(&self.target_scope(),&hash).map_err(store_error)?;

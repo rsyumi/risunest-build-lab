@@ -86,6 +86,24 @@ it('dismisses only the top nested dialog on Escape and preserves ancestors on Ba
     expect(closes[0]).toHaveBeenCalledOnce()
 })
 
+it('closes only the top layer when one Back skips both layer tokens', () => {
+    const parentClosed = vi.fn()
+    const childClosed = vi.fn()
+    const parent = modalNavigation(document.createElement('div'), { close: parentClosed })
+    const parentState = history.state
+    const child = modalNavigation(document.createElement('div'), { close: childClosed })
+    history.replaceState(null, '')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    expect(parentClosed).not.toHaveBeenCalled()
+    expect(childClosed).toHaveBeenCalledOnce()
+    expect(history.state).toEqual(parentState)
+    child.destroy()
+    history.replaceState(null, '')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    expect(parentClosed).toHaveBeenCalledOnce()
+    parent.destroy()
+})
+
 it('does not close a dialog for composition-owned Escape', () => {
     const close = vi.fn()
     const action = modalNavigation(document.createElement('div'), { close })

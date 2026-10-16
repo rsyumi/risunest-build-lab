@@ -21,6 +21,14 @@ fn reference() -> Finding {
 }
 
 #[test]
+fn a_missing_chat_page_offers_selecting_the_first_conversation_without_discarding_data() {
+    let candidates = plan(&result(vec![reference().at("$.chatPage", 0)]));
+    assert_eq!(candidates.len(), 1);
+    assert!(candidates[0].preferred && !candidates[0].discards);
+    assert_eq!(candidates[0].action, RepairAction::SelectFirstConversation { character_id: "char-1".into() });
+}
+
+#[test]
 fn a_dangling_reference_offers_removing_it_and_says_the_value_is_gone() {
     let plan = plan(&result(vec![reference()]));
     let [candidate] = plan.as_slice() else {

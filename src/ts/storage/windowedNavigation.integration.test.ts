@@ -1077,8 +1077,10 @@ describe('selected chat list edits', () => {
             expect(await characters.changeChar(indexOf(ownerId))).toBe(true)
             expect(runtime.getSelectedConversationMode()).toBe('windowed')
             await runtime.flushPendingData('activation')
+            await reader.open()
             const readConversation = vi.spyOn(runtime.store, 'readConversation')
             const committed: { keys: string[], units: string[], added?: string, replaced?: string }[] = []
+            const historiesAfterCommit: Message[][] = []
             const commit = runtime.store.commit.bind(runtime.store)
             vi.spyOn(runtime.store, 'commit').mockImplementation(async (request) => {
                 committed.push({
@@ -1087,7 +1089,9 @@ describe('selected chat list edits', () => {
                     added: request.addCharacter?.chaId,
                     replaced: request.replaceCharacter?.chaId,
                 })
-                return commit(request)
+                const result = await commit(request)
+                historiesAfterCommit.push((await reader.readConversation(ownerId, selectedId))!.value.message)
+                return result
             })
 
             // The sidebar's 새 캐릭터 생성 and 캐릭터 가져오기 add the character, then select it.
@@ -1100,15 +1104,22 @@ describe('selected chat list edits', () => {
             expect(selected().chaId).toBe(ownerId)
             expect(runtime.getSelectedConversationMode()).toBe('windowed')
             expect(get(app.localSaveFailure)).toBeNull()
-            expect(committed.map((entry) => entry.added)).toEqual([addedId])
+            expect(committed.flatMap((entry) => entry.added ? [entry.added] : [])).toEqual([addedId])
+            expect(committed.flatMap((entry) => entry.replaced ? [entry.replaced] : [])).toEqual([])
+            expect(historiesAfterCommit.length).toBeGreaterThan(0)
+            for (const messages of historiesAfterCommit) expect(messages).toEqual(history)
+            await reader.open()
+            expect((await reader.readRoot()).value.characterOrder).toContain(addedId)
+            const additionCommitBoundary = committed.length
 
             stores.DBState.db.username = 'Saved beside the windowed chat'
             runtime.markPersistentDataDirty(1)
             await runtime.flushPendingData('settings-change')
             // A later save carries only its own change, not the added character again.
-            expect(committed.slice(1)).toHaveLength(1)
-            expect(committed[1].keys.filter((key) => key !== 'rootMutations' && key !== 'unitMutations')).toEqual([])
-            expect(committed[1].units.filter((key) => key.includes(addedId))).toEqual([])
+            const settingsCommits = committed.slice(additionCommitBoundary)
+            expect(settingsCommits).toHaveLength(1)
+            expect(settingsCommits[0].keys.filter((key) => key !== 'rootMutations' && key !== 'unitMutations')).toEqual([])
+            expect(settingsCommits[0].units.filter((key) => key.includes(addedId))).toEqual([])
 
             expect(await characters.changeChar(indexOf(addedId))).toBe(true)
             expect(selected().chaId).toBe(addedId)

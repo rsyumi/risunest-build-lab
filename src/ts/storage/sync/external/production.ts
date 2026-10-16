@@ -545,15 +545,19 @@ export async function requestExternalStorageRestore(
             return completed!
         } finally {
             if (!handedOff) {
-                if (replacementFenced && replacement) {
-                    if (pause) await pause.abortUnchanged(replacement.assertAuthority)
-                    else await replacement.assertAuthority()
-                    if (pluginsFenced) {
-                        await (await import('../../../plugins/apiV3/v3.svelte')).restartPluginsAfterAuthorityReplacement()
-                    }
-                    await replacement.resume()
-                } else fence?.release()
-                current.scheduler.resume()
+                try {
+                    if (replacementFenced && replacement) {
+                        if (pause) await pause.abortUnchanged(replacement.assertAuthority)
+                        else await replacement.assertAuthority()
+                        if (pluginsFenced) {
+                            await (await import('../../../plugins/apiV3/v3.svelte')).restartPluginsAfterAuthorityReplacement()
+                        }
+                        await replacement.resume()
+                    } else fence?.release()
+                } finally {
+                    replacement?.release()
+                    current.scheduler.resume()
+                }
             }
         }
     }, undefined, true)

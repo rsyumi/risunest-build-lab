@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vite
 import { createNativeDeviceMarkers, DEVICE_MARKER_KEYS, type DeviceMarkerStorage } from '../storage/deviceMarkers'
 
 const state = vi.hoisted(() => ({
-    native: true, excluded: false, epoch: 0,
+    native: true, excluded: false, epoch: 0, syncBound: false, receive: vi.fn(), bindingRead: vi.fn(),
     db: { didFirstSetup: true, plugins: [] as Array<{ name: string, enabled?: boolean, version?: string }> },
     markers: null as unknown as DeviceMarkerStorage,
     importPlugin: vi.fn(), loadPlugins: vi.fn(), flush: vi.fn(), markDirty: vi.fn(), yield: vi.fn(),
@@ -27,6 +27,18 @@ vi.mock('../storage/persistentDataRuntime.svelte', () => ({
 }))
 vi.mock('./plugins.svelte', () => ({ importPlugin: state.importPlugin, loadPlugins: state.loadPlugins }))
 vi.mock('../ui/yieldToUi', () => ({ yieldToUi: state.yield }))
+vi.mock('../storage/sync/bindingNative', () => ({ createNativeSyncBindingBridge: () => ({
+    state: async () => {
+        await state.bindingRead()
+        return { libraryId: 'synthetic', targetAuthority: '1', selectionEpoch: '1',
+            target: state.syncBound ? { kind: 'server', connectionId: 'synthetic' } : { kind: 'none' } }
+    },
+    assertAuthority: async () => {},
+}) }))
+vi.mock('../storage/sync/bindingRegistry', async original => ({
+    ...await original<typeof import('../storage/sync/bindingRegistry')>(),
+    getSyncBindingTransport: () => ({ receiveAvailableChanges: state.receive }),
+}))
 
 import { onboardingHold } from '../../lib/Others/Onboarding/onboardingGate'
 import { persistentWorkingSetInputBlocked } from '../storage/persistentDataRuntime.svelte'
@@ -58,6 +70,8 @@ beforeEach(() => {
     state.native = true
     state.excluded = false
     state.epoch = 0
+    state.syncBound = false
+    state.bindingRead.mockResolvedValue(undefined)
     state.db = { didFirstSetup: true, plugins: [] }
     onboardingHold.set(false)
     // The production store is readonly; this mock owns the writable backing store.
@@ -85,6 +99,44 @@ afterEach(() => {
 })
 
 describe('default plugins attempted once per ID', () => {
+    it('rechecks a binding changed during its initial lookup without stranding defaults', async () => {
+        state.syncBound = true
+        let complete!: () => void
+        state.bindingRead.mockImplementationOnce(() => new Promise<void>(resolve => { complete = resolve }))
+        await start()
+        await vi.waitFor(() => expect(state.bindingRead).toHaveBeenCalledOnce())
+        state.syncBound = false
+        ;(await import('../storage/sync/bindingChanges')).notifySyncBindingChanged()
+        complete()
+        await vi.waitFor(() => { flushSync(); expect(stored.get(key)).toBe(JSON.stringify(names)) })
+        expect(state.receive).not.toHaveBeenCalled()
+        await vi.waitFor(() => expect(state.db.plugins.map(plugin => plugin.name)).toEqual(names))
+    })
+    it('does not start a receive when all default attempts were already recorded', async () => {
+        state.syncBound = true
+        stored.set(key, JSON.stringify(names))
+        loadMarkers()
+        const read = vi.spyOn(state.markers, 'getItem')
+        await start()
+        await vi.waitFor(() => expect(read).toHaveBeenCalledWith(key))
+        expect(state.receive).not.toHaveBeenCalled()
+        expect(write).not.toHaveBeenCalled()
+    })
+    it('receives existing defaults before creating records even with no enabled plugins', async () => {
+        state.syncBound = true
+        let complete!: () => void
+        state.receive.mockImplementationOnce(() => new Promise<void>(resolve => { complete = resolve }))
+        await start()
+        await vi.waitFor(() => expect(state.receive).toHaveBeenCalledOnce())
+        expect(stored.has(key)).toBe(false)
+        expect(fetcher).not.toHaveBeenCalled()
+        state.db.plugins = names.map(name => ({ name, enabled: false, version: 'remote' }))
+        complete()
+        await vi.waitFor(() => { flushSync(); expect(stored.get(key)).toBe(JSON.stringify(names)) })
+        expect(state.db.plugins).toEqual(names.map(name => ({ name, enabled: false, version: 'remote' })))
+        expect(fetcher).not.toHaveBeenCalled()
+        expect(state.importPlugin).not.toHaveBeenCalled()
+    })
     it('waits for onboarding and restoration, records durably, then installs and reloads once', async () => {
         state.db.didFirstSetup = false
         onboardingHold.set(true)
@@ -226,7 +278,11 @@ describe('default plugins attempted once per ID', () => {
     })
 
     it('does not download when the attempt record cannot be read', async () => {
-        vi.spyOn(state.markers, 'getItem').mockImplementationOnce(() => { throw new Error('unreadable') })
+        const read = state.markers.getItem.bind(state.markers)
+        vi.spyOn(state.markers, 'getItem').mockImplementation(name => {
+            if (name === key) throw new Error('unreadable')
+            return read(name)
+        })
         await start()
         await vi.waitFor(() => expect(console.error).toHaveBeenCalled())
         expect(write).not.toHaveBeenCalled()

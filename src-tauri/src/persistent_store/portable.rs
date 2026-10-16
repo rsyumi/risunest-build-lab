@@ -308,7 +308,11 @@ impl PersistentStore {
                 let key: risunest_sync_wire::unit::UnitKey = row.get::<_,String>(0)?.try_into().map_err(|_|invalid("invalid original unit key"))?;
                 let value: risunest_sync_wire::unit::UnitValue = serde_json::from_str(&row.get::<_,String>(1)?)?;
                 value.validate().map_err(|e| invalid(&e.to_string()))?;
-                large.extend(super::external_capture::large_unit_body_hash(&key,&value));
+                if super::lww::lww_known_unit_key(&key) {
+                    if let risunest_sync_wire::unit::UnitValue::Object { descriptor, .. } = &value {
+                        large.insert(descriptor.object_hash.clone());
+                    }
+                }
                 manifests.extend(super::external_capture::message_manifest_hash(&key,&value));
                 writer.put(&key,&value)?;
             }
@@ -317,11 +321,11 @@ impl PersistentStore {
         let temporary=tempfile::tempdir_in(&self.snapshots_dir)?;
         let certified=crate::sqlite_open::open(temporary.path().join("certified.sqlite"))?;
         certified.execute_batch("PRAGMA cache_size=-16384; PRAGMA temp_store=FILE; CREATE TABLE controls(hash TEXT PRIMARY KEY,body BLOB NOT NULL)")?;
-        let bounded = |hash: &str| -> StoreResult<Option<Vec<u8>>> {
-            Ok(source.query_row("SELECT body FROM backup_controls WHERE hash=?1 AND length(body)<=?2",rusqlite::params![hash,risunest_sync_wire::MAX_METADATA_BYTES as i64],|row|row.get(0)).optional()?)
+        let read_manifest = |hash: &str| -> StoreResult<Option<Vec<u8>>> {
+            Ok(source.query_row("SELECT body FROM backup_controls WHERE hash=?1",[hash],|row|row.get(0)).optional()?)
         };
-        let pages = super::external_capture::OriginalMessagePages::from_manifests(manifests,&bounded);
-        // A control above the bound is read only as a large unit body or as a
+        let pages = super::external_capture::OriginalMessagePages::from_manifests(manifests,&read_manifest);
+        // A control above the bound is read only as a known unit body or as a
         // page whose manifest declares that length.
         let read = |hash: &str| -> StoreResult<Option<Vec<u8>>> {
             let row: Option<(i64,Option<Vec<u8>>)> = source.query_row("SELECT length(body),CASE WHEN length(body)<=?2 THEN body END FROM backup_controls WHERE hash=?1",
@@ -837,6 +841,39 @@ mod tests {
             .execute_batch("ALTER TABLE root ADD COLUMN new_data TEXT")
             .unwrap();
         assert!(validate_live_columns(&source).is_err());
+    }
+
+    #[test]
+    fn portable_large_controls_still_require_integrity_and_exact_references() {
+        use super::super::external_capture::{large_metadata_fixture, original_unit_dependency_closure};
+        let (units, bodies, large) = large_metadata_fixture();
+        let closure = original_unit_dependency_closure(&units, &|hash| Ok(bodies.get(hash).cloned()), &|_| Ok(Some(1)), &Never).unwrap();
+        for tampered in [true, false] {
+            let source = Connection::open_in_memory().unwrap();
+            source.execute_batch("CREATE TABLE backup_units(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE backup_controls(hash TEXT PRIMARY KEY,body BLOB); CREATE TABLE backup_payloads(hash TEXT PRIMARY KEY,byte_length INTEGER,record INTEGER)").unwrap();
+            for (key, value) in &units {
+                source.execute("INSERT INTO backup_units VALUES(?1,?2)", rusqlite::params![String::from(key.clone()), serde_json::to_string(value).unwrap()]).unwrap();
+            }
+            for (hash, body) in &closure.controls {
+                let mut body = body.clone();
+                if tampered && hash == &large[0] { body.push(b' '); }
+                source.execute("INSERT INTO backup_controls VALUES(?1,?2)", rusqlite::params![hash, body]).unwrap();
+            }
+            for (hash, size) in &closure.managed_payloads {
+                source.execute("INSERT INTO backup_payloads VALUES(?1,?2,?3)", rusqlite::params![hash, *size as i64, closure.record_payloads.contains(hash)]).unwrap();
+            }
+            if !tampered {
+                let body = b"unreferenced synthetic control";
+                source.execute("INSERT INTO backup_controls VALUES(?1,?2)", rusqlite::params![risunest_sync_wire::hash(body), body.as_slice()]).unwrap();
+            }
+            let directory = tempfile::tempdir().unwrap();
+            let mut target = PersistentStore::open(directory.path()).unwrap();
+            let stage = target.replace_begin().unwrap();
+            let failure = target.stage_portable_units(&stage.staging_id, &source, &Never).unwrap_err().to_string();
+            let expected = if tampered { "Backup source body integrity failed" } else { "unreferenced original control" };
+            assert!(failure.contains(expected), "{failure}");
+            assert_eq!(target.revision().unwrap(), 0);
+        }
     }
 
     #[test]

@@ -35,6 +35,8 @@
     } from 'src/ts/storage/sync/external/types'
     import {
         externalConnectionFolder,
+        externalConnectionPlace,
+        externalConnectionTitle,
         externalEndpointWarning,
         externalErrorMessage,
         externalErrorKind,
@@ -55,6 +57,7 @@
         /** Opens an already existing repository only, without the create form. */
         restoreOnly?: boolean
         renewalConnection?: ExternalConnectionSummary
+        addressConnection?: ExternalConnectionSummary
         tone?: 'settings' | 'onboarding'
     }
 
@@ -65,6 +68,7 @@
         onbusychange = () => {},
         restoreOnly = false,
         renewalConnection,
+        addressConnection,
         tone = 'settings',
     }: Props = $props()
     const bridge = getExternalStorageBridge()
@@ -75,6 +79,7 @@
         : isTauriIOS
           ? 'ios'
           : ({ windows: 'windows', macos: 'macos', linux: 'linux' } as Record<string, string>)[osType()] ?? 'windows'
+    let newEndpoint = $state('')
     let providerId = $state<ExternalProviderId>('google_drive')
     let chosenMode = $state<ExternalOpenMode>('create')
     const mode = $derived<ExternalOpenMode>(restoreOnly ? 'existing' : chosenMode)
@@ -190,6 +195,7 @@
     }
 
     onMount(async () => {
+        if (addressConnection) return
         if (renewalConnection) busy = true
         try {
             providerDescriptors = await bridge.listProviders()
@@ -315,6 +321,15 @@
         if (contents === null) return
         connectionSettingsPayload = contents.replace(/^﻿/, '').trim()
         error = ''
+    }
+
+    async function saveAddress(): Promise<void> {
+        if (!addressConnection || busy || !newEndpoint.trim()) return
+        busy = true
+        error = ''
+        try { await onconnected(await bridge.changeEndpoint(addressConnection.id, newEndpoint.trim())) }
+        catch (reason) { error = externalErrorMessage(strings, reason) }
+        finally { busy = false }
     }
 
     async function scanConnectionSettings(): Promise<void> {
@@ -657,6 +672,18 @@
     }
 </script>
 
+{#if addressConnection}
+    {@const place = externalConnectionPlace(strings, addressConnection)}
+    <fieldset disabled={busy} class="form sub" data-tone={tone}>
+        <div class="field"><span>{externalConnectionTitle(strings, addressConnection)}</span>{#if place}<small>{place}</small>{/if}</div>
+        <label class="field"><span>{strings.endpoint}</span><TextInput bind:value={newEndpoint} /></label>
+        {#if error}<p role="alert" class="form-error">{error}</p>{/if}
+        <div class="actions">
+            <SettingButton {busy} disabled={!newEndpoint.trim()} onclick={saveAddress}>{strings.saveAddress}</SettingButton>
+            <SettingButton variant="secondary" disabled={busy} onclick={oncancel}>{strings.cancel}</SettingButton>
+        </div>
+    </fieldset>
+{:else}
 {#if authorizationCompletionInFlight && pendingAuthorizationId}
     <div class="pending-authorization" data-tone={tone}>
         <SettingButton variant="secondary" onclick={cancelPendingAuthorization}>{strings.cancel}</SettingButton>
@@ -866,6 +893,8 @@
 
 {#if folderSelector}
     <ExternalFolderSelector {strings} selectionId={folderSelector.selectionId} onselected={onSelectorSelected} oncancel={onSelectorCancel} />
+{/if}
+
 {/if}
 
 <style>

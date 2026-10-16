@@ -11,6 +11,24 @@ use std::{
 const RETRY_BUDGET: Duration = Duration::from_secs(5 * 60);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 
+struct ObservedBodyRead<'a, R> {
+    inner: R,
+    position: u64,
+    high_water: &'a std::sync::atomic::AtomicU64,
+    observer: Option<&'a (dyn Fn(u64) + Send + Sync)>,
+}
+impl<R: Read> Read for ObservedBodyRead<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.inner.read(buffer)?;
+        self.position = self.position.saturating_add(count as u64);
+        if let Some(observer) = self.observer {
+            let previous = self.high_water.fetch_max(self.position, std::sync::atomic::Ordering::Relaxed);
+            if self.position > previous { observer(self.position - previous); }
+        }
+        Ok(count)
+    }
+}
+
 type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 type Sleeper = Arc<dyn Fn(Duration) + Send + Sync>;
 
@@ -134,6 +152,7 @@ fn jitter(delay: Duration, attempt: u32) -> Duration {
 
 pub(crate) use risunest_sync_connect::Registration as ServerConfig;
 pub(crate) struct ServerClient {
+    pub(crate) body_download_observer: Option<Arc<dyn Fn(u64) + Send + Sync>>,
     #[cfg(test)]
     pub(crate) test_io: Option<Arc<TestIoCounters>>,
     http: Client,
@@ -445,6 +464,7 @@ impl ServerClient {
             .build()
             .map_err(|_| SyncError::new("http-client-unavailable", 503))?;
         Ok(Self {
+            body_download_observer: None,
             #[cfg(test)]
             test_io: None,
             http,
@@ -537,9 +557,11 @@ impl ServerClient {
         limit: usize,
     ) -> Result<RequestAttempt> {
         let body = self.prepare_body(body)?;
+        let operation_id = uuid::Uuid::new_v4();
+        let download_high_water = std::sync::atomic::AtomicU64::new(0);
         loop {
             let attempted = (self.retry_budget.clock)();
-            let result = self.request_once(method.clone(), path, &[], body.as_ref(), headers, limit);
+            let result = self.request_once(method.clone(), path, &[], body.as_ref(), headers, limit, operation_id, &download_high_water);
             let elapsed = (self.retry_budget.clock)().saturating_duration_since(attempted);
             match result {
                 Ok(mut reply) => {
@@ -591,10 +613,12 @@ impl ServerClient {
         let replay_safe = replay_safe(&method, path);
         let mut recovering = false;
         let body = self.prepare_body(body)?;
+        let operation_id = uuid::Uuid::new_v4();
+        let download_high_water = std::sync::atomic::AtomicU64::new(0);
         loop {
             let attempted = (self.retry_budget.clock)();
             let result =
-                self.request_once(method.clone(), path, query, body.as_ref(), headers, limit);
+                self.request_once(method.clone(), path, query, body.as_ref(), headers, limit, operation_id, &download_high_water);
             match result {
                 Ok(mut reply) => {
                     let elapsed = (self.retry_budget.clock)().saturating_duration_since(attempted);
@@ -692,6 +716,8 @@ impl ServerClient {
         body: Option<&PreparedBody>,
         headers: &[(&str, String)],
         limit: usize,
+        operation_id: uuid::Uuid,
+        download_high_water: &std::sync::atomic::AtomicU64,
     ) -> Result<Reply> {
         self.ensure_active()?;
         #[cfg(test)]
@@ -755,7 +781,7 @@ impl ServerClient {
             request = request.body(reqwest::blocking::Body::sized(reader, length));
         }
         let request = request.build().map_err(|_| SyncError::new("server-unreachable", 503))?;
-        let capture = risunest_network_log::begin("sync", request.method().as_str(), request.url().as_str(), request.headers());
+        let capture = risunest_network_log::begin_operation("sync", request.method().as_str(), request.url().as_str(), request.headers(), operation_id);
         if capture.is_active() {
             if let Some(body) = body {
                 let raw = body.log_body.as_deref().unwrap_or(&body.wire);
@@ -809,8 +835,11 @@ impl ServerClient {
             return Err(SyncError::new("response-too-large", 502));
         }
         let mut bytes = Vec::new();
-        let read = super::progress::WireReader::new(response.take(limit as u64 + 1), self.lane.clone(), false, None)
-            .read_to_end(&mut bytes);
+        let wire = super::progress::WireReader::new(response.take(limit as u64 + 1), self.lane.clone(), false, None);
+        let observer = if (200..300).contains(&status) && (path == "objects/transfer" || (path.starts_with("objects/") && path.ends_with("/part"))) {
+            self.body_download_observer.as_deref()
+        } else { None };
+        let read = ObservedBodyRead { inner: wire, position: 0, high_water: download_high_water, observer }.read_to_end(&mut bytes);
         if read.is_err() || bytes.len() > limit {
             if encoded { capture.representation(risunest_network_log::Side::Response, "encoded-sync"); }
             capture.append(risunest_network_log::Side::Response, &bytes);
@@ -1020,10 +1049,13 @@ mod progress_tests {
         });
         let lane = Arc::new(super::super::progress::ProgressLane::default());
         let worker_lane = lane.clone();
+        let downloaded = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let observed = downloaded.clone();
         let worker = std::thread::spawn(move || super::super::progress::within(&worker_lane, || {
-            let client = ServerClient::new(super::tests::config(&endpoint)).unwrap();
+            let mut client = ServerClient::new(super::tests::config(&endpoint)).unwrap();
+            client.body_download_observer = Some(Arc::new(move |bytes| { observed.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed); }));
             let body = PreparedBody { wire: vec![7; UPLOAD], log_body: None, encoded: false, raw_len: UPLOAD };
-            client.request_once(Method::PUT, "synthetic", &[], Some(&body), &[], 8192).unwrap().body
+            client.request_once(Method::POST, "objects/transfer", &[], Some(&body), &[], 8192, uuid::Uuid::new_v4(), &std::sync::atomic::AtomicU64::new(0)).unwrap().body
         }));
         noticed.recv_timeout(Duration::from_secs(5)).unwrap();
         let uploading = lane.snapshot("send");
@@ -1032,9 +1064,10 @@ mod progress_tests {
         release.send(()).unwrap();
         noticed.recv_timeout(Duration::from_secs(5)).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
-        while lane.snapshot("send").received_bytes < 4096 && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(1)); }
+        while downloaded.load(std::sync::atomic::Ordering::Relaxed) < 4096 && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(1)); }
         let downloading = lane.snapshot("send");
         assert_eq!(downloading.received_bytes, 4096);
+        assert_eq!(downloaded.load(std::sync::atomic::Ordering::Relaxed), 4096);
         assert!(downloading.receiving);
         assert!(!downloading.sending);
         assert_eq!(downloading.bytes_done, 0);
@@ -1043,7 +1076,60 @@ mod progress_tests {
         server.join().unwrap();
         let done = lane.snapshot("send");
         assert_eq!((done.sent_bytes, done.received_bytes), (UPLOAD as u64, 8192));
+        assert_eq!(downloaded.load(std::sync::atomic::Ordering::Relaxed), 8192);
         assert!(!done.sending && !done.receiving);
+    }
+
+    #[test]
+    fn body_download_retry_reports_only_new_bytes() {
+        use super::*;
+        use std::{io::Write, net::TcpListener, sync::mpsc};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (notice, noticed) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            for attempt in 0..4 {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut header = Vec::new();
+                while !header.ends_with(b"\r\n\r\n") { let mut byte = [0]; socket.read_exact(&mut byte).unwrap(); header.push(byte[0]); }
+                let header = String::from_utf8(header).unwrap();
+                let path = if attempt == 1 { "session" } else { "objects/synthetic/part" };
+                assert!(header.starts_with(&format!("GET /{path} HTTP/1.1\r\n")));
+                if attempt == 1 || attempt == 2 {
+                    let body = if attempt == 1 { r#"{"error":"synthetic-identity"}"# } else { r#"{"error":"server-updating"}"# };
+                    write!(socket,"HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+                } else {
+                    socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8192\r\nConnection: close\r\n\r\n").unwrap();
+                    socket.write_all(&[3;4096]).unwrap();
+                    if attempt == 0 {
+                        released.recv_timeout(Duration::from_secs(5)).unwrap();
+                        // Closing this declared 8192-byte body after its first half forces the real retry path.
+                    } else { socket.write_all(&[3;4096]).unwrap(); }
+                }
+            }
+        });
+        let reported = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let observed = reported.clone();
+        let worker = std::thread::spawn(move || {
+            let mut client = ServerClient::new(super::tests::config(&endpoint)).unwrap();
+            client.retry_budget = super::tests::no_sleep_budget();
+            client.body_download_observer = Some(Arc::new(move |bytes| {
+                let total = observed.fetch_add(bytes,std::sync::atomic::Ordering::Relaxed) + bytes;
+                if total == 4096 { notice.send(()).unwrap(); }
+            }));
+            client.request(Method::GET,"objects/synthetic/part",&[],None,&[],8192).unwrap()
+        });
+        noticed.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(reported.load(std::sync::atomic::Ordering::Relaxed),4096);
+        assert!(!worker.is_finished());
+        release.send(()).unwrap();
+        let reply = worker.join().unwrap();
+        assert_eq!(reply.status,200);
+        assert_eq!(reply.body,vec![3;8192]);
+        server.join().unwrap();
+        assert_eq!(reported.load(std::sync::atomic::Ordering::Relaxed),8192,"retry prefixes, identity responses and error bodies are not downloaded body progress");
     }
 
     #[test]
@@ -1104,7 +1190,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    fn no_sleep_budget() -> Arc<RetryBudget> {
+    pub(super) fn no_sleep_budget() -> Arc<RetryBudget> {
         let current = Arc::new(Mutex::new(Instant::now()));
         let clock_state = current.clone();
         let sleep_state = current;
@@ -1365,39 +1451,84 @@ mod tests {
 
     #[test]
     fn explicit_maintenance_retries_an_unadmitted_mutation_with_retry_after() {
-        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-        let endpoint = format!("http://{}", server.server_addr());
-        let task = std::thread::spawn(move || {
-            let mut request = server.recv().unwrap();
-            assert_eq!(request.method(), &tiny_http::Method::Post);
-            std::io::copy(request.as_reader(), &mut std::io::sink()).unwrap();
-            request
-                .respond(
-                    tiny_http::Response::from_string(r#"{"error":"server-updating"}"#)
-                        .with_status_code(503)
-                        .with_header(tiny_http::Header::from_bytes("Retry-After", "45").unwrap()),
-                )
-                .unwrap();
-            let mut request = server.recv().unwrap();
-            assert_eq!(request.method(), &tiny_http::Method::Post);
-            std::io::copy(request.as_reader(), &mut std::io::sink()).unwrap();
-            request.respond(tiny_http::Response::empty(201)).unwrap();
-        });
-        let mut client = ServerClient::new(config(&endpoint)).unwrap();
-        client.retry_budget = no_sleep_budget();
-        let reply = client
-            .request(
-                Method::POST,
-                "uploads",
-                &[],
-                Some(b"synthetic".to_vec()),
-                &[],
-                MAX_METADATA_BYTES,
-            )
-            .unwrap();
-        assert_eq!(reply.status, 201);
-        assert_eq!(*client.retry_budget.spent.lock().unwrap(), MAX_RETRY_DELAY);
-        task.join().unwrap();
+        if crate::test_process::run_isolated(concat!(module_path!(), "::explicit_maintenance_retries_an_unadmitted_mutation_with_retry_after")) {
+            return;
+        }
+        let _guard = crate::network_log::TEST_RECORDER_LOCK
+            .lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = tempfile::tempdir().unwrap();
+        let recorder = risunest_network_log::Recorder::open(
+            root.path().join("recent"), root.path().join("retained"),
+        ).unwrap();
+        recorder.configure(risunest_network_log::Settings {
+            enabled: true, ..Default::default()
+        }).unwrap();
+        risunest_network_log::install(recorder.clone());
+        for ambiguous in [false, true] {
+            let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+            let endpoint = format!("http://{}", server.server_addr());
+            let task = std::thread::spawn(move || {
+                let mut request = server.recv().unwrap();
+                assert_eq!(request.method(), &tiny_http::Method::Post);
+                std::io::copy(request.as_reader(), &mut std::io::sink()).unwrap();
+                request
+                    .respond(
+                        tiny_http::Response::from_string(r#"{"error":"server-updating"}"#)
+                            .with_status_code(503)
+                            .with_header(tiny_http::Header::from_bytes("Retry-After", "45").unwrap()),
+                    )
+                    .unwrap();
+                let mut request = server.recv().unwrap();
+                assert_eq!(request.method(), &tiny_http::Method::Post);
+                std::io::copy(request.as_reader(), &mut std::io::sink()).unwrap();
+                request.respond(tiny_http::Response::empty(201)).unwrap();
+                let mut request = server.recv().unwrap();
+                std::io::copy(request.as_reader(), &mut std::io::sink()).unwrap();
+                request.respond(tiny_http::Response::empty(201)).unwrap();
+            });
+            let mut client = ServerClient::new(config(&endpoint)).unwrap();
+            client.retry_budget = no_sleep_budget();
+            let request = || {
+                if ambiguous {
+                    match client.request_ambiguous_mutation(
+                        Method::POST, "uploads", Some(b"synthetic".to_vec()), &[], MAX_METADATA_BYTES,
+                    ).unwrap() {
+                        RequestAttempt::Response(reply) => reply,
+                        RequestAttempt::Failure { error, .. } => panic!("{error:?}"),
+                    }
+                } else {
+                    client.request(
+                        Method::POST,
+                        "uploads",
+                        &[],
+                        Some(b"synthetic".to_vec()),
+                        &[],
+                        MAX_METADATA_BYTES,
+                    )
+                    .unwrap()
+                }
+            };
+            let reply = request();
+            assert_eq!(reply.status, 201);
+            assert_eq!(*client.retry_budget.spent.lock().unwrap(), MAX_RETRY_DELAY);
+            let attempts = recorder.list(risunest_network_log::Query {
+                search: endpoint.clone(), ..Default::default()
+            }).unwrap().items;
+            assert_eq!(attempts.len(), 2);
+            let operation = attempts[0].operation_id.clone().expect("retry operation ID");
+            assert!(uuid::Uuid::parse_str(&operation).is_ok());
+            assert_eq!(attempts[1].operation_id.as_deref(), Some(operation.as_str()));
+            assert_ne!(attempts[0].id, attempts[1].id);
+            assert_eq!(request().status, 201);
+            task.join().unwrap();
+            let next = recorder.list(risunest_network_log::Query {
+                search: endpoint, ..Default::default()
+            }).unwrap().items;
+            assert_eq!(next.len(), 3);
+            assert_eq!(next.iter().filter(|item| item.operation_id.as_deref() == Some(operation.as_str())).count(), 2);
+            assert!(next.iter().all(|item| item.operation_id.is_some()));
+        }
+        recorder.shutdown();
     }
 
     #[test]

@@ -45,6 +45,16 @@ describe('the storage usage copy', () => {
 })
 
 describe('externalErrorMessage', () => {
+    it.each(['en', 'ko'])('explains QR failures in %s without an internal code', language => {
+        const copy = externalStorageStrings(language)
+        for (const code of ['qr-camera-permission-denied', 'qr-camera-permission-blocked']) {
+            expect(externalErrorMessage(copy, new Error(code))).toBe(copy.cameraDenied)
+        }
+        for (const code of ['qr-camera-unavailable', 'qr-scan-busy', 'qr-scan-timeout']) {
+            expect(externalErrorMessage(copy, new Error(code))).toBe(copy.cameraUnavailable)
+        }
+    })
+
     it('keeps native connection diagnostics and HTTP status in both languages', () => {
         for (const locale of ['ko', 'en']) {
             const copy = externalStorageStrings(locale)

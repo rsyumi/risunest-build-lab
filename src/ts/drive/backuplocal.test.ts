@@ -148,10 +148,11 @@ describe('local backup persistent snapshot', () => {
         expect(state.fullReadFile).not.toHaveBeenCalled()
     })
 
-    it('expands cold payloads into the replaced browser backup database', async () => {
+    it.each([false, true])('expands cold chat and skips an upstream plugin index when present (%s)', async (pluginIndex) => {
         state.native = false
         const coldKey = '00000000-0000-4000-8000-00000000c01d'
-        const database = structuredClone(risuSaveFixtureDatabase) as Database
+        const database = structuredClone(risuSaveFixtureDatabase) as Database & { pluginStorage: Record<string, unknown> }
+        database.pluginStorage = { inline: 'preserved', ...(pluginIndex ? { _coldpluginIndex: '00000000-0000-4000-8000-00000000c02d' } : {}) }
         database.characters[0].coldstorage = coldKey
         const restoredName = 'Restored cold character'
         const cold = {
@@ -162,6 +163,9 @@ describe('local backup persistent snapshot', () => {
             },
         }
         const archive = backupArchive(
+            ...(pluginIndex ? [backupEntry('coldstorage_00000000-0000-4000-8000-00000000c02d.json', new TextEncoder().encode(JSON.stringify({
+                type: 'risu-plugin-storage-index', version: 1, entries: [{ k: 'omitted', s: '"plugin value"' }], trash: [],
+            })))] : []),
             backupEntry(`coldstorage_${coldKey}.json`, new TextEncoder().encode(JSON.stringify(cold))),
             backupEntry('database.risudat', encodeRisuSaveLegacy(database, 'compression')),
         )
@@ -180,9 +184,11 @@ describe('local backup persistent snapshot', () => {
 
         expect(state.restoreEvents).toEqual(['database'])
         expect(state.replacePersistentDatabase).toHaveBeenCalledOnce()
-        const replaced = state.replacePersistentDatabase.mock.calls[0][0]
+        const replaced = state.replacePersistentDatabase.mock.calls[0][0] as typeof database
         expect(replaced.characters[0].name).toBe(restoredName)
         expect(replaced.characters[0].coldstorage).toBeUndefined()
+        expect(replaced.pluginStorage.inline).toBe('preserved')
+        expect(replaced.pluginStorage.omitted).toBeUndefined()
         expect(alertWait).not.toHaveBeenCalled()
 
         const context = state.fallbackContext
@@ -199,15 +205,15 @@ describe('local backup persistent snapshot', () => {
         expect(last?.progress).toEqual({
             completedBytes: archive.byteLength,
             totalBytes: archive.byteLength,
-            completedItems: 2,
-            totalItems: 2,
+            completedItems: pluginIndex ? 3 : 2,
+            totalItems: pluginIndex ? 3 : 2,
         })
         expect(last?.detail?.counts).toMatchObject({
-            entriesRead: 2,
-            entriesTotal: 2,
-            coldStorage: 1,
+            entriesRead: pluginIndex ? 3 : 2,
+            entriesTotal: pluginIndex ? 3 : 2,
+            coldStorage: pluginIndex ? 2 : 1,
             assets: 0,
-            skipped: 0,
+            skipped: pluginIndex ? 1 : 0,
             characters: database.characters.length,
             charactersTotal: database.characters.length,
             presets: database.botPresets.length,

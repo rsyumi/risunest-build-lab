@@ -1437,6 +1437,13 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             expect((await store.materializeDatabase()).pluginCustomStorage).toEqual(
                 database.pluginCustomStorage,
             )
+            expect((await store.queryPluginStorage(UNOWNED_PLUGIN_OWNER)).items.map(item => item.key)).toEqual(['fixture'])
+            expect((await store.queryPluginStorage('another-owner')).items).toEqual([])
+            const lease = await store.acquireRevision(imported.revision)
+            try {
+                expect((await lease.queryPluginStorage(UNOWNED_PLUGIN_OWNER)).items.map(item => item.key)).toEqual(['fixture'])
+                expect((await lease.queryPluginStorage('another-owner')).items).toEqual([])
+            } finally { await lease.release() }
         })
 
         it('atomically mutates plugin keys with root under revision CAS', async () => {

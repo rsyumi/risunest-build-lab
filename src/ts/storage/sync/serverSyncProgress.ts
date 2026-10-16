@@ -53,7 +53,7 @@ export function laneDeltas(current: ServerSyncLane[], baseline: ServerSyncLane[]
 }
 
 
-export type ServerSyncStage = 'preparing' | 'downloading' | 'applying' | 'refreshing' | 'publishing' | 'assets'
+export type ServerSyncStage = 'preparing' | 'downloading' | 'applying' | 'refreshing' | 'publishing' | 'assets' | 'assetPolicy'
 /** A routine sync shows one bar: for its changes, or for the assets it downloads after them. */
 export type ServerSyncRoutinePhase = 'changes' | 'assets'
 export interface ServerSyncAttempt {
@@ -102,6 +102,7 @@ const STAGE_LANES: Record<ServerSyncStage, ServerSyncLaneName[]> = {
     refreshing: [],
     publishing: ['send'],
     assets: ['hydrate', 'assets'],
+    assetPolicy: [],
 }
 const ACTIVITY: Record<Exclude<ServerSyncNativeStep, 'idle'>, keyof Text['activity']> = {
     preparing: 'preparing',

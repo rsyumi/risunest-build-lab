@@ -93,58 +93,62 @@ fn owner_units_preserve_unchanged_heads_and_drop_replaced_assets() {
 
 #[test]
 fn ordinary_parent_saves_preserve_owner_heads_by_stable_module_identity() {
-    let (_directory, mut store, database) = open_fixture();
-    let mut value = root(&database);
-    value["modules"] = json!([
-        {"id": "module-0", "assets":[["a","assets/a","bin"]]},
-        {"id": "module-1", "assets":[]}
-    ]);
-    let heads = vec![
-        AssetOwnerHead::present(
-            AssetOwnerLocator::RootModuleAssets { module_id: "module-0".to_owned() },
-            "11".repeat(32),
-            1,
-        ),
-        AssetOwnerHead::present(
-            AssetOwnerLocator::RootModuleAssets { module_id: "module-1".to_owned() },
-            "22".repeat(32),
-            0,
-        ),
-    ];
-    store
-        .commit(&WorkingSetCommit {
-            root: Some(value.clone()),
-            asset_owner_heads: Some(heads.clone()),
-            ..empty_working_set_commit(1)
-        })
-        .unwrap();
-    value["theme"] = json!("changed");
-    store
-        .commit(&WorkingSetCommit {
-            root_mutations: Some(vec![super::super::RootMutation::Set {
-                key: "theme".to_owned(),
-                value: json!("changed"),
-            }]),
-            ..empty_working_set_commit(2)
-        })
-        .unwrap();
-    assert_eq!(store.list_asset_owner_heads(None).unwrap().value, heads);
-    value["modules"].as_array_mut().unwrap().reverse();
-    store
-        .commit(&WorkingSetCommit {
-            root: Some(value),
-            ..empty_working_set_commit(3)
-        })
-        .unwrap();
-    assert_eq!(
+    for owners in [2, 16, 64] {
+        let (_directory, mut store, database) = open_fixture();
+        let mut value = root(&database);
+        value["modules"] = json!((0..owners).map(|index| json!({
+            "id": format!("module-{index}"), "description": "x".repeat(8192),
+            "assets": if index == 0 { json!([["a","assets/a","bin"]]) } else { json!([]) },
+        })).collect::<Vec<_>>());
+        let mut heads = (0..owners).map(|index| AssetOwnerHead::present(
+            AssetOwnerLocator::RootModuleAssets { module_id: format!("module-{index}") },
+            format!("{index:064x}"), i64::from(index == 0),
+        )).collect::<Vec<_>>();
+        heads.sort_by_key(|head| head.owner.storage_identity());
         store
-            .read_asset_owner_head(&AssetOwnerLocator::RootModuleAssets { module_id: "module-1".to_owned() }, None)
-            .unwrap()
-            .unwrap()
-            .value
-            .manifest_hash,
-        heads[1].manifest_hash
-    );
+            .commit(&WorkingSetCommit {
+                root: Some(value.clone()),
+                asset_owner_heads: Some(heads.clone()),
+                ..empty_working_set_commit(1)
+            })
+            .unwrap();
+        store.connection.execute_batch("CREATE TEMP TABLE owner_writes (operation TEXT);
+            CREATE TEMP TRIGGER changed_owner_update AFTER UPDATE ON asset_owner_heads BEGIN INSERT INTO owner_writes VALUES ('update'); END;
+            CREATE TEMP TRIGGER changed_owner_insert AFTER INSERT ON asset_owner_heads BEGIN INSERT INTO owner_writes VALUES ('insert'); END;
+            CREATE TEMP TRIGGER changed_owner_delete AFTER DELETE ON asset_owner_heads BEGIN INSERT INTO owner_writes VALUES ('delete'); END;").unwrap();
+        value["theme"] = json!("changed");
+        store
+            .commit(&WorkingSetCommit {
+                root_mutations: Some(vec![super::super::RootMutation::Set {
+                    key: "theme".to_owned(),
+                    value: json!("changed"),
+                }]),
+                ..empty_working_set_commit(2)
+            })
+            .unwrap();
+        assert_eq!(store.list_asset_owner_heads(None).unwrap().value, heads);
+        value["modules"].as_array_mut().unwrap().reverse();
+        let started = std::time::Instant::now();
+        store
+            .commit(&WorkingSetCommit {
+                root: Some(value),
+                asset_owner_heads: Some(heads.clone()),
+                ..empty_working_set_commit(3)
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .read_asset_owner_head(&AssetOwnerLocator::RootModuleAssets { module_id: "module-1".to_owned() }, None)
+                .unwrap()
+                .unwrap()
+                .value
+                .manifest_hash,
+            heads[1].manifest_hash
+        );
+        let writes: i64 = store.connection.query_row("SELECT count(*) FROM owner_writes", [], |row| row.get(0)).unwrap();
+        assert_eq!(writes, 0, "unchanged root asset owners keep their stored heads without rewrites");
+        eprintln!("root_owner_save owners={owners} payload_bytes={} elapsed_us={} owner_writes={writes}", owners * 8192, started.elapsed().as_micros());
+    }
 }
 
 #[test]

@@ -19,6 +19,7 @@ import {
 } from "./persistence";
 
 import { viewportProbe } from "./viewport";
+import { measureParserContext } from './parserContext.svelte';
 
 export function startStreamingSmoke() {
   const character = {
@@ -128,6 +129,9 @@ export function startStreamingSmoke() {
     __streamingSmoke: {
       ...api,
       viewport: viewportProbe,
+      measureParserContext,
+      parserScreen: (assets: number, baseline = false) => import('./parserScreenProbe')
+        .then(({ runParserScreenProbe }) => runParserScreenProbe(assets, baseline, () => unmount(fixture))),
       checkPersistenceReload,
       run: (profile = "smoke") =>
         profile === "viewport"

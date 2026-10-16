@@ -348,8 +348,6 @@ export async function loadLoreBookV3Prompt(history: ConversationHistoryOperation
     const activatedIndexes = new Set<number>()
     let disabledUIPrompts:string[] = []
     let matchTimes = 0
-    let keepActivateAfterMatch = false
-    let dontActivateAfterMatch = false
     while(matching){
         matching = false
         for(let i=0;i<fullLore.length;i++){
@@ -360,6 +358,8 @@ export async function loadLoreBookV3Prompt(history: ConversationHistoryOperation
                 continue
             }
             let activated = true
+            let keepActivateAfterMatch = false
+            let dontActivateAfterMatch = false
             let pos = ''
             let inject:{
                 operation:'append'|'prepend'|'replace',

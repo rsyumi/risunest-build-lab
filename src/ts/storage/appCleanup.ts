@@ -12,6 +12,7 @@ export interface AppCleanupStatus {
     profile: string | null
     /** Whether any named launch profile exists beside the default one. */
     namedProfiles: boolean
+    cleanupFolder: string
 }
 
 function hasCode(error: unknown, code: string): boolean {

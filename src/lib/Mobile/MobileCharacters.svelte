@@ -9,6 +9,15 @@
     import { getCatalogConversationCount } from "src/ts/storage/workingSetCatalog";
     import { language } from "src/lang";
 
+    import { onDestroy } from 'svelte';
+    import { RepresentativeImageList } from 'src/ts/ui/representativeImagePriority';
+    const imagePriority = new RepresentativeImageList();
+    onDestroy(() => imagePriority.dispose());
+    function observeImage(element: HTMLElement, reference: string) {
+        let stop = imagePriority.observe(element, reference);
+        return { update(next: string) { stop(); stop = imagePriority.observe(element, next); }, destroy() { stop(); } };
+    }
+
     interface Props {
         endGrid?: () => void;
         search?: string;
@@ -95,6 +104,7 @@
     })
     let visibleCharacters = $derived(matchingCharacters.slice(0, visibleCount))
     let hasMore = $derived(visibleCount < matchingCharacters.length)
+    $effect(() => { imagePriority.setOrder(visibleCharacters.map(character => character.image)) })
 
     function revealNextPage() {
         visibleCount = Math.min(
@@ -150,6 +160,7 @@
     {#each visibleCharacters as char, index (char.chaId)}
         <button
             data-character-id={char.chaId}
+            use:observeImage={char.image}
             class="flex p-2 border-t-darkborderc gap-2 w-full"
             class:border-t={index !== 0}
             class:archived-card={char.archived}

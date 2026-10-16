@@ -15,13 +15,15 @@ const REPORT_INTERVAL: Duration = Duration::from_millis(250);
 /// totals never shrink. A publication's preparation and a restore's download
 /// plan every domain at once, so their totals stay where the first reading put
 /// them.
+#[derive(Clone)]
 pub(crate) struct PhaseProgress {
-    completed_items: AtomicU64,
-    completed_bytes: AtomicU64,
-    planned_items: AtomicU64,
-    planned_bytes: AtomicU64,
-    reported: Mutex<Instant>,
-    sink: Box<dyn Fn(PhaseCounters) + Send + Sync>,
+    completed_items: Arc<AtomicU64>,
+    completed_bytes: Arc<AtomicU64>,
+    planned_items: Arc<AtomicU64>,
+    planned_bytes: Arc<AtomicU64>,
+    reported: Arc<Mutex<Instant>>,
+    reported_bytes: Arc<AtomicU64>,
+    sink: Arc<dyn Fn(PhaseCounters) + Send + Sync>,
 }
 
 /// One reading of the counters.
@@ -45,13 +47,14 @@ impl PhaseProgress {
         sink: impl Fn(PhaseCounters) + Send + Sync + 'static,
     ) -> Arc<Self> {
         Arc::new(Self {
-            completed_items: AtomicU64::new(reading.items),
-            completed_bytes: AtomicU64::new(reading.bytes),
-            planned_items: AtomicU64::new(reading.total_items),
-            planned_bytes: AtomicU64::new(reading.total_bytes),
+            completed_items: Arc::new(AtomicU64::new(reading.items)),
+            completed_bytes: Arc::new(AtomicU64::new(reading.bytes)),
+            planned_items: Arc::new(AtomicU64::new(reading.total_items)),
+            planned_bytes: Arc::new(AtomicU64::new(reading.total_bytes)),
             // Far enough back that the first reading reports.
-            reported: Mutex::new(Instant::now() - REPORT_INTERVAL),
-            sink: Box::new(sink),
+            reported: Arc::new(Mutex::new(Instant::now() - REPORT_INTERVAL)),
+            reported_bytes: Arc::new(AtomicU64::new(reading.bytes)),
+            sink: Arc::new(sink),
         })
     }
 
@@ -121,7 +124,9 @@ impl PhaseProgress {
         if let Ok(mut reported) = self.reported.lock() {
             *reported = Instant::now();
         }
-        (self.sink)(self.read());
+        let reading = self.read();
+        self.reported_bytes.store(reading.bytes, Ordering::Relaxed);
+        (self.sink)(reading);
     }
 
     /// A phase with nothing to do says nothing, rather than replacing what the
@@ -139,11 +144,43 @@ impl PhaseProgress {
             return;
         };
         let now = Instant::now();
-        if now.duration_since(*reported) < REPORT_INTERVAL {
+        let reading = self.read();
+        // Planning zero bytes must not hide the first received chunk if the source then stalls.
+        let first_bytes = reading.bytes > 0 && self.reported_bytes.load(Ordering::Relaxed) == 0;
+        if !first_bytes && now.duration_since(*reported) < REPORT_INTERVAL {
             return;
         }
         *reported = now;
+        self.reported_bytes.store(reading.bytes, Ordering::Relaxed);
         drop(reported);
-        (self.sink)(self.read());
+        (self.sink)(reading);
+    }
+}
+
+/// One in-flight object counts each byte once across provider retries.
+pub(crate) struct DownloadProgress {
+    phase: PhaseProgress,
+    bytes: AtomicU64,
+    committed: std::sync::atomic::AtomicBool,
+}
+impl DownloadProgress {
+    pub(crate) fn new(phase: &PhaseProgress) -> Arc<Self> {
+        Arc::new(Self { phase: phase.clone(), bytes: AtomicU64::new(0), committed: std::sync::atomic::AtomicBool::new(false) })
+    }
+    pub(crate) fn advance(&self, position: u64) {
+        let previous=self.bytes.fetch_max(position,Ordering::Relaxed);
+        if position>previous {self.phase.completed_many(0,position-previous);}
+    }
+    pub(crate) fn commit(&self, length: u64) {
+        self.advance(length);
+        self.committed.store(true,Ordering::Relaxed);
+    }
+}
+impl Drop for DownloadProgress {
+    fn drop(&mut self) {
+        if !self.committed.load(Ordering::Relaxed) {
+            self.phase.completed_bytes.fetch_sub(self.bytes.load(Ordering::Relaxed),Ordering::Relaxed);
+            self.phase.report();
+        }
     }
 }

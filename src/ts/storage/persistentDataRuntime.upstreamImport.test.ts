@@ -1,8 +1,10 @@
 import {beforeEach,describe,expect,it,vi} from 'vitest'
 vi.mock('../platform',async()=>(await import('../platform.testSupport')).platformModule({runtime:'tauri',os:'windows'}))
 const plugins=vi.hoisted(()=>({fencePluginExecutionForAuthorityReplacement:vi.fn(async()=>{}),invalidatePluginCachesAfterAuthorityReplacement:vi.fn(async()=>{}),restartPluginsAfterAuthorityReplacement:vi.fn(async()=>{})}))
-const binding=vi.hoisted(()=>({bound:true,state:{targetAuthority:'9007199254740993'},fence:vi.fn(async()=>{}),assertAuthority:vi.fn(async()=>{}),resume:vi.fn(async()=>{})}))
-vi.mock('./sync/bindingRegistry',()=>({prepareBoundLibraryReplacement:async()=>binding}))
+const binding=vi.hoisted(()=>({bound:true,state:{targetAuthority:'9007199254740993'},fence:vi.fn(async()=>{}),assertAuthority:vi.fn(async()=>{}),resume:vi.fn(async()=>{}),release:vi.fn(()=>{})}))
+const bindingBoundary=vi.hoisted(()=>({prepare:vi.fn(),invoke:vi.fn()}))
+vi.mock('./sync/bindingRegistry',async original=>({...await original<typeof import('./sync/bindingRegistry')>(),prepareBoundLibraryReplacement:bindingBoundary.prepare}))
+vi.mock('@tauri-apps/api/core',async original=>({...await original<typeof import('@tauri-apps/api/core')>(),invoke:bindingBoundary.invoke}))
 const alerts=vi.hoisted(()=>({checkbox:vi.fn(async()=>({confirmed:true,checked:true}))}))
 vi.mock('../alert',()=>({alertCheckboxConfirm:alerts.checkbox}))
 vi.mock('../plugins/apiV3/v3.svelte',()=>plugins)
@@ -16,6 +18,10 @@ import type {OfficialRevisionPublisher} from './saveCoordinator'
 import {makeDatabase} from './saveCoordinator.testSupport'
 import {runNativeBlockRisuSaveRestore,type NativeFileJobStatus} from './nativeFileJobs'
 import {retryCommittedWorkingSetRefreshWithContinuation} from './committedWorkingSetContinuation'
+import {restoreNativeOfficialAccountCandidate} from './sync/nativeOfficialAccountFlow'
+import {createPluginStartupGate} from '../plugins/pluginStartupGate'
+import {subscribeSyncBindingChanges} from './sync/bindingChanges'
+import {get} from 'svelte/store'
 async function createHarness(officialPublisher?: OfficialRevisionPublisher, captureWorkingSet = false) {
     let database = makeDatabase()
     let durable = structuredClone(database)
@@ -117,8 +123,84 @@ async function createHarness(officialPublisher?: OfficialRevisionPublisher, capt
     }
 }
 
-beforeEach(()=>{vi.clearAllMocks();library.hasCharacters.mockReset().mockResolvedValue(true);plugins.restartPluginsAfterAuthorityReplacement.mockImplementation(async()=>{});binding.bound=true;binding.fence.mockClear();binding.assertAuthority.mockClear();binding.resume.mockReset();binding.resume.mockImplementation(async()=>{})})
+beforeEach(()=>{vi.clearAllMocks();bindingBoundary.prepare.mockReset().mockResolvedValue(binding);bindingBoundary.invoke.mockReset();library.hasCharacters.mockReset().mockResolvedValue(true);plugins.restartPluginsAfterAuthorityReplacement.mockImplementation(async()=>{});binding.bound=true;binding.fence.mockClear();binding.assertAuthority.mockClear();binding.resume.mockReset();binding.resume.mockImplementation(async()=>{})})
 describe('direct native upstream import publication',()=>{
+    it('releases an abandoned preparation hold even when authority lookup fails, allowing one-time plugin recovery',async()=>{
+        const registry=await vi.importActual<typeof import('./sync/bindingRegistry')>('./sync/bindingRegistry')
+        const target={kind:'server' as const,connectionId:'synthetic-failed-preparation'}
+        const state={target,targetAuthority:'1',selectionEpoch:'1',libraryId:'synthetic',progress:null}
+        let unavailable=false,starts=0
+        bindingBoundary.invoke.mockImplementation(async command=>{if(unavailable)throw new Error('native state unavailable');if(command==='pds_lww_binding_state')return state;throw new Error(command)})
+        bindingBoundary.prepare.mockImplementation(registry.prepareBoundLibraryReplacement)
+        const unsupported=async():Promise<never>=>{throw new Error('Unexpected binding switch')}
+        const unregister=registry.registerSyncBindingTransport(target,{
+            inspectTarget:unsupported,pullAvailableState:unsupported,replaceFromTarget:unsupported,publishInitialSharedState:unsupported,
+            fenceOldJobs:async()=>{},resumeBinding:async()=>{throw new Error('Failed authority check must prevent resume')},receiveAvailableChanges:async()=>{},
+        })
+        const gate=createPluginStartupGate({enabled:()=>true,delay:()=>true,replacementPending:()=>registry.isSyncBindingReplacementPending(),
+            context:async()=>{throw new Error('native state unavailable')},start:async()=>{if(await gate.ensure())starts++},
+        })
+        const stop=subscribeSyncBindingChanges(()=>{if(gate.isWaiting())gate.retry()})
+        plugins.fencePluginExecutionForAuthorityReplacement.mockImplementationOnce(async()=>{unavailable=true;throw new Error('preparation failed')})
+        plugins.restartPluginsAfterAuthorityReplacement.mockImplementation(async()=>{expect(await gate.ensure()).toBe(false)})
+        const h=await createHarness()
+        try {
+            await expect(h.runtime.replacePersistentDatabase(makeDatabase(),'test',{upstreamImport:true})).rejects.toThrow('preparation failed')
+            expect(h.runtime.revision).toBe(1)
+            expect(registry.isSyncBindingReplacementPending()).toBe(false)
+            gate.loadOnce()
+            await vi.waitFor(()=>expect(starts).toBe(1))
+        } finally {stop();unregister()}
+    })
+    it.each(['server','external'] as const)('waits for resumed %s receive before starting plugins on the replacement database',async kind=>{
+        const registry=await vi.importActual<typeof import('./sync/bindingRegistry')>('./sync/bindingRegistry')
+        const target={kind,connectionId:'synthetic-import'}
+        const state={target,targetAuthority:'1',selectionEpoch:'1',libraryId:'synthetic',progress:null}
+        bindingBoundary.invoke.mockImplementation(async command=>{if(command==='pds_lww_binding_state')return state;throw new Error(command)})
+        bindingBoundary.prepare.mockImplementation(registry.prepareBoundLibraryReplacement)
+        let active=true,resumed=false,starts=0
+        let finish!:()=>void
+        const received=new Promise<void>(resolve=>{finish=resolve})
+        const unsupported=async():Promise<never>=>{throw new Error('Unexpected binding switch')}
+        const transport={inspectTarget:unsupported,pullAvailableState:unsupported,replaceFromTarget:unsupported,publishInitialSharedState:unsupported,
+            fenceOldJobs:async()=>{active=false},resumeBinding:async()=>{active=true;resumed=true},
+            receiveAvailableChanges:async()=>{if(!active)throw new Error(kind==='server'?'Sync binding changed':'Sync is stopped');if(resumed)await received},
+        }
+        const unregister=registry.registerSyncBindingTransport(target,transport)
+        const h=await createHarness()
+        const gate=createPluginStartupGate({enabled:()=>true,delay:()=>true,
+            context:async()=>({identity:'synthetic',target:kind,bound:true,replacementPending:registry.isSyncBindingReplacementPending(state),receive:transport.receiveAvailableChanges,assertCurrent:async()=>{}}),
+            start:async()=>{if(await gate.ensure()){expect(h.database.username).toBe('replacement');starts++}},
+        })
+        const stop=subscribeSyncBindingChanges(()=>{if(gate.isWaiting())gate.retry()})
+        plugins.restartPluginsAfterAuthorityReplacement.mockImplementation(async()=>{
+            expect(await gate.ensure()).toBe(false)
+            expect(get(gate.state).phase).toBe('waiting')
+        })
+        try {
+            await expect(h.runtime.replacePersistentDatabase({...makeDatabase(),username:'replacement'},'test',{upstreamImport:true})).resolves.toMatchObject({revision:2})
+            expect(starts).toBe(0)
+            expect(get(gate.state).phase).toBe('waiting')
+            expect(registry.isSyncBindingReplacementPending(state)).toBe(false)
+            finish()
+            await vi.waitFor(()=>expect(starts).toBe(1))
+            expect(get(gate.state).phase).toBe('released')
+        } finally {finish();stop();unregister()}
+    })
+    it.each(['preparation','unchanged-write'] as const)('restarts plugins after %s failure even when binding verification is unavailable',async failure=>{
+        const h=await createHarness()
+        if(failure==='preparation') plugins.fencePluginExecutionForAuthorityReplacement.mockRejectedValueOnce(new Error('preparation failed'))
+        else vi.mocked(h.store.replaceFromDatabase).mockRejectedValueOnce(new Error('unchanged write failed'))
+        binding.assertAuthority.mockImplementation(async()=>{throw new Error('binding unavailable')})
+        if(failure==='unchanged-write') binding.assertAuthority.mockResolvedValueOnce(undefined)
+        try {
+            await expect(h.runtime.replacePersistentDatabase(makeDatabase(),'failed-import',{upstreamImport:true})).rejects.toThrow()
+            expect(h.runtime.revision).toBe(1)
+            expect(h.database).toEqual(h.durable)
+            expect(plugins.restartPluginsAfterAuthorityReplacement).toHaveBeenCalledOnce()
+            expect(binding.resume).not.toHaveBeenCalled()
+        } finally { binding.assertAuthority.mockImplementation(async()=>{}) }
+    })
     it('keeps first-run consent through the compatibility replacement runtime',async()=>{
         binding.bound=false
         const h=await createHarness()
@@ -171,6 +253,21 @@ describe('direct native upstream import publication',()=>{
         expect(h.store.replaceFromDatabase).not.toHaveBeenCalled()
         expect(h.database.username).not.toBe('Declined')
     })
+    it.each(['confirmation','before-commit'] as const)('preserves the library when import cancellation arrives during %s',async stage=>{
+        const h=await createHarness()
+        const controller=new AbortController()
+        if(stage==='confirmation') alerts.checkbox.mockImplementationOnce(async()=>{
+            controller.abort()
+            return {confirmed:true,checked:true}
+        })
+        else binding.assertAuthority.mockImplementationOnce(async()=>{controller.abort()})
+        await expect(restoreNativeOfficialAccountCandidate(h.runtime,
+            {...makeDatabase(),username:'Cancelled'},1,controller.signal,[],
+        )).rejects.toMatchObject({name:'AbortError'})
+        expect((await h.store.readRoot()).value.username).not.toBe('Cancelled')
+        expect(h.runtime.revision).toBe(1)
+        expect(h.runtime.pendingWorkingSetRefreshRevision).toBeNull()
+    })
     it.each([true,false])('replaces a library that holds no character without asking, bound=%s',async bound=>{
         binding.bound=bound
         library.hasCharacters.mockResolvedValue(false)
@@ -195,7 +292,9 @@ describe('direct native upstream import publication',()=>{
         expect(()=>h.runtime.markPersistentDataDirty(1)).not.toThrow()
         expect(binding.resume).toHaveBeenCalledOnce()
     })
-    it.each(['refresh','uncertain'] as const)('retains read-only activation and resumes only after strict recovery: %s',async failure=>{
+    it.each([
+        ['refresh',false],['uncertain',false],['refresh',true],['uncertain',true],
+    ] as const)('retains read-only activation and resumes only after strict recovery: %s, account=%s',async(failure,account)=>{
         const h=await createHarness({pin:async()=>({publish:async()=>{},dispose:async()=>{}})})
         const incoming={...makeDatabase(),username:'Imported after recovery'}
         if(failure==='refresh') h.replaceDatabase.mockImplementationOnce(()=>{throw new Error('refresh failed')})
@@ -203,13 +302,17 @@ describe('direct native upstream import publication',()=>{
             h.nativeCommit(database)
             throw new Error('activation result unavailable')
         })
-        await expect(h.runtime.replacePersistentDatabase(incoming,'upstream-import',{upstreamImport:true,publishOfficial:true})).rejects.toThrow()
+        const operation=account
+            ? restoreNativeOfficialAccountCandidate(h.runtime,incoming,1,undefined,[])
+            : h.runtime.replacePersistentDatabase(incoming,'upstream-import',{upstreamImport:true,publishOfficial:true})
+        if(account) await expect(operation).rejects.toMatchObject({code:'activation-outcome-unresolved',recoveryRequired:true})
+        else await expect(operation).rejects.toThrow()
         expect(()=>h.runtime.markPersistentDataDirty(1)).toThrow()
         expect(binding.resume).not.toHaveBeenCalled()
         await expect(retryCommittedWorkingSetRefreshWithContinuation(h.runtime)).resolves.toEqual({kind:'committed',revision:2,projection:'applied'})
         expect(h.database.username).toBe('Imported after recovery')
         expect(binding.resume).toHaveBeenCalledOnce()
-        expect(h.runtime.hasPendingOfficialPublication()).toBe(true)
+        expect(h.runtime.hasPendingOfficialPublication()).toBe(!account)
         await h.runtime.flushPendingDataLocally('recovery-baselines')
         expect(h.store.commit).not.toHaveBeenCalled()
     })

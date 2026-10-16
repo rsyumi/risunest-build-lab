@@ -15,6 +15,7 @@ function ownedStorage(owner: string) {
         return owned
     }
     return {
+        dispose: () => {},
         getItem: async (key: string) => values().get(key) ?? null,
         setItem: async (key: string, value: unknown) => { values().set(key, value) },
         removeItem: async (key: string) => { values().delete(key) },

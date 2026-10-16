@@ -65,7 +65,7 @@ impl PersistentStore {
         match &intent {
             Intent::Target { staging_id, changes, .. } => {
                 if generation.as_deref() != Some(staging_id.as_str()) || active_generation(&self.connection)? != *staging_id { return Err(error("request-id-integrity")); }
-                intent_rows::read_target(device, request_id, changes)?.visit(false, |key, stamp, value, _| {
+                intent_rows::read_target(device, &self.repository_root, request_id, changes)?.visit(false, |key, stamp, value, _| {
                     wire(stamp.ok_or_else(|| error("request-id-integrity"))?.validate())?;
                     self.validate_device_completion_input(&key, &value)
                 })?;
@@ -74,7 +74,7 @@ impl PersistentStore {
                 if generation.as_deref() != Some(staging_id.as_str()) || base_revision.checked_add(1) != Some(revision) || active_generation(&self.connection)? != *staging_id {
                     return Err(error("request-id-integrity"));
                 }
-                intent_rows::read_replacement(device, request_id, changes)?;
+                intent_rows::read_replacement(device, &self.repository_root, request_id, changes)?;
                 for (key, value) in device_changes.iter() { self.validate_device_completion_input(key, value)?; }
             }
             Intent::NewDevice { staging_id, changes, old_writer_id, writer_id, new_authority, authorization_id, selection_change, .. } => {

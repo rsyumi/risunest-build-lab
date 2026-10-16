@@ -100,11 +100,15 @@ pub(crate) async fn network_log_command(
 
 
 #[cfg(test)]
+pub(crate) static TEST_RECORDER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn reinitializing_replaces_the_installed_recorder_and_keeps_settings() {
+        let _guard = TEST_RECORDER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let root = tempfile::tempdir().unwrap();
         let paths = crate::app_paths::AppPaths::isolated(root.path().join("synthetic-network-log")).unwrap();
         initialize(&paths).unwrap();

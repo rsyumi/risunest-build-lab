@@ -368,6 +368,7 @@ async fn download_ciphertext(
     provider: &dyn Provider,
     repository: &RepositoryHandle,
     durability: Durability,
+    progress: Option<&std::sync::Arc<super::phase_progress::DownloadProgress>>,
     cancel: &Cancellation,
 ) -> Result<PathBuf> {
     object.stored(repository)?;
@@ -387,6 +388,10 @@ async fn download_ciphertext(
         fs::remove_file(&partial).map_err(transient)?;
     }
     let mut sink = SpoolSink::create(&partial, object.receipt.byte_length)?;
+    if let Some(progress)=progress {
+        let progress=progress.clone();
+        sink.observe(std::sync::Arc::new(move |bytes|progress.advance(bytes)));
+    }
     #[cfg(test)]
     record_test_read(
         downloads,
@@ -424,7 +429,7 @@ async fn download_ciphertext(
 /// Only the owner opens plaintext or advances durable placement state.
 fn stage_ciphertexts<'a>(
     objects: &[&'a RemoteObject], staging_root: &'a Path, provider: &'a dyn Provider,
-    repository: &'a RepositoryHandle, durability: Durability, cancel: &'a Cancellation,
+    repository: &'a RepositoryHandle, durability: Durability, progress: Option<&'a PhaseProgress>, cancel: &'a Cancellation,
 ) -> Result<impl futures::Stream<Item = (&'a RemoteObject, Result<Option<PathBuf>>)> + 'a> {
     let downloads = staging_root.join("downloads");
     ensure_directory(&downloads)?;
@@ -443,13 +448,15 @@ fn stage_ciphertexts<'a>(
                 if stopped.load(std::sync::atomic::Ordering::Acquire) {
                     return Err(ProviderError::new(ErrorKind::Cancelled));
                 }
+                let streamed=progress.map(super::phase_progress::DownloadProgress::new);
                 let result = async {
                     let plaintext = staging_root.join("plaintext").join(&object.plaintext_sha256);
                     if verify(&plaintext, object.plaintext_length, &object.plaintext_sha256)? {
                         return Ok(None);
                     }
-                    download_ciphertext(object, &downloads, provider, repository, durability, cancel).await.map(Some)
+                    download_ciphertext(object, &downloads, provider, repository, durability, streamed.as_ref(), cancel).await.map(Some)
                 }.await;
+                if result.is_ok() {if let Some(progress)=&streamed {progress.commit(object.receipt.byte_length);}}
                 if result.is_err() { stopped.store(true, std::sync::atomic::Ordering::Release); }
                 result
             }.boxed().shared();
@@ -526,7 +533,7 @@ async fn open_object_with(
     if destination.exists() {
         fs::remove_file(&destination).map_err(transient)?;
     }
-    let ciphertext = download_ciphertext(object, &downloads, provider, repository, durability, cancel).await?;
+    let ciphertext = download_ciphertext(object, &downloads, provider, repository, durability, None, cancel).await?;
     decrypt_object(object, root_key, &plaintext, &destination, &ciphertext, durability, progress).await
 }
 
@@ -852,7 +859,7 @@ async fn open_packs(
     while pending.peek().is_some() {
         let batch: Vec<_> = pending.by_ref().take(provider.transfer_concurrency()).collect();
         let objects: Vec<_> = batch.iter().map(|(_, object)| *object).collect();
-        let mut downloads = stage_ciphertexts(&objects, staging_root, provider, repository, Durability::Durable, cancel)?;
+        let mut downloads = stage_ciphertexts(&objects, staging_root, provider, repository, Durability::Durable, Some(progress), cancel)?;
         let mut identities = batch.iter();
         while let Some((pack, ciphertext)) = downloads.next().await {
             let id = identities.next().ok_or_else(|| corrupt("download identity missing"))?.0;
@@ -863,7 +870,7 @@ async fn open_packs(
                 _ => {}
             }
             paths.insert(id.clone(), path);
-            progress.completed(pack.receipt.byte_length);
+            progress.completed(0);
         }
     }
     Ok(paths)
@@ -1521,7 +1528,7 @@ async fn run_turnover(
                 }
             }
             let objects: Vec<_> = batch.iter().map(|(_, pack)| *pack).collect();
-            let mut downloads = stage_ciphertexts(&objects, staging_root, provider, repository, durability, cancel)?;
+            let mut downloads = stage_ciphertexts(&objects, staging_root, provider, repository, durability, Some(progress), cancel)?;
             let mut identities = batch.iter();
             while let Some((pack, ciphertext)) = downloads.next().await {
                 let id = identities.next().ok_or_else(|| corrupt("download identity missing"))?.0;
@@ -1576,7 +1583,7 @@ async fn run_turnover(
                 discard_object(staging_root, pack);
                 #[cfg(test)]
                 record_turnover(staging_root, &required);
-                progress.completed(pack.receipt.byte_length);
+                progress.completed(0);
             }
         }
         Ok(())
@@ -1799,6 +1806,7 @@ pub(crate) async fn walk_sections(
     wanted: &BTreeSet<String>,
     staging_root: &Path,
     root_key: &[u8; 32],
+    record_into: Option<&Path>,
     provider: &dyn Provider,
     repository: &RepositoryHandle,
     walked: &PhaseProgress,
@@ -1807,7 +1815,7 @@ pub(crate) async fn walk_sections(
     let mut sections = Vec::new();
     for (id, reference) in wanted_sections(snapshot, wanted, staging_root, root_key, provider, repository, cancel).await? {
         sections.push(
-            walk_section(&id, reference, snapshot, staging_root, root_key, None, provider, repository, walked, cancel)
+            walk_section(&id, reference, snapshot, staging_root, root_key, record_into, provider, repository, walked, cancel)
                 .await?,
         );
     }
@@ -1954,10 +1962,10 @@ async fn fetch_section(
 }
 
 pub(crate) async fn download_checkpoint_data(
-    root: &RemoteObject, staging_root: &Path, root_key: &[u8;32],
+    root: &RemoteObject, staging_root: &Path, root_key: &[u8;32], record_into: Option<&Path>,
     provider: &dyn Provider, repository: &RepositoryHandle, progress: &PhaseProgress, cancel: &Cancellation,
 ) -> Result<(Vec<PreparedRecord>, Vec<PreparedObject>)> {
-    let turnover=walk_checkpoint_data(root,staging_root,root_key,provider,repository,progress,cancel).await?;
+    let turnover=walk_checkpoint_data(root,staging_root,root_key,record_into,provider,repository,progress,cancel).await?;
     let (items,bytes)=turnover.remaining();
     progress.plan(items,bytes);
     let (records,objects)=run_turnover(turnover,root_key,staging_root,provider,repository,progress,Durability::Durable,cancel).await?;
@@ -1967,18 +1975,19 @@ pub(crate) async fn download_checkpoint_data(
 /// Reads a record catalog, counting each node it fetches in `progress`, and
 /// works out which of its packs this staging directory still needs.
 async fn walk_checkpoint_data(
-    root: &RemoteObject, staging_root: &Path, root_key: &[u8;32],
+    root: &RemoteObject, staging_root: &Path, root_key: &[u8;32], record_into: Option<&Path>,
     provider: &dyn Provider, repository: &RepositoryHandle, progress: &PhaseProgress, cancel: &Cancellation,
 ) -> Result<Turnover> {
     ensure_directory(staging_root)?;
-    let (entries,packs,_) = read_catalog_with(root,wire::CatalogKind::Records,root_key,staging_root,provider,repository,progress,cancel).await?;
+    let (entries,packs,nodes) = read_catalog_with(root,wire::CatalogKind::Records,root_key,staging_root,provider,repository,progress,cancel).await?;
+    record_read(record_into,&super::packaging::CatalogRoot::Records,root,&entries,&packs,&nodes,repository);
     let content=content_store(staging_root)?;
     let plan=resolve_entries(entries,staging_root,&content,None,cancel)?;
     Turnover::new(plan,&packs)
 }
 
 pub(crate) async fn download_control_catalogs(
-    catalogs:&[wire::StoredObject],staging_root:&Path,root_key:&[u8;32],
+    catalogs:&[wire::StoredObject],staging_root:&Path,root_key:&[u8;32],record_into:Option<&Path>,
     provider:&dyn Provider,repository:&RepositoryHandle,cancel:&Cancellation,
 ) -> Result<Vec<PreparedObject>> {
     let mut objects=BTreeMap::new();let mut roots=BTreeMap::new();
@@ -1993,7 +2002,7 @@ pub(crate) async fn download_control_catalogs(
         }
         let remote=RemoteObject::from_stored(catalog,repository)?;
         let stage=staging_root.join(index.to_string());
-        let (records,controls)=download_checkpoint_data(&remote,&stage,root_key,provider,repository,&PhaseProgress::silent(),cancel).await?;
+        let (records,controls)=download_checkpoint_data(&remote,&stage,root_key,record_into,provider,repository,&PhaseProgress::silent(),cancel).await?;
         if !records.is_empty() {return Err(corrupt("control catalog contains unit records"));}
         for mut control in controls {
             if let ObjectSource::Captured(hash)=&control.source {
@@ -2029,7 +2038,7 @@ pub(crate) async fn revalidate_catalog(
 }
 
 pub(crate) async fn admit_data_catalogs(
-    catalogs:&[wire::StoredObject],store:&mut crate::persistent_store::PersistentStore,target:&str,root_key:&[u8;32],
+    catalogs:&[wire::StoredObject],store:&mut crate::persistent_store::PersistentStore,target:&str,root_key:&[u8;32],record_into:Option<&Path>,
     provider:&dyn Provider,repository:&RepositoryHandle,cancel:&Cancellation,
 ) -> Result<Vec<String>> {
     if catalogs.is_empty() {return Ok(Vec::new());}
@@ -2048,7 +2057,8 @@ pub(crate) async fn admit_data_catalogs(
         }
         let remote=RemoteObject::from_stored(catalog,repository)?;
         let directory=stage.path().join(index.to_string());ensure_directory(&directory)?;
-        let (entries,packs,_)=read_catalog(&remote,wire::CatalogKind::Records,root_key,&directory,provider,repository,cancel).await?;
+        let (entries,packs,nodes)=read_catalog(&remote,wire::CatalogKind::Records,root_key,&directory,provider,repository,cancel).await?;
+        record_read(record_into,&super::packaging::CatalogRoot::Records,&remote,&entries,&packs,&nodes,repository);
         let mut required=BTreeSet::new();let mut missing=Vec::new();
         for entry in entries {
             if entry.kind!=wire::CatalogEntryKind::Object {return Err(corrupt("control catalog contains unit records"));}
@@ -2136,13 +2146,20 @@ pub(crate) async fn download_packed_body_file(
     hash:&str, length:u64, chunks:Vec<wire::StoredChunk>, stored_packs:Vec<wire::StoredObject>, staging_root:&Path, root_key:&[u8;32],
     provider:&dyn Provider, repository:&RepositoryHandle,cancel:&Cancellation,
 ) -> Result<PathBuf> {
+    download_packed_body_file_observed(hash,length,chunks,stored_packs,staging_root,root_key,provider,repository,&PhaseProgress::silent(),cancel).await
+}
+pub(crate) async fn download_packed_body_file_observed(
+    hash:&str, length:u64, chunks:Vec<wire::StoredChunk>, stored_packs:Vec<wire::StoredObject>, staging_root:&Path, root_key:&[u8;32],
+    provider:&dyn Provider, repository:&RepositoryHandle,progress:&PhaseProgress,cancel:&Cancellation,
+) -> Result<PathBuf> {
     ensure_directory(staging_root)?;
     let mut packs=BTreeMap::new();
     for stored in &stored_packs { let pack=RemoteObject::from_stored(stored,repository)?; packs.insert(pack.object_id.clone(),pack); }
     let entry=CompleteEntry {kind:wire::CatalogEntryKind::Object,key:format!("object/{hash}"),content_sha256:hex::decode(hash).map_err(corrupt)?.try_into().map_err(|_|corrupt("body hash"))?,byte_length:length,chunks};
     // Every caller reads the body out of throwaway staging, so it is placed as scratch.
     let plan=resolve_entries_in(vec![entry],staging_root,None,None,cancel)?;
-    let (_,objects)=turn_over_packs_with(plan,&packs,root_key,staging_root,provider,repository,&PhaseProgress::silent(),Durability::Scratch,cancel).await?;
+    let (_,objects)=turn_over_packs_with(plan,&packs,root_key,staging_root,provider,repository,progress,Durability::Scratch,cancel).await?;
+    progress.flush();
     let body=objects.get(hash).ok_or_else(||corrupt("body missing"))?;
     match &body.source { ObjectSource::File(path)=>Ok(path.clone()), _=>Err(corrupt("body source")) }
 }
@@ -2290,7 +2307,7 @@ impl RestoreBodyPlan {
                 rows.map(|row|serde_json::from_str::<RemoteObject>(&row.map_err(transient)?).map_err(corrupt)).collect::<Result<Vec<_>>>()?
             };
             let objects:Vec<_>=packs.iter().collect();
-            let mut downloads=stage_ciphertexts(&objects,&self.directory,provider,repository,Durability::Durable,cancel)?;
+            let mut downloads=stage_ciphertexts(&objects,&self.directory,provider,repository,Durability::Durable,Some(progress),cancel)?;
             while let Some((remote,result))=downloads.next().await {
                 self.staged.push_back((remote.clone(),result));
             }
@@ -2334,7 +2351,7 @@ impl RestoreBodyPlan {
         tx.execute("UPDATE chunks SET done=1 WHERE pack=?1",[&remote.object_id]).map_err(transient)?;
         tx.execute("UPDATE packs SET done=1 WHERE id=?1",[&remote.object_id]).map_err(transient)?;
         tx.commit().map_err(transient)?;
-        progress.completed(remote.receipt.byte_length);
+        progress.completed(0);
         drop(input);
         discard_object(&self.directory,&remote);
         Ok(true)
@@ -2434,7 +2451,7 @@ pub(crate) async fn download_original_backup_units(
     progress: &PhaseProgress,
     cancel: &Cancellation,
 ) -> Result<OriginalUnits> {
-    let walk = walk_original_backup_units(root, staging_root, key, provider, repository, progress, cancel).await?;
+    let walk = walk_original_backup_units(root, staging_root, key, None, provider, repository, progress, cancel).await?;
     let (packs, bytes) = walk.plan.remaining_packs()?;
     progress.plan(packs, bytes);
     fetch_original_backup_units(walk, staging_root, key, provider, repository, progress, cancel).await
@@ -2453,6 +2470,7 @@ async fn walk_original_backup_units(
     root: &RemoteObject,
     staging_root: &Path,
     key: &[u8; 32],
+    record_into: Option<&Path>,
     provider: &dyn Provider,
     repository: &RepositoryHandle,
     progress: &PhaseProgress,
@@ -2499,6 +2517,8 @@ async fn walk_original_backup_units(
         kept.db.execute_batch("COMMIT").map_err(transient)?;
         discard_object(staging_root,&object);
     }
+    let cache=record_into.and_then(|path|super::package_cache::PackageCache::open(path).ok());
+    let mut cached_entries=Vec::new();
     let plan=RestoreBodyPlan::new(staging_root)?;
     let mut after=String::new();
     loop {
@@ -2534,10 +2554,24 @@ async fn walk_original_backup_units(
         if count!=first.fragment_count {return Err(corrupt("missing original unit fragment"));}
         let hash=hex::encode(first.content_sha256);
         kept.insert(&unit_key,&hash,first.byte_length)?;
+        if let Some(cache)=&cache {
+            let entry=super::packaging::EntryPlan {kind:first.kind,key:unit_key.clone(),content_sha256:hash.clone(),
+                byte_length:first.byte_length,chunks:chunks.clone(),packs:packs.values().map(|pack|RemoteObject::from_stored(pack,repository)).collect::<Result<_>>()?};
+            cached_entries.push(entry);
+            if cached_entries.len()>=256 {
+                let _=cache.put_entries(&root.repository_id,repository,wire::CatalogKind::Records,&cached_entries);
+                let _=cache.put_objects(repository,cached_entries.iter().flat_map(|entry|entry.packs.iter()));
+                cached_entries.clear();
+            }
+        }
         plan.push(&super::lww_residency::PackedSource {
             hash,byte_length:first.byte_length,chunks,packs:packs.into_values().collect(),catalog:root.stored(repository)?,
             library_id:root.repository_id.clone(),connection_id:"original-unit-controls".into(),connection_root:staging_root.into(),protected_snapshot:root.object_id.clone(),
         },false,repository)?;
+    }
+    if let Some(cache)=&cache {
+        let _=cache.put_entries(&root.repository_id,repository,wire::CatalogKind::Records,&cached_entries);
+        let _=cache.put_objects(repository,cached_entries.iter().flat_map(|entry|entry.packs.iter()));
     }
     plan.seal()?;
     Ok(OriginalUnitsWalk{kept,plan})
@@ -2585,7 +2619,7 @@ pub(crate) async fn download_backup_original_units(
     let document=super::control::SnapshotView::read(&read_bytes(&root,wire::MAX_METADATA_BYTES)?,wire::ObjectRole::BackupBundle,&snapshot.repository_id)?;
     if snapshot.object_id != format!("snapshot-{}",document.snapshot_id) {return Err(corrupt("backup identity differs"))}
     let original=RemoteObject::from_stored(document.original_units.as_ref().ok_or_else(|| corrupt("complete original unit root is required"))?,repository)?;
-    let walk=walk_original_backup_units(&original,staging_root,key,provider,repository,&PhaseProgress::silent(),cancel).await?;
+    let walk=walk_original_backup_units(&original,staging_root,key,None,provider,repository,&PhaseProgress::silent(),cancel).await?;
     fetch_original_backup_units(walk,staging_root,key,provider,repository,&PhaseProgress::silent(),cancel).await
 }
 
@@ -2614,7 +2648,9 @@ pub(crate) async fn admit_asset_catalogs(
             return Err(corrupt("asset catalog repository or role differs"));
         }
         let root=RemoteObject::from_stored(catalog,repository)?;
-        let (entries,packs,_)=read_catalog(&root,wire::CatalogKind::Assets,root_key,scratch.path(),provider,repository,cancel).await?;
+        let (entries,packs,nodes)=read_catalog(&root,wire::CatalogKind::Assets,root_key,scratch.path(),provider,repository,cancel).await?;
+        let cache=super::runtime::connection_directory(connection_root,connection_id).join("package-cache");
+        record_read(Some(&cache),&super::packaging::CatalogRoot::Assets,&root,&entries,&packs,&nodes,repository);
         let shared_catalog=interner.intern(catalog.clone());
         let mut shared_packs=BTreeMap::<String,super::lww_residency::SharedObject>::new();
         let mut witnessed=Vec::new();
@@ -2718,12 +2754,15 @@ pub(crate) async fn walk_snapshot_database_first(snapshot:&RemoteObject,staging_
         .ok_or_else(|| corrupt("full backup original unit root is required"))?;
     let original_root = RemoteObject::from_stored(original_root, repository)?;
     let original = walk_original_backup_units(
-        &original_root, staging_root, key, provider, repository, walked, cancel,
+        &original_root, staging_root, key,
+        Some(&super::runtime::connection_directory(connection_root,connection_id).join("package-cache")), provider, repository, walked, cancel,
     ).await?;
     let records_root=RemoteObject::from_stored(&document.library.record_catalog,repository)?;
-    let records=walk_checkpoint_data(&records_root,staging_root,key,provider,repository,walked,cancel).await?;
+    let cache=super::runtime::connection_directory(connection_root,connection_id).join("package-cache");
+    let records=walk_checkpoint_data(&records_root,staging_root,key,Some(&cache),provider,repository,walked,cancel).await?;
     let assets_root=RemoteObject::from_stored(&document.library.asset_catalog,repository)?;
-    let (entries,packs,_)=read_catalog_with(&assets_root,wire::CatalogKind::Assets,key,staging_root,provider,repository,walked,cancel).await?;
+    let (entries,packs,nodes)=read_catalog_with(&assets_root,wire::CatalogKind::Assets,key,staging_root,provider,repository,walked,cancel).await?;
+    record_read(Some(&cache),&super::packaging::CatalogRoot::Assets,&assets_root,&entries,&packs,&nodes,repository);
     let mut objects=Vec::new();
     let cas=PayloadCas::new(library_root).map_err(transient)?;
     let metadata = crate::sqlite_open::open_with_flags(
@@ -2993,6 +3032,10 @@ mod tests {
             assert_eq!(provider.read_attempts("pack-resume-0"),1,"completed prefix must not consume the next quota window");
             assert_eq!(provider.read_attempts("pack-resume-1"),2);
             assert_eq!(provider.read_attempts("pack-resume-2"),2);
+            let progress=PhaseProgress::silent();
+            let path=download_packed_body_file_observed(&source.hash,source.byte_length,source.chunks.clone(),source.packs.clone(),&stage.join("export-spool"),&root_key,&provider,&repository,&progress,&Cancellation::default()).await.unwrap();
+            assert_eq!(fs::read(path).unwrap(),body);
+            assert_eq!(progress.read().bytes,source.packs.iter().map(|pack|pack.ciphertext_length).sum::<u64>());
         });
     }
 

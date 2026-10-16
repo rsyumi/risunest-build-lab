@@ -159,13 +159,13 @@ describe('app cleanup startup gate', () => {
     })
 
     it.each([
-        [windowsAgent, null, '%LOCALAPPDATA%\\RisuNest-cleanup'],
-        [windowsAgent, 'work', '%LOCALAPPDATA%\\RisuNestProfiles\\work\\cleanup'],
-        ['Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)', 'work', '~/Library/Application Support/RisuNestProfiles/work/cleanup'],
-        ['Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko)', 'work', '~/.local/share/risunest-profiles/work/cleanup'],
+        [windowsAgent, null, 'C:/synthetic/agent-cleanup'],
+        [windowsAgent, 'work', 'D:/synthetic/work/cleanup'],
+        ['Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)', 'work', '/synthetic/mac/work/cleanup'],
+        ['Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko)', 'work', '/custom-xdg/risunest-profiles/work/cleanup'],
     ])('keeps a corrupt journal fail closed and names the record to remove outside the app (%#)', async (userAgent, profile, folder) => {
         stubNavigator({ userAgent, language: 'en-US' })
-        vi.mocked(invoke).mockResolvedValue({ pending: true, mode: null, error: 'cleanup-journal-corrupt', canCancel: false, profile, namedProfiles: profile !== null })
+        vi.mocked(invoke).mockResolvedValue({ pending: true, mode: null, error: 'cleanup-journal-corrupt', canCancel: false, profile, namedProfiles: profile !== null, cleanupFolder: folder })
         const bootstrap = vi.fn()
         void appCleanupBeforeBootstrap().then(bootstrap)
         await vi.waitFor(() => expect(statusText()).toContain(folder))
@@ -204,9 +204,9 @@ describe('app cleanup startup gate', () => {
 
     it('falls back to removing the record outside the app when cancellation is unavailable', async () => {
         stubNavigator({ userAgent: windowsAgent, language: 'en-US' })
-        vi.mocked(invoke).mockResolvedValue({ pending: true, mode: 'reset', error: 'secret-index-corrupt', canCancel: false })
+        vi.mocked(invoke).mockResolvedValue({ pending: true, mode: 'reset', error: 'secret-index-corrupt', canCancel: false, cleanupFolder: 'C:/synthetic/agent-cleanup' })
         void appCleanupBeforeBootstrap()
-        await vi.waitFor(() => expect(statusText()).toContain('%LOCALAPPDATA%\\RisuNest-cleanup'))
+        await vi.waitFor(() => expect(statusText()).toContain('C:/synthetic/agent-cleanup'))
         expect(statusText()).not.toContain(cancelButton().textContent)
         expect(cancelButton().hidden).toBe(true)
     })

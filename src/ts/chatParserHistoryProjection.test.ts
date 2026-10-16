@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, expect, it, vi } from 'vitest'
 import {
     ChatParserCompleteProjectionRequiredError,
@@ -9,6 +10,7 @@ import {
 } from './chatParserHistoryProjection'
 import type { ProcessScriptCaptureContext } from './process/scripts'
 import type { Message } from './storage/database.svelte'
+import { captureChatParserContextSeed, createChatParserContextSeed, forkChatParserContext } from './chatParserContextSeed.svelte'
 
 const CHARACTER_ID = 'character-1'
 const CONVERSATION_ID = 'conversation-1'
@@ -120,6 +122,51 @@ function makeInput(
 }
 
 describe('live chat parser history projection', () => {
+    it('captures the current time again without changing a cached seed', () => {
+        const seed = createChatParserContextSeed(makeContext())
+        const clock = vi.spyOn(Date, 'now').mockReturnValue(1234)
+        try {
+            expect(captureChatParserContextSeed(seed).parserContext.currentTime).toBe(1234)
+            clock.mockReturnValue(5678)
+            expect(captureChatParserContextSeed(seed).parserContext.currentTime).toBe(5678)
+            expect(seed.parserContext.currentTime).toBe(1)
+        } finally { clock.mockRestore() }
+    })
+
+    it('keeps deep-copy isolation for non-plain capture values', () => {
+        const context = makeContext()
+        const extended = context.parserContext.chatVariables as unknown as Record<string, unknown>
+        extended.date = new Date(1234)
+        extended.map = new Map([['value', { count: 1 }]])
+        const seed = createChatParserContextSeed(context)
+        const first = forkChatParserContext(seed).parserContext.chatVariables as unknown as typeof extended
+        ;(first.date as Date).setTime(5678)
+        ;(first.map as Map<string, { count: number }>).get('value')!.count = 2
+        const second = forkChatParserContext(seed).parserContext.chatVariables as unknown as typeof extended
+        expect((second.date as Date).getTime()).toBe(1234)
+        expect((second.map as Map<string, { count: number }>).get('value')!.count).toBe(1)
+    })
+
+    it('isolates nested rendering mutations between rows sharing a detached seed', async () => {
+        const context = makeContext()
+        context.parserContext.character.additionalAssets = [['asset', 'original.png', 'png']]
+        context.parserContext.chatVariables = { value: 'original' }
+        const seed = createChatParserContextSeed(context)
+        const { input } = makeInput(makeMessages(8), 6, { contextSeed: seed })
+        const first = await createChatParserHistoryProjection(input)
+        const second = await createChatParserHistoryProjection({ ...input, currentAbsoluteIndex: 7 })
+        if (first.kind !== 'bounded' || second.kind !== 'bounded') throw new Error('Expected bounded projections')
+        first.context.parserContext.character.additionalAssets[0][1] = 'changed.png'
+        first.context.parserContext.character.additionalAssets.push(['extra', 'extra.png', 'png'])
+        first.context.parserContext.chatVariables.value = 'changed'
+        first.context.parserContext.character.chats[0].message[0].data = 'changed row'
+        expect(second.context.parserContext.character.additionalAssets).toEqual([['asset', 'original.png', 'png']])
+        expect(second.context.parserContext.chatVariables).toEqual({ value: 'original' })
+        expect(second.context.parserContext.character.chats[0].message.map(row => row.data)).not.toContain('changed row')
+        expect(second.context.parserContext.database.characters[0]).toBe(second.context.parserContext.character)
+        expect(seed).toEqual(context)
+    })
+
     it('builds a bounded common-row projection with absolute and projected offsets', async () => {
         const messages = makeMessages(100)
         const { input, reads } = makeInput(messages, 99, { maxProjectionMessages: 32 })

@@ -76,6 +76,32 @@ fn only_the_deep_scan_rereads_a_stored_object() {
 }
 
 #[test]
+fn quick_scan_batches_local_alias_presence() {
+    for aliases in [32, 1025] {
+        let (_directory, state, hash) = damaged_payload_fixture();
+        with_store_mutex(&state, |store| {
+            let tx = store.connection.unchecked_transaction()?;
+            let generation = active_generation(&tx)?;
+            for index in 1..aliases {
+                tx.execute("INSERT INTO asset_aliases (generation,logical_key,object_hash,kind,size,mime,name,ext)
+                    VALUES (?1,?2,?3,'asset',24,'application/octet-stream','synthetic.bin','bin')",
+                    rusqlite::params![generation, format!("assets/synthetic-{index}.bin"), hash])?;
+            }
+            tx.commit()?;
+            Ok(())
+        }).unwrap();
+        crate::asset_repository::body_io::reset_body_io();
+        let started = std::time::Instant::now();
+        let result = quick_scan(&state, &DataHealthState::default()).unwrap();
+        let io = crate::asset_repository::body_io::take_body_io();
+        assert!(!has(&result, codes::ALIAS_OBJECT_MISMATCH));
+        assert_eq!(io.stat_requests, 0, "quick validation must not inspect aliases one file request at a time");
+        assert!(io.batch_stat_requests <= 2);
+        eprintln!("quick_alias_presence aliases={aliases} stat_requests={} batches={} elapsed_us={}", io.stat_requests, io.batch_stat_requests, started.elapsed().as_micros());
+    }
+}
+
+#[test]
 fn a_scan_writes_its_result_to_the_working_folder_for_the_next_reader() {
     let (directory, state, _) = damaged_payload_fixture();
     let health = DataHealthState::default();
@@ -124,6 +150,26 @@ fn a_deep_scan_resumes_from_its_stored_cursor_and_finishes_once() {
             .count(),
         0
     );
+}
+
+#[test]
+fn deep_progress_counts_local_bytes_even_when_registered_sizes_differ() {
+    let (directory, state, hash) = damaged_payload_fixture();
+    let stored = b"short";
+    fs::write(directory.path().join(crate::asset_repository::object_physical_key(&hash)), stored).unwrap();
+    with_store_mutex(&state, |store| {
+        let generation = active_generation(&store.connection)?;
+        store.connection.execute("INSERT INTO asset_aliases (generation,logical_key,object_hash,kind,size,mime,name,ext)
+            VALUES (?1,'assets/absent.bin',?2,'asset',1048576,'application/octet-stream','absent.bin','bin')",
+            rusqlite::params![generation, "ff".repeat(32)])?;
+        Ok(())
+    }).unwrap();
+    let result = deep_to_completion(&state, &DataHealthState::default());
+    let progress = result.deep.unwrap();
+    assert_eq!(progress.total_objects, 2);
+    assert_eq!(progress.completed_objects, 2);
+    assert_eq!(progress.total_bytes, stored.len() as u64);
+    assert_eq!(progress.completed_bytes, stored.len() as u64);
 }
 
 #[test]

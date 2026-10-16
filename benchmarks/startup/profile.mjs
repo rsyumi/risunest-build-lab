@@ -259,8 +259,11 @@ async function main() {
                 }
             }
             localStorage.setItem('startupInteract', '${scenario.interaction}');
-            localStorage.setItem('risuNestDeviceSettings', JSON.stringify({schema: 'risunest.device-settings/v1',
-                performanceProfile: 'normal', androidKeepAliveDuringGeneration: false, nativeFileLogEnabled: false}));
+            await invoke('pds_set_device_setting', {key: 'risuNestDeviceSettings', value: JSON.stringify({
+                schema: 'risunest.device-settings/v1', performanceProfile: 'normal',
+                androidKeepAliveDuringGeneration: false, nativeFileLogEnabled: false,
+                generationHistoryLimitEnabled: false, generationHistoryLimitMultiplier: 2, messageSendKey: 'enter'
+            })});
         })()`)
         recentSnapshotReady = scenario.recentSnapshot
     }

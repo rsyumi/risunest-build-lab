@@ -291,6 +291,8 @@ struct PluginPart { owner: String, session_id: String, offset: u64, part: String
 struct PluginWrite {
     owner: String,
     mutations: Vec<crate::persistent_store::device_store::plugin_values::PluginDeviceMutation>,
+    #[serde(default)]
+    observations: Vec<crate::persistent_store::device_store::plugin_values::PluginDeviceObservation>,
 }
 
 #[tauri::command]
@@ -317,7 +319,7 @@ pub(crate) async fn pds_plugin_part_android_finish(
 #[tauri::command]
 pub(crate) async fn pds_plugin_write_android_finish(
     app: AppHandle, window: WebviewWindow, state: State<'_, AndroidCommitState>, id: String,
-) -> StoreResult<()> {
+) -> StoreResult<Vec<crate::persistent_store::device_store::plugin_values::PluginDeviceObservation>> {
     logged("pds_plugin_write_android_finish", async move {
         guard(&window)?;
         let bytes = state.lock()?.take(&id)?;
@@ -325,14 +327,14 @@ pub(crate) async fn pds_plugin_write_android_finish(
         tauri::async_runtime::spawn_blocking(move || {
             let request: PluginWrite = serde_json::from_slice(&bytes)?;
             drop(bytes);
-            let changed = with_store_mut(lease.app.state(), |store| {
+            let (changed, observed) = with_store_mut(lease.app.state(), |store| {
                 let device = store.device_store_mut()?;
                 let before = device.revision()?;
-                device.write_plugin_device_values(&request.owner, &request.mutations)?;
-                Ok(device.revision()? != before)
+                let observed = device.write_plugin_device_values_observed(&request.owner, &request.mutations, &request.observations, crate::persistent_store::device_store::plugin_values::text_value::PART_BYTES as u64, crate::persistent_store::device_store::plugin_values::text_value::REQUEST_BYTES)?;
+                Ok((device.revision()? != before, observed))
             })?;
             if changed { crate::server_sync::events::notify_device_changed(&lease.app); }
-            Ok(())
+            Ok(observed)
         }).await.map_err(|_| invalid("Android plugin write task failed"))?
     }.await)
 }

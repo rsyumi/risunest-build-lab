@@ -122,20 +122,39 @@ impl Residency {
             }
         }
         let mut db = crate::sqlite_open::open(&path)?;
-        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")?;
+        let configure_started = std::time::Instant::now();
+        let configure_budget = std::time::Duration::from_secs(5);
+        loop {
+            db.busy_timeout(configure_budget.saturating_sub(configure_started.elapsed()))?;
+            match db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;") {
+                Ok(()) => break,
+                // A simultaneous WAL-mode change can bypass SQLite's busy timeout.
+                Err(error) if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)
+                    && configure_started.elapsed() < configure_budget => {
+                        std::thread::sleep(std::time::Duration::from_millis(10).min(configure_budget.saturating_sub(configure_started.elapsed())));
+                    }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        db.busy_timeout(configure_budget)?;
         let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version == 0 {
-            let tx = db.transaction()?;
-            let count: i64 =
-                tx.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))?;
-            if count != 0 {
-                return Err(SyncError::new("invalid-residency-store", 409));
-            }
-            tx.execute_batch("CREATE TABLE contexts(id TEXT PRIMARY KEY,library_id TEXT NOT NULL,device_id TEXT NOT NULL,epoch TEXT NOT NULL,config TEXT NOT NULL);
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+            if version == 0 {
+                let count: i64 =
+                    tx.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))?;
+                if count != 0 {
+                    return Err(SyncError::new("invalid-residency-store", 409));
+                }
+                tx.execute_batch("CREATE TABLE contexts(id TEXT PRIMARY KEY,library_id TEXT NOT NULL,device_id TEXT NOT NULL,epoch TEXT NOT NULL,config TEXT NOT NULL);
                 CREATE TABLE objects(context TEXT NOT NULL REFERENCES contexts(id),hash TEXT NOT NULL,size INTEGER NOT NULL CHECK(size>=0),retention_id TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('active','releasing','released')),confirmation_order INTEGER NOT NULL CHECK(confirmation_order>0),PRIMARY KEY(context,hash));
                 CREATE INDEX objects_hash ON objects(hash);
                 CREATE INDEX objects_confirmation_order ON objects(confirmation_order);
                 PRAGMA user_version=1;")?;
+            } else if version != 1 {
+                return Err(SyncError::new("incompatible-residency-store", 409));
+            }
             tx.commit()?;
         } else if version != 1 {
             return Err(SyncError::new("incompatible-residency-store", 409));
@@ -488,7 +507,7 @@ pub(crate) fn open_transient_with_check(
     digest: &str,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<Option<TransientBody>> {
-    open_transient_inner(root, scratch_root, digest, check, true)
+    open_transient_inner(root, scratch_root, digest, check, true, None)
 }
 pub(crate) fn open_transient_server_with_check(
     root: &Path,
@@ -496,7 +515,13 @@ pub(crate) fn open_transient_server_with_check(
     digest: &str,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<Option<TransientBody>> {
-    open_transient_inner(root, scratch_root, digest, check, false)
+    open_transient_server_observed(root, scratch_root, digest, check, None)
+}
+pub(crate) fn open_transient_server_observed(
+    root: &Path, scratch_root: &Path, digest: &str, check: &dyn Fn() -> Result<()>,
+    observer: Option<std::sync::Arc<dyn Fn(u64) + Send + Sync>>,
+) -> Result<Option<TransientBody>> {
+    open_transient_inner(root, scratch_root, digest, check, false, observer)
 }
 fn open_transient_inner(
     root: &Path,
@@ -504,6 +529,7 @@ fn open_transient_inner(
     digest: &str,
     check: &dyn Fn() -> Result<()>,
     allow_external: bool,
+    observer: Option<std::sync::Arc<dyn Fn(u64) + Send + Sync>>,
 ) -> Result<Option<TransientBody>> {
     check()?;
     validate_hash(digest)?;
@@ -519,13 +545,19 @@ fn open_transient_inner(
         if !allow_external { return Ok(None); }
         return Ok(crate::external_storage::lww_residency::hydrate(root, digest, check)?.map(|file|TransientBody {body:super::cache::Body::File(file),_directory:None}));
     };
-    open_transient_server_proof_with_check(root, scratch_root, &proof, check)
+    open_transient_server_proof_observed(root, scratch_root, &proof, check, observer)
 }
 pub(crate) fn open_transient_server_proof_with_check(
     root: &Path,
     scratch_root: &Path,
     proof: &RemoteObject,
     check: &dyn Fn() -> Result<()>,
+) -> Result<Option<TransientBody>> {
+    open_transient_server_proof_observed(root, scratch_root, proof, check, None)
+}
+fn open_transient_server_proof_observed(
+    root: &Path, scratch_root: &Path, proof: &RemoteObject, check: &dyn Fn() -> Result<()>,
+    observer: Option<std::sync::Arc<dyn Fn(u64) + Send + Sync>>,
 ) -> Result<Option<TransientBody>> {
     check()?;
     let digest = proof.hash.as_str();
@@ -553,10 +585,11 @@ pub(crate) fn open_transient_server_proof_with_check(
         check()?;
         return Ok(Some(TransientBody { body, _directory: Some(directory) }));
     }
-    let client = super::client::ServerClient::new(proof.config.resolve(root)?)?;
+    let mut client = super::client::ServerClient::new(proof.config.resolve(root)?)?;
     #[cfg(test)]
-    let client = { let mut client = client; super::client::attach_test_io(root, &mut client); client };
+    super::client::attach_test_io(root, &mut client);
     client.resolve_identity()?;
+    client.body_download_observer = observer;
     check()?;
     let directory = tempfile::Builder::new().prefix("asset-transient-").tempdir_in(scratch_root)?;
     let cache = super::cache::Cache::open(directory.path())?;
@@ -650,8 +683,8 @@ impl HydrationSession {
                 // leaves without a file, so custody is read under it too.
                 let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
                 let mut rows = Vec::with_capacity(hashes.len());
-                let sizes = cas.stat_objects(hashes.iter().map(|hash| hash.as_str()))?;
-                for (hash, size) in hashes.into_iter().zip(sizes) {
+                let sizes = cas.stat_objects(page.iter().map(String::as_str))?;
+                for (hash, size) in page.iter().zip(sizes) {
                     if let Some(size) = size {
                         rows.push(AssetObjectRegistration { object_hash: hash.clone(), byte_size: size });
                         local.push(hash);
@@ -678,102 +711,128 @@ impl HydrationSession {
         // once, on the lane the downloading clients report to.
         let planned_bytes = server_pages.iter().flatten().map(|object| object.size).sum::<u64>();
         if let Some(lane) = super::progress::current().filter(|_| planned_bytes > 0) { lane.plan_files(0, planned_bytes); }
+        let positions = digests.iter().enumerate().map(|(index, hash)| (hash.as_str(), index)).collect::<std::collections::BTreeMap<_, _>>();
+        let rank = |hash: &str| (!priority.contains(hash), positions.get(hash).copied().unwrap_or(usize::MAX));
+        let mut server_groups = Vec::new();
         for selected in [true, false] {
             for page in &server_pages {
-                let objects = page.iter().filter(|object| {
-                    if priority.is_empty() { selected } else { priority.contains(&object.hash) == selected }
-                }).collect::<Vec<_>>();
-                if objects.is_empty() { continue; }
-                check()?;
-                let hashes = objects.iter().map(|object| &object.hash).collect::<std::collections::BTreeSet<_>>();
-                let locks = hashes.iter().map(|hash| hydration_lock(&self.root, hash)).collect::<Result<Vec<_>>>()?;
-                let guards = locks.iter().map(|lock| lock_with_check(lock, check)).collect::<Result<Vec<_>>>()?;
-                let mut groups = std::collections::BTreeMap::<String, Vec<RemoteObject>>::new();
-                for proof in objects {
-                    let hash = &proof.hash;
-                    check()?;
-                    {
-                        let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
-                        if cas.stat_object(hash)?.is_some() {
-                            opened(hash, HydrationOutcome::AlreadyLocal);
-                            continue;
-                        }
-                    }
-                    #[cfg(test)]
-                    if let Some(body) = test_remote::body(&self.root, hash) {
-                        let staged = super::transfer::stage_checked(&cas, &mut body.as_slice(), hash, proof.size, check)?;
-                        check()?;
-                        let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
-                        check()?;
-                        let outcome = publish_registered(&cas, &mut self.catalog, &self.root, staged);
-                        check()?;
-                        outcome?;
-                        opened(hash, HydrationOutcome::Downloaded);
-                        continue;
-                    }
-                    let key = format!("{}:{}", proof.context, serde_json::to_string(&proof.config)
-                        .map_err(|_| SyncError::new("invalid-server-config", 409))?);
-                    groups.entry(key).or_default().push(proof.clone());
+                let mut group: Vec<&RemoteObject> = Vec::new();
+                let mut previous = String::new();
+                for object in page.iter().filter(|object| priority.contains(&object.hash) == selected) {
+                    let key = format!("{}:{}", object.context, serde_json::to_string(&object.config).map_err(|_| SyncError::new("invalid-server-config", 409))?);
+                    if !group.is_empty() && previous != key { server_groups.push(std::mem::take(&mut group)); }
+                    previous = key;
+                    group.push(object);
                 }
-                for (key, objects) in groups {
-                    let _budget = lock_with_check(&TRANSFER_BUDGET, check)?;
-                    if !self.clients.contains_key(&key) {
-                        let client = super::client::ServerClient::with_cancellation(objects[0].config.resolve(&self.root)?, self.cancellation.clone())?;
-                        #[cfg(test)]
-                        let client = { let mut client = client; super::client::attach_test_io(&self.root, &mut client); client };
-                        client.resolve_identity()?;
-                        self.clients.insert(key.clone(), client);
-                    }
-                    if self.cache.is_none() {
-                        let directory = tempfile::Builder::new().prefix("asset-hydration-").tempdir_in(&self.root)?;
-                        self.cache = Some(super::cache::Cache::open(directory.path())?);
-                        self.directory = Some(directory);
-                    }
-                    let cache = self.cache.as_ref().unwrap();
-                    let client = self.clients.get(&key).unwrap();
-                    super::transfer::Transfer::new(client, cache)?.with_check(check)
-                        .download(&objects.iter().map(|object| object.hash.clone()).collect::<Vec<_>>(), &[])?;
-                    let mut remaining = objects.as_slice();
-                    while !remaining.is_empty() {
-                        let count = crate::asset_repository::parallel_stage::batch_len(remaining.iter().map(|object| object.size));
-                        let (batch, rest) = remaining.split_at(count);
-                        remaining = rest;
-                        let staged = crate::asset_repository::parallel_stage::stage_batch(batch, check, &|object, stopped| {
-                            let mut body = cache.open_derived(&object.hash)?.ok_or_else(|| SyncError::new("hydration-incomplete", 502))?;
-                            super::transfer::stage_checked(&cas, &mut body, &object.hash, object.size, &|| {
-                                if stopped.load(std::sync::atomic::Ordering::Acquire) { Err(SyncError::new("cancelled", 409)) }
-                                else { Ok(()) }
-                            })
-                        });
-                        check()?;
-                        for (object, staged) in batch.iter().zip(staged?) {
-                            check()?;
-                            {
-                                let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
-                                check()?;
-                                let outcome = publish_registered(&cas, &mut self.catalog, &self.root, staged);
-                                check()?;
-                                outcome?;
-                                opened(&object.hash, HydrationOutcome::Downloaded);
-                            }
-                            cache.remove_derived(&object.hash)?;
-                        }
-                    }
-                }
-                drop(guards);
-                std::thread::yield_now();
-            }
-            if selected && !external.is_empty() {
-                unavailable.extend(crate::external_storage::lww_residency::hydrate_registered_many(
-                    &self.root, &external, priority, self.cancellation.clone(), check, &mut opened,
-                )?);
+                if !group.is_empty() { server_groups.push(group); }
             }
         }
+        server_groups.sort_by_key(|group| rank(&group[0].hash));
+        let mut server_groups = server_groups.into_iter().peekable();
+        let root = self.root.clone();
+        let cancellation = self.cancellation.clone();
+        if !external.is_empty() {
+            unavailable.extend(crate::external_storage::lww_residency::hydrate_registered_many_scheduled(
+                &root, &external, priority, cancellation, check, &mut opened,
+                &mut |first, opened| {
+                    while server_groups.peek().is_some_and(|group| rank(&group[0].hash) < rank(first)) {
+                        self.hydrate_server_objects(&server_groups.next().unwrap(), check, opened)?;
+                    }
+                    Ok(())
+                },
+            )?);
+        }
+        for group in server_groups { self.hydrate_server_objects(&group, check, &mut opened)?; }
         check()?;
         if unavailable.is_empty() {
             if let (Some(lane), Some(scope)) = (&lane, scope) { lane.asset_settled(scope); }
         }
         Ok(unavailable)
+    }
+
+    fn hydrate_server_objects(&mut self, objects: &[&RemoteObject], check: &dyn Fn() -> Result<()>, opened: &mut dyn FnMut(&str, HydrationOutcome)) -> Result<()> {
+        let cas = crate::asset_repository::PayloadCas::new(&self.root)?;
+        check()?;
+        let hashes = objects.iter().map(|object| &object.hash).collect::<std::collections::BTreeSet<_>>();
+        let locks = hashes.iter().map(|hash| hydration_lock(&self.root, hash)).collect::<Result<Vec<_>>>()?;
+        let guards = locks.iter().map(|lock| lock_with_check(lock, check)).collect::<Result<Vec<_>>>()?;
+        let mut groups = Vec::<(String, Vec<RemoteObject>)>::new();
+        for proof in objects {
+            let hash = &proof.hash;
+            check()?;
+            {
+                let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
+                if cas.stat_object(hash)?.is_some() {
+                    opened(hash, HydrationOutcome::AlreadyLocal);
+                    continue;
+                }
+            }
+            #[cfg(test)]
+            if let Some(body) = test_remote::body(&self.root, hash) {
+                let staged = super::transfer::stage_checked(&cas, &mut body.as_slice(), hash, proof.size, check)?;
+                check()?;
+                let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
+                check()?;
+                let outcome = publish_registered(&cas, &mut self.catalog, &self.root, staged);
+                check()?;
+                outcome?;
+                opened(hash, HydrationOutcome::Downloaded);
+                continue;
+            }
+            let key = format!("{}:{}", proof.context, serde_json::to_string(&proof.config)
+                .map_err(|_| SyncError::new("invalid-server-config", 409))?);
+            if let Some((_, batch)) = groups.last_mut().filter(|(previous, _)| *previous == key) {
+                batch.push((*proof).clone());
+            } else { groups.push((key, vec![(*proof).clone()])); }
+        }
+        for (key, objects) in groups {
+            let _budget = lock_with_check(&TRANSFER_BUDGET, check)?;
+            if !self.clients.contains_key(&key) {
+                let client = super::client::ServerClient::with_cancellation(objects[0].config.resolve(&self.root)?, self.cancellation.clone())?;
+                #[cfg(test)]
+                let client = { let mut client = client; super::client::attach_test_io(&self.root, &mut client); client };
+                client.resolve_identity()?;
+                self.clients.insert(key.clone(), client);
+            }
+            if self.cache.is_none() {
+                let directory = tempfile::Builder::new().prefix("asset-hydration-").tempdir_in(&self.root)?;
+                self.cache = Some(super::cache::Cache::open(directory.path())?);
+                self.directory = Some(directory);
+            }
+            let cache = self.cache.as_ref().unwrap();
+            let client = self.clients.get(&key).unwrap();
+            super::transfer::Transfer::new(client, cache)?.with_check(check)
+                .download(&objects.iter().map(|object| object.hash.clone()).collect::<Vec<_>>(), &[])?;
+            let mut remaining = objects.as_slice();
+            while !remaining.is_empty() {
+                let count = crate::asset_repository::parallel_stage::batch_len(remaining.iter().map(|object| object.size));
+                let (batch, rest) = remaining.split_at(count);
+                remaining = rest;
+                let staged = crate::asset_repository::parallel_stage::stage_batch(batch, check, &|object, stopped| {
+                    let mut body = cache.open_derived(&object.hash)?.ok_or_else(|| SyncError::new("hydration-incomplete", 502))?;
+                    super::transfer::stage_checked(&cas, &mut body, &object.hash, object.size, &|| {
+                        if stopped.load(std::sync::atomic::Ordering::Acquire) { Err(SyncError::new("cancelled", 409)) }
+                        else { Ok(()) }
+                    })
+                });
+                check()?;
+                for (object, staged) in batch.iter().zip(staged?) {
+                    check()?;
+                    {
+                        let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
+                        check()?;
+                        let outcome = publish_registered(&cas, &mut self.catalog, &self.root, staged);
+                        check()?;
+                        outcome?;
+                        opened(&object.hash, HydrationOutcome::Downloaded);
+                    }
+                    cache.remove_derived(&object.hash)?;
+                }
+            }
+        }
+        drop(guards);
+        std::thread::yield_now();
+        Ok(())
     }
 }
 

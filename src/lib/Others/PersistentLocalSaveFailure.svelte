@@ -17,7 +17,7 @@
 </script>
 
 {#if $persistentLocalSaveFailure !== null}
-    <aside role="alert" aria-live="assertive" class="fixed left-2 right-2 top-2 z-[1000] rounded-lg border border-danger-400 bg-darkbg p-3 text-textcolor shadow-lg sm:left-auto sm:max-w-md" data-local-save-failure>
+    <aside role="alert" aria-live="assertive" class="rounded-lg border border-danger-400 bg-darkbg p-3 break-keep text-textcolor shadow-lg" data-local-save-failure>
         <p>{message}</p>
         <SettingButton class="mt-2" busy={saving} onclick={retry}>{language.retry}</SettingButton>
     </aside>

@@ -1,0 +1,100 @@
+vi.mock('src/ts/parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
+import 'src/ts/stores.svelte'
+import { afterEach, expect, it, vi } from 'vitest'
+import { mount, tick, unmount } from 'svelte'
+import { get } from 'svelte/store'
+import { language } from 'src/lang'
+import { DBState, settingsOpen, SettingsMenuIndex } from 'src/ts/stores.svelte'
+import { activeRisuNestSettingsTab } from 'src/ts/setting/risuNestSettingsTabs'
+import { pluginStartupState } from 'src/ts/plugins/pluginStartupGate'
+import { externalStorageStrings } from 'src/lib/Setting/ExternalStorage/strings'
+import { syncStatus, type SyncStatusSource } from 'src/ts/storage/sync/syncStatus'
+import type { ServerSyncView } from 'src/ts/storage/sync/syncStatusView'
+import type { ExternalConnectionSummary } from 'src/ts/storage/sync/external/types'
+import SyncStoppedNotice from './SyncStoppedNotice.svelte'
+
+let component: ReturnType<typeof mount> | undefined
+afterEach(async () => {
+    if (component) await unmount(component)
+    component = undefined
+    document.body.replaceChildren()
+    syncStatus.set(null)
+    pluginStartupState.set({ phase: 'released', since: 0 })
+    settingsOpen.set(false)
+    activeRisuNestSettingsTab.set(null)
+    DBState.db.risunestSyncStatusUi = true
+})
+const server = (view: Partial<ServerSyncView>): SyncStatusSource => ({
+    target: 'server',
+    view: { status: { configured: true, bound: true }, running: false, paused: false, error: '', ...view } as ServerSyncView,
+    pendingChanges: async () => 0,
+    syncNow: async () => {},
+})
+const stopped = (error: string, lastSuccessAt?: number) => server({ paused: true, error, lastSuccessAt })
+async function show(source: SyncStatusSource | null) {
+    syncStatus.set(source)
+    await tick()
+}
+const notice = () => document.querySelector('[data-sync-stopped]')
+const close = () => notice()!.querySelector<HTMLButtonElement>(`button[aria-label="${language.close}"]`)!.click()
+
+it('shows a stop once until its cause changes or a sync succeeds', async () => {
+    component = mount(SyncStoppedNotice, { target: document.body })
+    await show(server({ error: 'server-unreachable' }))
+    expect(notice()).toBeNull()
+
+    await show(stopped('clock-skew'))
+    expect(notice()?.getAttribute('role')).toBe('alert')
+    expect(notice()?.querySelector('p')?.textContent).toBe(language.risuNest.serverSync.blocked)
+    expect(notice()?.textContent).toContain(language.lwwSync.clockBlocked)
+    close(); await tick()
+    expect(notice()).toBeNull()
+
+    // A retry clears the error before its attempt and fails with the same one.
+    await show(server({}))
+    await show(server({ running: true }))
+    await show(stopped('clock-skew'))
+    expect(notice()).toBeNull()
+
+    await show(stopped('writer-collision'))
+    expect(notice()).not.toBeNull()
+    close(); await tick()
+
+    await show(server({ lastSuccessAt: 1 }))
+    await show(stopped('writer-collision', 1))
+    expect(notice()).not.toBeNull()
+})
+
+it('leaves the stop to the plugin notice while plugins wait and omits the open settings tab', async () => {
+    pluginStartupState.set({ phase: 'waiting', since: Date.now(), target: 'server' })
+    component = mount(SyncStoppedNotice, { target: document.body })
+    await show(server({ error: 'unauthorized' }))
+    expect(notice()).toBeNull()
+    pluginStartupState.set({ phase: 'released', since: 0 }); await tick()
+    expect(notice()?.querySelector('p')?.textContent).toBe(language.risuNest.serverSync.registrationRequired)
+
+    const settings = [...notice()!.querySelectorAll('button')].find(button => button.textContent?.trim() === language.risuNest.tabs.sync)!
+    settings.click(); await tick()
+    expect(get(settingsOpen)).toBe(true)
+    expect(get(SettingsMenuIndex)).toBe(17)
+    activeRisuNestSettingsTab.set('sync'); await tick()
+    expect([...notice()!.querySelectorAll('button')].map(button => button.getAttribute('aria-label'))).toEqual([language.close])
+})
+
+it('reports an external connection that needs the user', async () => {
+    const strings = externalStorageStrings('en')
+    component = mount(SyncStoppedNotice, { target: document.body })
+    const connection = { id: 'webdav-1', purpose: 'sync', status: 'reauth-required', lastError: { code: 'unauthorized', message: '', retryable: false, action: 'reauthenticate' } } as Partial<ExternalConnectionSummary> as ExternalConnectionSummary
+    await show({ target: 'external', connection, syncStopped: false, refresh: () => {}, syncNow: async () => {} })
+    expect(notice()?.querySelector('p')?.textContent).toBe(strings.statusReauth)
+    expect(notice()?.textContent).toContain(strings.reauthenticate)
+})
+
+it('stays hidden while the sync UI is turned off', async () => {
+    DBState.db.risunestSyncStatusUi = false
+    component = mount(SyncStoppedNotice, { target: document.body })
+    await show(stopped('unauthorized'))
+    expect(notice()).toBeNull()
+    DBState.db.risunestSyncStatusUi = true; await tick()
+    expect(notice()).not.toBeNull()
+})

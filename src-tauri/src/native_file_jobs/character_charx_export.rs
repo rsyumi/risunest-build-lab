@@ -185,12 +185,12 @@ where
             .ok_or_else(|| invalid_input("character CharX item count overflowed"))?,
     )
     .map_err(|_| invalid_input("character CharX entry count is invalid"))?;
-    job.set_progress(JobProgress {
+    job.set_export_progress(JobProgress {
         completed_bytes: 0,
         total_bytes: None,
         completed_items: 0,
         total_items: Some(total_items),
-    })
+    }, 0, None)
     .map_err(job_error)?;
 
     let repository =
@@ -238,12 +238,12 @@ where
             });
         let Some(source_identity) = embedded_asset_source(asset, &character, occurrence)? else {
             completed_items += 1;
-            job.set_progress(JobProgress {
+            job.set_export_progress(JobProgress {
                 completed_bytes,
                 total_bytes: None,
                 completed_items,
                 total_items: Some(total_items),
-            })
+            }, completed_bytes, None)
             .map_err(job_error)?;
             continue;
         };
@@ -315,23 +315,23 @@ where
         };
         completed_bytes = completed_bytes.saturating_add(copied);
         completed_items += 1;
-        job.set_progress(JobProgress {
+        job.set_export_progress(JobProgress {
             completed_bytes,
             total_bytes: None,
             completed_items,
             total_items: Some(total_items),
-        })
+        }, completed_bytes, None)
         .map_err(job_error)?;
     }
 
     write_module_overlay(&mut archive, module, job, &mut decoded_bytes, limits)?;
     completed_items += 1;
-    job.set_progress(JobProgress {
+    job.set_export_progress(JobProgress {
         completed_bytes,
         total_bytes: None,
         completed_items,
         total_items: Some(total_items),
-    })
+    }, completed_bytes, None)
     .map_err(job_error)?;
     write_card_metadata(&mut archive, &card, job, &mut decoded_bytes, limits)?;
     completed_items += 1;
@@ -352,12 +352,12 @@ where
         )?,
     };
     let source_bytes = fs::metadata(&source).map_err(io_error)?.len();
-    job.set_progress(JobProgress {
+    job.set_export_progress(JobProgress {
         completed_bytes: source_bytes,
         total_bytes: Some(source_bytes.saturating_mul(2)),
         completed_items,
         total_items: Some(total_items),
-    })
+    }, source_bytes, None)
     .map_err(job_error)?;
 
     if job.is_cancel_requested() {
@@ -406,12 +406,12 @@ where
         &destination_path,
         || job.is_cancel_requested() || phase_failure.borrow().is_some(),
         |progress| {
-            if let Err(error) = job.set_progress(JobProgress {
+            if let Err(error) = job.set_export_progress(JobProgress {
                 completed_bytes: source_bytes.saturating_add(progress.copied_bytes),
                 total_bytes: Some(source_bytes.saturating_mul(2)),
                 completed_items,
                 total_items: Some(total_items),
-            }) {
+            }, progress.copied_bytes, Some(source_bytes)) {
                 *phase_failure.borrow_mut() = Some(error);
             }
         },

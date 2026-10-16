@@ -95,6 +95,20 @@ it('lists presets of the active prompt preset, shows all on request and applies 
     expect(mocks.toast).toHaveBeenCalledWith(languageEnglish.togglePresetApplied('One'))
 })
 
+it('keeps a refused preset open without showing an applied toast', async () => {
+    await unmount(instance)
+    instance = mount(TogglePresetPopup, { target: document.body, props: {
+        close: mocks.close, onApply: async () => false,
+    } })
+    await tick()
+    names()[0].click()
+    await vi.waitFor(() => expect(mocks.confirm).toHaveBeenCalled())
+    await tick()
+    expect(mocks.toast).not.toHaveBeenCalled()
+    expect(mocks.close).not.toHaveBeenCalled()
+    expect(DBState.db.globalChatVariables).toEqual({ toggle_a: '1', toggle_b: '0', toggle_orphan: 'x' })
+})
+
 it('uses staged values for a new preset without changing applied toggles', async () => {
     await unmount(instance)
     instance = mount(TogglePresetPopup, { target: document.body, props: {
