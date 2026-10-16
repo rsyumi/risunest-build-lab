@@ -346,6 +346,7 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
     private func sweepStaging() {
         guard !stagingSweepStarted, let staging = staging else { return }
         stagingSweepStarted = true
+        portableSources.sweepCopies(staging: staging)
         let manager = FileManager.default
         let receipts = staging.appendingPathComponent("receipts", isDirectory: true)
         var protected = Set<String>()
@@ -515,7 +516,10 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
     }
 
     @objc func portableSourceOrphans(_ invoke: Invoke) {
-        fileQueue.async { invoke.resolve(self.portableSources.orphanReceipts().map { $0.receipt }) }
+        fileQueue.async {
+            do { invoke.resolve(try self.portableSources.orphanReceipts().map { $0.receipt }) }
+            catch { invoke.reject("Backup source cleanup failed", code: "cleanup-failed") }
+        }
     }
     @objc func acknowledgePortableSourceOrphan(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(PortableSourceArgs.self)
@@ -637,11 +641,7 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
         do {
             guard let staging = staging else { invoke.reject(rootUnavailable().localizedDescription); return }
             let file = try ownedFile(args.path, under: staging)
-            guard UUID(uuidString: file.deletingLastPathComponent().lastPathComponent) != nil,
-                  file.deletingLastPathComponent().deletingLastPathComponent() == staging.resolvingSymlinksInPath() else {
-                invoke.reject("Expected a staged import or export file"); return
-            }
-            try FileManager.default.removeItem(at: file.deletingLastPathComponent())
+            try NativeFileState.discardStagedFile(file, staging: staging)
             invoke.resolve()
         } catch { invoke.reject(error.localizedDescription) }
     }

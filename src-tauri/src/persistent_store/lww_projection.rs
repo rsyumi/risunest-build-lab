@@ -869,11 +869,10 @@ pub(in crate::persistent_store) fn validate_received(
     }
     Ok(())
 }
-pub(in crate::persistent_store) fn apply_mutation(
+fn mutation_value(
     tx: &Transaction<'_>,
-    generation: &str,
     mutation: &UnitMutation,
-) -> StoreResult<()> {
+) -> StoreResult<Option<UnitValue>> {
     let value = match mutation {
         UnitMutation::Set { value, .. } => unit_value(tx, value)?,
         UnitMutation::Delete { .. } => UnitValue::Deleted,
@@ -907,10 +906,75 @@ pub(in crate::persistent_store) fn apply_mutation(
         return Err(error("unit-not-editable"));
     }
     if parent_status(tx, key)? == "retired" {
-        return Ok(());
+        return Ok(None);
     }
-    apply_value(tx, generation, key, &value, true)
+    Ok(Some(value))
 }
+pub(in crate::persistent_store) fn apply_mutation(
+    tx: &Transaction<'_>, generation: &str, mutation: &UnitMutation,
+) -> StoreResult<()> {
+    if let Some(value) = mutation_value(tx, mutation)? {
+        apply_value(tx, generation, mutation.key(), &value, true)?;
+    }
+    Ok(())
+}
+
+pub(in crate::persistent_store) fn apply_mutations(
+    tx: &Transaction<'_>, generation: &str, mutations: &[UnitMutation],
+) -> StoreResult<()> {
+    let mut root_mutations = Vec::new();
+    let mut characters = BTreeMap::new();
+    let flush = |root_mutations: &mut Vec<&UnitMutation>, characters: &mut BTreeMap<String, Vec<&UnitMutation>>| -> StoreResult<()> {
+        if !root_mutations.is_empty() {
+            let mut value = None;
+            for mutation in root_mutations.drain(..) {
+                if let Some(next) = mutation_value(tx, mutation)? {
+                    if value.is_none() { value = Some(root(tx, generation)?); }
+                    patch_root(value.as_mut().unwrap(), &mutation.key().components(), json_value_resolved(tx, &next)?)?;
+                }
+            }
+            if let Some(value) = value { write_root(tx, generation, &value)?; }
+        }
+        for (id, mutations) in std::mem::take(characters) {
+            let mut detail = None;
+            for mutation in mutations {
+                if let Some(next) = mutation_value(tx, mutation)? {
+                    if detail.is_none() { detail = Some(character_detail(tx, generation, &id)?); }
+                    patch_character(detail.as_mut().unwrap(), &mutation.key().components(), json_value_resolved(tx, &next)?, true)?;
+                }
+            }
+            if let Some(detail) = detail { commit::put_character_detail(tx, generation, &detail)?; }
+        }
+        Ok(())
+    };
+    for mutation in mutations {
+        let p = mutation.key().components();
+        if matches!(p[0].as_str(), "root" | "toggle" | "variable" | "preset-protected" | "persona" | "record") {
+            root_mutations.push(mutation);
+        } else if p[0] == "character" {
+            characters.entry(p[1].clone()).or_insert_with(Vec::new).push(mutation);
+        } else {
+            flush(&mut root_mutations, &mut characters)?;
+            apply_mutation(tx, generation, mutation)?;
+        }
+    }
+    flush(&mut root_mutations, &mut characters)
+}
+
+fn patch_root(v: &mut Value, p: &[String], next: Option<Value>) -> StoreResult<()> {
+    match p[0].as_str() {
+        "root" => patch(v, &p[1], next),
+        "toggle" | "variable" | "preset-protected" => {
+            let map = if p[0] == "preset-protected" { "protectedPresetValues" } else { "explicitGlobalChatVariables" };
+            let field = v.as_object_mut().ok_or_else(|| error("invalid-root"))?.entry(map).or_insert(json!({}));
+            patch(field, &p[1], next)
+        }
+        "persona" => patch_array(v, "personas", "id", &p[1], Some(&p[2]), next),
+        "record" => patch_array(v, &p[1], if p[1] == "plugins" { "name" } else { "id" }, &p[2], None, next),
+        _ => Err(error("unit-not-editable")),
+    }
+}
+
 fn patch(value: &mut Value, field: &str, next: Option<Value>) -> StoreResult<()> {
     let map = value
         .as_object_mut()
@@ -977,7 +1041,36 @@ pub(in crate::persistent_store) fn apply(
     key: &UnitKey,
     value: &UnitValue,
 ) -> StoreResult<()> {
-    apply_value(tx, generation, key, value, false)
+    if key.components()[0] == "plugin-local" {
+        apply_received(tx, generation, key, value).map(|_| ())
+    } else {
+        apply_value(tx, generation, key, value, false)
+    }
+}
+
+pub(in crate::persistent_store) fn apply_received(
+    tx: &Transaction<'_>, generation: &str, key: &UnitKey, value: &UnitValue,
+) -> StoreResult<bool> {
+    let changed = plugin_storage_changed(tx, generation, key, value)?;
+    apply_value(tx, generation, key, value, false)?;
+    let p = key.components();
+    if changed && p[0] == "plugin-local" {
+        plugin_values::advance_remote_sequence(tx, &p[1], &p[2], &p[3])?;
+    }
+    Ok(changed)
+}
+
+fn plugin_storage_changed(tx: &Transaction<'_>, generation: &str, key: &UnitKey, value: &UnitValue) -> StoreResult<bool> {
+    let p = key.components();
+    let current = if p[0] == "plugin-local" {
+        if !plugin_participates(tx)? { return Ok(false); }
+        plugin_unit_value(tx, &p[1], &p[2], &p[3])?
+    } else if p[0] == "plugin" {
+        let mut values = BTreeMap::new();
+        capture_key(tx, generation, key, &mut values)?;
+        values.remove(key).unwrap_or(UnitValue::Deleted)
+    } else { return Ok(false); };
+    Ok(wire(current.identity())? != wire(value.identity())?)
 }
 /// The character whose detail `apply` patches for this key, when the patch
 /// touches nothing else.
@@ -1107,20 +1200,9 @@ fn apply_value(
     }
     let next = json_value_resolved(tx, value)?;
     match p[0].as_str() {
-        "root" => {
+        "root" | "toggle" | "variable" | "preset-protected" | "persona" | "record" => {
             let mut v = root(tx, generation)?;
-            patch(&mut v, &p[1], next)?;
-            write_root(tx, generation, &v)?;
-        }
-        "toggle" | "variable" | "preset-protected" => {
-            let mut v = root(tx, generation)?;
-            let map = if p[0] == "preset-protected" {
-                "protectedPresetValues"
-            } else {
-                "explicitGlobalChatVariables"
-            };
-            let field = v.as_object_mut().unwrap().entry(map).or_insert(json!({}));
-            patch(field, &p[1], next)?;
+            patch_root(&mut v, &p, next)?;
             write_root(tx, generation, &v)?;
         }
         "character" => {
@@ -1142,23 +1224,6 @@ fn apply_value(
             .ok_or_else(|| error("parent-missing"))?;
             patch(&mut v, &p[2], next)?;
             tx.execute("UPDATE bot_presets SET value=?3,name=?4,image=?5 WHERE generation=?1 AND preset_id=?2",params![generation,p[1],serde_json::to_string(&v)?,v.get("name").and_then(Value::as_str).unwrap_or_default(),v.get("image").and_then(Value::as_str)])?;
-        }
-        "persona" => {
-            let mut v = root(tx, generation)?;
-            patch_array(&mut v, "personas", "id", &p[1], Some(&p[2]), next)?;
-            write_root(tx, generation, &v)?;
-        }
-        "record" => {
-            let mut v = root(tx, generation)?;
-            patch_array(
-                &mut v,
-                &p[1],
-                if p[1] == "plugins" { "name" } else { "id" },
-                &p[2],
-                None,
-                next,
-            )?;
-            write_root(tx, generation, &v)?;
         }
         "exists" => {
             if next.is_none() {
@@ -1506,6 +1571,12 @@ pub(in crate::persistent_store) fn refresh_orders(
     generation: &str,
     changed: &[UnitKey],
 ) -> StoreResult<()> {
+    refresh_orders_charged(tx, generation, changed, None)
+}
+
+pub(in crate::persistent_store) fn refresh_orders_charged(
+    tx: &Connection, generation: &str, changed: &[UnitKey], mut written: Option<&mut dyn FnMut(i64) -> StoreResult<()>>,
+) -> StoreResult<()> {
     let mut scopes = BTreeSet::new();
     for key in changed {
         let p = key.components();
@@ -1592,7 +1663,9 @@ pub(in crate::persistent_store) fn refresh_orders(
             // Owner-local reordering must retain the positions of other owners
             // in the flattened upstream object.
             for (id, position) in ids.iter().zip(positions) {
-                tx.execute("UPDATE plugin_storage SET ordinal=?4 WHERE generation=?1 AND owner=?2 AND storage_key=?3 AND ordinal<>?4",params![generation,p[2],id,position])?;
+                if tx.execute("UPDATE plugin_storage SET ordinal=?4 WHERE generation=?1 AND owner=?2 AND storage_key=?3 AND ordinal<>?4",params![generation,p[2],id,position])? > 0 {
+                    if let Some(written) = written.as_deref_mut() { written(tx.query_row("SELECT length(CAST(value AS BLOB)) FROM plugin_storage WHERE generation=?1 AND owner=?2 AND storage_key=?3", params![generation,p[2],id], |row| row.get(0))?)?; }
+                }
             }
             continue;
         }
@@ -1704,17 +1777,24 @@ pub(in crate::persistent_store) fn refresh_orders(
             let mut v = root(tx, generation)?;
             patch(&mut v, "characterOrder", Some(json!(projected)))?;
             write_root(tx, generation, &v)?;
+            if let Some(written) = written.as_deref_mut() { written(tx.query_row("SELECT length(CAST(value AS BLOB)) FROM root WHERE generation=?1", [generation], |row| row.get(0))?)?; }
         }
         for (i, id) in ids.iter().enumerate() {
             match p[1].as_str() {
                 "characters" => {
-                    tx.execute("UPDATE characters SET configured_index=?3 WHERE generation=?1 AND character_id=?2 AND configured_index<>?3",params![generation,id,i as i64])?;
+                    if tx.execute("UPDATE characters SET configured_index=?3 WHERE generation=?1 AND character_id=?2 AND configured_index<>?3",params![generation,id,i as i64])? > 0 {
+                        if let Some(written) = written.as_deref_mut() { written(tx.query_row("SELECT length(CAST(detail AS BLOB)) FROM characters WHERE generation=?1 AND character_id=?2", params![generation,id], |row| row.get(0))?)?; }
+                    }
                 }
                 "conversations" => {
-                    tx.execute("UPDATE conversations SET configured_index=?4 WHERE generation=?1 AND character_id=?2 AND conversation_id=?3 AND configured_index<>?4",params![generation,p[2],id,i as i64])?;
+                    if tx.execute("UPDATE conversations SET configured_index=?4 WHERE generation=?1 AND character_id=?2 AND conversation_id=?3 AND configured_index<>?4",params![generation,p[2],id,i as i64])? > 0 {
+                        if let Some(written) = written.as_deref_mut() { written(tx.query_row("SELECT length(CAST(detail AS BLOB)) FROM conversations WHERE generation=?1 AND character_id=?2 AND conversation_id=?3", params![generation,p[2],id], |row| row.get(0))?)?; }
+                    }
                 }
                 "presets" => {
-                    tx.execute("UPDATE bot_presets SET configured_index=?3 WHERE generation=?1 AND preset_id=?2 AND configured_index<>?3",params![generation,id,i as i64])?;
+                    if tx.execute("UPDATE bot_presets SET configured_index=?3 WHERE generation=?1 AND preset_id=?2 AND configured_index<>?3",params![generation,id,i as i64])? > 0 {
+                        if let Some(written) = written.as_deref_mut() { written(tx.query_row("SELECT length(CAST(value AS BLOB)) FROM bot_presets WHERE generation=?1 AND preset_id=?2", params![generation,id], |row| row.get(0))?)?; }
+                    }
                 }
                 _ => {}
             }
@@ -1733,6 +1813,7 @@ pub(in crate::persistent_store) fn refresh_orders(
                 });
             }
             write_root(tx, generation, &v)?;
+            if let Some(written) = written.as_deref_mut() { written(tx.query_row("SELECT length(CAST(value AS BLOB)) FROM root WHERE generation=?1", [generation], |row| row.get(0))?)?; }
         }
     }
     Ok(())
@@ -1902,7 +1983,14 @@ pub(in crate::persistent_store) fn archive_metadata(
     let body = super::super::message_pages::object_body(db, &descriptor.object_hash)?
         .ok_or_else(|| error("archive-metadata-missing"))?;
     let archived: super::super::archive::ArchivedObject = serde_json::from_slice(&body)?;
-    if archive_value(db, &archived)? != *value {
+    let (_, _, descriptor, _) = archive_objects(&archived)?;
+    let expected = {
+        let result = UnitValue::object(descriptor);
+        #[cfg(test)]
+        crate::persistent_store::hash_work::descriptor_creation(&result);
+        result
+    }.map_err(error)?;
+    if expected != *value {
         return Err(error("archive-descriptor-mismatch"));
     }
     Ok(archived)

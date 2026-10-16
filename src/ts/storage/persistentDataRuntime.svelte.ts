@@ -1,3 +1,4 @@
+import type { PluginStorageWriteCheck } from '../plugins/pluginStorageProtection'
 import { generatingConversations } from './generatingConversationRegistry'
 import type { LwwStageReceive, LwwApplyResult } from './persistentDataStore'
 import { flushPersistentIdentityEdits, derivePersistentIdentityMirrors } from './persistentIdentityHooks'
@@ -629,7 +630,8 @@ export const replacePersistentDatabase = (
 export const mutatePersistentPluginStorage = (
     reason: string,
     mutations: readonly PluginStorageMutation[],
-): Promise<void> => getPersistentDataRuntime().mutatePersistentPluginStorage(reason, mutations)
+    check?: PluginStorageWriteCheck,
+): Promise<void> => getPersistentDataRuntime().mutatePersistentPluginStorage(reason, mutations, check)
 export const mutatePersistentPresets = (
     reason: string,
     mutate: PersistentPresetMutation,
@@ -786,8 +788,8 @@ export const hasPendingOfficialPublication = (): boolean =>
 
 export const getPersistentRevision = (): DataRevision => getPersistentDataRuntime().revision
 export const applyPersistentLwwReceive = (request: LwwStageReceive): Promise<LwwApplyResult> => getPersistentDataRuntime().applyLwwReceive(request)
-export const commitPersistentUnitIntent: PersistentDataRuntime['commitPersistentUnitIntent'] = (reason, mutations, conversations, wholeMessages, projectionObserver) =>
-    getPersistentDataRuntime().commitPersistentUnitIntent(reason, mutations, conversations, wholeMessages, projectionObserver)
+export const commitPersistentUnitIntent: PersistentDataRuntime['commitPersistentUnitIntent'] = (reason, mutations, conversations, wholeMessages, projectionObserver, check) =>
+    getPersistentDataRuntime().commitPersistentUnitIntent(reason, mutations, conversations, wholeMessages, projectionObserver, check)
 export const commitPreparedUnitIntent: PersistentDataRuntime['commitPreparedUnitIntent'] = (reason, prepare) =>
     getPersistentDataRuntime().commitPreparedUnitIntent(reason, prepare)
 export const withPausedPersistentWrites = <T>(reason: string, operation: (token: PersistentMutationToken) => Promise<T>): Promise<T> => getPersistentDataRuntime().withPausedPersistentWrites(reason, operation)

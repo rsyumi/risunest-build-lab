@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 const native = vi.hoisted(() => ({ invoke: vi.fn() }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke, Channel: class { onmessage = (_value: unknown) => {} } }))
-import { beginExternalProgress, clearExternalProgress, externalJobFraction, externalProgressFor, subscribeExternalProgress, type ExternalOperationProgress, type ExternalTransferSnapshot } from './progress'
+import { beginExternalProgress, clearExternalProgress, externalJobFraction, externalProgressFor, externalSyncAttempt, subscribeExternalProgress, type ExternalOperationProgress, type ExternalTransferSnapshot } from './progress'
 import type { ExternalJobSummary } from './types'
 const reading = (sequence: number, uploadedBytes: string): ExternalTransferSnapshot => ({ sequence, stage: 'uploading', uploadedBytes, preparedBytes: '0', downloadedBytes: '0', uploadedObjects: '1', downloadedObjects: '0' })
 afterEach(() => { for (const id of ['a', 'b']) clearExternalProgress(id); vi.useRealTimers(); native.invoke.mockReset() })
@@ -111,13 +111,17 @@ describe('external progress ownership', () => {
         routine.stage('preparing')
         await vi.advanceTimersByTimeAsync(60_000)
         expect(externalProgressFor(state, 'a')).toBeUndefined()
+        // The status button still shows the attempt the panel keeps quiet.
+        expect(externalSyncAttempt(state, 'a')?.stage).toBe('preparing')
         routine.finish('complete', false)
         expect(externalProgressFor(state, 'a')).toBeUndefined()
+        expect(externalSyncAttempt(state, 'a')).toBeUndefined()
         const binding = beginExternalProgress('a', 'binding')
         binding.stage('applying')
         const next = beginExternalProgress('a', 'sync')
         await vi.advanceTimersByTimeAsync(700)
         expect(externalProgressFor(state, 'a')?.stage).toBe('applying')
+        expect(externalSyncAttempt(state, 'a')?.kind).toBe('binding')
         binding.finish('complete'); next.finish('complete', false); stop()
     })
     it('accumulates bounded native pages without treating their totals as a whole-operation percentage', async () => {

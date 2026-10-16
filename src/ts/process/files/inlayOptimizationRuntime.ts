@@ -1,7 +1,6 @@
 import { isTauri } from "../../platform";
 import { resolveBlobStore } from "../../storage/platformBlobStore";
 import { getServerSyncController } from "../../storage/sync/serverSyncProduction";
-import { getAssetResidencyStatus } from "../../storage/sync/serverAssetResidency";
 import type { InlayOptimizationEnvironment } from "./inlayOptimizationMessages";
 import { encodeInlayImageBytes } from "./inlayImageEncoding";
 import {
@@ -68,9 +67,9 @@ export function createStoredInlayOptimizationDeps(): InlayOptimizationDeps {
 export async function readInlayOptimizationEnvironment(): Promise<InlayOptimizationEnvironment> {
     if (!isTauri) return { syncConfigured: false }
     try {
-        const syncConfigured = getServerSyncController().snapshot().status?.configured === true
-        if (!syncConfigured) return { syncConfigured }
-        return { syncConfigured, residencyPolicy: (await getAssetResidencyStatus()).policy }
+        const status = getServerSyncController().snapshot().status
+        const syncConfigured = status?.configured === true
+        return { syncConfigured, residencyPolicy: syncConfigured ? status?.assetPolicy : undefined }
     } catch (error) {
         void error
         return { syncConfigured: false }

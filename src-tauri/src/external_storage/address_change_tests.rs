@@ -614,6 +614,19 @@ fn other_key(key: &str) -> zeroize::Zeroizing<String> {
     }
 }
 
+async fn saved_connection(device: &Device, config: &ConnectionConfig, created: &Created) -> super::connection_store::StoredConnection {
+    let (handle, capabilities) = device.open(config, OpenMode::Existing).await.unwrap();
+    let stored = super::connection_store::StoredConnection {
+        id: "address-edit".into(), config: config.clone(), descriptor: created.descriptor.clone(),
+        descriptor_locator: created.descriptor_locator.clone(), provider_repository_id: handle.repository_id,
+        credential_ref: CREDENTIAL.into(), root_key_ref: "synthetic-root".into(), recovery_key_ref: "synthetic-recovery".into(),
+        capabilities, created_at_ms: 1, verified_at_ms: 1, last_sync_at_ms: Some(2), last_backup_at_ms: Some(3),
+        retention_policy: None, transfer_concurrency: Some(2), labels: Default::default(),
+    };
+    super::connection_store::ConnectionStore::open(device.directory.path()).unwrap().insert(&stored).unwrap();
+    stored
+}
+
 /// A repository made and backed up through `first` is joined through
 /// `second`: the recovery key opens it, its history lists the backup, the
 /// backup restores, and sync published through one address is received
@@ -630,6 +643,18 @@ async fn reach_through_another_address(
     let second_device = Device::new(transport, secret, create);
     let created = create_repository(&first_device, &first, [7; 32]).await;
     let (first_handle, first_capabilities) = first_device.open(&first, OpenMode::Existing).await.unwrap();
+    let stored = saved_connection(&first_device, &first, &created).await;
+    let changed = super::connection_commands::change_endpoint(first_device.directory.path(), &stored,
+        second.endpoint.clone(), |_| Ok(first_device._dependencies.dependencies.clone()), &created.root_key, &cancel).await.unwrap();
+    assert_eq!(serde_json::to_value(&changed).unwrap()["connection"]["id"].as_str(), Some(stored.id.as_str()));
+    let reread = super::connection_store::ConnectionStore::open(first_device.directory.path()).unwrap().read(&stored.id).unwrap();
+    let mut expected = serde_json::to_value(&stored).unwrap();
+    expected["config"]["endpoint"] = second.endpoint.clone().into();
+    expected["verifiedAtMs"] = reread.verified_at_ms.into();
+    assert_eq!(serde_json::to_value(&reread).unwrap(), expected);
+    let stale = super::connection_commands::change_endpoint(first_device.directory.path(), &stored,
+        second.endpoint.clone(), |_| Ok(first_device._dependencies.dependencies.clone()), &created.root_key, &cancel).await.err().unwrap();
+    assert_eq!(stale.kind, ErrorKind::PreconditionFailed);
     let (record_key, record_hash) = back_up(&first_device, &first_handle, &first_capabilities, &created).await;
 
     let (second_handle, second_capabilities) = second_device.open(&second, OpenMode::Existing).await.unwrap();
@@ -782,6 +807,13 @@ async fn refuse_another_repository_at_one_address(
     let second_device = Device::new(second_server, secret, create);
     let other = create_repository(&second_device, &config, [9; 32]).await;
     assert_ne!(other.descriptor.repository_id, held.descriptor.repository_id);
+    let stored = saved_connection(&first_device, &config, &held).await;
+    let mismatch = super::connection_commands::change_endpoint(first_device.directory.path(), &stored,
+        config.endpoint.clone(), |_| Ok(second_device._dependencies.dependencies.clone()), &held.root_key, &cancel).await.err().unwrap();
+    assert_eq!(mismatch.kind, ErrorKind::RepositoryMismatch);
+    let reread = super::connection_store::ConnectionStore::open(first_device.directory.path()).unwrap().read(&stored.id).unwrap();
+    assert_eq!(serde_json::to_value(reread).unwrap(), serde_json::to_value(stored).unwrap());
+
 
     let (handle, _) = second_device.open(&config, OpenMode::Existing).await.unwrap();
     let path = second_device.directory.path();

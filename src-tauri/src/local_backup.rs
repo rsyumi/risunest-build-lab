@@ -76,6 +76,7 @@ pub(crate) trait CancellationProbe {
     fn cancellation_flag(&self) -> Option<Arc<AtomicBool>> { None }
     fn backup_bytes_processed(&self, _bytes: u64) {}
     fn backup_item_processed(&self) {}
+    fn backup_download_observer(&self) -> Option<Arc<dyn Fn(u64) + Send + Sync>> { None }
 }
 
 pub(crate) struct NeverCancelled;

@@ -357,6 +357,7 @@ fn missing_parent_is_durable_and_hard_retirement_suppresses_future_children() {
         vec![],
     );
     assert!(store.read_character("char", None).unwrap().is_none());
+    assert!(read_unit(&store.connection, &unit_key(&["character", "char", "name"]).unwrap()).unwrap().is_none());
     assert!(is_retired(
         &store.connection,
         &unit_key(&["exists", "character", "char"]).unwrap()
@@ -461,6 +462,28 @@ fn assert_device_restore_label(store: &PersistentStore, label: &str) {
     let values: Vec<(String,String)> = device.connection().prepare("SELECT space,value FROM plugin_device_storage WHERE owner='orphan' AND key='shared-key' AND tombstone=0 ORDER BY space").unwrap()
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap().collect::<Result<_,_>>().unwrap();
     assert_eq!(values, vec![("json".into(), serde_json::to_string(&serde_json::json!({"label":label})).unwrap()), ("string".into(),label.into())]);
+}
+
+#[test]
+fn replacement_scratch_failure_preserves_the_library_and_allows_retry() {
+    let (directory, mut store) = store();
+    let before = store.read_root(None).unwrap();
+    let stage = restore_stage(&mut store, "restored");
+    let header = Header { binding_authority: 0.into(), request_id: "scratch-failure".into() };
+    let scratch = directory.path().join("external-storage").join("scratch");
+    std::fs::create_dir_all(scratch.parent().unwrap()).unwrap();
+    if scratch.is_dir() { std::fs::remove_dir(&scratch).unwrap(); }
+    std::fs::write(&scratch, b"synthetic unavailable scratch").unwrap();
+    assert!(store.lww_commit_replacement(&header, &stage).is_err());
+    assert_eq!(store.revision().unwrap(), before.revision);
+    assert_eq!(store.read_root(None).unwrap().value, before.value);
+    assert_eq!(store.device_store().unwrap().connection().query_row(
+        "SELECT count(*) FROM lww_intents WHERE request_id=?1", [&header.request_id],
+        |row| row.get::<_,i64>(0)).unwrap(), 0);
+    std::fs::remove_file(&scratch).unwrap();
+    store.lww_commit_replacement(&header, &stage).unwrap();
+    assert_eq!(store.read_root(None).unwrap().value["language"], "restored");
+    assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
 }
 
 #[test]
@@ -572,7 +595,7 @@ fn full_restore_rejects_missing_duplicate_and_versioned_device_sections_before_r
 
 #[test]
 fn full_restore_recovers_original_inputs_after_library_and_device_transaction_failures() {
-    for phase in 0..3 {
+    for (phase, scratch_failures) in [(0,0),(1,0),(2,0),(0,1),(1,3),(2,3)] {
         let (dir,mut store)=store();
         store.device_store_mut().unwrap().set_section_participating(device_store::Section::LocalPlugins,true).unwrap();
         write_restore_device_fixture(&mut store,"old"); clear_outbox(&mut store);
@@ -590,8 +613,33 @@ fn full_restore_recovers_original_inputs_after_library_and_device_transaction_fa
         assert_device_restore_label(&store,"old");
         let reserved=store.lww_clock_state().unwrap().issued.unwrap();
         assert_eq!(store.device_store().unwrap().connection().query_row("SELECT complete FROM lww_intents WHERE request_id=?1",[&header.request_id],|row|row.get::<_,bool>(0)).unwrap(),false);
+        let frozen_rows: i64=store.device_store().unwrap().connection().query_row("SELECT count(*) FROM lww_intent_rows WHERE request_id=?1",[&header.request_id],|row|row.get(0)).unwrap();
+        assert!(frozen_rows>0);
         drop(sections); drop(store);
+        let scratch=dir.path().join("external-storage").join("scratch");
+        if scratch_failures>0 {
+            std::fs::remove_dir(&scratch).unwrap();
+            std::fs::write(&scratch,b"synthetic unavailable scratch").unwrap();
+            for attempt in 1..=scratch_failures {
+                let store=PersistentStore::open(dir.path()).unwrap();
+                assert_eq!(store.revision().unwrap(),if phase==0 {0}else{1});
+                assert_device_restore_label(&store,"old");
+                let device=store.device_store().unwrap().connection();
+                let evidence: (i64,bool,bool)=device.query_row(
+                    "SELECT f.failures,f.quarantined,i.complete FROM lww_intent_failures f JOIN lww_intents i USING(request_id) WHERE request_id=?1",
+                    [&header.request_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+                assert_eq!(evidence,(attempt,attempt==3,false));
+                assert_eq!(device.query_row("SELECT count(*) FROM lww_intent_rows WHERE request_id=?1",[&header.request_id],|row|row.get::<_,i64>(0)).unwrap(),frozen_rows);
+            }
+            std::fs::remove_file(&scratch).unwrap();
+        }
         let mut store=PersistentStore::open(dir.path()).unwrap();
+        if scratch_failures==3 {
+            assert_device_restore_label(&store,"old");
+            let selected=store.lww_quarantined_intents().unwrap().into_iter().find(|intent|intent.request_id==header.request_id).unwrap();
+            assert!(selected.recoverable && !selected.discardable);
+            assert!(store.lww_complete_quarantined_intent(&selected.request_id,&selected.token,store.revision().unwrap()).unwrap());
+        }
         assert_eq!(store.revision().unwrap(),1); assert_device_restore_label(&store,"frozen");
         assert_eq!(read_unit(&store.connection,&unit_key(&["future-unit","frozen"]).unwrap()).unwrap().unwrap().1,original.values().next().unwrap().clone());
         assert_eq!(store.lww_clock_state().unwrap().issued,Some(reserved.clone()));
@@ -600,6 +648,8 @@ fn full_restore_recovers_original_inputs_after_library_and_device_transaction_fa
         let sections=full_device_backup(Some("frozen"));
         assert_eq!(store.lww_commit_replacement_with_device_sections(&header,&stage,Some(&original),&sections.iter().collect::<Vec<_>>()).unwrap().revision,1);
         assert_eq!(store.device_store().unwrap().connection().query_row("SELECT complete FROM lww_intents WHERE request_id=?1",[&header.request_id],|row|row.get::<_,bool>(0)).unwrap(),true);
+        assert!(store.lww_quarantined_intents().unwrap().is_empty());
+        assert_eq!(std::fs::read_dir(&scratch).unwrap().count(),0);
     }
 }
 
@@ -886,8 +936,12 @@ fn backup_device_revision_rejects_absent_released_unpinned_foreign_and_changed_i
 #[test]
 fn backup_unit_values_are_lease_fixed_and_include_opaque_held_and_permanent_deletions() {
     let (_dir,mut store)=store();
-    save(&mut store,vec![mutation(&["root","language"],serde_json::json!("before")),mutation(&["exists","character","retired"],serde_json::json!({"type":"character"}))]);
+    save(&mut store,vec![mutation(&["root","language"],serde_json::json!("before")),mutation(&["exists","character","retired"],serde_json::json!({"type":"character"})),mutation(&["character","retired","name"],serde_json::json!("Retired"))]);
     store.commit(&WorkingSetCommit{expected_revision:store.revision().unwrap(),unit_mutations:Some(vec![UnitMutation::Delete{key:unit_key(&["exists","character","retired"]).unwrap()}]),..Default::default()}).unwrap();
+    let retired_child = unit_key(&["character","retired","name"]).unwrap();
+    // Older stores can still carry a child of an already retired record.
+    store.connection.execute("INSERT OR REPLACE INTO lww_units(key,stamp,value,version,identity) SELECT ?1,stamp,value,version,identity FROM lww_units WHERE key=?2",
+        params![retired_child.as_str(), unit_key(&["root","language"]).unwrap().as_str()]).unwrap();
     let opaque=change(&["future-unit","opaque-backup"],1,serde_json::json!({"future":3}));
     let held=change(&["character","missing-parent","name"],1,serde_json::json!("held"));
     receive(&mut store,"backup-opaque-held",vec![opaque.clone(),held.clone()],vec![]);
@@ -897,6 +951,7 @@ fn backup_unit_values_are_lease_fixed_and_include_opaque_held_and_permanent_dele
     assert_eq!(before[&opaque.key],opaque.value);
     assert_eq!(before[&held.key],held.value);
     assert_eq!(before[&unit_key(&["exists","character","retired"]).unwrap()],UnitValue::Deleted);
+    assert!(!before.contains_key(&retired_child));
     assert!(before.keys().all(|key|!is_device(key)));
     save(&mut store,vec![mutation(&["root","language"],serde_json::json!("after"))]);
     assert_eq!(store.lww_backup_unit_values(&lease.lease).unwrap(),before);
@@ -982,7 +1037,7 @@ fn backup_held_messages_restore_with_one_stamp_and_project_after_reopen_and_late
     receive(&mut store,"retire-restored-parent",vec![Change{key:unit_key(&["exists","character","waiting"]).unwrap(),stamp:stamp(4),value:UnitValue::Deleted}],vec![]);
     receive(&mut store,"retired-parent-arrives-again",vec![change(&["exists","character","waiting"],5,serde_json::json!(true)),Change{stamp:stamp(restored.0.physical_ms.0+1),..message.clone()}],vec![]);
     assert_eq!(store.connection.query_row("SELECT count(*) FROM characters WHERE generation=?1",[active_generation(&store.connection).unwrap()],|row|row.get::<_,i64>(0)).unwrap(),0);
-    assert_eq!(read_unit(&store.connection,&message.key).unwrap().unwrap(),restored);
+    assert!(read_unit(&store.connection,&message.key).unwrap().is_none());
     assert_eq!(parent_status(&store.connection,&message.key).unwrap(),"retired");
     assert!(store.lww_read_outbox(0.into(),100).unwrap().entries.iter().all(|entry|entry.key!=message.key));
     assert_eq!(store.connection.query_row("SELECT count(*) FROM lww_receive_rows WHERE key=?1 AND status<>'done'",[message.key.as_str()],|row|row.get::<_,i64>(0)).unwrap(),0);
@@ -2855,6 +2910,7 @@ fn explicit_new_device_recovery_finishes_after_library_activation_without_exposi
         .unwrap();
     let activation = commit::replace_commit_lww(
         &mut store.connection,
+        &store.repository_root,
         &staging,
         &header,
         &stamp,

@@ -30,6 +30,8 @@ import {
     rebasePluginMutationPublication,
 } from './pluginMutationPublication'
 import { flushSync } from 'svelte'
+import { createPersistentStoreHarness } from '../../../tests/support/persistentStoreHarness'
+import { advancePluginStorageRemoteChanges, PluginStorageObservation } from '../plugins/pluginStorageProtection'
 
 vi.mock('../parser/parser.svelte', async () => (await import('../parser/parser.testSupport')).parserStubModule())
 
@@ -85,6 +87,28 @@ function apply(
 }
 
 describe('key-scoped plugin storage publication', () => {
+    it('queries only the cleared owner and observes its deleted keys after committing', async () => {
+        const database = makeDatabase()
+        const { store, revision } = await createPersistentStoreHarness(database)
+        const committed = await store.commit({ expectedRevision: revision, pluginStorage: [
+            { type: 'set', owner: 'cleared-owner', key: 'key', value: 'removed' },
+            { type: 'set', owner: 'other-owner', key: 'key', value: 'kept' },
+        ] })
+        const query = vi.spyOn(store, 'queryPluginStorage')
+        const coordinator = new SaveCoordinator({ store, captureRoot: () => captureRoot(database),
+            captureSelectedCharacter: () => null, replaceDatabase: () => {} })
+        coordinator.initialize(committed.revision)
+        const observation = new PluginStorageObservation('cleared-owner')
+        const mutations: PluginStorageMutation[] = [{ type: 'clear', owner: 'cleared-owner' }]
+        try {
+            await coordinator.mutatePersistentPluginStorage('clear', mutations, observation.prepareWrite(mutations))
+            expect(query).toHaveBeenCalledExactlyOnceWith('cleared-owner')
+            expect(await store.readPluginStorage('cleared-owner', 'key')).toBeNull()
+            expect((await store.readPluginStorage('other-owner', 'key'))?.value).toBe('kept')
+            advancePluginStorageRemoteChanges([JSON.stringify(['plugin', 'cleared-owner', 'key'])])
+            expect(() => observation.prepareWrite([{ type: 'set', owner: 'cleared-owner', key: 'key', value: 'stale' }]).validate()).toThrow('PLUGIN_STORAGE_STALE')
+        } finally { observation.dispose() }
+    })
     it('does not repeatedly encode or parse a large unchanged string during explicit small writes', async () => {
         const payload = 'x'.repeat(2 * 1_048_576)
         const storage = { payload, counter: 0, nested: { count: 0 } }

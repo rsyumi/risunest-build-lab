@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PluginDeviceMutation } from './pluginDeviceKeyspace'
 
-const native = vi.hoisted(() => ({ invoke: vi.fn(), values: new Map<string, string>() }))
-vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule({ runtime: 'tauri', os: 'windows' }))
+const native = vi.hoisted(() => ({ invoke: vi.fn(), values: new Map<string, string>(), android: false }))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule(() => ({ runtime: 'tauri', os: native.android ? 'android' : 'windows' })))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }))
 vi.mock('./plugins.svelte', () => ({ pluginStorageStore: { invalidate: vi.fn() } }))
 vi.mock('../storage/persistentDataStoreFactory', () => ({ getPersistentDataStore: vi.fn() }))
@@ -11,13 +11,20 @@ import { SafeLocalPluginStorage } from './pluginSafeClass'
 import { invalidatePluginDeviceKeyspaces } from './pluginDeviceKeyspace'
 import { deletePluginDataItems } from './pluginDataInventory'
 import { pluginDeviceParts, pluginDeviceValueSize, readNativePluginDeviceValue, writeNativePluginDeviceValues, PLUGIN_DEVICE_PART_BYTES } from './pluginDeviceTransfer'
+import { ANDROID_COMMIT_CHUNK_BYTES, ANDROID_LARGE_COMMIT_SIZE } from '../storage/androidCommitTransport'
 
 beforeEach(() => {
+    native.android = false
     native.values.clear()
     invalidatePluginDeviceKeyspaces()
     native.invoke.mockReset().mockImplementation(async (command: string, args: {
-        owner: string; mutations?: PluginDeviceMutation[];
+        owner: string; key?: string; mutations?: PluginDeviceMutation[];
     }) => {
+        if (command === 'pds_plugin_device_sequence') return 'epoch:0'
+        if (command === 'pds_read_plugin_device_value') {
+            const value = native.values.get(args.key!)
+            return value ?? null
+        }
         if (command === 'pds_hydrate_plugin_device_storage') {
             return { complete: true, byteSize: 0, entries: [...native.values].map(([key, value]) =>
                 ({ space: 'json', key, value })) }
@@ -35,6 +42,31 @@ beforeEach(() => {
 })
 
 describe('native JSON plugin values', () => {
+    it('includes observation fields when routing a write across the Android IPC size boundary', async () => {
+        native.android = true
+        const observations = [{ space: 'string' as const, key: 'key', sequence: 'epoch:2' }]
+        const mutation = { type: 'set' as const, space: 'string' as const, key: 'key', value: '' }
+        const overhead = new TextEncoder().encode(JSON.stringify({ owner: 'owner', mutations: [mutation], observations })).length
+        mutation.value = 'x'.repeat(ANDROID_LARGE_COMMIT_SIZE + 1 - overhead)
+        let body = '', saved = ''
+        native.invoke.mockImplementation(async (command, args) => {
+            if (command === 'pds_commit_android_open') return { capacity: ANDROID_COMMIT_CHUNK_BYTES }
+            if (command === 'pds_commit_android_chunk') { body += args.chunk; return new TextEncoder().encode(body).length }
+            if (command === 'pds_plugin_write_android_finish') {
+                const request = JSON.parse(body)
+                expect(request.observations).toEqual(observations)
+                saved = request.mutations[0].value
+                return observations
+            }
+            if (command === 'pds_commit_android_cancel') return
+            throw new Error('Oversized ordinary IPC write')
+        })
+        vi.stubGlobal('window', {})
+        try { await expect(writeNativePluginDeviceValues('owner', [mutation], observations)).resolves.toEqual(observations) }
+        finally { vi.unstubAllGlobals() }
+        expect(saved).toBe(mutation.value)
+    })
+
     it('counts encoded UTF-8 and splits only between complete code points', () => {
         for (const value of ['a가😀\"\n\u0000z', '😀😀😀', '', '한글'.repeat(20)]) {
             const size = new TextEncoder().encode(JSON.stringify(value)).length
@@ -105,7 +137,7 @@ describe('native JSON plugin values', () => {
             await expect(storage.setItem('value', value)).rejects.toBeInstanceOf(TypeError)
             await expect(storage.getItem('value')).resolves.toBe('text')
         }
-        expect(native.invoke).not.toHaveBeenCalled()
+        expect(native.invoke.mock.calls.some(([command]) => command === 'pds_write_plugin_device_values')).toBe(false)
         expect(native.values.get('value')).toBe('"text"')
     })
 

@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "lane": "macos",
-  "source_commit": "380dd1b69e25ec0b4044e32da3eb0282595422e8",
-  "source_tree": "61d50898a437b48746b208d3888209544f476a3d",
-  "file_list_sha256": "bd6b399767ba6d13b0b9d3799e133bff196f29df15330a4894c2a8cf78b1fb32",
+  "source_commit": "31e0acac055bf2794ce548cbab5736ad32aabaa8",
+  "source_tree": "8b16ab008a8c146c63a5f7073e658e8d2f0db32d",
+  "file_list_sha256": "109dd2b7778df460c1a604aec04c469352af7651a7985c71c83e33a026cb487d",
   "exclusion_rules_version": "risunest-build-inputs-v2"
 }

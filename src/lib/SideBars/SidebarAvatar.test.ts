@@ -5,6 +5,7 @@ import { createRawSnippet, tick, type ComponentProps } from 'svelte'
 import { createClassComponent } from 'svelte/legacy'
 
 import SidebarAvatar from './SidebarAvatar.svelte'
+import { RepresentativeImageList, readRepresentativeImagePriority } from 'src/ts/ui/representativeImagePriority'
 
 vi.mock('src/ts/gui/tooltip', () => ({
     tooltipRight: () => ({}),
@@ -34,6 +35,7 @@ class TestIntersectionObserver {
                     ({
                         target,
                         isIntersecting: true,
+                        intersectionRatio: 1,
                     }) as IntersectionObserverEntry,
             ),
             this as unknown as IntersectionObserver,
@@ -79,6 +81,27 @@ afterEach(() => {
 })
 
 describe('SidebarAvatar lazy sources', () => {
+    it('updates actual image priority as a mounted avatar enters and leaves view', async () => {
+        vi.stubGlobal('IntersectionObserver', TestIntersectionObserver)
+        const list = new RepresentativeImageList()
+        list.setOrder(['assets/first', 'assets/second'])
+        try {
+            const { component, target } = renderAvatar({ src: '/synthetic.png', imagePriority: list, imageReference: 'assets/second' })
+            await tick()
+            const element = target.querySelector('.avatar')!
+            expect(readRepresentativeImagePriority()?.visible).toEqual([])
+            TestIntersectionObserver.instances[0].setVisible(element)
+            await tick()
+            expect(readRepresentativeImagePriority()?.visible).toEqual(['assets/second'])
+            component.$set({ imageReference: 'assets/first' })
+            await tick()
+            expect(readRepresentativeImagePriority()?.visible).toEqual([])
+            TestIntersectionObserver.instances[0].setVisible(element)
+            await tick()
+            expect(readRepresentativeImagePriority()?.visible).toEqual(['assets/first'])
+        } finally { list.dispose() }
+    })
+
     it('renders the avatar placeholder when an existing source promise rejects', async () => {
         const source = deferred<string>()
         const { target } = renderAvatar({ src: source.promise, rounded: true })

@@ -148,6 +148,10 @@ function installAndroidNativeControl(): void {
     const saf = createAndroidControlClient(window.RisuNestSafControl)
     window.RisuSafBridge = {
         copyExport: (...args) => saf.notify('saf.copyExport', ...args),
+        reserveExport: (...args) => saf.notify('saf.reserveExport', ...args),
+        copyReservedExport: (...args) => saf.notify('saf.copyReservedExport', ...args),
+        bindExport: (...args) => saf.request<boolean>('saf.bindExport', ...args),
+        releaseExport: (...args) => saf.request<boolean>('saf.releaseExport', ...args),
         cancelExport: (id) => saf.request<boolean>('saf.cancelExport', id),
         cancelSource: (id) => saf.notify('saf.cancelSource', id),
         pickBackupSource: (id) => saf.notify('saf.pickBackupSource', id),

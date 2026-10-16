@@ -129,6 +129,38 @@ fn restore_original_backup(populate: impl FnOnce(&mut PersistentStore)) -> (temp
         let admission = Arc::new(crate::native_file_jobs::admission::Admission::default());
         let state = crate::persistent_store::commands::PersistentStoreState::default();
         runtime_restore::activate_database_first_backup(&mut store, &state, &job, database, sections, Cancellation::default(), admission.staging().unwrap()).unwrap();
+        let before=provider.uploaded_ids().into_iter().filter(|id|id.starts_with("pack-")).collect::<Vec<_>>();
+        let hydration=store.hydrate_external_capture_dependencies("restored-backup",&probe).unwrap();
+        let (lease,prepared)=store.lww_acquire_backup_capture(store.revision().unwrap()).unwrap();
+        let sections=super::sections::capture_prepared_backup_sections(&prepared,&destination.path().join("backup-sections"),&probe.0).unwrap();
+        let capture=store.capture_external_library_from_lease_with_sections("restored-backup",&hydration,&lease.lease,sections,&probe).unwrap();
+        let sections=capture.catalog.backup_sections().unwrap();
+        let units=capture.catalog.original_backup_units().unwrap();
+        let meta=packaging::SnapshotMetadata {snapshot_id:"restored-backup".into(),repository_id:connected.stored.descriptor.repository_id.clone(),library_id:capture.identity.library_epoch.clone(),author_device_id:capture.identity.store_id.clone(),
+            created_at_ms:super::runtime::now_ms(),logical_revision:capture.identity.revision as u64,parent_snapshot_id:None,
+            content_fingerprint:capture.catalog.content_fingerprint(&risunest_external_storage_format::format::library_fingerprint_domain()).unwrap(),
+            purpose:packaging::SnapshotPurpose::BackupBundle {source:risunest_external_storage_format::control::BundleSource::Device {writer_id:store.lww_clock_state().unwrap().writer_id},remote_generation:None,original_units:units}};
+        let identity=JobIdentity {job_id:"restored-backup".into(),connection_id:"synthetic-connection".into(),repository_id:connected.handle.repository_id.clone(),capture_id:capture.id.clone(),capture:capture.identity.clone()};
+        let mut journal=TransferJournal::open(&destination.path().join("second-journal"),identity).unwrap();
+        let cache=super::runtime::connection_directory(destination.path(),"synthetic-connection").join("package-cache");
+        let clock=fake::FakeLeaseClock::new(super::runtime::now_ms());let cancel=Cancellation::default();
+        let context=super::leases::LeaseContext {root:destination.path(),connection_id:"synthetic-connection",writer_id:"backup-writer",descriptor:&connected.stored.descriptor,
+            root_key:&connected.root_key,provider:connected.provider.as_ref(),repository:&connected.handle,clock:&clock,protection_supported:true,ledger:None};
+        let owner=match super::leases::admit(&context,"restored-backup",LeaseKind::Work,&cancel).await.unwrap() {
+            super::leases::Admission::Admitted(owner)=>owner,_=>panic!("backup lease must be admitted"),
+        };
+        let view=super::cleanup::ConnectedRepositoryView {connected:&connected,writer_id:"collector",policy:super::connection::RetentionPolicy::DEFAULT,
+            now_ms:super::runtime::now_ms(),unfinished:vec![],cache_root:&cache};
+        let documents=super::cleanup::ConnectedDocuments {connected:&connected,cancel:&cancel,scratch:destination.path()};
+        let request=super::cleanup::CleanupRequest {job_id:"cleanup-during-backup",cleanup_supported:true,limits:super::cleanup::CleanupLimits::default(),connection_time:&|_|Ok(true)};
+        assert_eq!(super::cleanup::run(&context,&request,&view,&documents,&cancel).await.unwrap().stop_reason,super::cleanup::StopReason::Lease);
+        assert!(before.iter().all(|id|provider.holds(id)),"the backup lease protects packs inherited from restore");
+        let second=owner.run(&context,&cancel,packaging::package_and_upload_protected(capture,sections,destination.path(),&cache,meta,&connected.root_key,packaging::PackageLimits::from_capabilities(&connected.stored.capabilities).unwrap(),None,&mut journal,
+            connected.provider.as_ref(),&connected.handle,&PhaseProgress::silent(),&cancel,Some((&owner,&context)))).await.unwrap();
+        let after=provider.uploaded_ids().into_iter().filter(|id|id.starts_with("pack-")).collect::<Vec<_>>();
+        assert_eq!(before,after,"the first backup after restore reuses unchanged packs");
+        assert!(second.referenced_objects.iter().any(|object|object.role==ObjectRole::Pack));
+
     });
     (destination, store)
 }
@@ -152,7 +184,7 @@ fn original_backup_restores_an_indivisible_message_above_the_metadata_bound() {
         source.commit(&WorkingSetCommit {
             expected_revision: source.revision().unwrap(),
             add_character: Some(json!({
-                "type": "character", "chaId": "synthetic-large", "name": "Large",
+                "type": "character", "chaId": "synthetic-large", "name": "Large", "chatPage": 0,
                 "chats": [{"id": "synthetic-large-chat", "name": "Large", "message": [{"role": "user", "data": data}]}],
             })),
             ..Default::default()

@@ -12,6 +12,7 @@ import {
     NativeFileOperationBusyError,
     nativeFileOperation,
     nativeFileOperationOutcome,
+    recordRecoveredNativeFileOperation,
     runExternalAndroidNativeFileOperation,
     runSharedNativeFileOperation,
     type NativeFileOperationOutcome,
@@ -132,8 +133,10 @@ describe('renderer-lifetime native file job manager', () => {
 
     it('coalesces remounted callers onto one operation and exposes shared progress', async () => {
         let finish!: (value: string) => void
-        const operation = vi.fn(async ({ onStatus }: SharedNativeFileOperationContext) => {
-            onStatus(status({ kind: 'restore-block-risu-save' }))
+        let previous!: SharedNativeFileOperationContext
+        const operation = vi.fn(async (context: SharedNativeFileOperationContext) => {
+            previous = context
+            context.onStatus(status({ kind: 'restore-block-risu-save' }))
             return await new Promise<string>((resolve) => finish = resolve)
         })
 
@@ -148,6 +151,15 @@ describe('renderer-lifetime native file job manager', () => {
         finish('done')
         await expect(first).resolves.toBe('done')
         expect(get(nativeFileOperation)).toBeNull()
+        const nextStatus = status({jobId:'next-restore'})
+        await runSharedNativeFileOperation('import', 'next-restore', async context => {
+            context.onStatus(nextStatus)
+            previous.onStatus(status({state:'succeeded', phase:'complete'}))
+            expect(get(nativeFileOperation)?.status).toEqual(nextStatus)
+            return 'next result'
+        }, {presentation:'dialog'})
+        recordRecoveredNativeFileOperation(status({state:'cancelled', phase:'complete'}))
+        expect(get(nativeFileOperationOutcome)?.status).toEqual(nextStatus)
     })
 
     it('cancels only through the explicit manager action', async () => {

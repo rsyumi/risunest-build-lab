@@ -13,6 +13,7 @@
     import { openDataHealthScreen } from "src/ts/storage/dataHealthNavigation";
     import {
         unMigrationAccount,
+        resetAccountStorageSession,
         accountUnmigrationBusy,
     } from "src/ts/storage/accountStorage";
     import {
@@ -307,6 +308,9 @@
                                 );
                             }
                             return;
+                        } else {
+                            localStorage.removeItem("fallbackRisuToken");
+                            resetAccountStorageSession();
                         }
                         DBState.db.account = undefined;
                     }}>{language.logout}</button

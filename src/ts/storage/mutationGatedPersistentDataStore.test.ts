@@ -183,13 +183,14 @@ describe('createMutationGatedPersistentDataStore', () => {
     })
 
     it('reads and exports without acquiring the write gate', async () => {
-        const harness = await createPersistentStoreHarness({ username: 'Fixture', botPresets: [], characters: [] } as unknown as Database)
+        const harness = await createPersistentStoreHarness({ username: 'Fixture', botPresets: [], characters: [], pluginCustomStorage: { fixture: 'value' } } as unknown as Database)
         const aliases = harness.spy('readAssetAliasesByKeys')
         const metadata = harness.spy('readConversationMetadata')
         const gate = { runWrite: vi.fn() } as unknown as StorageMutationGate
         const gated = createMutationGatedPersistentDataStore(harness.store, gate)
 
         await expect(gated.materializeDatabase(harness.revision)).resolves.toMatchObject({ username: 'Fixture' })
+        expect((await gated.queryPluginStorage('different-owner')).items).toEqual([])
         const lease = await gated.acquireRevision(harness.revision)
         expect(lease.revision).toBe(harness.revision)
         await lease.release()

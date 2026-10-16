@@ -1,5 +1,6 @@
 import type { StreamingScreenshotArchive } from './chatScreenshotArchive'
 import type { ChatScreenshotJob, FrozenChatScreenshotRenderContext } from './chatScreenshotRange'
+import { withAndroidSafDestination } from './storage/androidSafBridge'
 
 export const CHAT_SCREENSHOT_WIDTH = 960
 export const CHAT_SCREENSHOT_PAGE_HEIGHT = 8_000
@@ -143,8 +144,8 @@ export async function captureChatScreenshot(
         if (!committedAfterCancellation) throwIfAborted(signal)
         return { kind: archive ? 'zip' : 'png', pages: pageNumber }
     } catch (error) {
-        if (archive) await archive.abort()
-        throw error
+        return withAndroidSafDestination(archive ? { release: async () => { await archive.abort() } } : undefined,
+            async () => { throw error })
     } finally {
         await surface.dispose()
     }

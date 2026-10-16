@@ -17,7 +17,8 @@ import { recordNativeLogError, setNativeLogFileEnabled } from "./nativeLog";
 import { registerRuntimeErrorHandlers } from "./runtimeErrors";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { MobileGUI, botMakerMode, selectedCharID, loadedStore, LoadingStatusState, bootFailure } from "./stores.svelte";
-import { keepPluginsOffForThisStart, loadPlugins, loadPluginsAfterAuthoritativeRestore } from "./plugins/plugins.svelte";
+import { afterPluginsStarted, keepPluginsOffForThisStart, loadPlugins, loadPluginsAfterAuthoritativeRestore } from "./plugins/plugins.svelte";
+import { setPluginStartupSyncExcluded } from './plugins/pluginStartupGate';
 import { alertConfirm, alertError, alertInput, alertLogin, alertMd, alertNormal, alertSelect, alertToast, alertTOS, waitAlert } from "./alert";
 import { backgroundErrorMessage } from "./storage/backgroundErrorMessage";
 import { applyHubSelection, characterURLImport, downloadRisuHub, hubURL } from "./characterCards";
@@ -127,6 +128,7 @@ import { getDeviceMarkers, initializeDeviceMarkers } from "./storage/deviceMarke
 import {
     configureNativeOfficialAccountFlow,
     createNativeOfficialAccountFlowService,
+    restoreNativeOfficialAccountCandidate,
     type NativeOfficialAccountFlow,
     type NativeOfficialAccountFlowService,
     nativeOfficialAccountKeys,
@@ -234,6 +236,7 @@ export async function loadData() {
         applyHubSelection(markers)
         const deviceSettings = loadDeviceSettings(markers)
         const pluginsExcludedAtStart = excluded('plugins')
+        setPluginStartupSyncExcluded(excluded('sync'))
         // A restore or a received change later in this run must not start the plugins either.
         if (pluginsExcludedAtStart) keepPluginsOffForThisStart()
         if (isTauri) {
@@ -355,6 +358,7 @@ export async function loadData() {
         const accountStorage = new AccountStorage(isTauri ? {
             ...nativeAccountStorageOptions,
             credentialRouting: {
+                getAccountId: () => nativeOfficialFlow?.getAccountId(),
                 getToken: () => nativeOfficialFlow?.getToken(),
                 reauthenticate: async (loginResult) => {
                     if (!snapshotRequestReauthentication) {
@@ -417,6 +421,12 @@ export async function loadData() {
             account: accountStorage,
             cold: { readRemote: getAccountColdStorageItem },
             prepareCandidate: prepareDatabaseForPersistence,
+            restoreCandidate: isTauri
+                ? (candidate, expectedRevision, signal) => restoreNativeOfficialAccountCandidate(
+                    runtime, candidate, expectedRevision, signal,
+                    [language.risuNest.backup.officialRestoreInlayWarning],
+                )
+                : undefined,
             markPublished: () => undefined,
             ledger: officialAssetLedger,
             association: createOfficialAssociationMarkers(associationStorage),
@@ -631,6 +641,14 @@ export async function loadData() {
                 console.error('External sync transports failed to register', error)
             }
         }
+        if (isTauri) {
+            try {
+                const { installProductionSyncStatus } = await import('./storage/sync/syncStatusProduction')
+                installProductionSyncStatus()
+            } catch (error) {
+                console.error('Sync status failed to start', error)
+            }
+        }
         let heldExitRevision: number | undefined
         let heldExitFence: RetainableReplacementFence | undefined
         let selectedExitDrain: SyncExitDrainAdapter | null = null
@@ -801,21 +819,19 @@ export async function loadData() {
         await transition('format-update', language.risuNest.startup.data)
         performance.mark('boot:cold-storage-ready')
         await transition('plugins', language.risuNest.startup.plugins)
-        let pluginsLoaded = excluded('plugins')
-        try {
-            if (!pluginsLoaded) await loadPlugins()
-            pluginsLoaded = true
-        } catch (error) {
-            console.error(error)
-        }
-        if (pluginsLoaded && recoveredNativeRestoreJobs.length > 0) {
-            try {
-                await acknowledgeRecoveredNativeRestores(recoveredNativeRestoreJobs)
-            }
-            catch (error) {
-                console.error('Native restore acknowledgement failed', error)
+        if (recoveredNativeRestoreJobs.length > 0) {
+            if (excluded('plugins')) {
+                try { await acknowledgeRecoveredNativeRestores(recoveredNativeRestoreJobs) }
+                catch (error) { console.error('Native restore acknowledgement failed', error) }
+            } else {
+                const stop = afterPluginsStarted(async () => {
+                    try { await acknowledgeRecoveredNativeRestores(recoveredNativeRestoreJobs); stop() }
+                    catch (error) { console.error('Native restore acknowledgement failed', error) }
+                })
             }
         }
+        try { if (!excluded('plugins')) await loadPlugins() }
+        catch (error) { console.error(error) }
         performance.mark('boot:plugins-ready')
         if (!isTauri && !excluded('account') && getDatabase().account) {
             await transition('account-data', language.risuNest.startup.account)

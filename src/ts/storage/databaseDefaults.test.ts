@@ -84,6 +84,11 @@ describe('streaming display defaults', () => {
             } as Database).risunestChatEditPopup,
         ).toBe(false)
     })
+
+    it('shows the sync status UI by default and preserves turning it off', () => {
+        expect(normalizeDatabaseDefaults({ characters: [] } as Database).risunestSyncStatusUi).toBe(true)
+        expect(normalizeDatabaseDefaults({ characters: [], risunestSyncStatusUi: false } as Database).risunestSyncStatusUi).toBe(false)
+    })
 })
 
 describe('RisuNest inlay database defaults', () => {

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import test from 'node:test';
 
 const compiler = process.env.NSIS_MAKENSIS ?? join(process.env.LOCALAPPDATA ?? '', 'tauri', 'NSIS', 'makensis.exe');
@@ -40,7 +40,7 @@ SectionEnd
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
-import { readFileSync, mkdirSync, copyFileSync } from 'node:fs';
+import { readFileSync, mkdirSync, copyFileSync, symlinkSync, unlinkSync } from 'node:fs';
 
 const q = value => value.replaceAll('$', '$$').replaceAll('"', '$\\"');
 function buildManagerStub(directory) {
@@ -48,11 +48,20 @@ function buildManagerStub(directory) {
   writeFileSync(stubSource, String.raw`
 use std::{env, fs, io::Write};
 fn main() {
+ let initial=env::args().skip(1).collect::<Vec<_>>();
+ if initial.first().is_some_and(|arg| arg=="hold-file") {
+  use std::os::windows::fs::OpenOptionsExt;
+  let handle=fs::OpenOptions::new().read(true).share_mode(3).open(&initial[1]).unwrap();
+  fs::write(&initial[2], b"ready").unwrap();
+  let deadline=std::time::Instant::now()+std::time::Duration::from_secs(30);
+  while !std::path::Path::new(&initial[3]).exists() && std::time::Instant::now()<deadline {std::thread::sleep(std::time::Duration::from_millis(10));}
+  drop(handle); fs::remove_file(&initial[2]).unwrap(); return;
+ }
  let mut root=env::current_exe().unwrap().parent().unwrap().to_path_buf();
  let mut values=env::args().skip(1).collect::<Vec<_>>();
  let data=if values.first().is_some_and(|v| v=="--data-dir") {let data=std::path::PathBuf::from(values[1].clone());values.drain(0..2);data} else {root.join("local/RisuNestSyncData")};
  if values.first().is_some_and(|v| v=="--server") {root=std::path::PathBuf::from(&values[1]).parent().unwrap().to_owned();values.drain(0..2);}
- if values.iter().any(|v| v=="forget-removal") {return;}
+ if values.iter().any(|v| v=="forget-removal-resumable") {return;}
  assert!(data.starts_with(&root));
  let args=values.join(" ").trim().to_owned();
  if args=="installer removal-check normal delete" {println!("delete-data");}
@@ -66,14 +75,27 @@ fn main() {
   assert!(owner>0 && owner!=std::process::id());
   println!("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
  }
+ if args=="installer preserve-files" {
+  if fs::read(root.join("risunest-sync-bundle.json")).unwrap()==b"invalid" {println!("skipped");return;}
+  let baseline=root.join("risunest-sync-bundle.previous.json");
+  if !baseline.exists() {fs::copy(root.join("risunest-sync-bundle.json"), baseline).unwrap();}
+ }
  if args=="installer delete-data" {
   if root.join("fail").exists() {std::process::exit(9);}
-  if data.exists() {fs::remove_dir_all(data).unwrap();}
+  if data.exists() {fs::remove_dir_all(&data).unwrap();}
  }
- if values.first().is_some_and(|v| v=="installer") && values.get(1).is_some_and(|v| v=="remove-files") && root.join("fail-remove").exists() {
+ if values.first().is_some_and(|v| v=="installer") && values.get(1).is_some_and(|v| v=="remove-files-resumable") && root.join("fail-remove").exists() {
   fs::remove_file(root.join("fail-remove")).unwrap();
   println!("removal-file-failed: synthetic");
   std::process::exit(7);
+ }
+ if args=="installer commit-removal" || args.starts_with("installer resume-removal ") {
+  if args=="installer resume-removal delete" {
+   if data.join("risunest-sync-instance.json").exists() {fs::remove_dir_all(&data).unwrap();}
+   else {println!("keep-data");}
+  }
+  let retry=root.join(".risunest-sync-removal"); fs::create_dir_all(&retry).unwrap();
+  fs::write(retry.join("complete"), "true").unwrap();
  }
  if args=="installer register" && root.join("fail-register").exists() {
   fs::remove_file(root.join("fail-register")).unwrap();
@@ -90,14 +112,36 @@ fn main() {
   assert.equal(built.status, 0, built.stderr);
   return binary;
 }
+function waitForFixture(condition) {
+  const deadline = Date.now() + 5000;
+  while (!condition()) {
+    assert.ok(Date.now() < deadline, 'synthetic file-lock boundary became ready');
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+  }
+}
+function holdDeletion(binary, path) {
+  const signals = mkdtempSync(join(dirname(binary), 'lock-signals-'));
+  const ready = join(signals, 'ready');
+  const release = join(signals, 'release');
+  const child = spawn(binary, ['hold-file', path, ready, release], { windowsHide: true, stdio: 'ignore' });
+  const exited = new Promise(resolve => child.once('exit', resolve));
+  waitForFixture(() => existsSync(ready));
+  return async () => {
+    writeFileSync(release, 'release');
+    waitForFixture(() => !existsSync(ready));
+    await exited;
+    rmSync(signals, { recursive: true });
+  };
+}
 function writeManagerHook(directory) {
   const hook = join(directory, 'hook.nsh');
-  writeFileSync(hook, readFileSync(resolve('server/manager/install/windows.nsh'), 'utf8').replaceAll('$LOCALAPPDATA', '$INSTDIR\\local').replace(/!include [^\r\n]+windows-common.nsh"/, `!include "${resolve('src-tauri/windows-common.nsh')}"`));
+  writeFileSync(hook, readFileSync(resolve('server/manager/install/windows.nsh'), 'utf8').replaceAll('$LOCALAPPDATA', '$INSTDIR\\local').replace(/!include [^\r\n]+windows-common.nsh"/, `!include "${resolve('src-tauri/windows-common.nsh')}"`).replace('DetailPrint "$(SyncResumeDataKept)"', 'FileOpen $0 "$INSTDIR\\data-kept" w\nFileWriteUTF16LE $0 "$(SyncResumeDataKept)"\nFileClose $0'));
   return hook;
 }
 
-test('Sync NSIS preserves data by default, protects updates, and aborts before binary removal on cleanup failure', { skip }, () => {
+test('Sync NSIS preserves data by default, protects updates, and aborts before binary removal on cleanup failure', { skip }, async () => {
   const directory = mkdtempSync(join(tmpdir(), 'risunest-sync-nsis-runtime-'));
+  let completed = false;
   try {
     const binary = buildManagerStub(directory);
     const hook = writeManagerHook(directory);
@@ -128,6 +172,7 @@ FileWrite $0 "$SyncFailureMessage"
 FileClose $0
 FunctionEnd
 Section
+!insertmacro NSIS_HOOK_PREINSTALL
 SetOutPath "$INSTDIR"
 File /oname=risunest-sync-manager.exe "${q(binary)}"
 WriteUninstaller "$INSTDIR\uninstall.exe"
@@ -155,6 +200,7 @@ Section Uninstall
 !insertmacro NSIS_HOOK_PREUNINSTALL
 Delete "$INSTDIR\risunest-sync-manager.exe"
 !insertmacro NSIS_HOOK_POSTUNINSTALL
+!insertmacro NSIS_HOOK_FINALUNINSTALL
 SectionEnd
 `);
     const compile = spawnSync(compiler, ['/V2', script], { encoding: 'utf8', timeout: 30000, windowsHide: true });
@@ -167,6 +213,7 @@ SectionEnd
       { name: 'failed', args: ['/DELETEAPPDATA'], fail: true, data: true, installed: true, code: 1 },
       { name: 'forced-unregistered', args: ['/FORCE', '/DELETEAPPDATA'], unregistered: true, data: true, installed: false, code: 0 },
       { name: 'unchecked', args: ['/DELETEAPPDATA', '/UNCHECKED'], data: true, installed: false, code: 0 },
+      { name: 'copy-failed', args: [], missingManager: true, data: true, installed: false, code: 1 },
       { name: 'retry', args: ['/DELETEAPPDATA'], failRemove: true, data: false, installed: true, code: 1 },
     ]) {
       const location = join(directory, scenario.name);
@@ -177,15 +224,23 @@ SectionEnd
       if (scenario.fail) writeFileSync(join(location, 'fail'), 'fixture');
       if (scenario.failRemove) writeFileSync(join(location, 'fail-remove'), 'fixture');
       assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true }).status, 0);
+      if (scenario.missingManager) rmSync(join(location, 'risunest-sync-manager.exe'));
       const uninstall = () => spawnSync(join(location, 'uninstall.exe'), ['/S', ...scenario.args, `_?=${location}`], { timeout: 30000, windowsHide: true, env: { ...process.env, RISUNEST_SYNC_UNINSTALL_DATA_DIR: scenario.custom ? dataRoot : '' } });
       const result = uninstall();
-      assert.equal(result.status, scenario.code, `${scenario.name}: exit ${existsSync(join(location, "calls")) ? readFileSync(join(location, "calls"), "utf8") : "no manager calls"}`);
+      assert.equal(result.status, scenario.code, `${scenario.name}: exit ${existsSync(join(location, "calls")) ? readFileSync(join(location, "calls"), "utf8") : "no manager calls"}\ndiagnostic: ${existsSync(join(location, 'diagnostic')) ? readFileSync(join(location, 'diagnostic'), 'utf8') : 'unavailable'}`);
       assert.equal(existsSync(join(location, 'risunest-sync-manager.exe')), scenario.installed, `${scenario.name}: manager remains on failure`);
       assert.equal(existsSync(join(dataRoot, 'synthetic')), scenario.data, `${scenario.name}: data`);
+      if (scenario.missingManager) {
+        const diagnostic = readFileSync(join(location, 'diagnostic'), 'utf8');
+        assert.match(diagnostic, /removal-helper-copy-failed:/);
+        assert.ok(diagnostic.includes(join(location, 'risunest-sync-manager.exe')));
+        assert.equal(existsSync(join(location, 'calls')), false);
+        continue;
+      }
       const calls = readFileSync(join(location, 'calls'), 'utf8');
       if (scenario.name === 'update') {
         assert.match(calls, /^prepare-update:/);
-        assert.doesNotMatch(calls, /uninstall|delete-data|forget-removal/);
+        assert.doesNotMatch(calls, /uninstall|delete-data|forget-removal-resumable/);
       } else {
         assert.equal([...calls.matchAll(/^installer prepare ([1-9]\d*):/gm)].length, 1, `${scenario.name}: prepare receives the uninstaller owner PID`);
         assert.match(calls, /^uninstall lock-held(?: --force)?:/m);
@@ -197,12 +252,12 @@ SectionEnd
       }
       if (scenario.data && !scenario.installed && scenario.name !== 'update') {
         assert.match(calls, /^installer finish aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:/m);
-        assert.ok(calls.indexOf('installer finish') > calls.indexOf('installer remove-files'));
+        assert.ok(calls.indexOf('installer finish') > calls.indexOf('installer remove-files-resumable'));
       }
       if (scenario.unregistered) {
         assert.match(calls, /installer removal-check force delete/);
         assert.match(calls, /uninstall lock-held --force/);
-        assert.match(calls, /installer remove-files force/);
+        assert.match(calls, /installer remove-files-resumable force/);
         assert.doesNotMatch(calls, /installer delete-data/);
       }
       if (scenario.name === 'unchecked') {
@@ -216,12 +271,125 @@ SectionEnd
         assert.equal(existsSync(join(location, 'risunest-sync-manager.exe')), false, `${scenario.name}: retry removes the manager`);
         const retried = readFileSync(join(location, 'calls'), 'utf8').slice(calls.length);
         assert.match(retried, /^installer delete-data:/m);
-        assert.match(retried, /^installer remove-files normal:/m);
+        assert.match(retried, /^installer remove-files-resumable normal:/m);
       }
     }
+    {
+      const location = join(directory, 'linked-retry');
+      const outside = join(directory, 'unrelated-folder');
+      mkdirSync(location); mkdirSync(outside);
+      writeFileSync(join(outside, 'receipt.json'), '{}');
+      writeFileSync(join(outside, 'complete'), 'true');
+      assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true }).status, 0);
+      const retry = join(location, '.risunest-sync-removal');
+      symlinkSync(outside, retry, 'junction');
+      try {
+        assert.equal(spawnSync(join(location, 'uninstall.exe'), ['/S', `_?=${location}`], { timeout: 30000, windowsHide: true }).status, 1);
+        assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true }).status, 1);
+        assert.equal(readFileSync(join(outside, 'receipt.json'), 'utf8'), '{}');
+        assert.equal(existsSync(join(location, 'risunest-sync-manager.exe')), true);
+      } finally { unlinkSync(retry); }
+    }
+    for (const boundary of ['helper-copy', 'receipt-staged', 'receipt', 'manager-deleted', 'final-files-deleted', 'registration-forgotten', 'complete', 'helper-cleaned', 'receipt-cleaned']) {
+      const location = join(directory, `interrupted-${boundary}`);
+      mkdirSync(join(location, 'local/RisuNestSyncData'), { recursive: true });
+      assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true }).status, 0);
+      const retry = join(location, '.risunest-sync-removal');
+      mkdirSync(retry);
+      writeFileSync(join(retry, 'data-path'), Buffer.from(join(location, 'local/RisuNestSyncData'), 'utf16le'));
+      copyFileSync(binary, join(retry, 'manager.exe'));
+      const prepared = !['helper-copy', 'receipt-staged'].includes(boundary);
+      if (prepared) writeFileSync(join(retry, 'receipt.json'), '{}');
+      if (boundary === 'receipt-staged') writeFileSync(join(retry, 'receipt.new'), '{');
+      if (prepared && boundary !== 'receipt') rmSync(join(location, 'risunest-sync-manager.exe'));
+      if (['complete', 'helper-cleaned', 'receipt-cleaned'].includes(boundary)) writeFileSync(join(retry, 'complete'), 'true');
+      if (['helper-cleaned', 'receipt-cleaned'].includes(boundary)) rmSync(join(retry, 'manager.exe'));
+      if (boundary === 'receipt-cleaned') rmSync(join(retry, 'receipt.json'));
+      if (boundary === 'receipt') {
+        const refused = spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true });
+        assert.equal(refused.status, 1, 'unfinished removal refuses reinstall');
+        assert.equal(readFileSync(join(retry, 'receipt.json'), 'utf8'), '{}');
+      }
+      if (boundary === 'receipt-cleaned') {
+        writeFileSync(join(retry, 'receipt.json'), 'synthetic completed receipt');
+        const releaseLock = holdDeletion(binary, join(retry, 'receipt.json'));
+        try {
+          const refused = spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true });
+          assert.equal(refused.status, 1, 'locked completed residue refuses reinstall');
+          assert.equal(readFileSync(join(retry, 'complete'), 'utf8'), 'true', 'cleanup refusal retains completion evidence');
+        } finally { await releaseLock(); }
+        const reinstall = spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true });
+        assert.equal(reinstall.status, 0, 'completed residue permits reinstall');
+        assert.equal(existsSync(retry), false, 'reinstall clears only completed retry residue');
+        assert.equal(existsSync(join(location, 'risunest-sync-manager.exe')), true);
+      }
+      const result = spawnSync(join(location, 'uninstall.exe'), ['/S', `_?=${location}`], { timeout: 30000, windowsHide: true });
+      assert.equal(result.status, 0, `${boundary}: ${existsSync(join(location, 'diagnostic')) ? readFileSync(join(location, 'diagnostic'), 'utf8') : result.error ?? ''}`);
+      assert.equal(existsSync(join(location, 'risunest-sync-manager.exe')), false, boundary);
+      assert.equal(existsSync(retry), false, `${boundary}: retry artifacts removed`);
+      assert.equal(existsSync(join(location, 'local/RisuNestSyncData')), true, `${boundary}: preserved data`);
+    }
+    for (const boundary of ['pending', 'forgotten', 'complete']) {
+      const location = join(directory, `delete-resume-${boundary}`);
+      const data = join(location, 'custom data 경로');
+      mkdirSync(data, { recursive: true });
+      writeFileSync(join(data, 'synthetic'), 'fixture');
+      if (boundary === 'pending') writeFileSync(join(data, 'risunest-sync-instance.json'), '{}');
+      assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true }).status, 0);
+      const retry = join(location, '.risunest-sync-removal');
+      mkdirSync(retry);
+      writeFileSync(join(retry, 'data-path'), Buffer.from(data, 'utf16le'));
+      copyFileSync(binary, join(retry, 'manager.exe'));
+      writeFileSync(join(retry, 'receipt.json'), '{}');
+      rmSync(join(location, 'risunest-sync-manager.exe'));
+      if (boundary === 'complete') writeFileSync(join(retry, 'complete'), 'true');
+      const result = spawnSync(join(location, 'uninstall.exe'), ['/S', '/DELETEAPPDATA', `_?=${location}`], { timeout: 30000, windowsHide: true });
+      assert.equal(result.status, 0, boundary);
+      assert.equal(existsSync(data), boundary !== 'pending', boundary);
+      if (boundary !== 'pending') {
+        const message = readFileSync(join(location, 'data-kept'), 'utf16le');
+        assert.ok(message === `Server data could not be deleted. Data folder: ${data}` || message === `서버 데이터를 삭제하지 못했습니다. 데이터 폴더: ${data}`, message);
+      }
+    }
+    for (const invalid of ['', 'relative', 'x'.repeat(20000)]) {
+      const location = join(directory, `invalid-path-${invalid.length}`);
+      mkdirSync(location);
+      assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true }).status, 0);
+      rmSync(join(location, 'risunest-sync-manager.exe'));
+      const retry = join(location, '.risunest-sync-removal');
+      mkdirSync(retry);
+      writeFileSync(join(retry, 'complete'), 'true');
+      writeFileSync(join(retry, 'data-path'), Buffer.from(invalid, 'utf16le'));
+      assert.equal(spawnSync(join(location, 'uninstall.exe'), ['/S', '/DELETEAPPDATA', `_?=${location}`], { timeout: 30000, windowsHide: true }).status, 1);
+      assert.equal(existsSync(join(location, 'data-kept')), false, 'an invalid path never reports the default data directory');
+      assert.equal(existsSync(join(location, 'uninstall.exe')), true);
+    }
+    for (const locked of ['complete', 'data-path']) {
+      const location = join(directory, `locked-completed-${locked}`);
+      const data = join(location, 'custom data');
+      mkdirSync(data, { recursive: true });
+      assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true }).status, 0);
+      rmSync(join(location, 'risunest-sync-manager.exe'));
+      const retry = join(location, '.risunest-sync-removal');
+      mkdirSync(retry);
+      writeFileSync(join(retry, 'complete'), 'true');
+      writeFileSync(join(retry, 'data-path'), Buffer.from(data, 'utf16le'));
+      const releaseLock = holdDeletion(binary, join(retry, locked));
+      try {
+        assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true }).status, 1);
+        assert.equal(readFileSync(join(retry, 'complete'), 'utf8'), 'true');
+        assert.equal(readFileSync(join(retry, 'data-path'), 'utf16le'), data);
+      } finally { await releaseLock(); }
+      assert.equal(spawnSync(join(location, 'uninstall.exe'), ['/S', '/FORCE', '/DELETEAPPDATA', `_?=${location}`], { timeout: 30000, windowsHide: true }).status, 0);
+      assert.equal(existsSync(retry), false);
+      assert.equal(existsSync(data), true);
+      assert.ok(readFileSync(join(location, 'data-kept'), 'utf16le').includes(data));
+    }
+    completed = true;
   } finally {
     assert.equal(dirname(directory), resolve(tmpdir()));
-    rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    if (completed) rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    else console.error(`Retained synthetic Sync NSIS fixture: ${directory}`);
   }
 });
 
@@ -295,7 +463,9 @@ test('Sync setup keeps the replaced bundle list until a retry removes obsolete f
     const replacement = join(directory, 'replacement.json');
     writeFileSync(replacement, '{"version":"1.0.5","files":["risunest-sync-manager.exe"]}\n');
     const script = join(directory, 'installer.nsi');
-    writeFileSync(script, setupScript(directory, writeManagerHook(directory), String.raw`
+    const hook = writeManagerHook(directory);
+    writeFileSync(hook, readFileSync(hook, 'utf8').replaceAll('DetailPrint "$(SyncObsoleteSkipped)"', 'FileOpen $0 "$INSTDIR\\obsolete-skipped" w\nFileWriteUTF16LE $0 "$(SyncObsoleteSkipped)"\nFileClose $0'));
+    writeFileSync(script, setupScript(directory, hook, String.raw`
 !insertmacro NSIS_HOOK_PREINSTALL
 SetOutPath "$INSTDIR"
 File /oname=risunest-sync-manager.exe "${q(binary)}"
@@ -321,6 +491,16 @@ File /oname=risunest-sync-bundle.json "${q(replacement)}"
     assert.equal(install(fresh).status, 0);
     assert.equal(existsSync(join(fresh, 'risunest-sync-bundle.previous.json')), false);
     assert.doesNotMatch(readFileSync(join(fresh, 'calls'), 'utf8'), /obsolete-files/);
+    const corrupt = join(directory, 'corrupt');
+    mkdirSync(corrupt);
+    copyFileSync(binary, join(corrupt, 'risunest-sync-manager.exe'));
+    writeFileSync(join(corrupt, 'risunest-sync-bundle.json'), 'invalid');
+    writeFileSync(join(corrupt, 'risunest-sync-bundle.previous.json'), previous);
+    assert.equal(install(corrupt).status, 0);
+    assert.doesNotMatch(readFileSync(join(corrupt, 'calls'), 'utf8'), /obsolete-files/);
+    assert.equal(readFileSync(join(corrupt, 'risunest-sync-bundle.previous.json'), 'utf8'), previous);
+    const detail = readFileSync(join(corrupt, 'obsolete-skipped'), 'utf16le');
+    assert.ok(detail === 'The previous bundle marker could not be read. Obsolete-file cleanup was skipped.' || detail === '이전 설치의 파일 목록을 읽을 수 없어 이전 파일 제거를 건너뛰었습니다.', detail);
   } finally {
     assert.equal(dirname(directory), resolve(tmpdir()));
     rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
@@ -363,3 +543,105 @@ FileClose $1`));
     rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
+
+for (const installMode of ['currentUser', 'both']) {
+test(`Sync template retains a discoverable retry when the uninstaller cannot be deleted (${installMode})`, { skip }, async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'risunest-sync-finalize-'));
+  const location = join(directory, 'installed');
+  const key = `Software\\RisuNestSynthetic\\${directory.split(/[\\/]/).at(-1)}`;
+  try {
+    const template = readFileSync(resolve('src-tauri/windows-installer.nsi'), 'utf8');
+    const start = template.indexOf('  !ifdef RISUNEST_DEFER_UNINSTALL_TEARDOWN', template.indexOf('!insertmacro NSIS_HOOK_POSTUNINSTALL'));
+    const teardown = template.slice(start, template.indexOf('  ; Auto close', start));
+    assert.ok(start > 0 && teardown.includes('DeleteRegKey'));
+    const finalHook = readFileSync(resolve('server/manager/install/windows.nsh'), 'utf8').match(/!macro NSIS_HOOK_FINALUNINSTALL\r?\n[\s\S]*?!macroend/)[0];
+    const script = join(directory, 'installer.nsi');
+    writeFileSync(script, String.raw`
+Unicode true
+RequestExecutionLevel user
+SilentInstall silent
+SilentUnInstall silent
+OutFile "${q(join(directory, 'installer.exe'))}"
+!include LogicLib.nsh
+!define RISUNEST_DEFER_UNINSTALL_TEARDOWN
+!define INSTALLMODE "${installMode}"
+Var MultiUser.InstallMode
+!define PRODUCTNAME "RisuNest Synthetic Retry"
+!define UNINSTKEY "${key}"
+${finalHook}
+Section
+SetOutPath "$INSTDIR"
+WriteRegStr HKCU "${key}" "DisplayName" "RisuNest Synthetic Retry"
+WriteRegStr HKCU "${key}" "UninstallString" '$\"$INSTDIR\uninstall.exe$\"'
+WriteUninstaller "$INSTDIR\uninstall.exe"
+SectionEnd
+Section Uninstall
+StrCpy $MultiUser.InstallMode "CurrentUser"
+SetShellVarContext all
+${teardown}
+SectionEnd
+`);
+    const compile = spawnSync(compiler, ['/V2', script], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+    assert.equal(compile.status, 0, `${compile.stdout}\n${compile.stderr}`);
+    assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true }).status, 0);
+    const installed = join(location, 'uninstall.exe');
+    const active = join(directory, 'active-uninstaller.exe');
+    copyFileSync(installed, active);
+    const retry = join(location, '.risunest-sync-removal');
+    mkdirSync(retry); writeFileSync(join(retry, 'complete'), 'true');
+    const binary = buildManagerStub(directory);
+    const releaseLock = holdDeletion(binary, installed);
+    try {
+      assert.equal(spawnSync(active, ['/S', `_?=${location}`], { timeout: 30000, windowsHide: true }).status, 1);
+      assert.equal(existsSync(installed), true);
+      assert.equal(readFileSync(join(retry, 'complete'), 'utf8'), 'true');
+      const registration = spawnSync('reg.exe', ['query', `HKCU\\${key}`, '/v', 'UninstallString'], { encoding: 'utf8', windowsHide: true });
+      assert.equal(registration.status, 0);
+      assert.ok(registration.stdout.includes(installed), 'Apps registration retains the same retry executable');
+    } finally { await releaseLock(); }
+    assert.equal(spawnSync(active, ['/S', `_?=${location}`], { timeout: 30000, windowsHide: true }).status, 0);
+    assert.equal(existsSync(installed), false);
+    assert.equal(existsSync(retry), false);
+    assert.equal(spawnSync('reg.exe', ['query', `HKCU\\${key}`], { windowsHide: true }).status, 1);
+    assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true }).status, 0);
+    mkdirSync(retry); writeFileSync(join(retry, 'complete'), 'true');
+    assert.equal(spawnSync(installed, ['/S', `_?=${location.toUpperCase()}`], { timeout: 30000, windowsHide: true }).status, 0, 'in-place removal leaves its image for the caller');
+    assert.equal(existsSync(installed), true);
+    assert.equal(existsSync(location), true);
+    assert.equal(existsSync(retry), false);
+    assert.equal(spawnSync('reg.exe', ['query', `HKCU\\${key}`], { windowsHide: true }).status, 1);
+    assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true }).status, 0);
+    mkdirSync(retry); writeFileSync(join(retry, 'complete'), 'true');
+    const registryDeletionDenied = deny => {
+      const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `
+        $ErrorActionPreference = 'Stop'
+        $key = $env:RISUNEST_SYNTHETIC_UNINSTALL_KEY
+        if (!$key.StartsWith('Software\\RisuNestSynthetic\\risunest-sync-finalize-')) { throw 'not a synthetic registry key' }
+        $rights = [System.Security.AccessControl.RegistryRights]::ReadPermissions -bor [System.Security.AccessControl.RegistryRights]::ChangePermissions
+        $registryKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($key, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, $rights)
+        try {
+          $acl = $registryKey.GetAccessControl()
+          $rule = [System.Security.AccessControl.RegistryAccessRule]::new([System.Security.Principal.WindowsIdentity]::GetCurrent().User, [System.Security.AccessControl.RegistryRights]::Delete, [System.Security.AccessControl.AccessControlType]::Deny)
+          ${deny ? '$acl.AddAccessRule($rule)' : '$acl.RemoveAccessRuleSpecific($rule)'}
+          $registryKey.SetAccessControl($acl)
+        } finally { $registryKey.Dispose() }
+      `], { encoding: 'utf8', windowsHide: true, env: { ...process.env, RISUNEST_SYNTHETIC_UNINSTALL_KEY: key } });
+      assert.equal(result.status, 0, result.stderr);
+    };
+    registryDeletionDenied(true);
+    try {
+      assert.equal(spawnSync(active, ['/S', `_?=${location}`], { timeout: 30000, windowsHide: true }).status, 1, 'access denied remains a removal failure');
+      assert.equal(existsSync(installed), true);
+      assert.equal(readFileSync(join(retry, 'complete'), 'utf8'), 'true');
+    } finally { registryDeletionDenied(false); }
+    assert.equal(spawnSync('reg.exe', ['delete', `HKCU\\${key}`, '/f'], { windowsHide: true }).status, 0);
+    assert.equal(spawnSync(active, ['/S', `_?=${location}`], { timeout: 30000, windowsHide: true }).status, 0, 'retry after registry removal finishes uninstall');
+    assert.equal(existsSync(installed), false);
+    assert.equal(existsSync(retry), false);
+  } finally {
+    spawnSync('reg.exe', ['delete', `HKCU\\${key}`, '/f'], { windowsHide: true });
+    assert.equal(dirname(directory), resolve(tmpdir()));
+    rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+}

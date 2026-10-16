@@ -10,6 +10,8 @@ import { replacePersistentDatabase } from "../storage/persistentDataRuntime.svel
 import { installAccountBackup } from "../storage/databaseRestore"
 import { isTauri } from "../platform"
 import { hasLibraryCharacters } from "../storage/libraryCharacters"
+import { getAccountColdStorageItem } from "../process/coldstorage.svelte"
+import { expandColdPayloads } from "../process/coldPayloadExpansion"
 
 export function risuLogin() {
     const win = window.open(hubURL + '/hub/login')
@@ -138,8 +140,14 @@ export async function loadRisuAccountBackup() {
 
         alertWait("Loading backup")
 
+        const candidate = await decodeRisuSave(buf.buffer)
+        const expansion = await expandColdPayloads(candidate, getAccountColdStorageItem)
+        if (expansion.unavailableKeys.length > 0) {
+            alertError(language.accountBackupUnavailable)
+            return
+        }
         let followupFailed = false
-        const outcome = await installAccountBackup(prepareExternalDatabaseImport(await decodeRisuSave(buf.buffer)), {
+        const outcome = await installAccountBackup(prepareExternalDatabaseImport(candidate), {
             replaceDatabase: replacePersistentDatabase,
             loadPlugins: async () => (await import('../plugins/plugins.svelte')).loadPlugins(),
             onPostCommitError: (error) => {

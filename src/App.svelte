@@ -47,7 +47,10 @@
     import { getStartupExclusions } from './ts/storage/deviceSettings';
     import LoadingIndicator from './lib/UI/GUI/LoadingIndicator.svelte';
     import SyncExitDialog from './lib/Others/SyncExitDialog.svelte';
+    import PluginStartupNotice from './lib/Others/PluginStartupNotice.svelte';
     import PersistentLocalSaveFailure from './lib/Others/PersistentLocalSaveFailure.svelte';
+    import SyncStoppedNotice from './lib/Others/SyncStoppedNotice.svelte';
+    import SyncStatusPanel from './lib/Others/SyncStatusPanel.svelte';
     import PersistentWorkingSetRecovery from './lib/Others/PersistentWorkingSetRecovery.svelte';
     import { persistentWorkingSetInputBlocked } from './ts/storage/persistentDataRuntime.svelte';
     import { restoreFocusAfterInputBlock } from './ts/ui/restoreFocusAfterInputBlock';
@@ -493,4 +496,13 @@
 </main>
 <SyncExitDialog />
 <PersistentWorkingSetRecovery />
-<PersistentLocalSaveFailure />
+<!-- Open settings place their close button at the top right; the notices start below it. The padding keeps card shadows inside the scroll box. -->
+<div class="pointer-events-none fixed right-0 z-[1000] flex max-h-[calc(100dvh-4rem)] flex-col gap-2 overflow-y-auto px-2 pt-2 pb-4 sm:left-auto sm:w-full sm:max-w-[464px] {$MobileGUI ? 'left-0 top-[64px]' : $settingsOpen ? 'left-0' : 'left-12 top-0'} [&>*]:pointer-events-auto" style:top={$settingsOpen && !$MobileGUI ? `${DBState.db.settingsCloseButtonSize + 8}px` : null}>
+    <PersistentLocalSaveFailure />
+    <!-- Onboarding shows the sync and plugin state itself. -->
+    {#if didFirstSetup && !$onboardingHold}
+        <PluginStartupNotice />
+        <SyncStoppedNotice />
+    {/if}
+</div>
+<SyncStatusPanel />

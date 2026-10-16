@@ -1,3 +1,5 @@
+import { createPluginStorageStore } from '../plugins/pluginStorageStore'
+import { setPluginStorageReloadHandler, PluginStorageObservation } from '../plugins/pluginStorageProtection'
 import {deriveEffectivePresetMirrors, deriveEffectivePersonaMirrors, deriveEffectiveToggleVariables, flushEffectivePresetEdits, flushEffectivePersonaEdits, flushEffectiveToggleEdits, presetMirrorMap, getExplicitGlobalChatVariables, translateRootUnitIntents} from './effectiveIdentityState'
 import { configurePersistentIdentityHooks } from './persistentIdentityHooks'
 import { describe, expect, it, vi } from 'vitest'
@@ -859,5 +861,149 @@ describe('LWW renderer save path', () => {
         expect(finish).toHaveBeenCalledOnce()
         expect(initialize).not.toHaveBeenCalled()
         initialize.mockRestore()
+    })
+})
+
+
+describe('received plugin storage protection', () => {
+    async function pluginHarness() {
+        const reload = vi.fn()
+        setPluginStorageReloadHandler(reload)
+        let storage!: ReturnType<typeof createPluginStorageStore>
+        const h = await runtimeHarness(undefined, { onPluginStorageChanged: owner => storage?.invalidateOwner(owner) })
+        const owner = crypto.randomUUID()
+        storage = createPluginStorageStore({ store: h.store,
+            getStorageAuthorityEpoch: () => h.runtime.getStorageAuthorityEpoch(),
+            assertPersistentMutationAllowed: epoch => h.runtime.assertPersistentMutationAllowed(epoch),
+            mutate: (mutations, check) => h.runtime.mutatePersistentPluginStorage('synthetic-plugin', mutations, check),
+        })
+        const guest = storage.forOwner(owner)
+        await guest.setItem('settings', { selected: 'old', refreshed: 0 })
+        const nativeCommit = h.store.commit.bind(h.store)
+        const localChanges: WorkingSetCommit[] = []
+        h.store.commit = async change => { localChanges.push(change); return nativeCommit(change) }
+        h.store.lwwStageReceive = async () => {}
+        h.store.lwwFinishReceive = async () => {}
+        const receive = async (value: unknown, options: { pause?: Promise<void>; unknown?: boolean; projectionFailure?: boolean; echo?: boolean } = {}) => {
+            const key = JSON.stringify(['plugin', owner, 'settings'])
+            h.store.lwwApplyReceive = async () => {
+                await options.pause
+                if (options.echo) return { revision: h.runtime.revision, affectedKeys: [], heldKeys: [], deferredKeys: [] }
+                const result = await nativeCommit({ expectedRevision: h.runtime.revision, pluginStorage: [value === undefined
+                    ? { type: 'delete', owner, key: 'settings' } : { type: 'set', owner, key: 'settings', value }] })
+                if (options.unknown) throw new Error('unknown durable outcome')
+                if (options.projectionFailure) vi.spyOn(h.store, 'acquireRevision').mockRejectedValueOnce(new Error('projection unavailable'))
+                return { ...result, affectedKeys: [key], heldKeys: [], deferredKeys: [] }
+            }
+            return h.runtime.applyLwwReceive({ bindingAuthority: 'synthetic', requestId: crypto.randomUUID(),
+                changes: [{ key, stamp: { physicalMs: '1', logical: '0', writerId: 'client-a' }, value: { kind: 'deleted' } }],
+                progress: { kind: 'server', cursor: '1' }, admittedTimeUpperMs: '100' })
+        }
+        return { ...h, owner, guest, storage, receive, localChanges, reload }
+    }
+
+    it.each(['startup', 'timer', 'unload'])('keeps client A durable while client B republishes its whole cached value at %s', async activity => {
+        const h = await pluginHarness()
+        const cached = await h.guest.getItem('settings') as { selected: string; refreshed: number }
+        await h.receive({ selected: 'client-a', refreshed: 1 })
+        h.localChanges.length = 0
+        await expect(h.guest.setItem('settings', { ...cached, refreshed: activity.length })).rejects.toThrow('PLUGIN_STORAGE_STALE')
+        expect((await h.store.readPluginStorage(h.owner, 'settings'))?.value).toEqual({ selected: 'client-a', refreshed: 1 })
+        expect(h.localChanges).toEqual([])
+        expect(h.reload).toHaveBeenCalled()
+        const reloaded = h.storage.forOwner(h.owner)
+        const fresh = await reloaded.getItem('settings') as object
+        await reloaded.setItem('settings', { ...fresh, refreshed: 2 })
+        expect((await h.store.readPluginStorage(h.owner, 'settings'))?.value).toEqual({ selected: 'client-a', refreshed: 2 })
+        h.guest.dispose(); reloaded.dispose()
+    })
+
+    it('checks a write queued behind receive, preserving writes ordered before it', async () => {
+        const h = await pluginHarness()
+        await h.guest.getItem('settings')
+        await h.guest.setItem('settings', { selected: 'before-receive' })
+        let release!: () => void
+        const pause = new Promise<void>(resolve => { release = resolve })
+        const receiving = h.receive({ selected: 'client-a' }, { pause })
+        const writing = h.guest.setItem('settings', { selected: 'stale-timer' })
+        const rejected = expect(writing).rejects.toThrow('PLUGIN_STORAGE_STALE')
+        release(); await receiving; await rejected
+        expect((await h.store.readPluginStorage(h.owner, 'settings'))?.value).toEqual({ selected: 'client-a' })
+        h.guest.dispose()
+    })
+
+    it('rejects clear and deletion without recreating remote deletions, but permits blind writes and unaffected keys', async () => {
+        const h = await pluginHarness()
+        await h.receive(undefined)
+        await expect(h.guest.clear()).rejects.toThrow('PLUGIN_STORAGE_STALE')
+        await expect(h.guest.removeItem('settings')).rejects.toThrow('PLUGIN_STORAGE_STALE')
+        expect(await h.store.readPluginStorage(h.owner, 'settings')).toBeNull()
+        await h.guest.setItem('unaffected', 'valid cleanup')
+        const blind = h.storage.forOwner(h.owner)
+        await blind.keys()
+        await blind.setItem('settings', 'blind')
+        expect((await h.store.readPluginStorage(h.owner, 'settings'))?.value).toBe('blind')
+        h.guest.dispose(); blind.dispose()
+    })
+
+    it.each([{ unknown: true }, { projectionFailure: true }])('fences a committed value before failed projection or an unknown apply result: %j', async options => {
+        const h = await pluginHarness()
+        await expect(h.receive('remote', options)).rejects.toThrow()
+        await expect(h.guest.setItem('settings', 'old')).rejects.toThrow()
+        expect((await h.store.readPluginStorage(h.owner, 'settings'))?.value).toBe('remote')
+        h.guest.dispose()
+    })
+
+    it('does not advance for an echo and documents the pre-receive LWW boundary', async () => {
+        const h = await pluginHarness()
+        await h.guest.getItem('settings')
+        await h.receive(null, { echo: true })
+        await h.guest.setItem('settings', 'committed before learning of remote update')
+        expect((await h.store.readPluginStorage(h.owner, 'settings'))?.value).toBe('committed before learning of remote update')
+        expect(h.reload).not.toHaveBeenCalled()
+        h.guest.dispose()
+    })
+
+    it('observes the keys a blind clear actually deleted', async () => {
+        const h = await pluginHarness()
+        const blind = h.storage.forOwner(h.owner)
+        await blind.clear()
+        h.guest.dispose()
+        await h.receive('remote reintroduction')
+        expect(h.reload).toHaveBeenCalled()
+        await expect(blind.setItem('settings', 'stale')).rejects.toThrow('PLUGIN_STORAGE_STALE')
+        blind.dispose()
+    })
+
+    it('a fresh empty owner snapshot observes remote deletions', async () => {
+        const h = await pluginHarness()
+        await h.receive(undefined)
+        await expect(h.guest.clear()).rejects.toThrow('PLUGIN_STORAGE_STALE')
+        await expect(h.guest.snapshot()).resolves.toEqual({})
+        await expect(h.guest.clear()).resolves.toBeUndefined()
+        h.guest.dispose()
+    })
+
+    it('fences observations after an unknown deferred drain outcome', async () => {
+        const h = await pluginHarness()
+        h.store.lwwBindingState = async () => ({ targetAuthority: 'synthetic' })
+        h.store.lwwDrainDeferred = async () => { throw new Error('unknown drain') }
+        await expect(h.runtime.drainLwwDeferred()).rejects.toThrow('unknown drain')
+        await expect(h.guest.setItem('settings', 'stale')).rejects.toThrow('PLUGIN_STORAGE_STALE')
+        h.guest.dispose()
+    })
+
+    it('checks database-permission unit commits inside the same receive queue', async () => {
+        const h = await pluginHarness()
+        const observation = new PluginStorageObservation(h.owner)
+        observation.observe('settings')
+        const mutation = { type: 'set' as const, owner: h.owner, key: 'settings', value: 'stale database snapshot' }
+        const check = observation.prepareWrite([mutation])
+        await h.receive('remote')
+        h.localChanges.length = 0
+        await expect(h.runtime.commitPersistentUnitIntent('database-permission', [{ key: JSON.stringify(['plugin', h.owner, 'settings']), type: 'set', value: mutation.value }], [], [], undefined, check)).rejects.toThrow('PLUGIN_STORAGE_STALE')
+        expect((await h.store.readPluginStorage(h.owner, 'settings'))?.value).toBe('remote')
+        expect(h.localChanges).toEqual([])
+        observation.dispose(); h.guest.dispose()
     })
 })

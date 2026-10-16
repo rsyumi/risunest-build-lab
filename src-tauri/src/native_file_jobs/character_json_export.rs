@@ -584,12 +584,12 @@ where
     )?;
     let total_items = u64::try_from(sources.iter().filter(|source| source.is_some()).count())
         .map_err(|_| invalid_input("character JSON asset count is invalid"))?;
-    job.set_progress(JobProgress {
+    job.set_export_progress(JobProgress {
         completed_bytes: 0,
         total_bytes: None,
         completed_items: 0,
         total_items: Some(total_items),
-    })
+    }, 0, None)
     .map_err(job_error)?;
 
     let source = owned_directory.join("character.json");
@@ -598,7 +598,7 @@ where
         .write(true)
         .open(&source)
         .map_err(io_error)?;
-    let output = BufWriter::with_capacity(COPY_BUFFER_BYTES, file);
+    let output = BufWriter::with_capacity(COPY_BUFFER_BYTES, super::export::ProgressWriter::new(file, job));
     let mut output = LimitedWriter::new(output, maximum_bytes);
     write_json_value(
         &mut output,
@@ -612,12 +612,12 @@ where
     output.inner.get_ref().sync_all().map_err(io_error)?;
     drop(output);
     let source_bytes = fs::metadata(&source).map_err(io_error)?.len();
-    job.set_progress(JobProgress {
+    job.set_export_progress(JobProgress {
         completed_bytes: source_bytes,
         total_bytes: Some(source_bytes.saturating_mul(2)),
         completed_items: total_items,
         total_items: Some(total_items),
-    })
+    }, source_bytes, None)
     .map_err(job_error)?;
 
     if job.is_cancel_requested() {
@@ -663,12 +663,12 @@ where
         &destination_path,
         || job.is_cancel_requested() || phase_failure.borrow().is_some(),
         |progress| {
-            if let Err(error) = job.set_progress(JobProgress {
+            if let Err(error) = job.set_export_progress(JobProgress {
                 completed_bytes: source_bytes.saturating_add(progress.copied_bytes),
                 total_bytes: Some(source_bytes.saturating_mul(2)),
                 completed_items: total_items,
                 total_items: Some(total_items),
-            }) {
+            }, progress.copied_bytes, Some(source_bytes)) {
                 *phase_failure.borrow_mut() = Some(error);
             }
         },

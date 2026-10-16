@@ -91,6 +91,10 @@ export class ExternalStorageBridge {
         return this.native('external_storage_prepare_renewal', { connectionId })
     }
 
+    changeEndpoint(connectionId: string, endpoint: string): Promise<ExternalConnectionResult> {
+        return this.native('external_storage_change_endpoint', { connectionId, endpoint })
+    }
+
     unlockConnection(connectionId: string, recoveryKey: string): Promise<void> {
         return this.native('external_storage_unlock_connection', { connectionId, recoveryKey })
     }

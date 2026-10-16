@@ -79,6 +79,10 @@ export function hasRetryableCommittedWorkingSetContinuation(runtime: object, aut
     return pending?.runtime === runtime && pending.authorityEpoch === authorityEpoch && pending.retainOnFailure
 }
 
+export function hasCommittedWorkingSetContinuation(runtime: object, authorityEpoch: number): boolean {
+    return pending?.runtime === runtime && pending.authorityEpoch === authorityEpoch
+}
+
 export function rebaseCommittedWorkingSetContinuation(runtime: object, authorityEpoch: number, currentEpoch: number): void {
     if (hasRetryableCommittedWorkingSetContinuation(runtime, authorityEpoch)) pending = {...pending!, authorityEpoch:currentEpoch}
 }

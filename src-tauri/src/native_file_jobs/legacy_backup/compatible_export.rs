@@ -187,7 +187,7 @@ fn export_compatible_local_backup_with_limit(
             .open(&archive_path)
             .map_err(io_job_error)?;
         let written =
-            write_legacy_local_backup_v1(&mut archive, &attachments.entries, &cancellation)
+            write_legacy_local_backup_v1(&mut super::super::export::ProgressWriter::new(&mut archive, job), &attachments.entries, &cancellation)
                 .map_err(local_backup_error)?;
         if !written.is_complete() {
             return Err(NativeJobError::new(
@@ -298,12 +298,14 @@ fn export_compatible_local_backup_with_limit(
             output,
             || job.is_cancel_requested() || phase_error.borrow().is_some(),
             |progress| {
-                let _ = job.set_progress(JobProgress {
+                if let Err(error) = job.set_export_progress(JobProgress {
                     completed_bytes: written.archive_bytes.saturating_add(progress.copied_bytes),
                     total_bytes: Some(written.archive_bytes.saturating_mul(2)),
                     completed_items: written.written_entries,
                     total_items: Some(written.written_entries),
-                });
+                }, progress.copied_bytes, Some(written.archive_bytes)) {
+                    *phase_error.borrow_mut() = Some(error);
+                }
             },
             || {
                 job.set_phase(JobPhase::FinalizingExport).map_err(|error| {

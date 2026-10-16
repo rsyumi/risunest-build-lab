@@ -9,7 +9,7 @@ import type { ToggleValues } from 'src/ts/toggleBindings'
 
 const syntax = vi.hoisted(() => ({ type: 'toggle' }))
 const toggleBind = vi.hoisted(() => ({
-    props: {} as { unpinKeys?: string[], onApplyPreset?: (values: ToggleValues, keys: readonly string[]) => void },
+    props: {} as { unpinKeys?: string[], onApplyPreset?: (values: ToggleValues, keys: readonly string[]) => Promise<boolean> },
 }))
 
 vi.mock('src/ts/stores.svelte', () => {
@@ -251,6 +251,32 @@ it('previews replacing a local override without removing it before the binding i
     expect(customSwitch().checked).toBe(false)
     expect(chat().GLGlobalVariables).toEqual({ toggle_example: '1' })
     expect(chat().savedToggleValues).toEqual({ toggle_example: '0' })
+    expect(DBState.db.globalChatVariables.toggle_example).toBe('0')
+})
+
+it.each([false, true])('applies and clears presets in local overrides (bound: %s)', async (bound) => {
+    chat().useLocallySetGlobalVariables = true
+    chat().GLGlobalVariables = { toggle_example: '0', unrelated: 'keep' }
+    if (bound) chat().savedToggleValues = { toggle_example: '0' }
+    await tick()
+    await expect(toggleBind.props.onApplyPreset!({ toggle_example: '1' }, ['toggle_example'])).resolves.toBe(true)
+    await tick()
+    expect(customSwitch().checked).toBe(true)
+    expect(chat().GLGlobalVariables).toEqual({ toggle_example: '1', unrelated: 'keep' })
+    expect(DBState.db.globalChatVariables.toggle_example).toBe('0')
+    await expect(toggleBind.props.onApplyPreset!({}, ['toggle_example'])).resolves.toBe(true)
+    await tick()
+    expect(chat().GLGlobalVariables).toEqual({ unrelated: 'keep' })
+    expect(customSwitch().checked).toBe(false)
+    expect(chat().savedToggleValues).toEqual(bound ? { toggle_example: '0' } : undefined)
+})
+
+it('reports a refused global preset without changing either value during generation', async () => {
+    chat().GLGlobalVariables = { toggle_example: '1' }
+    doingChat.set(true)
+    await tick()
+    await expect(toggleBind.props.onApplyPreset!({ toggle_example: '0' }, ['toggle_example'])).resolves.toBe(false)
+    expect(chat().GLGlobalVariables.toggle_example).toBe('1')
     expect(DBState.db.globalChatVariables.toggle_example).toBe('0')
 })
 

@@ -1,3 +1,4 @@
+import { observePluginRemoteChanges, requestPluginStorageReload, StalePluginStorageError } from './pluginStorageProtection'
 import { invoke } from '@tauri-apps/api/core'
 import { isTauri } from '../platform'
 import { pluginDeviceStorage, pluginDevicePrefix } from './pluginDeviceStorage'
@@ -8,14 +9,15 @@ export type PluginDeviceSpace = 'string' | 'json'
 export const PLUGIN_DEVICE_CACHE_BYTES = 4 * 1024 * 1024
 
 // Conservative UTF-16 payload and per-entry allowance, not a storage limit.
-function cacheEntryBytes(key: string, value: string): number {
-    return 64 + 2 * (key.length + value.length)
+function cacheEntryBytes(key: string, value: string, sequence = ''): number {
+    return 128 + 2 * (key.length + value.length + sequence.length)
 }
 
 export interface PluginDeviceEntry {
     space: PluginDeviceSpace
     key: string
     value: string
+    sequence?: string
 }
 
 export interface PluginDeviceHydration {
@@ -29,11 +31,14 @@ export type PluginDeviceMutation =
     | { type: 'delete'; space: PluginDeviceSpace; key: string }
     | { type: 'clear'; space: PluginDeviceSpace }
 
+export interface PluginDeviceObservation { space: PluginDeviceSpace; key: string; sequence: string }
+
 export interface PluginDeviceBackend {
+    sequence?(owner: string, space: PluginDeviceSpace, key: string): Promise<string>
     hydrate(owner: string): Promise<PluginDeviceHydration>
     read(owner: string, space: PluginDeviceSpace, key: string): Promise<string | null>
     keys(owner: string, space: PluginDeviceSpace): Promise<string[]>
-    write(owner: string, mutations: readonly PluginDeviceMutation[]): Promise<void>
+    write(owner: string, mutations: readonly PluginDeviceMutation[], observations?: readonly PluginDeviceObservation[]): Promise<void | PluginDeviceObservation[]>
 }
 
 /**
@@ -110,7 +115,7 @@ export function createBrowserPluginDeviceBackend(): PluginDeviceBackend {
         async keys(owner: string, space: PluginDeviceSpace): Promise<string[]> {
             return space === 'string' ? localKeys(owner) : await forageKeys(owner)
         },
-        async write(owner: string, mutations: readonly PluginDeviceMutation[]): Promise<void> {
+        async write(owner: string, mutations: readonly PluginDeviceMutation[], observations?: readonly PluginDeviceObservation[]): Promise<void | PluginDeviceObservation[]> {
             for (const mutation of mutations) {
                 if (mutation.type === 'clear') {
                     const keys =
@@ -147,6 +152,7 @@ export function createBrowserPluginDeviceBackend(): PluginDeviceBackend {
  */
 export function createNativePluginDeviceBackend(): PluginDeviceBackend {
     return {
+        sequence: (owner, space, key) => invoke<string>('pds_plugin_device_sequence', { owner, space, key }),
         async hydrate(owner: string): Promise<PluginDeviceHydration> {
             return await invoke<PluginDeviceHydration>('pds_hydrate_plugin_device_storage', {
                 owner,
@@ -162,8 +168,8 @@ export function createNativePluginDeviceBackend(): PluginDeviceBackend {
         async keys(owner: string, space: PluginDeviceSpace): Promise<string[]> {
             return await invoke<string[]>('pds_list_plugin_device_keys', { owner, space })
         },
-        async write(owner: string, mutations: readonly PluginDeviceMutation[]): Promise<void> {
-            await writeNativePluginDeviceValues(owner, mutations)
+        async write(owner: string, mutations: readonly PluginDeviceMutation[], observations?: readonly PluginDeviceObservation[]): Promise<void | PluginDeviceObservation[]> {
+            return await writeNativePluginDeviceValues(owner, mutations, observations)
         },
     }
 }
@@ -174,18 +180,48 @@ export function createNativePluginDeviceBackend(): PluginDeviceBackend {
  * out as single changes and the cache follows the commit, never the other way
  * round.
  */
+const liveKeyspaces = new Set<PluginDeviceKeyspace>()
+
 export class PluginDeviceKeyspace {
     readonly #owner: string
     readonly #backend: PluginDeviceBackend
-    #cache: Map<PluginDeviceSpace, Map<string, string>> | null = null
+    #cache: Map<PluginDeviceSpace, Map<string, PluginDeviceEntry>> | null = null
     #hydration: Promise<void> | null = null
     #cacheBytes = 0
     #generation = 0
     #writeSequence = 0
+    readonly #observed = new Map<string, PluginDeviceObservation>()
+    readonly #stopObserving: () => void
 
     constructor(owner: string, backend: PluginDeviceBackend) {
         this.#owner = owner
         this.#backend = backend
+        liveKeyspaces.add(this)
+        this.#stopObserving = observePluginRemoteChanges(keys => {
+            let reload = false
+            for (const unit of keys) {
+                const [kind, owner, space, key] = JSON.parse(unit) as string[]
+                if (kind !== 'plugin-local' || owner !== this.#owner) continue
+                this.invalidate()
+                reload ||= this.#observed.has(JSON.stringify([space, key]))
+            }
+            return reload
+        })
+    }
+
+    dispose(): void { this.#stopObserving(); liveKeyspaces.delete(this) }
+    belongsTo(owner: string): boolean { return this.#owner === owner }
+
+    async #reloadIfStale(observations: readonly PluginDeviceObservation[]): Promise<void> {
+        if (!this.#backend.sequence || !liveKeyspaces.has(this)) return
+        try {
+            for (const value of observations) {
+                if (await this.#backend.sequence(this.#owner, value.space, value.key) !== value.sequence) {
+                    requestPluginStorageReload()
+                    return
+                }
+            }
+        } catch { requestPluginStorageReload() }
     }
 
     async #hydrate(): Promise<void> {
@@ -201,15 +237,15 @@ export class PluginDeviceKeyspace {
                 this.#cache = null
                 return
             }
-            const cache = new Map<PluginDeviceSpace, Map<string, string>>([
+            const cache = new Map<PluginDeviceSpace, Map<string, PluginDeviceEntry>>([
                 ['string', new Map()],
                 ['json', new Map()],
             ])
             let bytes = 0
             for (const entry of loaded.entries) {
-                bytes += cacheEntryBytes(entry.key, entry.value)
+                bytes += cacheEntryBytes(entry.key, entry.value, entry.sequence)
                 if (bytes > PLUGIN_DEVICE_CACHE_BYTES) return
-                cache.get(entry.space)?.set(entry.key, entry.value)
+                cache.get(entry.space)?.set(entry.key, entry)
             }
             this.#cacheBytes = bytes
             this.#cache = cache
@@ -231,13 +267,20 @@ export class PluginDeviceKeyspace {
     }
 
     async #write(mutation: PluginDeviceMutation): Promise<void> {
+        const observationGeneration = this.#generation
+        const observations = [...this.#observed.values()].filter(value => value.space === mutation.space && (mutation.type === 'clear' || value.key === mutation.key))
         await this.#hydrate()
         const generation = this.#generation
         const sequence = ++this.#writeSequence
+        let committed: readonly PluginDeviceObservation[] = []
         try {
-            await this.#backend.write(this.#owner, [mutation])
+            const observed = await this.#backend.write(this.#owner, [mutation], observations)
+            committed = observed || []
+            for (const value of observed || []) this.#observed.set(JSON.stringify([value.space, value.key]), value)
+            if (observationGeneration !== this.#generation) await this.#reloadIfStale(observed || [])
         } catch (error) {
             this.invalidate()
+            if (JSON.stringify(error)?.includes('PLUGIN_STORAGE_STALE') || String(error).includes('PLUGIN_STORAGE_STALE')) throw new StalePluginStorageError()
             throw error
         }
         if (generation !== this.#generation || sequence !== this.#writeSequence) {
@@ -248,29 +291,45 @@ export class PluginDeviceKeyspace {
         const cache = this.#cache?.get(mutation.space)
         if (!cache) return
         if (mutation.type === 'clear') {
-            for (const [key, value] of cache) this.#cacheBytes -= cacheEntryBytes(key, value)
+            for (const [key, entry] of cache) this.#cacheBytes -= cacheEntryBytes(key, entry.value, entry.sequence)
             cache.clear()
             return
         }
         const previous = cache.get(mutation.key)
-        if (previous !== undefined) this.#cacheBytes -= cacheEntryBytes(mutation.key, previous)
+        if (previous !== undefined) this.#cacheBytes -= cacheEntryBytes(mutation.key, previous.value, previous.sequence)
         if (mutation.type === 'delete') {
             cache.delete(mutation.key)
             return
         }
-        this.#cacheBytes += cacheEntryBytes(mutation.key, mutation.value)
+        const entry = { space: mutation.space, key: mutation.key, value: mutation.value,
+            sequence: committed.find(value => value.space === mutation.space && value.key === mutation.key)?.sequence }
+        this.#cacheBytes += cacheEntryBytes(entry.key, entry.value, entry.sequence)
         if (this.#cacheBytes > PLUGIN_DEVICE_CACHE_BYTES) {
             this.#cache = null
             this.#cacheBytes = 0
             return
         }
-        cache.set(mutation.key, mutation.value)
+        cache.set(mutation.key, entry)
     }
 
     async getItem(space: PluginDeviceSpace, key: string): Promise<string | null> {
         await this.#hydrate()
         const cached = this.#cache?.get(space)
-        if (cached) return cached.get(key) ?? null
+        const entry = cached?.get(key)
+        if (this.#backend.sequence) {
+            if (entry?.sequence !== undefined) {
+                this.#observed.set(JSON.stringify([space, key]), { space, key, sequence: entry.sequence })
+                return entry.value
+            }
+            const generation = this.#generation
+            const sequence = await this.#backend.sequence(this.#owner, space, key)
+            const observation = { space, key, sequence }
+            this.#observed.set(JSON.stringify([space, key]), observation)
+            const value = await this.#backend.read(this.#owner, space, key)
+            if (generation !== this.#generation) await this.#reloadIfStale([observation])
+            return value
+        }
+        if (cached) return entry?.value ?? null
         return await this.#backend.read(this.#owner, space, key)
     }
 
@@ -302,6 +361,10 @@ function activeBackend(): PluginDeviceBackend {
     return backend
 }
 
+export function createPluginDeviceKeyspace(owner: string): PluginDeviceKeyspace {
+    return new PluginDeviceKeyspace(owner, activeBackend())
+}
+
 export function getPluginDeviceKeyspace(owner: string): PluginDeviceKeyspace {
     let keyspace = keyspaces.get(owner)
     if (!keyspace) {
@@ -313,7 +376,7 @@ export function getPluginDeviceKeyspace(owner: string): PluginDeviceKeyspace {
 
 /** Invalidates held wrappers too; plugin-owned copies remain outside this cache. */
 export function invalidatePluginDeviceKeyspaces(owner?: string): void {
-    if (owner === undefined) {
-        for (const keyspace of keyspaces.values()) keyspace.invalidate()
-    } else keyspaces.get(owner)?.invalidate()
+    for (const keyspace of liveKeyspaces) {
+        if (owner === undefined || keyspace.belongsTo(owner)) keyspace.invalidate()
+    }
 }

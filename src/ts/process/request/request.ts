@@ -1,3 +1,4 @@
+import { pluginStartupGate } from '../../plugins/pluginStartupGate'
 import { Ollama } from 'ollama/dist/browser.mjs';
 import { createRequestAbortScope } from '../../network/requestAbortScope';
 import { language } from "../../../lang";
@@ -205,6 +206,7 @@ function normalizeOllamaStreamResponse(response: Response): Response {
 }
 
 export async function requestChatData(arg:requestDataArgument, model:ModelModeExtended, abortSignal:AbortSignal=null):Promise<requestDataResponse> {
+    if (pluginStartupGate.refuse()) return { type: 'fail', result: language.risuNest.pluginStartup.requestRefused }
     const db = getDatabase()
     const fallBackModels:string[] = safeStructuredClone(db?.fallbackModels?.[model] ?? [])
     const tools = arg.tools ?? (await getTools())
@@ -440,6 +442,7 @@ export function reformater(formated:OpenAIChat[],modelInfo:LLMModel|LLMFlags[]){
 
 
 export async function requestChatDataMain(arg:requestDataArgument, model:ModelModeExtended, abortSignal:AbortSignal=null):Promise<requestDataResponse> {
+    if (pluginStartupGate.refuse()) return { type: 'fail', result: language.risuNest.pluginStartup.requestRefused }
     const db = getDatabase()
     const targ:RequestDataArgumentExtended = arg
 

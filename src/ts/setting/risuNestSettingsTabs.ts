@@ -16,6 +16,8 @@ export const RISUNEST_SETTINGS_TABS: readonly RisuNestSettingsTab[] = [
  * the sync server from a deep link. The page reads it when it mounts or while it is open, then
  * clears it, so the next plain visit starts on the first tab again.
  */
+export const activeRisuNestSettingsTab = writable<RisuNestSettingsTab | null>(null)
+
 export const risuNestSettingsTabRequest = writable<RisuNestSettingsTab | null>(null)
 
 export function openRisuNestSettingsTab(tab: RisuNestSettingsTab): void {

@@ -322,6 +322,13 @@ fn a_saved_publication_keeps_its_asset_pins_across_a_page_reload_until_it_is_sen
             .query_row("SELECT EXISTS(SELECT 1 FROM external_lww_segments WHERE json_extract(metadata,'$.assetJob.jobId')=?1)",
                 [&journals[0]], |row| row.get(0)).unwrap();
         assert!(saved);
+        let writer = f.a.lww_clock_state().unwrap().writer_id;
+        let (publication, _) = f.a.external_lww_pending(&f.sender.target_scope(), &writer).unwrap().unwrap();
+        f.a.device_store().unwrap().connection().execute(
+            "UPDATE external_lww_segments SET metadata=?1 WHERE target=?2 AND writer=?3 AND seq=?4",
+            rusqlite::params![serde_json::to_string(&publication).unwrap(), publication.target, writer, publication.seq.0.to_string()],
+        ).unwrap();
+        f.restart_a();
         let native_jobs = || -> std::result::Result<Vec<crate::native_file_jobs::JobStatus>, String> { Ok(Vec::new()) };
         let open_store = || f.a.open_native_job_store().map_err(|error| error.to_string());
         DurableCasJobState::default().sweep_after_page_start(&root, &CasJobOwnerProbe {

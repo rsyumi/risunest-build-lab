@@ -818,6 +818,7 @@ fn collect_generation_asset_roots(
 fn collect_lww_asset_roots(connection: &Connection) -> StoreResult<AssetRootSet> {
     use risunest_sync_wire::unit::{UnitKey, UnitValue};
     let mut roots = AssetRootSet::default();
+    let mut object_units = Vec::new();
     for table in ["lww_units", "lww_receive_rows", "snapshot_original_units"] {
         let predicate = if table == "lww_receive_rows" { " WHERE status IN ('held','deferred')" } else { "" };
         let mut statement = connection.prepare(&format!("SELECT key,value FROM {table}{predicate}"))?;
@@ -836,15 +837,7 @@ fn collect_lww_asset_roots(connection: &Connection) -> StoreResult<AssetRootSet>
                         observe_json_value(&value,None,&mut roots);
                     }
                     UnitValue::Object {..} => {
-                        let inventory=super::external_capture::original_unit_dependency_inventory(&[(key,value)].into_iter().collect(),&|hash| {
-                            let length:Option<i64>=connection.query_row("SELECT length(body) FROM message_page_objects WHERE hash=?1",[hash],|row|row.get(0)).optional()?;
-                            if length.is_some_and(|length|length<0 || length as u64>risunest_sync_wire::MAX_METADATA_BYTES as u64) {return Err(validation("GC control exceeds its byte limit"));}
-                            Ok(connection.query_row("SELECT body FROM message_page_objects WHERE hash=?1",[hash],|row|row.get(0)).optional()?)
-                        },&|hash| {
-                            let size:Option<i64>=connection.query_row("SELECT byte_size FROM asset_objects WHERE object_hash=?1",[hash],|row|row.get(0)).optional()?;
-                            size.map(|size|u64::try_from(size).map_err(|_|validation("GC payload size is invalid"))).transpose()
-                        },&crate::local_backup::NeverCancelled,false,&mut |_,_,_|Ok(()))?;
-                        roots.object_hashes.extend(inventory.payloads.into_keys());
+                        object_units.push(Ok((key, value)));
                     }
                     UnitValue::Inline {..} | UnitValue::Deleted => {}
                 }
@@ -852,6 +845,16 @@ fn collect_lww_asset_roots(connection: &Connection) -> StoreResult<AssetRootSet>
             })();
             if result.is_err() {roots.retain_all_objects=true;roots.blockers.insert("lww-source-unscannable".into());}
         }
+    }
+    let inventory = super::external_capture::streamed_unit_dependency_inventory(object_units, &|hash| {
+        Ok(connection.prepare_cached("SELECT body FROM message_page_objects WHERE hash=?1")?.query_row([hash], |row| row.get(0)).optional()?)
+    }, &|hash| {
+        let size: Option<i64> = connection.prepare_cached("SELECT byte_size FROM asset_objects WHERE object_hash=?1")?.query_row([hash], |row| row.get(0)).optional()?;
+        size.map(|size| u64::try_from(size).map_err(|_| validation("GC payload size is invalid"))).transpose()
+    }, &crate::local_backup::NeverCancelled, false, &mut |_, _, _| Ok(()));
+    match inventory {
+        Ok(inventory) => roots.object_hashes.extend(inventory.payloads.into_keys()),
+        Err(_) => { roots.retain_all_objects = true; roots.blockers.insert("lww-source-unscannable".into()); }
     }
     let mut statement=connection.prepare("SELECT logical_key,kind FROM asset_aliases WHERE object_hash IS NOT NULL")?;
     let mut rows=statement.query([])?;
@@ -1698,6 +1701,51 @@ mod lww_inline_root_tests {
             roots.blockers.insert("lww-source-unscannable".into());
         }
         roots
+    }
+
+    #[test]
+    fn shared_object_dependencies_are_looked_up_once_across_all_retained_versions() {
+        use rusqlite::ffi;
+        struct Trace { database: *mut ffi::sqlite3, queries: Box<usize> }
+        impl Drop for Trace {
+            fn drop(&mut self) { unsafe { ffi::sqlite3_trace_v2(self.database, 0, None, std::ptr::null_mut()); } }
+        }
+        unsafe extern "C" fn count(_: u32, context: *mut std::ffi::c_void, statement: *mut std::ffi::c_void, _: *mut std::ffi::c_void) -> i32 {
+            let sql = unsafe { ffi::sqlite3_sql(statement.cast()) };
+            if !sql.is_null() && unsafe { std::ffi::CStr::from_ptr(sql) }.to_bytes().starts_with(b"SELECT byte_size FROM asset_objects") {
+                unsafe { *context.cast::<usize>() += 1; }
+            }
+            0
+        }
+        for units in [16, 64] {
+            let connection = library();
+            connection.execute_batch("CREATE TABLE asset_objects (object_hash TEXT PRIMARY KEY,byte_size INTEGER)").unwrap();
+            let body = "11".repeat(32);
+            let dependency = "22".repeat(32);
+            for hash in [&body, &dependency] { connection.execute("INSERT INTO asset_objects VALUES(?1,1)", [hash]).unwrap(); }
+            let mut descriptor = risunest_sync_wire::descriptor::RecordDescriptor::content(body.clone());
+            descriptor.dependencies.push(dependency.clone());
+            let value = serde_json::to_string(&UnitValue::object(descriptor).unwrap()).unwrap();
+            for index in 0..units {
+                let key = serde_json::to_string(&vec!["future".to_owned(), format!("synthetic-{index}")]).unwrap();
+                for table in ["lww_units", "snapshot_original_units"] {
+                    connection.execute(&format!("INSERT INTO {table} VALUES(?1,?2)"), [&key, &value]).unwrap();
+                }
+            }
+            let mut trace = Trace { database: unsafe { connection.handle() }, queries: Box::new(0) };
+            assert_eq!(unsafe { ffi::sqlite3_trace_v2(trace.database, ffi::SQLITE_TRACE_STMT as u32, Some(count), (&mut *trace.queries as *mut usize).cast()) }, ffi::SQLITE_OK);
+            let steps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed = steps.clone();
+            connection.progress_handler(1, Some(move || { observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed); false })).unwrap();
+            let roots = collect_lww_asset_roots(&connection).unwrap();
+            connection.progress_handler(0, None::<fn() -> bool>).unwrap();
+            assert!(!roots.retain_all_objects);
+            assert_eq!(roots.object_hashes, [body, dependency].into_iter().collect());
+            assert_eq!(*trace.queries, 2, "shared payloads are resolved once for {units} units and their retained versions");
+            let steps = steps.load(std::sync::atomic::Ordering::Relaxed);
+            assert!(steps > 0 && steps <= units * 2 * 6 + 100, "shared dependency scans used {steps} SQLite steps for {} retained versions", units * 2);
+            eprintln!("dependency_inventory units={} payload_queries={} sqlite_steps={steps}", units * 2, trace.queries);
+        }
     }
 
     #[test]

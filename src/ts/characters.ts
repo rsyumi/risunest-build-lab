@@ -1013,19 +1013,27 @@ export async function changeChar(index: number, arg:{
         await yieldToUi()
         if (!isRestoreCurrent()) return false
         if (!isRestoreCurrent()) return false
-        const expectedNavigationGeneration = restoreNavigationGeneration + 1
+        let expectedNavigationGeneration = restoreNavigationGeneration + 1
+        let exhaustedGeneration: number | undefined
         const activationOptions = {
+            onRetryExhausted: (generation: number) => { exhaustedGeneration = generation },
             normalize: (candidate: character) =>
                 applyHypaV3AlwaysToggleOn(characterFormatUpdate(candidate, {
                     updateInteraction: true,
                 })),
         }
         let activated = await activateCharacter(chaId, activationOptions)
-        if (!activated) {
-            if (getPersistentNavigationGeneration() !== expectedNavigationGeneration) return false
+        if (!activated && exhaustedGeneration === undefined) {
+            if (!activity.isCurrent() || getPersistentNavigationGeneration() !== expectedNavigationGeneration) return false
+            expectedNavigationGeneration += 1
             activated = await activateCharacter(chaId, activationOptions)
         }
-        if(!activated) return false
+        if (!activated) {
+            if (activity.isCurrent() && getPersistentNavigationGeneration() === (exhaustedGeneration ?? expectedNavigationGeneration)) {
+                alertToast(language.characterSelectionFailed)
+            }
+            return false
+        }
         if (!activity.isCurrent()) return false
         return true
     } catch (error) {

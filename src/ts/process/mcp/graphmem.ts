@@ -100,7 +100,8 @@ export class GraphMemClient extends MCPClientLike {
         let graph: GraphIndex[] = []
 
         try {
-            graph = JSON.parse(getChatVar("graphmem_graph")) as GraphIndex[];
+            const stored = JSON.parse(getChatVar("graphmem_graph"));
+            if (Array.isArray(stored)) graph = stored;
         } catch (error) {}
 
         graph.push({ name, summary, connections });

@@ -147,9 +147,9 @@ export async function deletePluginDataItems(
         const device = owned.filter((item) => item.space !== undefined)
         const library = owned.filter((item) => item.space === undefined)
         if (library.length > 0) {
-            await pluginStorageStore
-                .forOwner(owner)
-                .mutate(library.map((item) => ({ type: 'delete', key: item.key })))
+            const storage = pluginStorageStore.forOwner(owner)
+            try { await storage.mutate(library.map((item) => ({ type: 'delete', key: item.key }))) }
+            finally { storage.dispose() }
         }
         if (device.length === 0) continue
         const mutations = device.map((item) => ({

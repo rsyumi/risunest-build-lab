@@ -41,6 +41,7 @@
     import { language } from "../../lang";
     import isEqual from "lodash/isEqual";
     import SidebarAvatar from "./SidebarAvatar.svelte";
+    import SyncStatusButton from "./SyncStatusButton.svelte";
     import BaseRoundedButton from "../UI/BaseRoundedButton.svelte";
     import { getCharacterIndexObject, selectSingleFile } from "src/ts/util";
     import { v4 } from "uuid";
@@ -55,6 +56,13 @@
     import { RISU_SIDEBAR_DRAG_TYPE } from "src/ts/dragTypes";
     import { sidebarTouchDrag } from "src/ts/gui/sidebarTouchDrag";
   import { clearCharacterSelection } from "../workingSetNavigation";
+  import { onDestroy } from "svelte";
+  import { RepresentativeImageList } from "src/ts/ui/representativeImagePriority";
+  const imagePriority = new RepresentativeImageList(false);
+  onDestroy(() => imagePriority.dispose());
+  $effect(() => imagePriority.setOrder(charImages.flatMap(char => char.type === 'normal'
+    ? [char.img] : [char.img, ...(openFolders.includes(char.id) ? char.folder.map(child => child.img) : [])]),
+    charImages.some(char => char.type === 'folder')));
   let sideBarMode = $state(0);
   let editMode = $state(false);
   let menuMode = $state(0);
@@ -469,6 +477,7 @@
   <ShellIcon />
   <span class="text-xs">{language.playground.playground}</span>
 </button>
+<SyncStatusButton variant="menu" />
 </div>
 {:else}
 <div
@@ -601,11 +610,12 @@
               rounded={IconRounded} 
               name={char.name}
               chaId={DBState.db.characters[char.index]?.chaId}
+              {imagePriority} imageReference={char.img}
             />
           {:else if char.type === "folder"}
             {#key char.color}
             {#key char.name}
-              <SidebarAvatar src="slot" size="56" rounded={IconRounded} bordered name={char.name} color={char.color} backgroundimg={() => char.img ? getCharImage(char.img, "plain") : ""}
+              <SidebarAvatar {imagePriority} imageReference={char.img} src="slot" size="56" rounded={IconRounded} bordered name={char.name} color={char.color} backgroundimg={() => char.img ? getCharImage(char.img, "plain") : ""}
               oncontextmenu={async (e) => {
                 e.preventDefault()
                 const sel = parseInt(await alertSelect([language.renameFolder,language.changeFolderColor,language.changeFolderImage,language.cancel]))
@@ -765,6 +775,7 @@
                   rounded={IconRounded} 
                   name={char2.name}
                   chaId={DBState.db.characters[char2.index]?.chaId}
+                  {imagePriority} imageReference={char2.img}
                 />
               </div>
             </div>
@@ -833,6 +844,7 @@
       >
     </div>
   </div>
+  <SyncStatusButton variant="slot" />
   {#if DBState.db.hamburgerButtonBottom}
   <div class="border-t border-t-selected w-full relative text-white ">
     {#if menuMode === 1}

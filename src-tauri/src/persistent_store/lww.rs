@@ -37,7 +37,7 @@ pub(super) use replacement_source::{SourceLayer, REMAPPED as REMAPPED_SOURCE, ST
 pub(super) use replacement_source::{clear as clear_replacement_source, insert as insert_replacement_source, units as replacement_source_units};
 pub(super) use projection::validate_received;
 pub(super) use projection::{
-    apply_mutation, capture_device_changes, capture_targets, is_device, preserve_local_root,
+    apply_mutations, capture_device_changes, capture_targets, is_device, preserve_local_root,
     refresh_orders, archive_object_hashes, archive_value,
 };
 
@@ -242,6 +242,7 @@ pub(crate) struct ApplyReceive {
 pub(crate) struct ApplyResult {
     pub revision: i64,
     pub affected_keys: Vec<UnitKey>,
+    pub plugin_storage_changed_keys: Vec<UnitKey>,
     pub held_keys: Vec<UnitKey>,
     pub deferred_keys: Vec<UnitKey>,
 }
@@ -680,6 +681,7 @@ fn suppress_retired(db: &Connection, parent: &UnitKey) -> StoreResult<()> {
         other=>("json_extract(key,'$[0]')='record' AND json_extract(key,'$[1]')=?2 AND json_extract(key,'$[2]')=?1",p[2].as_str(),Some(other)),
     };
     for (table, action) in [
+        ("lww_units", "DELETE FROM lww_units"),
         ("lww_outbox", "DELETE FROM lww_outbox"),
         (
             "lww_receive_rows",
@@ -807,10 +809,13 @@ impl PersistentStore {
         let values = crate::sqlite_open::open(scratch.path().join("units.sqlite"))?;
         values.execute_batch("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-4096; PRAGMA temp_store=FILE;
             CREATE TABLE units(key TEXT PRIMARY KEY,stamp TEXT NOT NULL,value TEXT NOT NULL); BEGIN")?;
-        for row in rows {
+        'units: for row in rows {
             if probe.is_cancelled() { return Err(error("cancelled")); }
             let (key,stamp,value) = row?;
             let key: UnitKey = wire(key.try_into())?;
+            for parent in parent_keys(&key)? {
+                if is_retired(&reader.connection, &parent)? { continue 'units; }
+            }
             let stamp: Stamp = serde_json::from_str(&stamp)?;
             wire(stamp.validate())?;
             let value: UnitValue = serde_json::from_str(&value)?;
@@ -1623,7 +1628,7 @@ impl PersistentStore {
                 ..
             } => {
                 let changes =
-                    intent_rows::read_replacement(self.device_store()?.connection(), &header.request_id, &changes)?;
+                    intent_rows::read_replacement(self.device_store()?.connection(), &self.repository_root, &header.request_id, &changes)?;
                 if let Some(sections) = device_sections {
                     self.finish_lww_device_replacement(&header, &staging_id, &changes, &sections, &device_changes, &stamp, &digest)?;
                 } else {
@@ -1635,7 +1640,7 @@ impl PersistentStore {
                 changes,
                 ..
             } => {
-                let changes = intent_rows::read_target(self.device_store()?.connection(), &header.request_id, &changes)?;
+                let changes = intent_rows::read_target(self.device_store()?.connection(), &self.repository_root, &header.request_id, &changes)?;
                 self.finish_lww_replacement(
                     &header,
                     &staging_id,
@@ -2411,7 +2416,9 @@ impl PersistentStore {
                         && read_unit(&tx, &change.key)?
                             .is_none_or(|(_, v)| !matches!(v, UnitValue::Deleted));
                     if decision == LwwDecision::ApplyRemote || new_retirement {
-                        projection::apply(&tx, &generation, &change.key, &change.value)?;
+                        if projection::apply_received(&tx, &generation, &change.key, &change.value)? {
+                            result.plugin_storage_changed_keys.push(change.key.clone());
+                        }
                         put_unit(
                             &tx,
                             &change.key,
@@ -2422,7 +2429,9 @@ impl PersistentStore {
                         )?;
                         result.affected_keys.push(change.key.clone());
                     } else if was_unprojected && decision == LwwDecision::Identical {
-                        projection::apply(&tx, &generation, &change.key, &change.value)?;
+                        if projection::apply_received(&tx, &generation, &change.key, &change.value)? {
+                            result.plugin_storage_changed_keys.push(change.key.clone());
+                        }
                         result.affected_keys.push(change.key.clone());
                     }
                     let local_pending: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM lww_requests receipt JOIN lww_outbox pending ON pending.version=receipt.request_id WHERE receipt.request_id=?1 AND pending.key=?2 AND pending.stamp=?3 AND pending.value=?4)",params![id,change.key.as_str(),serde_json::to_string(&change.stamp)?,serde_json::to_string(&change.value)?],|row|row.get(0))?;
@@ -2953,7 +2962,7 @@ impl PersistentStore {
         }
         let generation = active_generation(&self.connection)?;
         let tx = self.connection.transaction()?;
-        let changes = replacement_changes(&tx, &generation, staging_id, effective_source)?;
+        let changes = replacement_changes(&tx, &self.repository_root, &generation, staging_id, effective_source)?;
         tx.commit()?;
         let (device_changes, device_settings_digest) = if let Some(sections) = device_sections {
             let tx = self.device_store_mut()?.transaction()?;
@@ -3028,7 +3037,7 @@ impl PersistentStore {
         staging_id: &str,
         changes: &[Change],
     ) -> StoreResult<RevisionResult> {
-        let rows = FrozenRows::new()?;
+        let rows = FrozenRows::new(&self.repository_root)?;
         for change in changes { rows.insert(intent_rows::target_row(change)?)?; }
         self.lww_replace_target_rows(header, staging_id, &rows)
     }
@@ -3061,7 +3070,7 @@ impl PersistentStore {
             wire(stamp.ok_or_else(|| error("request-id-integrity"))?.validate())?;
             projection::validate_received(&self.connection, &key, &value)
         })?;
-        binding_stage::validate_binding_source_rows(&self.connection, staging_id, header, changes)?;
+        binding_stage::validate_binding_source_rows(&self.connection, &self.repository_root, staging_id, header, changes)?;
         let rows = intent_rows::write(
             &mut self.device_store_mut()?.connection,
             &header.request_id,
@@ -3099,6 +3108,7 @@ impl PersistentStore {
         };
         let result = commit::replace_commit_lww_rows(
             &mut self.connection,
+            &self.repository_root,
             staging_id,
             header,
             stamp,
@@ -3147,6 +3157,7 @@ fn archived_character(key: &UnitKey) -> Option<String> {
 /// message bodies, and replay retains the same key order and frozen digest.
 fn replacement_changes(
     tx: &Transaction<'_>,
+    root: &std::path::Path,
     active: &str,
     staging_id: &str,
     source: Option<SourceLayer<'_>>,
@@ -3154,7 +3165,7 @@ fn replacement_changes(
     let sourced = |key: &UnitKey| -> StoreResult<Option<UnitValue>> {
         source.map(|source| replacement_source::get(tx, source, key)).transpose().map(Option::flatten)
     };
-    let changes = FrozenRows::new()?;
+    let changes = FrozenRows::new(root)?;
     changes.db.execute_batch("CREATE TABLE captured(key TEXT PRIMARY KEY,before_value TEXT,staged_value TEXT);")?;
     for (generation, column) in [(active, "before_value"), (staging_id, "staged_value")] {
         let sql = format!("INSERT INTO captured(key,{column}) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET {column}=excluded.{column}");
@@ -3241,7 +3252,7 @@ impl PersistentStore {
         }
         let generation = active_generation(&self.connection)?;
         let tx = self.connection.transaction()?;
-        let rows = replacement_changes(&tx, &generation, staging_id, source.map(|_| SourceLayer::staged(staging_id)))?;
+        let rows = replacement_changes(&tx, &self.repository_root, &generation, staging_id, source.map(|_| SourceLayer::staged(staging_id)))?;
         let mut merged = (Vec::new(), BTreeSet::new());
         rows.visit(false, |key, _, value, source_override| {
             if source_override { merged.1.insert(key.clone()); }
@@ -3349,11 +3360,12 @@ thread_local! {
 }
 fn reset_target_device(
     tx: &Transaction<'_>,
+    root: &std::path::Path,
     header: &Header,
     received: &[Change],
     binding: DecimalU64,
 ) -> StoreResult<()> {
-    let rows = FrozenRows::new()?;
+    let rows = FrozenRows::new(root)?;
     for change in received { rows.insert(intent_rows::target_row(change)?)?; }
     reset_target_device_rows(tx, header, &rows, binding)
 }

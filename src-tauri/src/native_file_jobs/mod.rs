@@ -48,7 +48,7 @@ mod screenshot_output_test;
 use crate::native_log::logged;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -130,6 +130,7 @@ pub(crate) enum JobSource {
     AndroidSpool { token: String },
     AndroidSeekable { token: String },
     IosScoped { token: String },
+    SavedConflict { token: String },
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -536,7 +537,7 @@ pub(crate) fn open_job_source(
             let path = resolve_spool_source(job_root, token)?;
             open_regular_file_no_follow(&path)
         }
-        JobSource::AndroidSeekable { .. } | JobSource::IosScoped { .. } => Err(invalid_source_error("Portable custody requires its bounded probe or exact job claim")),
+        JobSource::SavedConflict { .. } | JobSource::AndroidSeekable { .. } | JobSource::IosScoped { .. } => Err(invalid_source_error("Portable custody requires its bounded probe or exact job claim")),
     }
 }
 
@@ -561,7 +562,7 @@ fn resolve_source(job_root: &Path, source: &JobSource) -> Result<PathBuf, Native
     match source {
         JobSource::DesktopPath { path } => resolve_desktop_source(path),
         JobSource::AndroidSpool { token } => resolve_spool_source(job_root, token),
-        JobSource::AndroidSeekable { .. } | JobSource::IosScoped { .. } => Err(invalid_source_error("Portable custody has no path authority")),
+        JobSource::SavedConflict { .. } | JobSource::AndroidSeekable { .. } | JobSource::IosScoped { .. } => Err(invalid_source_error("Portable custody has no path authority")),
     }
 }
 
@@ -1461,6 +1462,7 @@ impl NativeFileJobState {
                 expected_revision,
             } => {
                 let opened_source = match &source {
+                    JobSource::SavedConflict { .. } => None,
                     JobSource::DesktopPath { .. } => Some(open_job_source(&self.root, &source)?),
                     JobSource::AndroidSpool { token } => {
                         parse_android_spool_token(token)?;
@@ -1522,7 +1524,7 @@ impl NativeFileJobState {
                         parse_android_spool_token(token)?;
                         None
                     }
-                    JobSource::AndroidSeekable { .. } | JobSource::IosScoped { .. } => return Err(invalid_source_error("Portable custody is not an upstream/content source")),
+                    JobSource::SavedConflict { .. } | JobSource::AndroidSeekable { .. } | JobSource::IosScoped { .. } => return Err(invalid_source_error("Portable custody is not an upstream/content source")),
                 };
                 let repository_root =
                     crate::persistent_store::commands::with_store_mut(app.state(), |store| {
@@ -1601,7 +1603,7 @@ impl NativeFileJobState {
                         parse_android_spool_token(token)?;
                         None
                     }
-                    JobSource::AndroidSeekable { .. } | JobSource::IosScoped { .. } => { portable_source_custody::ensure_platform_source(&app, &source)?; None },
+                    JobSource::SavedConflict { .. } | JobSource::AndroidSeekable { .. } | JobSource::IosScoped { .. } => { portable_source_custody::ensure_platform_source(&app, &source)?; None },
                 };
                 let store =
                     crate::persistent_store::commands::with_store_mut(app.state(), |store| {
@@ -1802,7 +1804,7 @@ impl NativeFileJobState {
                         parse_android_spool_token(token)?;
                         None
                     }
-                    JobSource::AndroidSeekable { .. } | JobSource::IosScoped { .. } => return Err(invalid_source_error("Portable custody is not an upstream/content source")),
+                    JobSource::SavedConflict { .. } | JobSource::AndroidSeekable { .. } | JobSource::IosScoped { .. } => return Err(invalid_source_error("Portable custody is not an upstream/content source")),
                 };
                 let store =
                     crate::persistent_store::commands::with_store_mut(app.state(), |store| {
@@ -1970,7 +1972,7 @@ impl NativeFileJobState {
                 claim_spool_content_source(&self.root, token, &owned_directory, &display_name)
                     .map(|source| source.opened)
             }
-            JobSource::AndroidSeekable { .. } | JobSource::IosScoped { .. } => Err(invalid_source_error("Portable custody is not a content source")),
+            JobSource::SavedConflict { .. } | JobSource::AndroidSeekable { .. } | JobSource::IosScoped { .. } => Err(invalid_source_error("Portable custody is not a content source")),
         };
         let opened_source = match opened_source {
             Ok(source) => source,
@@ -2042,6 +2044,7 @@ impl NativeFileJobState {
             ));
         };
         let opened_source = match &source {
+            JobSource::SavedConflict { .. } => None,
             JobSource::DesktopPath { .. } => Some(open_job_source(&self.root, &source)?),
             JobSource::AndroidSpool { token } => {
                 parse_android_spool_token(token)?;
@@ -2176,7 +2179,7 @@ impl NativeFileJobState {
                     *opened_source = Some(source.opened);
                     Ok(())
                 }
-                JobSource::AndroidSeekable { .. } | JobSource::IosScoped { .. } if opened_source.is_none() => {
+                JobSource::SavedConflict { .. } | JobSource::AndroidSeekable { .. } | JobSource::IosScoped { .. } if opened_source.is_none() => {
                     *opened_source = Some(portable_source_custody::claim(source, &job_id)?);
                     Ok(())
                 }
@@ -3517,7 +3520,7 @@ pub(crate) fn native_file_job_forget(
         forget_device_session(&state, &device, &job_id)?;
         let forgotten = state.forget(&job_id)?;
         if restore {
-            crate::persistent_store::commands::with_store(app.state(), |store| restore_receipts::forget(store, &job_id)).map_err(error::store_error)?;
+            crate::persistent_store::commands::with_store(app.state(), |store| restore_receipts::forget(store, &state.registry, &job_id)).map_err(error::store_error)?;
         }
         Ok(forgotten)
     })())
@@ -3703,6 +3706,31 @@ pub(crate) enum JobStage {
     AwaitingActivation,
     Activating,
     CleaningUp,
+    PreparingExport,
+    DownloadingExport,
+    WritingExport,
+    VerifyingExport,
+    PublishingDestination,
+    FinalizingExport,
+}
+
+fn export_progress_stage(kind: JobKind, phase: JobPhase) -> Option<JobStage> {
+    if !matches!(kind, JobKind::ExportPortableBackup | JobKind::ExportBlockRisuSave
+        | JobKind::ExportCompatibleLocalBackup | JobKind::ExportCharacterCharx
+        | JobKind::ExportCharacterCard | JobKind::ExportRisuModule
+        | JobKind::OfficialPublicationUpload) { return None; }
+    match phase {
+        JobPhase::WritingExport => Some(if kind == JobKind::ExportPortableBackup { JobStage::PreparingExport } else { JobStage::WritingExport }),
+        JobPhase::PublishingDestination | JobPhase::UploadingDatabase => Some(JobStage::PublishingDestination),
+        JobPhase::FinalizingExport | JobPhase::FinalizingPublication => Some(JobStage::FinalizingExport),
+        _ => None,
+    }
+}
+
+fn reset_export_detail(status: &mut JobStatus) {
+    if let Some(stage) = export_progress_stage(status.kind, status.phase) {
+        status.detail = Some(JobDetail::new(stage, StageUnit::Bytes, 0, None, ImportCounts::default()));
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -4003,6 +4031,7 @@ pub(crate) struct RestoreOmissions {
     pub(crate) values: u64,
     pub(crate) plugin_storage: u64,
     pub(crate) inlays: u64,
+    pub(crate) excluded_characters: u64,
 }
 
 impl IncompleteRestorePreview {
@@ -4019,6 +4048,7 @@ impl IncompleteRestorePreview {
             ("skipped-backup-values", self.omissions.values),
             ("skipped-plugin-storage", self.omissions.plugin_storage),
             ("skipped-backup-inlays", self.omissions.inlays),
+            ("excluded-backup-characters", self.omissions.excluded_characters),
         ] {
             if count != 0 { warnings.push(format!("{kind}:{count}")); }
         }
@@ -4091,6 +4121,7 @@ pub(crate) struct JobRegistry {
     #[cfg(test)]
     content_preparation_gate: Mutex<Option<Arc<ContentPreparationGate>>>,
     jobs: Mutex<HashMap<String, Arc<JobControl>>>,
+    hidden_restore_receipts: Mutex<HashSet<String>>,
     max_terminal_jobs: usize,
     max_terminal_age: Duration,
 }
@@ -4127,6 +4158,7 @@ impl JobRegistry {
             #[cfg(test)]
             content_preparation_gate: Mutex::new(None),
             jobs: Mutex::new(HashMap::new()),
+            hidden_restore_receipts: Mutex::default(),
             max_terminal_jobs,
             max_terminal_age,
         }
@@ -4395,6 +4427,7 @@ impl JobControl {
             "values" => &mut omissions.values,
             "pluginStorage" => &mut omissions.plugin_storage,
             "inlays" => &mut omissions.inlays,
+            "excludedCharacters" => &mut omissions.excluded_characters,
             _ => return Err("unknown restore omission category".to_owned()),
         };
         *target = target.saturating_add(count);
@@ -5045,6 +5078,7 @@ impl JobControl {
         }
         status.state = JobState::Running;
         status.phase = JobPhase::FinalizingPublication;
+        reset_export_detail(&mut status);
         status.publication_attempt = None;
         Ok(())
     }
@@ -5079,7 +5113,20 @@ impl JobControl {
         }
         status.state = JobState::Running;
         status.phase = phase;
+        reset_export_detail(&mut status);
         Ok(())
+    }
+
+    pub(crate) fn set_export_progress(&self, progress: JobProgress, completed: u64, total: Option<u64>) -> Result<(), String> {
+        self.set_progress(progress)?;
+        self.set_export_bytes(completed, total)
+    }
+
+    pub(crate) fn set_export_bytes(&self, completed: u64, total: Option<u64>) -> Result<(), String> {
+        let status = self.status();
+        let stage = export_progress_stage(status.kind, status.phase)
+            .ok_or_else(|| "native job is not exporting".to_owned())?;
+        self.set_detail(JobDetail::new(stage, StageUnit::Bytes, completed, total, ImportCounts::default()))
     }
 
     pub(crate) fn set_progress(&self, progress: JobProgress) -> Result<(), String> {
@@ -5147,6 +5194,7 @@ impl JobControl {
             return Err("native job phase transition is invalid".to_owned());
         }
         status.phase = phase;
+        reset_export_detail(&mut status);
         Ok(())
     }
 
@@ -5162,6 +5210,7 @@ impl JobControl {
             return Err("native export publication cannot commit from its current state".to_owned());
         }
         status.phase = JobPhase::FinalizingExport;
+        reset_export_detail(&mut status);
         Ok(())
     }
 
@@ -8134,8 +8183,17 @@ mod tests {
             .unwrap();
 
         job.start(JobPhase::WritingExport).unwrap();
+        job.set_export_progress(JobProgress { completed_bytes: 100, total_bytes: None, ..Default::default() }, 100, None).unwrap();
+        assert_eq!(job.status().detail.unwrap().stage_completed, 100);
         job.set_phase(JobPhase::PublishingDestination).unwrap();
+        assert_eq!(job.status().detail.unwrap().stage_completed, 0);
+        job.set_export_progress(JobProgress { completed_bytes: 125, total_bytes: Some(200), ..Default::default() }, 25, Some(100)).unwrap();
+        let publishing = job.status().detail.unwrap();
+        assert_eq!((publishing.stage_completed, publishing.stage_total), (25, Some(100)));
         job.commit_export_publication().unwrap();
+        let finalizing = job.status().detail.unwrap();
+        assert_eq!(finalizing.stage, JobStage::FinalizingExport);
+        assert_eq!((finalizing.stage_completed, finalizing.stage_total), (0, None));
 
         assert_eq!(job.status().phase, JobPhase::FinalizingExport);
         assert_eq!(job.request_cancel().unwrap(), CancelOutcome::TooLate);

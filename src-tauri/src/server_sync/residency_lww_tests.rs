@@ -443,17 +443,23 @@ fn transient_hydration_keeps_the_body_remote_and_reclaims_its_spool() {
         .unwrap();
     store.asset_residency_evict(|| Ok(())).unwrap();
     let cas = PayloadCas::new(store.repository_root()).unwrap();
-    let mut body = super::residency::open_transient_server_with_check(
+    let downloaded = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let observed = downloaded.clone();
+    let mut body = super::residency::open_transient_server_observed(
         store.repository_root(),
         store.repository_root(),
         &hash,
         &|| Ok(()),
+        Some(std::sync::Arc::new(move |bytes| { observed.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed); })),
     )
     .unwrap()
     .unwrap();
+    let received = downloaded.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(received > 0);
     let mut actual = Vec::new();
     std::io::Read::read_to_end(&mut body, &mut actual).unwrap();
     assert_eq!(actual, bytes);
+    assert_eq!(downloaded.load(std::sync::atomic::Ordering::Relaxed), received);
     assert!(cas.stat_object(&hash).unwrap().is_none());
     assert!(Residency::open(store.repository_root()).unwrap().object(&hash,None).unwrap().is_some());
     drop(body);

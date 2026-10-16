@@ -1,3 +1,7 @@
+import { advancePluginStorageRemoteChanges, setPluginStorageReloadHandler, type PluginStorageWriteCheck } from './pluginStorageProtection'
+import { deletePluginDataItems } from './pluginDataInventory'
+import { pluginStorageStore } from './plugins.svelte'
+vi.mock('./plugins.svelte', () => ({ pluginStorageStore: { forOwner: vi.fn() } }))
 const OWNER = 'test-plugin'
 import { describe, expect, it, vi } from 'vitest'
 import {
@@ -71,7 +75,8 @@ function harness(entries: Record<string, { byteSize: number; value: unknown }>, 
             release: vi.fn(async () => undefined),
         })),
     })
-    const mutate = vi.fn(async (mutations: readonly PluginStorageMutation[]) => {
+    const mutate = vi.fn(async (mutations: readonly PluginStorageMutation[], check?: PluginStorageWriteCheck) => {
+        check?.validate()
         for (const mutation of mutations) {
             if (mutation.type === 'clear') {
                 for (const key of Object.keys(entries)) delete entries[key]
@@ -86,6 +91,7 @@ function harness(entries: Record<string, { byteSize: number; value: unknown }>, 
             }
         }
         revision++
+        check?.committed()
     })
     return {
         store,
@@ -125,9 +131,8 @@ describe('plugin storage V3 residency', () => {
         mutations[0].key = 'after'
         opening.resolve()
         await writing
-        expect(mutate).toHaveBeenCalledWith([
-            { type: 'set', owner: OWNER, key: 'before', value: { text: 'captured' } },
-        ])
+        expect(await storage.forOwner(OWNER).getItem('before')).toEqual({ text: 'captured' })
+        expect(await storage.forOwner(OWNER).getItem('after')).toBeNull()
     })
 
     it('late_plugin_result_cannot_cross_replacement while its storage index loads', async () => {
@@ -240,16 +245,15 @@ describe('plugin storage V3 residency', () => {
     })
 
     it('normalizes an undefined set value to a deletion before commit and cache update', async () => {
-        const { storage, mutate, readPluginStorage } = harness(
+        const { storage, store } = harness(
             { alpha: { byteSize: 6, value: 'alpha' } },
             100,
         )
 
         await storage.forOwner(OWNER).setItem('alpha', undefined)
 
-        expect(mutate).toHaveBeenCalledWith([{ type: 'delete', owner: 'test-plugin', key: 'alpha' }])
         await expect(storage.forOwner(OWNER).getItem('alpha')).resolves.toBeNull()
-        expect(readPluginStorage).not.toHaveBeenCalled()
+        await expect(store.readPluginStorage(OWNER, 'alpha')).resolves.toBeNull()
     })
 
     it('keeps the V3 cache coherent with published storage mutations', async () => {
@@ -549,4 +553,59 @@ describe('plugin storage V3 residency', () => {
         await expect(storage.forOwner(OWNER).snapshot()).rejects.toBeInstanceOf(RevisionConflictError)
         expect(store.acquireRevision).toHaveBeenCalledTimes(3)
     })
+})
+
+
+it('captures an observation before a delayed read and permits only a new read to recover', async () => {
+    const entries = { key: { value: 'old', byteSize: 3 } }
+    const h = harness(entries, 100)
+    const guest = h.storage.forOwner(OWNER)
+    const gate = deferred<{ revision: number; value: string }>()
+    h.readPluginStorage.mockReturnValueOnce(gate.promise)
+    const reading = guest.getItem('key')
+    await vi.waitFor(() => expect(h.readPluginStorage).toHaveBeenCalled())
+    entries.key.value = 'remote'
+    h.storage.invalidateOwner(OWNER)
+    advancePluginStorageRemoteChanges([JSON.stringify(['plugin', OWNER, 'key'])])
+    gate.resolve({ revision: 4, value: 'old' })
+    expect(await reading).toBe('old')
+    await expect(guest.setItem('key', 'stale')).rejects.toThrow('PLUGIN_STORAGE_STALE')
+    expect(entries.key.value).toBe('remote')
+    expect(await guest.getItem('key')).toBe('remote')
+    await guest.setItem('key', 'fresh edit')
+    expect(entries.key.value).toBe('fresh edit')
+    guest.dispose()
+})
+
+it('records known snapshot keys once while later pages preserve intervening fresh reads', async () => {
+    const { storage } = harness({ key: { value: 'remote', byteSize: 6 } })
+    const guest = storage.forOwner(OWNER)
+    await guest.getItem('key')
+    const observePage = guest.observation.beginSnapshot()
+    observePage([])
+    advancePluginStorageRemoteChanges([JSON.stringify(['plugin', OWNER, 'key'])])
+    await expect(guest.setItem('key', 'stale')).rejects.toThrow('PLUGIN_STORAGE_STALE')
+    await guest.getItem('key')
+    observePage(['other'])
+    await expect(guest.setItem('key', 'fresh')).resolves.toBeUndefined()
+    guest.dispose()
+})
+
+it.each([false, true])('disposes an inventory deletion observer even after failure (%s)', async fail => {
+    const { storage, mutate } = harness({ key: { value: 'old', byteSize: 3 } })
+    vi.mocked(pluginStorageStore.forOwner).mockImplementation(owner => {
+        const guest = storage.forOwner(owner)
+        guest.observation.observe('key')
+        return guest
+    })
+    if (fail) mutate.mockRejectedValueOnce(new Error('disk failure'))
+    const owner = 'inventory-deletion-review'
+    const deleting = deletePluginDataItems([{ owner, key: 'key', valueType: 'string', byteSize: 3, automatic: false }], 'library')
+    if (fail) await expect(deleting).rejects.toThrow('disk failure')
+    else await deleting
+    const reload = vi.fn()
+    setPluginStorageReloadHandler(reload)
+    advancePluginStorageRemoteChanges([JSON.stringify(['plugin', owner, 'key'])])
+    expect(reload).not.toHaveBeenCalled()
+    setPluginStorageReloadHandler(() => {})
 })

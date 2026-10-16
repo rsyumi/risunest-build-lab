@@ -17,7 +17,7 @@
     import ToggleBind from './ToggleBind.svelte'
     import CustomSideBar from "./CustomSidebar.svelte";
     import { getGlobalChatVar, isLocallyHandledGlobalChatVar } from "src/ts/parser/chatVar.svelte";
-    import { applyGlobalToggleValues, removeLocalToggleValue, setCharacterMemory, setLocalToggleMode, setToggleValue } from 'src/ts/sidebarToggles'
+    import { applyGlobalToggleValues, applyLocalToggleValues, removeLocalToggleValue, setCharacterMemory, setLocalToggleMode, setToggleValue } from 'src/ts/sidebarToggles'
     import { applyToggleValues, snapshotToggleValues, toggleValueChanged, type ToggleValues } from 'src/ts/toggleBindings'
     import { PinIcon } from "@lucide/svelte";
     import { doingChat } from 'src/ts/process/generationState'
@@ -163,15 +163,14 @@
         }
         stageToggleValues({ [key]: value }, [key])
     }
-    const applyTogglePreset = (values: ToggleValues, keys: readonly string[]) => {
-        if (savingToggles) return
-        if (savedToggles === undefined) {
-            void applyGlobalToggleValues(values, keys)
-            return
-        }
+    const applyTogglePreset = async (values: ToggleValues, keys: readonly string[]): Promise<boolean> => {
+        if (savingToggles) return false
+        if (getCurrentChat()?.useLocallySetGlobalVariables) return applyLocalToggleValues(values, keys)
+        if (savedToggles === undefined) return applyGlobalToggleValues(values, keys)
         const next = { ...toggleEditor.values }
         applyToggleValues(next, values, keys)
         stageToggleValues(next, [...keys, ...Object.keys(values)].filter((key) => key.startsWith('toggle_')))
+        return true
     }
     const isToggleDirty = (key: string | undefined) =>
         savedToggles !== undefined &&

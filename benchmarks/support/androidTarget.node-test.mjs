@@ -80,7 +80,7 @@ syncBuiltinESMExports()
 `)
     try {
         for (const runner of ['device-backup/android-smoke', 'startup/android-smoke', 'streaming/android-smoke',
-            'plugin-review/android-smoke', 'sync-server/android-probe', 'sync-server/android-runtime', 'startup/cdp']) {
+            'plugin-review/android-smoke', 'sync-server/android-probe', 'startup/cdp']) {
             await t.test(runner, () => {
                 writeFileSync(log, '')
                 const args = runner === 'startup/cdp'

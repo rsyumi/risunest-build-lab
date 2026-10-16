@@ -22,6 +22,7 @@ pub(crate) struct PluginDeviceEntry {
     pub(crate) space: String,
     pub(crate) key: String,
     pub(crate) value: String,
+    pub(crate) sequence: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -57,6 +58,24 @@ pub(crate) enum PluginDeviceRange {
     Changed,
     #[serde(rename_all = "camelCase")]
     Value { value: String, next_offset: u64 },
+}
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct PluginDeviceObservation {
+    pub(crate) space: String,
+    pub(crate) key: String,
+    pub(crate) sequence: String,
+}
+
+pub(crate) fn advance_remote_sequence(db: &Connection, owner: &str, space: &str, key: &str) -> StoreResult<()> {
+    db.execute("INSERT INTO temp.plugin_remote_sequences VALUES(?1,?2,?3,1) ON CONFLICT(owner,space,key) DO UPDATE SET sequence=sequence+1", params![owner,space,key])?;
+    Ok(())
+}
+fn remote_sequence(db: &Connection, epoch: &str, owner: &str, space: &str, key: &str) -> StoreResult<String> {
+    let sequence: i64 = db.query_row("SELECT sequence FROM temp.plugin_remote_sequences WHERE owner=?1 AND space=?2 AND key=?3", params![owner,space,key], |row| row.get(0)).optional()?.unwrap_or(0);
+    Ok(format!("{epoch}:{sequence}"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,9 +138,10 @@ impl DeviceStore {
             });
         }
         let mut statement = self.connection.prepare(
-            "SELECT space,key,value FROM plugin_device_storage
-                WHERE owner=?1 AND tombstone=0 AND value IS NOT NULL
-                ORDER BY space,key",
+            "SELECT p.space,p.key,p.value,coalesce(r.sequence,0) FROM plugin_device_storage p
+                LEFT JOIN temp.plugin_remote_sequences r ON r.owner=p.owner AND r.space=p.space AND r.key=p.key
+                WHERE p.owner=?1 AND p.tombstone=0 AND p.value IS NOT NULL
+                ORDER BY p.space,p.key",
         )?;
         let entries = statement
             .query_map([owner], |row| {
@@ -129,6 +149,7 @@ impl DeviceStore {
                     space: row.get(0)?,
                     key: row.get(1)?,
                     value: row.get(2)?,
+                    sequence: format!("{}:{}", self.plugin_read_epoch, row.get::<_, i64>(3)?),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -242,9 +263,20 @@ impl DeviceStore {
         self.write_plugin_device_values_with_limits(owner, mutations, text_value::PART_BYTES as u64, text_value::REQUEST_BYTES)
     }
 
+    pub(crate) fn plugin_device_sequence(&self, owner: &str, space: &str, key: &str) -> StoreResult<String> {
+        validate_owner(owner)?; validate_space(space)?; validate_key(key)?;
+        remote_sequence(&self.connection, &self.plugin_read_epoch, owner, space, key)
+    }
+
     pub(crate) fn write_plugin_device_values_with_limits(
         &mut self, owner: &str, mutations: &[PluginDeviceMutation], part_limit: u64, request_limit: u64,
     ) -> StoreResult<()> {
+        self.write_plugin_device_values_observed(owner, mutations, &[], part_limit, request_limit).map(|_| ())
+    }
+
+    pub(crate) fn write_plugin_device_values_observed(
+        &mut self, owner: &str, mutations: &[PluginDeviceMutation], observations: &[PluginDeviceObservation], part_limit: u64, request_limit: u64,
+    ) -> StoreResult<Vec<PluginDeviceObservation>> {
         validate_owner(owner)?;
         if mutations.len() > MAX_BATCH_ENTRIES {
             return Err(invalid("plugin device write batch is too large"));
@@ -261,8 +293,8 @@ impl DeviceStore {
             fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
         }
         #[derive(Serialize)]
-        struct Request<'a> { owner: &'a str, mutations: &'a [PluginDeviceMutation] }
-        serde_json::to_writer(RequestSize { size: 0, limit: request_limit }, &Request { owner, mutations })
+        struct Request<'a> { owner: &'a str, mutations: &'a [PluginDeviceMutation], observations: &'a [PluginDeviceObservation] }
+        serde_json::to_writer(RequestSize { size: 0, limit: request_limit }, &Request { owner, mutations, observations })
             .map_err(|_| invalid("plugin device write batch is too large"))?;
         for mutation in mutations {
             match mutation {
@@ -282,13 +314,32 @@ impl DeviceStore {
             }
         }
         if mutations.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let mut staged = mutations.iter().map(|mutation| match mutation {
             PluginDeviceMutation::Staged { session_id } => self.plugin_writes.take(owner, session_id).map(Some),
             _ => Ok(None),
         }).collect::<StoreResult<Vec<_>>>()?;
+        let epoch = self.plugin_read_epoch.clone();
         let transaction = self.transaction()?;
+        let mut written = std::collections::BTreeSet::new();
+        for (mutation, staged) in mutations.iter().zip(&staged) {
+            let (space, key) = match mutation {
+                PluginDeviceMutation::Set { space, key, .. } | PluginDeviceMutation::Delete { space, key } => (space, Some(key)),
+                PluginDeviceMutation::Clear { space } => (space, None),
+                PluginDeviceMutation::Staged { .. } => {
+                    let staged = staged.as_ref().ok_or_else(|| invalid("plugin device write session is unavailable"))?;
+                    (&staged.space, Some(&staged.key))
+                }
+            };
+            if let Some(key) = key { written.insert((space.clone(), key.clone())); }
+            for observation in observations.iter().filter(|o| &o.space == space && key.is_none_or(|key| key == &o.key)) {
+                if remote_sequence(&transaction, &epoch, owner, &observation.space, &observation.key)? != observation.sequence {
+                    return Err(invalid("PLUGIN_STORAGE_STALE: Plugin storage changed during synchronization. Read it again before saving."));
+                }
+                written.insert((observation.space.clone(), observation.key.clone()));
+            }
+        }
         let writer_id: String = transaction.query_row(
             "SELECT writer_id FROM device_meta WHERE singleton=1",
             [],
@@ -347,6 +398,7 @@ impl DeviceStore {
                         keys
                     };
                     for key in keys {
+                        written.insert((space.clone(), key.clone()));
                         let clock = issue_write_clock(&transaction, Section::LocalPlugins)?;
                         transaction.execute(
                             "UPDATE plugin_device_storage
@@ -371,8 +423,12 @@ impl DeviceStore {
             }
         }
         finish_mutation(&transaction)?;
+        let observed = written.into_iter().map(|(space, key)| {
+            let sequence = remote_sequence(&transaction, &epoch, owner, &space, &key)?;
+            Ok(PluginDeviceObservation { space, key, sequence })
+        }).collect::<StoreResult<Vec<_>>>()?;
         transaction.commit()?;
-        Ok(())
+        Ok(observed)
     }
 }
 

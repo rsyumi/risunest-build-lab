@@ -85,6 +85,14 @@ fn wire_streams_exact_bytes_and_exposes_status_headers_without_redirects_or_retr
         assert_eq!(records.len(), 4);
         assert_eq!(records[0].body, data);
         assert!(records[0].headers.starts_with("PUT /synthetic HTTP/1.1"));
+        drop(records);
+        for headers in [vec![("ETag".into(), "first".into()), ("ETag".into(), "second".into())],
+            vec![("X-Synthetic".into(), "\u{e9}".into())]] {
+            let server = WireServer::start(vec![Reply::Http { status: 403, headers, body: vec![] }]);
+            let error = transport.send(request(&server, None), &cancel).await.err().unwrap();
+            assert_eq!(error.kind, ErrorKind::Corrupt);
+            assert_eq!(error.http_status, Some(403), "rejected headers retain the received status");
+        }
     });
 }
 #[test]

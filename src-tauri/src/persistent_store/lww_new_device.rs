@@ -310,13 +310,13 @@ impl PersistentStore {
             return Err(error("stale-or-wrong-target-new-device-stage"));
         }
         super::super::sync_selection::validate_binding_stage_content(&self.connection, staging_id)?;
-        let rows = super::binding_stage::binding_source_rows(&self.connection, staging_id)?;
+        let rows = super::binding_stage::binding_source_rows(&self.connection, &self.repository_root, staging_id)?;
         let mut changes = Vec::new();
         rows.visit(false, |key, stamp, value, _| {
             changes.push(Change { key, stamp: stamp.ok_or_else(|| error("request-id-integrity"))?, value });
             Ok(())
         })?;
-        validate_binding_source(&self.connection, staging_id, header, &changes)?;
+        validate_binding_source(&self.connection, &self.repository_root, staging_id, header, &changes)?;
         let mut keys = BTreeSet::new();
         for change in &changes {
             if !keys.insert(change.key.clone()) {
@@ -381,6 +381,7 @@ impl PersistentStore {
         }
         commit::replace_commit_lww(
             &mut self.connection,
+            &self.repository_root,
             staging_id,
             header,
             stamp,
@@ -398,6 +399,7 @@ impl PersistentStore {
             .map_err(|failure| error(failure.code))?;
         self.copy_device_unit_bodies(changes)?;
         self.external_lww_release_writer_jobs(old_writer_id)?;
+        let root = self.repository_root.clone();
         let tx = self.device_store_mut()?.transaction()?;
         verify(&tx, header.binding_authority)?;
         verify_device_intent_revision(&tx, &header.request_id)?;
@@ -409,7 +411,7 @@ impl PersistentStore {
         if current_writer != old_writer_id {
             return Err(error("new-device-intent-writer-changed"));
         }
-        reset_target_device(&tx, header, changes, new_authority)?;
+        reset_target_device(&tx, &root, header, changes, new_authority)?;
         tx.execute("DELETE FROM lww_progress", [])?;
         // The retired writer never sends again, so its unsettled segments and
         // sequences are dropped instead of waiting for an answer forever.

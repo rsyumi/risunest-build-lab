@@ -64,6 +64,35 @@ fn ten_megabyte_plugin_single_edit_is_exact_and_small_both_directions() {
     }
 }
 #[test]
+fn sparse_matches_stop_searching_a_sixteen_megabyte_target() {
+    let base = vec![b'a'; delta::MAX_TARGET_BYTES];
+    let mut target = vec![b'b'; delta::MAX_TARGET_BYTES];
+    target[..64].copy_from_slice(&base[..64]);
+    assert_eq!(
+        delta::create(&[&base], &target).unwrap_err().0,
+        "delta-search-limit"
+    );
+}
+
+#[test]
+fn useful_matches_after_a_bounded_literal_prefix_still_make_an_exact_recipe() {
+    let base = vec![b'a'; 1024 * 1024];
+    let target = [vec![b'b'; 128 * 1024], base.clone()].concat();
+    let recipe = delta::create(&[&base], &target).unwrap();
+    assert!(recipe.encoded_len().unwrap() < target.len() / 4);
+    assert_eq!(recipe.apply(&[&base]).unwrap(), target);
+}
+
+#[test]
+fn a_large_append_keeps_the_matching_base_when_search_is_exhausted() {
+    let base = vec![b'a'; 2 * 1024 * 1024];
+    let target = [base.clone(), vec![b'b'; 300 * 1024]].concat();
+    let recipe = delta::create(&[&base], &target).unwrap();
+    assert!(recipe.encoded_len().unwrap() < target.len() / 4);
+    assert_eq!(recipe.apply(&[&base]).unwrap(), target);
+}
+
+#[test]
 fn empty_and_no_base_exact_full_recipe_and_untrusted_limits() {
     let recipe = delta::create(&[], b"").unwrap();
     assert_eq!(

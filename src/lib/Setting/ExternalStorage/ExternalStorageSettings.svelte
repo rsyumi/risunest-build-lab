@@ -20,6 +20,7 @@
     import { createNativeSyncBindingBridge } from 'src/ts/storage/sync/bindingNative'
     import { subscribeSyncBindingChanges } from 'src/ts/storage/sync/bindingChanges'
     import { isExternalLwwRunning, requestExternalLwwNow, subscribeExternalLwwFailures, supportsExternalLwwNewDevice } from 'src/ts/storage/sync/external/lwwProduction'
+    import { externalErrorLabel, externalSyncFailureText, externalSyncStatusView } from 'src/ts/storage/sync/syncStatusView'
     import BindingTargetSwitch from 'src/ts/storage/sync/BindingTargetSwitch.svelte'
     import { PREVIOUS_FILES_DOWNLOAD_FAILED } from 'src/ts/storage/sync/bindingFlow'
     import { language } from 'src/lang'
@@ -59,6 +60,7 @@
     const strings = $derived(externalStorageStrings(DBState.db.language))
     let storageState = $state<ExternalStorageState | null>(null)
     let adding = $state(false)
+    let addressConnection = $state<ExternalConnectionSummary | undefined>()
     let renewalConnection = $state<ExternalConnectionSummary | undefined>()
     let unlockConnection = $state<ExternalConnectionSummary | undefined>()
     let unlockKey = $state('')
@@ -252,12 +254,15 @@
     async function onConnected(result: ExternalConnectionResult): Promise<void> {
         busy = false
         adding = false
+        const addressChanged = addressConnection !== undefined
+        addressConnection = undefined
         const renewed = renewalConnection !== undefined
         renewalConnection = undefined
         if (result.recovery) recoveryKey = result.recovery.key
         await refreshExternalStorageProductionState()
         await refresh()
         schedulePoll()
+        if (addressChanged) return
         if (renewed) {
             const job = activeJob(result.connection)
             if (job && externalJobIsPaused(job)) await resumeJob(result.connection, job)
@@ -723,10 +728,7 @@
     }
 
     function errorLabel(value?: ExternalJobSummary['error']): string {
-        if (!value) return strings.failed
-        if (value.action === 'reauthenticate') return strings.reauthenticate
-        if (value.action === 'unlock-key') return strings.unlockKey
-        return externalErrorMessage(strings, value)
+        return externalErrorLabel(strings, value)
     }
 
     /** A connection whose automatic backup is off reports `paused`, and it runs every other job. */
@@ -762,29 +764,9 @@
         return connection.purpose === 'sync' && selection?.kind === 'external' && selection.connectionId === connection.id && !syncRunning[connection.id]
     }
 
-    function connectionTone(connection: ExternalConnectionSummary): 'connected' | 'working' | 'attention' | 'idle' | 'paused' {
-        const job = activeJob(connection)
-        if (!connectionUsable(connection)) return 'attention'
-        if (job && (externalJobIsPaused(job) || job.state === 'uncertain')) return 'attention'
-        const operation = externalProgressFor(progress, connection.id)
-        if (operation?.state === 'running') return operation.stage === 'waiting' ? 'idle' : 'working'
-        if (job && externalJobIsActive(job)) return 'working'
-        if (syncStopped(connection)) return 'paused'
-        if (connectionUsable(connection)) return 'connected'
-        return 'attention'
-    }
-
-    // The notice under the heading explains a paused job, so the badge names only the state.
-    function connectionStatus(connection: ExternalConnectionSummary): string {
-        const job = activeJob(connection)
-        if (!connectionUsable(connection)) return connectionStatusLabel(connection.status)
-        if (job?.state === 'uncertain') return strings.statusError
-        if (job && externalJobIsPaused(job)) return ['reauth-required', 'key-locked'].includes(connection.status) ? connectionStatusLabel(connection.status) : strings.statusError
-        const operation = externalProgressFor(progress, connection.id)
-        if (operation?.state === 'running') return operation.stage === 'waiting' ? strings.transfer.waiting : operation.kind === 'binding' ? strings.transfer.connecting : strings.transfer.syncing
-        if (job && externalJobIsActive(job)) return strings.jobActive[job.kind]
-        if (syncStopped(connection)) return strings.statusPaused
-        return connectionStatusLabel(connection.status)
+    // The status button shows the same badge, so the mapping lives with the sync status view.
+    function connectionBadge(connection: ExternalConnectionSummary) {
+        return externalSyncStatusView(strings, connection, activeJob(connection), externalProgressFor(progress, connection.id), syncStopped(connection))
     }
 
     // A backup registers each pack as it seals it, so its upload has no total until it ends.
@@ -874,14 +856,14 @@
 
 <SettingGroup id="risunest-external-storage" title={strings.title} description={strings.help}>
     {#snippet actions()}
-        {#if storageState?.supported && !adding && !renewalConnection}<SettingButton disabled={busy} onclick={() => adding = true}>{strings.add}</SettingButton>{/if}
+        {#if storageState?.supported && !adding && !renewalConnection && !addressConnection}<SettingButton disabled={busy} onclick={() => adding = true}>{strings.add}</SettingButton>{/if}
         {#if storageState?.supported !== false}<SettingButton variant="secondary" busy={activeAction === 'refresh'} disabled={busy} onclick={refreshWithHistory}>{strings.refresh}</SettingButton>{/if}
     {/snippet}
 
     {#if !storageState && busy}<p class="placeholder">{strings.loading}</p>
     {:else if storageState && !storageState.supported}<p class="placeholder">{strings.unsupported}</p>
-    {:else if adding || renewalConnection}
-        <ConnectionForm {renewalConnection} {strings} onconnected={onConnected} oncancel={() => { adding = false; renewalConnection = undefined }} onbusychange={value => busy = value} />
+    {:else if adding || renewalConnection || addressConnection}
+        <ConnectionForm {addressConnection} {renewalConnection} {strings} onconnected={onConnected} oncancel={() => { adding = false; renewalConnection = undefined; addressConnection = undefined }} onbusychange={value => busy = value} />
     {:else if storageState}
         {#if !storageState.connections.length}
             <div class="blank">
@@ -892,6 +874,7 @@
         {#each storageState.connections as connection (connection.id)}
             {@const job = activeJob(connection)}
             {@const ProviderIcon = providerIcon(connection.providerId)}
+            {@const badge = connectionBadge(connection)}
             {@const renewable = connection.status === 'reauth-required' || job?.error?.action === 'reauthenticate'}
             {@const lockable = connection.status === 'key-locked' || job?.error?.action === 'unlock-key'}
             {@const recheckable = job?.state === 'uncertain' && job.kind === 'backup'}
@@ -909,15 +892,13 @@
                         <h3 class="card-title">{externalConnectionTitle(strings, connection)}</h3>
                         {#if place}<p class="card-sub">{place}</p>{/if}
                     </div>
-                    <div class="card-status"><StatusBadge label={connectionStatus(connection)} tone={connectionTone(connection)} /></div>
+                    <div class="card-status"><StatusBadge label={badge.label} tone={badge.tone} /></div>
                 </header>
 
                 {#if connection.lastError && !restoreReportsError(connection, job)}<SettingNotice text={errorLabel(connection.lastError)} />{/if}
                 {#if syncFailures.has(connection.id)}
                     {@const failure = syncFailures.get(connection.id)}
-                    <SettingNotice role="status" text={externalErrorKind(failure) === 'clockSkew' ? language.lwwSync.clockBlocked
-                        : externalErrorKind(failure) === 'previousStorageUnavailable' ? language.lwwSync.previousStorageUnavailable
-                        : externalErrorMessage(strings, failure)} />
+                    <SettingNotice role="status" text={externalSyncFailureText(strings, failure)} />
                     {#if ['clockSkew', 'corrupt'].includes(externalErrorKind(failure) ?? '') && supportsExternalLwwNewDevice(connection.id)}
                         <div class="actions">
                             <BindingTargetSwitch target={{kind:'external',connectionId:connection.id}} options={{mode:'new-device'}} label={language.lwwSync.newDeviceAction} onBound={() => refreshExternalStorageProductionState().then(() => refresh())} onError={reason => error = externalErrorMessage(strings, reason)} />
@@ -973,6 +954,9 @@
                         {:else if syncTarget}<SettingButton variant={remedy ? 'secondary' : 'primary'} disabled={busy} onclick={() => syncNow(connection)}>{strings.runSync}</SettingButton>{/if}
                         {#if job && externalJobIsActive(job)}<SettingButton variant="secondary" onclick={() => cancelJob(job)}>{strings.cancel}</SettingButton>{/if}
                         {#if job && unfinishedRestore(job)}<SettingButton variant="secondary" disabled={busy} onclick={() => stopRestore(job)}>{strings.stopRestore}</SettingButton>{/if}
+                        {#if connection.providerId === 'webdav' || connection.providerId === 's3'}
+                            <SettingButton variant="secondary" disabled={busy} onclick={() => addressConnection = connection}>{strings.changeAddress}</SettingButton>
+                        {/if}
                     </div>
                 </div>
 

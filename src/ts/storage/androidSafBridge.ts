@@ -115,6 +115,24 @@ export interface AndroidSafDestinationRequest {
     signal?: AbortSignal
     onProgress?(progress: AndroidSafProgress): void
     deferAcknowledgement?: boolean
+    reservation?: AndroidSafDestinationReservation
+}
+
+export interface AndroidSafDestinationReservation {
+    requestId: string
+    readonly jobId?: string
+    bind(exportId: string): Promise<void>
+    release(): Promise<void>
+}
+
+export type AndroidSafExportKind = NonNullable<AndroidSafDestinationEvent['sourceKind']>
+
+export function bindAndroidSafDestinationSource(reservation: AndroidSafDestinationReservation, sourcePath: string): Promise<void> {
+    const pieces = sourcePath.replaceAll('\\', '/').split('/')
+    const name = pieces.at(-1) === 'archive.zip.part' ? pieces.at(-2) : pieces.at(-1)
+    const exportId = name?.match(/(?:^|-)([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(?:\.|$)/)?.[1]
+    if (!exportId) return Promise.reject(new Error('Android SAF source has no export identity'))
+    return reservation.bind(exportId)
 }
 
 export interface AndroidSafProgress {
@@ -143,11 +161,16 @@ export interface AndroidSafDestinationEvent {
     message?: string | null
     warningCodes: string[]
     publicationPrerequisitesComplete?: boolean
+    copyStarted?: boolean
 }
 
 type NativeReply<T> = T | Promise<T>
 
 export interface AndroidSafJavascriptBridge {
+    copyReservedExport?(requestId: string, sourcePath: string, jobId: string): NativeReply<void>
+    reserveExport?(requestId: string, suggestedName: string, sourceKind: AndroidSafExportKind): NativeReply<void>
+    bindExport?(requestId: string, exportId: string): NativeReply<boolean>
+    releaseExport?(requestId: string): NativeReply<boolean>
     copyExport(
         requestId: string,
         sourcePath: string,
@@ -570,6 +593,165 @@ export async function discardAndroidSafSource(
     return await bridge.discardSource?.(token) === true
 }
 
+async function recoverUnclaimedAndroidDestination(
+    bridge: AndroidSafJavascriptBridge,
+): Promise<void> {
+    const encoded = await bridge.getExportStatus?.()
+    if (!encoded || encoded.length > 8_192) return
+    let terminal: Partial<AndroidSafDestinationEvent>
+    try { terminal = JSON.parse(encoded) } catch { return }
+    if (!terminal || typeof terminal !== 'object'
+        || typeof terminal.requestId !== 'string'
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(terminal.requestId)
+        || activeDestinationRequestIds.has(terminal.requestId)
+        || !['download', 'legacyBackup', 'screenshot'].includes(terminal.sourceKind ?? '')
+        || !['succeeded', 'failed', 'cancelled'].includes(terminal.state ?? '')
+        || !Array.isArray(terminal.warningCodes)
+        || terminal.warningCodes.some((warning) => typeof warning !== 'string')) return
+    if (terminal.sourceKind === 'screenshot') {
+        const { recoverAndroidScreenshotPublication } = await import('../nativeScreenshotArchiveWriter')
+        const { invoke } = await import('@tauri-apps/api/core')
+        await recoverAndroidScreenshotPublication({
+            getStatus: () => encoded,
+            invoke,
+            acknowledgeAndroidSafExport: (id) => bridge.acknowledgeExport?.(id) ?? false,
+        })
+        return
+    }
+    // These publications have no deferred owner. Native acknowledgement still checks the exact receipt.
+    if (!await bridge.acknowledgeExport?.(terminal.requestId)) {
+        throw new AndroidSafDestinationError(terminal.requestId, 'acknowledgement-failed', terminal.warningCodes,
+            'Android SAF terminal receipt could not be acknowledged')
+    }
+}
+
+/** Release the reservation without replacing a failed operation's error. */
+export async function withAndroidSafDestination<T>(
+    reservation: Pick<AndroidSafDestinationReservation, 'release'> | undefined,
+    operation: () => Promise<T>,
+): Promise<T> {
+    let failed = false
+    let originalError: unknown
+    try {
+        return await operation()
+    } catch (error) {
+        failed = true
+        originalError = error
+        throw error
+    } finally {
+        try { await reservation?.release() }
+        catch (cleanupError) {
+            if (!failed) throw cleanupError
+            // Cleanup must not replace the producer's error, including cancellation.
+            if (originalError && typeof originalError === 'object' && cleanupError instanceof AndroidSafDestinationError) {
+                try {
+                    const previous = (originalError as {warningCodes?: unknown}).warningCodes
+                    Object.assign(originalError, {warningCodes: [...new Set([
+                        ...(Array.isArray(previous) ? previous : []), ...cleanupError.warningCodes,
+                    ])]})
+                } catch {}
+            }
+        }
+    }
+}
+
+export function reserveAndroidSafDestination(
+    suggestedName: string,
+    sourceKind: AndroidSafExportKind,
+    signal?: AbortSignal,
+    dependencies: AndroidSafDestinationDependencies = productionDependencies,
+): Promise<AndroidSafDestinationReservation> {
+    if (signal?.aborted) return Promise.reject(new DOMException('Android SAF export was cancelled', 'AbortError'))
+    const { bridge } = dependencies
+    if (!bridge.reserveExport || !bridge.bindExport || !bridge.releaseExport || !bridge.copyReservedExport) {
+        return Promise.reject(new Error('Android SAF destination reservation is unavailable'))
+    }
+    const requestId = dependencies.createRequestId()
+    let jobId: string | undefined
+    activeDestinationRequestIds.add(requestId)
+    const reservedEvent = 'risunest-android-saf-reserved'
+    return withLibraryFileSelection(() => new Promise((resolve, reject) => {
+        let settled = false
+        const cleanup = () => {
+            signal?.removeEventListener('abort', onAbort)
+            dependencies.removeEventListener(reservedEvent, onReserved)
+            dependencies.removeEventListener(DESTINATION_EVENT, onTerminal)
+        }
+        const release = async () => {
+            try {
+                if (!await bridge.releaseExport!(requestId)) return
+                // Copies retain their terminal receipt for their publication owner to acknowledge.
+                const status = await bridge.getExportStatus?.()
+                const terminal = status ? JSON.parse(status) as AndroidSafDestinationEvent : null
+                if (terminal?.requestId === requestId) {
+                    await bridge.acknowledgeExport?.(requestId)
+                    if (terminal.warningCodes.includes('partial-destination-may-remain')) {
+                        throw new AndroidSafDestinationError(requestId, 'destination-cleanup-failed', terminal.warningCodes,
+                            'A partial file may remain at the Android SAF destination')
+                    }
+                }
+            } finally {
+                activeDestinationRequestIds.delete(requestId)
+            }
+        }
+        const fail = (error: unknown) => {
+            if (settled) return
+            settled = true
+            cleanup()
+            void release().catch((cleanupError) => {
+                if (error && typeof error === 'object' && cleanupError instanceof AndroidSafDestinationError) {
+                    Object.assign(error, {warningCodes: cleanupError.warningCodes})
+                }
+            }).finally(() => reject(error))
+        }
+        const onAbort = () => {
+            void Promise.resolve(bridge.cancelExport?.(requestId)).catch(() => {})
+        }
+        const onReserved = (event: Event) => {
+            if ((event as CustomEvent<{requestId: string}>).detail?.requestId !== requestId || settled) return
+            if (signal?.aborted) {
+                fail(new DOMException('Android SAF export was cancelled', 'AbortError'))
+                return
+            }
+            settled = true
+            cleanup()
+            resolve({
+                requestId,
+                get jobId() { return jobId },
+                async bind(exportId) {
+                    if (!await bridge.bindExport!(requestId, exportId)) {
+                        throw new AndroidSafDestinationError(requestId, 'invalid-destination', [], 'Android SAF destination does not match the export')
+                    }
+                    jobId = exportId
+                },
+                release,
+            })
+        }
+        const onTerminal = (event: Event) => {
+            const detail = (event as CustomEvent<AndroidSafDestinationEvent>).detail
+            if (detail?.requestId !== requestId) return
+            fail(detail.state === 'cancelled' ? androidSafAbortError(requestId, detail)
+                : new AndroidSafDestinationError(requestId, detail.code ?? 'destination-picker-failed', detail.warningCodes,
+                    detail.message ?? 'Android SAF destination selection failed'))
+        }
+        dependencies.addEventListener(reservedEvent, onReserved)
+        dependencies.addEventListener(DESTINATION_EVENT, onTerminal)
+        signal?.addEventListener('abort', onAbort, {once: true})
+        try {
+            const reserve = () => {
+                if (signal?.aborted) {
+                    fail(new DOMException('Android SAF export was cancelled', 'AbortError'))
+                    return
+                }
+                return bridge.reserveExport!(requestId, suggestedName, sourceKind)
+            }
+            void Promise.resolve(bridge.getExportStatus
+                ? recoverUnclaimedAndroidDestination(bridge).then(reserve)
+                : reserve()).catch(fail)
+        } catch (error) { fail(error) }
+    }))
+}
+
 export function copyNativeExportToAndroidSaf(
     request: AndroidSafDestinationRequest,
     dependencies: AndroidSafDestinationDependencies = productionDependencies,
@@ -577,7 +759,7 @@ export function copyNativeExportToAndroidSaf(
     if (request.signal?.aborted) {
         return Promise.reject(new DOMException('Android SAF export was cancelled', 'AbortError'))
     }
-    const requestId = dependencies.createRequestId()
+    const requestId = request.reservation?.requestId ?? dependencies.createRequestId()
     activeDestinationRequestIds.add(requestId)
     return withLibraryFileSelection(() => new Promise((resolve, reject) => {
         let settled = false
@@ -652,11 +834,13 @@ export function copyNativeExportToAndroidSaf(
         }
         request.signal?.addEventListener('abort', onAbort, { once: true })
         try {
-            const started = dependencies.bridge.copyExport(
-                requestId,
-                request.sourcePath,
-                request.suggestedName,
-            )
+            const started = request.reservation
+                ? Promise.resolve(request.reservation.jobId ? undefined : bindAndroidSafDestinationSource(request.reservation, request.sourcePath))
+                    .then(() => {
+                        if (!dependencies.bridge.copyReservedExport || !request.reservation?.jobId) throw new Error('Android SAF reservation is not bound')
+                        return dependencies.bridge.copyReservedExport(requestId, request.sourcePath, request.reservation.jobId)
+                    })
+                : dependencies.bridge.copyExport(requestId, request.sourcePath, request.suggestedName)
             void Promise.resolve(started).catch((error) => finish(() => reject(error)))
         }
         catch (error) {

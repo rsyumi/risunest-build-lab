@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
+import { Packr as NodePackr, Unpackr as NodeUnpackr } from 'msgpackr'
 import { Packr, Unpackr } from 'msgpackr/index-no-eval'
 import { describe, expect, it, vi } from 'vitest'
 
@@ -51,6 +52,19 @@ function persistedProjection(value: unknown): unknown {
 }
 
 describe('Roadmap 14 msgpackr cross-language fixture', () => {
+    it('round-trips long UTF-8 strings through Node and no-eval encoders', () => {
+        for (const Encoder of [NodePackr, Packr]) {
+            const encoder = new Encoder({ useRecords: false })
+            for (const text of ['x'.repeat(63), 'x'.repeat(64), '한글🙂'.repeat(16384)]) {
+                const value = { characters: [{ description: text }], pluginCustomStorage: { text } }
+                const payload = encoder.encode(value)
+                for (const Decoder of [NodeUnpackr, Unpackr]) {
+                    expect(new Decoder({ useRecords: false }).decode(payload)).toEqual(value)
+                }
+            }
+        }
+    })
+
     it('freezes number, map-order, extension, undefined, and unknown-field semantics', () => {
         const fixture = readFixture()
         const decoder = new Unpackr({ int64AsType: 'number', useRecords: false })

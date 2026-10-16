@@ -376,7 +376,7 @@ export function createReferenceHarness(target) {
       target === "risuai"
         ? context.getColdStorageItem(key)
         : context.readColdStorageJsonEntry(key).coldData,
-    async importArchive(bytes) {
+    async importArchive(bytes, chunkBytes = 317) {
       if (target === "pocket") {
         const imported = await transaction.importArchive(bytes);
         lastSourceDatabase = imported.sourceDatabase;
@@ -397,16 +397,17 @@ export function createReferenceHarness(target) {
         }
         return imported.database;
       }
-      const stream = () =>
-        new ReadableStream({
-          start(controller) {
-            for (let offset = 0; offset < bytes.length; offset += 317)
-              controller.enqueue(
-                new Uint8Array(bytes.subarray(offset, offset + 317)),
-              );
-            controller.close();
+      const stream = () => {
+        let offset = 0;
+        return new ReadableStream({
+          pull(controller) {
+            if (offset === bytes.length) return controller.close();
+            const end = Math.min(offset + chunkBytes, bytes.length);
+            controller.enqueue(new Uint8Array(bytes.subarray(offset, end)));
+            offset = end;
           },
         });
+      };
       context.document.createElement = () => {
         input = {
           files: [{ size: bytes.length, stream }],
@@ -639,7 +640,7 @@ if (
     );
     verifySourcePins(contract);
     const bytes = fs.readFileSync(archive);
-    const database = await harness.importArchive(bytes);
+    const database = await harness.importArchive(bytes, 64 * 1024);
     if (
       !acceptsContract(
         contract,

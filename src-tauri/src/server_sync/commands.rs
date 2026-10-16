@@ -147,6 +147,14 @@ fn claim_library<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<crate::native_
         .server()
         .map_err(|code| SyncError::new(code, 409))
 }
+fn with_status_store<R: tauri::Runtime, T>(app: &AppHandle<R>, operation: impl FnOnce(&PersistentStore) -> Result<T>) -> Result<T> {
+    if app.state::<ServerSyncCommandState>().cleanup_closed.load(Ordering::Acquire) {
+        return Err(SyncError::new("cleanup-pending", 409));
+    }
+    app.state::<crate::persistent_store::commands::PersistentStoreState>().with_status_job_store(operation)
+        .map_err(|error| SyncError::caused("local-store-unavailable", 503, error.to_string()))?
+}
+
 fn job_store<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PersistentStore> {
     with_store_mut(app.state(), |store| store.open_native_job_store())
         .map_err(|error| SyncError::caused("local-store-unavailable", 503, error.to_string()))
@@ -208,12 +216,12 @@ pub(crate) async fn server_sync_asset_status(
     app: AppHandle,
     target: Option<crate::persistent_store::asset_residency::PreviousStorageTarget>,
 ) -> Result<crate::persistent_store::asset_residency::ResidencyStatus> {
-    logged_blocking("asset-status", move || job_store(&app)?.asset_residency_status_for_target(target.as_ref())).await
+    logged_blocking("asset-status", move || with_status_store(&app, |store| store.asset_residency_status_for_target(target.as_ref()))).await
 }
 /// How many files only one external storage connection holds, as the status counts them.
 #[tauri::command]
 pub(crate) async fn asset_residency_connection_objects(app: AppHandle, connection_id: String) -> Result<u64> {
-    logged_blocking("asset-status", move || job_store(&app)?.asset_residency_connection_objects(&connection_id)).await
+    logged_blocking("asset-status", move || with_status_store(&app, |store| store.asset_residency_connection_objects(&connection_id))).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_asset_policy(
@@ -343,7 +351,7 @@ fn lww_client_cancelled(store:&PersistentStore,cancelled:Option<Arc<AtomicBool>>
 }
 #[tauri::command]
 pub(crate) async fn server_sync_status(app:AppHandle)->Result<LwwStatus> {
-    logged_blocking("status",move||lww_status(&job_store(&app)?)).await
+    logged_blocking("status",move||with_status_store(&app, lww_status)).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_configure(app:AppHandle,config:super::client::ServerConfig)->Result<()> {
@@ -354,8 +362,8 @@ pub(crate) async fn server_sync_lww_push(app:AppHandle,request:crate::persistent
     logged_blocking("push",move|| within(&LANES.send,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"send")?;let mut store=job_store(&app)?;lww_client_cancelled(&store,Some(cancelled))?.push(&mut store,&request,&generating)})).await
 }
 #[tauri::command]
-pub(crate) async fn server_sync_lww_pull(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<crate::persistent_store::lww::StageReceive> {
-    logged_blocking("pull",move|| within(&LANES.receive,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"receive")?;let mut store=job_store(&app)?;lww_client_cancelled(&store,Some(cancelled))?.receive_page(&mut store,&request)})).await
+pub(crate) async fn server_sync_lww_pull(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<super::lww_client::ReceivePage> {
+    logged_blocking("pull",move|| within(&LANES.receive,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"receive")?;let mut store=job_store(&app)?;lww_client_cancelled(&store,Some(cancelled))?.receive_page_with_frontier(&mut store,&request)})).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_lww_ack(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<()> {
@@ -391,8 +399,8 @@ pub(crate) async fn server_sync_lww_drain(app:AppHandle,request:crate::persisten
     logged_blocking("drain",move||within(&LANES.send,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"send")?;let mut store=job_store(&app)?;let core=lww_client_cancelled(&store,Some(cancelled))?;let mut next=request;while core.push(&mut store,&next,&generating)?.is_some(){next.request_id=uuid::Uuid::new_v4().to_string();}if !store.lww_read_outbox(next.binding_authority,1)?.entries.is_empty(){return Err(SyncError::new("generation-active",409));}Ok(())})).await
 }
 #[tauri::command]
-pub(crate) async fn server_sync_lww_hydrate(app:AppHandle,request:crate::persistent_store::lww::Header,selected_character_id:Option<String>,representatives_only:Option<bool>)->Result<()> {
-    logged_blocking("hydrate",move|| within(&LANES.hydrate,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"hydrate")?;let store=job_store(&app)?;if representatives_only.unwrap_or(false) && store.server_asset_policy()?==super::residency::AssetPolicy::Full{return Ok(());}hydrate_binding_assets(&store,&request,cancelled,selected_character_id.as_deref(),||{})})).await
+pub(crate) async fn server_sync_lww_hydrate(app:AppHandle,request:crate::persistent_store::lww::Header,selected_character_id:Option<String>,representatives_only:Option<bool>,icon_priority:Option<crate::persistent_store::asset_residency::RepresentativeImagePriority>)->Result<()> {
+    logged_blocking("hydrate",move|| within(&LANES.hydrate,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"hydrate")?;let store=job_store(&app)?;if representatives_only.unwrap_or(false) && store.server_asset_policy()?==super::residency::AssetPolicy::Full{return Ok(());}hydrate_binding_assets_ordered(&store,&request,cancelled,selected_character_id.as_deref(),icon_priority.as_ref(),||{})})).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_lww_pending_count(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<u64> {
@@ -401,12 +409,15 @@ pub(crate) async fn server_sync_lww_pending_count(app:AppHandle,request:crate::p
 #[tauri::command]
 pub(crate) async fn server_sync_progress()->Vec<super::progress::LaneSnapshot> {LANES.snapshot()}
 pub(crate) fn hydrate_binding_assets(store:&crate::persistent_store::PersistentStore,request:&crate::persistent_store::lww::Header,cancelled:Arc<AtomicBool>,selected_character_id:Option<&str>,on_object_done:impl Fn())->Result<()> {
+    hydrate_binding_assets_ordered(store,request,cancelled,selected_character_id,None,on_object_done)
+}
+pub(crate) fn hydrate_binding_assets_ordered(store:&crate::persistent_store::PersistentStore,request:&crate::persistent_store::lww::Header,cancelled:Arc<AtomicBool>,selected_character_id:Option<&str>,icon_priority:Option<&crate::persistent_store::asset_residency::RepresentativeImagePriority>,on_object_done:impl Fn())->Result<()> {
     let authority=request.binding_authority;
     let check=||{if cancelled.load(Ordering::Acquire){return Err(SyncError::new("cancelled",409));}if store.lww_binding_authority()?!=authority{return Err(SyncError::new("binding-authority-changed",409));}Ok(())};
     check()?;
     match store.server_asset_policy()? {
         super::residency::AssetPolicy::Full => store.hydrate_registered_remote_assets_prioritized(Some(cancelled.clone()),selected_character_id,check,on_object_done),
-        super::residency::AssetPolicy::Remote => store.hydrate_representative_images(Some(cancelled.clone()),selected_character_id,check,on_object_done),
+        super::residency::AssetPolicy::Remote => store.hydrate_representative_images(Some(cancelled.clone()),selected_character_id,icon_priority,check,on_object_done),
     }
 }
 
@@ -418,8 +429,8 @@ async fn stop_notification_job<R: tauri::Runtime>(app:&AppHandle<R>)->Result<()>
     Ok(())
 }
 #[tauri::command]
-pub(crate) async fn server_sync_notify_start(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<()> {recorded("notify-start",start_notification_job(app,request).await)}
-async fn start_notification_job<R: tauri::Runtime>(app:AppHandle<R>,request:crate::persistent_store::lww::Header)->Result<()> {
+pub(crate) async fn server_sync_notify_start(app:AppHandle,request:crate::persistent_store::lww::Header,operation_id:Option<uuid::Uuid>)->Result<()> {recorded("notify-start",start_notification_job(app,request,operation_id).await)}
+async fn start_notification_job<R: tauri::Runtime>(app:AppHandle<R>,request:crate::persistent_store::lww::Header,operation_id:Option<uuid::Uuid>)->Result<()> {
     stop_notification_job(&app).await?;
     if app.state::<ServerSyncCommandState>().cleanup_closed.load(Ordering::Acquire){return Err(SyncError::new("cleanup-pending",409));}
     let start=app.state::<ServerSyncCommandState>().begin_notification()?;
@@ -431,7 +442,7 @@ async fn start_notification_job<R: tauri::Runtime>(app:AppHandle<R>,request:crat
     app.state::<ServerSyncCommandState>().install_notification(start,move|guard| tauri::async_runtime::spawn(async move {
         let _guard=guard;
         use tauri::Emitter;
-        let _=super::notification::run(config,move|frame| {let _=events.emit("risu-server-sync-remote-hint",frame);},move|connected| {let _=connection.emit("risu-server-sync-notification",serde_json::json!({"connected":connected}));}).await;
+        let _=super::notification::run(config,operation_id,move|frame| {let _=events.emit("risu-server-sync-remote-hint",frame);},move|connected| {let _=connection.emit("risu-server-sync-notification",serde_json::json!({"connected":connected}));}).await;
     }))
 }
 
@@ -620,6 +631,29 @@ mod tests {
         drop(app.state::<crate::native_file_jobs::NativeFileJobState>().admission.server().unwrap());
     }
     #[test]
+    fn status_reuses_its_connection_observes_policy_changes_and_refuses_cleanup() {
+        let (_root, store) = super::super::lww_tests::local();
+        let app = mock_app(store);
+        with_status_store(app.handle(), |store| {
+            store.device_store()?.connection().execute_batch("CREATE TEMP TABLE synthetic_status_connection (value INTEGER); INSERT INTO synthetic_status_connection VALUES(1)")?;
+            Ok(())
+        }).unwrap();
+        with_store(app.state(), |store| store.device_store()?.set_asset_residency_policy(AssetPolicy::Remote)).unwrap();
+        with_status_store(app.handle(), |store| {
+            assert_eq!(store.device_store()?.connection().query_row("SELECT value FROM synthetic_status_connection", [], |row| row.get::<_,i64>(0))?, 1);
+            assert_eq!(serde_json::to_value(lww_status(store)?).unwrap()["assetPolicy"], "remote");
+            Ok(())
+        }).unwrap();
+        let state = app.state::<ServerSyncCommandState>();
+        state.begin_cleanup().unwrap();
+        assert_eq!(with_status_store(app.handle(), |_| Ok(())).unwrap_err().code, "cleanup-pending");
+        state.finish_cleanup().unwrap();
+        with_status_store(app.handle(), |store| {
+            assert_eq!(store.device_store()?.connection().query_row("SELECT count(*) FROM sqlite_temp_schema WHERE name='synthetic_status_connection'", [], |row| row.get::<_,i64>(0))?, 1);
+            Ok(())
+        }).unwrap();
+    }
+    #[test]
     fn the_sync_status_reports_the_stored_asset_policy() {
         let (_root, store) = super::super::lww_tests::local();
         let read = |store: &PersistentStore| serde_json::to_value(super::lww_status(store).unwrap()).unwrap();
@@ -722,7 +756,7 @@ mod tests {
         app.listen("risu-server-sync-notification", move |event| {
             let _ = link_tx.send(serde_json::from_str::<serde_json::Value>(event.payload()).unwrap());
         });
-        tauri::async_runtime::block_on(start_notification_job(app.handle().clone(), request)).unwrap();
+        tauri::async_runtime::block_on(start_notification_job(app.handle().clone(), request, None)).unwrap();
         assert_eq!(link_rx.recv_timeout(WAIT).unwrap(), serde_json::json!({"connected": true}));
         let SeqNotification::Seq { seq: before } = hint_rx.recv_timeout(WAIT).unwrap();
         save(&mut source, &["root", "language"], serde_json::json!("ja"));

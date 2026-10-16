@@ -177,6 +177,20 @@ async fn run(entry: Entry, installer_diagnostics: &mut bool) -> Result<()> {
         #[cfg(windows)]
         ["installer", "register"] => crate::removal::register(&root, &executable),
         #[cfg(windows)]
+        ["installer", "preserve-files"] => {
+            let preserved = crate::removal::preserve_install_baseline(&executable)?;
+            println!("{}", if preserved { "preserved" } else { "skipped" });
+            Ok(())
+        }
+        #[cfg(windows)]
+        ["installer", "resume-removal", data @ ("delete" | "preserve")] => {
+            let kept = crate::removal::resume_finalization(&executable, *data == "delete")?;
+            println!("{}", if kept { "keep-data" } else { "complete" });
+            Ok(())
+        }
+        #[cfg(windows)]
+        ["installer", "commit-removal"] => crate::removal::commit_finalization(&executable),
+        #[cfg(windows)]
         ["installer", "obsolete-files", previous] => {
             let removed =
                 crate::removal::remove_obsolete_owned_files(&executable, &PathBuf::from(previous))?;
@@ -210,13 +224,17 @@ async fn run(entry: Entry, installer_diagnostics: &mut bool) -> Result<()> {
             Ok(())
         }
         #[cfg(windows)]
-        ["installer", "remove-files", mode] => {
+        ["installer", action @ ("remove-files" | "remove-files-resumable"), mode] => {
             let force = match *mode {
                 "force" => true,
                 "normal" => false,
                 _ => return Err("invalid-uninstall-option".into()),
             };
-            crate::removal::remove_owned_files(&root, &executable, force)
+            if *action == "remove-files" {
+                crate::removal::remove_owned_files(&root, &executable, force)
+            } else {
+                crate::removal::remove_owned_files_resumable(&root, &executable, force)
+            }
         }
         #[cfg(not(windows))]
         ["removal-helper", parent, mode @ ("delete" | "preserve")] => {
@@ -238,6 +256,10 @@ async fn run(entry: Entry, installer_diagnostics: &mut bool) -> Result<()> {
             crate::removal::cleanup_services(&root, &executable).await
         }
         ["installer", "forget-removal"] => crate::removal::forget_registration(&root, &executable),
+        #[cfg(windows)]
+        ["installer", "forget-removal-resumable"] => {
+            crate::removal::forget_finalization(&root, &executable)
+        }
         ["installer", "delete-data"] => crate::removal::delete_registered_data(&root, &executable),
         ["uninstall", ..] => crate::removal::cli(&root, &executable, &command[1..]).await,
         ["autostart", "status"] => {

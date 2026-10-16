@@ -120,6 +120,109 @@ mod windows {
     use std::{fs, path::PathBuf, process::Command};
 
     #[test]
+    fn released_and_resumed_commands_honor_ownership_and_removal_artifact_contracts() {
+        for (delete_data, resumed) in [false, true].into_iter().flat_map(|delete| {
+            [None, Some(false), Some(true)].map(move |resumed| (delete, resumed))
+        }) {
+            let temp = tempfile::tempdir().unwrap();
+            let base = temp.path().canonicalize().unwrap();
+            let local = base.join("local");
+            let root = base.join("custom data 경로");
+            let install = base.join("installation");
+            fs::create_dir_all(&install).unwrap();
+            let manager = install.join("risunest-sync-manager.exe");
+            fs::copy(env!("CARGO_BIN_EXE_risunest-sync-manager"), &manager).unwrap();
+            let copied = base.join("remove.exe");
+            fs::copy(&manager, &copied).unwrap();
+            let server = install.join("risunest-sync-server.exe");
+            fs::write(&server, b"synthetic").unwrap();
+            fs::write(install.join("uninstall.exe"), b"synthetic").unwrap();
+            fs::write(install.join("risunest-sync-bundle.json"), serde_json::json!({
+                "schema":"risunest-sync-bundle/v1", "product":"sync", "variant":"managed", "version":"1.0.4",
+                "protocolId":risunest_sync_server::PROTOCOL_ID, "storeFormatId":risunest_sync_server::STORE_FORMAT_ID,
+                "files":["risunest-sync-manager.exe", "risunest-sync-server.exe"], "vendor":[]
+            }).to_string()).unwrap();
+            let invoke = |args: &[&str]| {
+                let mut command = Command::new(&copied);
+                if !args.contains(&"resume-removal") {
+                    command.arg("--data-dir").arg(&root);
+                }
+                let output = command
+                    .arg("--server")
+                    .arg(&server)
+                    .args(args)
+                    .env("LOCALAPPDATA", &local)
+                    .env("APPDATA", base.join("roaming"))
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{args:?}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                output
+            };
+            invoke(&["installer", "register"]);
+            fs::write(root.join("metadata.sqlite"), b"synthetic").unwrap();
+            invoke(&[
+                "installer",
+                "removal-check",
+                "normal",
+                if delete_data { "delete" } else { "preserve" },
+            ]);
+            if let Some(forgotten) = resumed {
+                invoke(&["installer", "remove-files-resumable", "normal"]);
+                if forgotten {
+                    invoke(&["installer", "forget-removal-resumable"]);
+                }
+                let output = invoke(&[
+                    "installer",
+                    "resume-removal",
+                    if delete_data { "delete" } else { "preserve" },
+                ]);
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stdout).trim(),
+                    if forgotten && delete_data {
+                        "keep-data"
+                    } else {
+                        "complete"
+                    }
+                );
+                let retry = install.join(".risunest-sync-removal");
+                assert_eq!(fs::read(retry.join("complete")).unwrap(), b"true");
+                assert_eq!(
+                    fs::read(retry.join("data-path")).unwrap(),
+                    root.to_str()
+                        .unwrap()
+                        .encode_utf16()
+                        .flat_map(u16::to_le_bytes)
+                        .collect::<Vec<_>>()
+                );
+                fs::remove_dir_all(retry).unwrap();
+            } else {
+                if delete_data {
+                    invoke(&["installer", "delete-data"]);
+                }
+                invoke(&["installer", "remove-files", "normal"]);
+            }
+            assert!(!install.join(".risunest-sync-removal").exists());
+            fs::remove_file(install.join("uninstall.exe")).unwrap();
+            fs::remove_dir(&install).unwrap();
+            invoke(&["installer", "forget-removal"]);
+            assert!(!install.exists());
+            assert_eq!(
+                root.join("metadata.sqlite").exists(),
+                !delete_data || resumed == Some(true)
+            );
+            let instance = risunest_sync_manager::platform::instance_name(&root);
+            assert!(!local
+                .join(".risunest-sync-instances")
+                .join(format!("{instance}.json"))
+                .exists());
+        }
+    }
+
+    #[test]
     fn incomplete_installation_and_force_use_the_real_manager_without_deleting_unknown_data() {
         let temp = tempfile::tempdir().unwrap();
         let base = temp.path().canonicalize().unwrap();
@@ -170,6 +273,8 @@ mod windows {
         );
         assert!(root.join("risunest-sync-instance.json").exists());
         assert!(!root.join("metadata.sqlite").exists());
+        let baseline = install.join("risunest-sync-bundle.previous.json");
+        fs::write(&baseline, "synthetic invalid baseline").unwrap();
         let normal = invoke(&manager, &["uninstall", "--dry-run"]);
         assert!(normal.status.success());
         assert!(!root.join("manager-update").exists());
@@ -250,6 +355,14 @@ mod windows {
             String::from_utf8_lossy(&removed.stderr)
         );
         assert!(!server.exists() && !manager.exists() && !marker.exists());
+        assert!(!baseline.exists());
+        let forgotten = invoke(&copied, &["installer", "forget-removal"]);
+        assert!(
+            forgotten.status.success(),
+            "{}",
+            String::from_utf8_lossy(&forgotten.stderr)
+        );
+        assert!(!install.join(".risunest-sync-removal").exists());
         assert_eq!(fs::read(&extra).unwrap(), b"synthetic");
         assert_eq!(fs::read(root.join("preserved-data")).unwrap(), b"synthetic");
         assert!(PathBuf::from(&copied).exists());

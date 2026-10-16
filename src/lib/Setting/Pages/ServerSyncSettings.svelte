@@ -4,7 +4,8 @@
     import { language } from 'src/lang'
     import { alertActionConfirm, alertCheckboxConfirm, alertConfirm } from 'src/ts/alert'
     import { isTauri } from 'src/ts/platform'
-    import { platform as nativePlatform } from '@tauri-apps/plugin-os'
+    import { serverSyncErrorMessage, writerRecoveryCodes, usedRegistrationCodes } from 'src/ts/storage/sync/serverSyncErrorMessage'
+    import { serverSyncStatusView } from 'src/ts/storage/sync/syncStatusView'
     import { completeServerSyncBinding, connectServerSync, disconnectServerSync, dismissServerSyncConnectionFailure, holdServerSync, retryServerSync, getServerSyncController, getServerSyncCacheUsage, cleanupServerSyncCache, type ServerSyncCacheUsage } from 'src/ts/storage/sync/serverSyncProduction'
     import { parseServerRegistration } from 'src/ts/storage/sync/serverSyncRegistration'
     import { serverRegistrationInbox } from 'src/ts/storage/sync/serverSyncRegistrationInbox'
@@ -14,7 +15,6 @@
     import { assetCleanupProgress, isAssetCleanupRunning } from 'src/ts/storage/sync/serverAssetCleanupProgress'
     import { describeBlockedReason } from 'src/ts/storage/sync/blockedReasonText'
     import type { ServerConfig } from 'src/ts/storage/sync/serverSync'
-    import { PREVIOUS_FILES_DOWNLOAD_FAILED } from 'src/ts/storage/sync/bindingFlow'
     import { formatRisuNestStorageBytes as bytes } from 'src/ts/storage/risuNestStorageDashboard'
     import { serverSyncProgressView, serverSyncRoutineView } from 'src/ts/storage/sync/serverSyncProgress'
     import SettingGroup from '../RisuNest/SettingGroup.svelte'
@@ -63,10 +63,6 @@
     let stopWatching = () => {}
     let stopCleanup = () => {}
     let mounted = false
-    const writerRecoveryCodes = ['writer-collision', 'equal-stamp-integrity']
-    const registrationCodes = ['unauthorized', 'invalid-device-token', 'server-epoch-changed']
-    // The server refused the registration code itself, so only a new one can connect.
-    const usedRegistrationCodes = ['registration-used', 'registration-integrity', 'registration-not-new']
     // Sync stays stopped by the collision while another connection attempt fails.
     let writerRecovery = $derived(writerRecoveryCodes.includes(view.error) || writerRecoveryCodes.includes(view.blockedCode))
     let connected = $derived(!!view.status.configured && !!view.status.bound)
@@ -74,14 +70,7 @@
     let storedPolicy = $derived(view.status.assetPolicy ?? residency?.policy)
     // A connected device keeps its registration input folded until a code is needed again.
     let codeShown = $derived(!view.status.bound || !!view.error || !!failure || !!candidate || codeOpen)
-    let status = $derived.by((): { label: string; tone: 'idle' | 'connected' | 'working' | 'paused' | 'attention' } => {
-        if (view.progress || (connected && view.running)) return { label: copy.running, tone: 'working' }
-        if (!connected) return { label: copy.disconnected, tone: view.bindingIncomplete ? 'attention' : 'idle' }
-        if (registrationCodes.includes(view.error)) return { label: copy.registrationRequired, tone: 'attention' }
-        if (view.error) return { label: view.paused ? copy.blocked : copy.ready, tone: 'attention' }
-        if (view.paused) return { label: copy.paused, tone: 'paused' }
-        return { label: copy.ready, tone: 'connected' }
-    })
+    let status = $derived(serverSyncStatusView(view))
     // Automatic sync shows one bar as soon as it has anything to move, and keeps it finished for a moment.
     let shown = $derived(view.progress ?? view.finished)
     let summary = $derived(shown?.mode === 'routine' ? serverSyncRoutineView(shown, copy, !view.progress) : undefined)
@@ -97,21 +86,8 @@
         { value: 'full' as AssetResidencyPolicy, label: copy.residency.full },
         { value: 'remote' as AssetResidencyPolicy, label: copy.residency.remote },
     ])
-    const linux = (() => { try { return isTauri && nativePlatform() === 'linux' } catch { return false } })()
     const errorCode = (error: unknown) => typeof error === 'object' && error && 'code' in error ? String(error.code) : ''
-    const message = (error: unknown) => {
-        const token = errorCode(error)
-        if (['clock-skew', 'incoming-clock-skew', 'accepted-clock-correction-required'].includes(token)) return language.lwwSync.clockBlocked
-        if (writerRecoveryCodes.includes(token)) return language.lwwSync.writerCollision
-        if (token === 'unit-too-large') return language.lwwSync.unitTooLarge
-        if (token === 'device-credential-unavailable') return linux ? copy.credentialUnavailableLinux : copy.credentialUnavailable
-        if (registrationCodes.includes(token)) return language.lwwSync.registrationRevoked
-        if (usedRegistrationCodes.includes(token)) return tone === 'onboarding' ? language.lwwSync.registrationUsedOnboarding : language.lwwSync.registrationUsed
-        if (token === PREVIOUS_FILES_DOWNLOAD_FAILED) return language.lwwSync.downloadFailedNotConnected
-        if (token === 'previous-storage-unavailable') return language.lwwSync.previousStorageUnavailable
-        if (token.startsWith('qr-')) return token.includes('permission') ? copy.cameraDenied : copy.cameraUnavailable
-        return copy.errorHelp
-    }
+    const message = (error: unknown) => serverSyncErrorMessage(error, tone === 'onboarding', !!view.status.bound)
     async function readResidency() {
         const read = ++residencyRead
         residencyFailed = false
@@ -227,7 +203,7 @@
         })
         dispose = controller.subscribe(value => { view = value })
         stopWatching = controller.watchProgress()
-        inboxDispose = serverRegistrationInbox.changed.subscribe(() => { const pending = serverRegistrationInbox.take(); if (pending) candidate = pending })
+        inboxDispose = serverRegistrationInbox.changed.subscribe(() => { const pending = serverRegistrationInbox.take(); if (pending) replaceCandidate(pending) })
         void refresh().catch(error => { failure ||= message(error) })
     })
     onDestroy(() => { mounted = false; stopCleanup(); dispose(); stopWatching(); inboxDispose(); scanner.cancel(); serverRegistrationInbox.releaseConsumed() })
@@ -314,7 +290,8 @@
 {/snippet}
 
 {#snippet alert()}
-    {#if view.error || failure}<SettingNotice role="alert" text={failure || message({ code: view.error })} />{/if}
+    <!-- An error that is still being retried reads as information, not a failure to act on. -->
+    {#if view.error || failure}{@const retrying = !failure && status.tone === 'failed'}<SettingNotice role={retrying ? 'status' : 'alert'} tone={retrying ? 'info' : 'danger'} text={failure || message({ code: view.error })} />{/if}
 {/snippet}
 
 {#snippet residencyChoices(apply?: (next: AssetResidencyPolicy) => void)}

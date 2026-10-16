@@ -158,7 +158,7 @@ where
             .write(true)
             .open(&source)
             .map_err(io_error)?;
-        let mut output = BufWriter::new(file);
+        let mut output = BufWriter::new(super::export::ProgressWriter::new(file, job));
         let _total_items = {
             let reader = prepared.reader().map_err(store_error)?;
             let projected = export::projected_root_module(
@@ -180,6 +180,7 @@ where
         output.flush().map_err(io_error)?;
         output.get_ref().sync_all().map_err(io_error)?;
         drop(output);
+        let source_bytes = fs::metadata(&source).map_err(io_error)?.len();
         if job.is_cancel_requested() {
             return Err(cancelled(
                 "RISUM export cancelled before destination publication",
@@ -219,7 +220,11 @@ where
             destination_root,
             &destination_path,
             || job.is_cancel_requested() || phase_failure.borrow().is_some(),
-            |_| {},
+            |progress| {
+                if let Err(error) = job.set_export_bytes(progress.copied_bytes, Some(source_bytes)) {
+                    *phase_failure.borrow_mut() = Some(error);
+                }
+            },
             || {
                 if job.is_cancel_requested() || phase_failure.borrow().is_some() {
                     return Err(destination::DestinationWriteError::Cancelled);

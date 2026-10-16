@@ -157,28 +157,28 @@ pub(crate) struct ObjectPage {
 }
 
 /// Totals over the objects the leased generation registers. An object several aliases share is
-/// read once, so the proportion matches the work the pass actually does.
-pub(crate) fn registered_object_totals(db: &rusqlite::Connection) -> Result<ObjectTotals> {
-    let (objects, bytes): (i64, i64) = db.query_row(
-        REGISTERED_OBJECT_TOTALS,
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    Ok(ObjectTotals {
-        objects: sql_u64(objects)?,
-        bytes: sql_u64(bytes)?,
-    })
+/// read once; the byte total includes only bodies currently stored on this device.
+pub(crate) fn registered_object_totals(db: &rusqlite::Connection, cas: &PayloadCas) -> Result<ObjectTotals> {
+    let mut statement = db.prepare(REGISTERED_OBJECTS)?;
+    let mut rows = statement.query([""])?;
+    let mut totals = ObjectTotals::default();
+    let mut hashes = Vec::new();
+    loop {
+        hashes.clear();
+        for _ in 0..ABSENT_PAGE {
+            let Some(row) = rows.next()? else { break; };
+            hashes.push(row.get::<_, String>(0)?);
+        }
+        if hashes.is_empty() { break; }
+        totals.objects += hashes.len() as u64;
+        totals.bytes += cas.stat_objects(hashes.iter().map(String::as_str))?.into_iter().flatten().sum::<u64>();
+    }
+    Ok(totals)
 }
 
 const REGISTERED_OBJECTS: &str = "SELECT object_hash,MAX(size),MAX(kind) FROM (
             SELECT object_hash,size,kind FROM asset_aliases WHERE object_hash IS NOT NULL
         ) WHERE object_hash>?1 GROUP BY object_hash ORDER BY object_hash";
-
-const REGISTERED_OBJECT_TOTALS: &str = "SELECT COUNT(*),COALESCE(SUM(size),0) FROM (
-            SELECT object_hash,MAX(size) AS size FROM (
-                SELECT object_hash,size FROM asset_aliases WHERE object_hash IS NOT NULL
-            ) GROUP BY object_hash
-        )";
 
 /// Rereads the stored bytes of every registered object and compares the digest with the hash the
 /// alias registered. `budget` bounds one page by the bytes it reads, so a large library makes
@@ -202,8 +202,8 @@ pub(crate) fn scan_registered_objects(
         let kind: String = row.get(2)?;
         match reread_object(cas, &hash, size) {
             Ok(read) => page.bytes += read,
-            Err(detail) => {
-                page.bytes += size;
+            Err((detail, read)) => {
+                page.bytes += read;
                 if !report.record(Finding::new(
                     codes::ALIAS_OBJECT_MISMATCH,
                     kind,
@@ -226,9 +226,9 @@ pub(crate) fn scan_registered_objects(
 
 /// Returns the bytes read, or the reason the stored object no longer matches its registration.
 /// An absent object is the quick scan's own finding, so this pass stays quiet about it.
-fn reread_object(cas: &PayloadCas, hash: &str, size: u64) -> std::result::Result<u64, String> {
+fn reread_object(cas: &PayloadCas, hash: &str, size: u64) -> std::result::Result<u64, (String, u64)> {
     use sha2::Digest;
-    let Some(mut file) = cas.open_object(hash).map_err(|error| error.to_string())? else {
+    let Some(mut file) = cas.open_object(hash).map_err(|error| (error.to_string(), 0))? else {
         return Ok(0);
     };
     let mut digest = sha2::Sha256::new();
@@ -239,16 +239,16 @@ fn reread_object(cas: &PayloadCas, hash: &str, size: u64) -> std::result::Result
             Ok(0) => break,
             Ok(count) => count,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err((error.to_string(), read)),
         };
         digest.update(&buffer[..count]);
         read += count as u64;
     }
     if read != size {
-        return Err("stored payload length differs from the registered size".to_owned());
+        return Err(("stored payload length differs from the registered size".to_owned(), read));
     }
     if hex::encode(digest.finalize()) != hash {
-        return Err("stored payload digest differs from the registered hash".to_owned());
+        return Err(("stored payload digest differs from the registered hash".to_owned(), read));
     }
     Ok(read)
 }
@@ -394,32 +394,35 @@ impl LibraryObjects for LivePayloads<'_> {
             "SELECT kind,logical_key,object_hash,size FROM asset_aliases ORDER BY kind,logical_key",
         )?;
         let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
+        loop {
             check(probe)?;
-            let kind: String = row.get(0)?;
-            let key: String = row.get(1)?;
-            let hash: Option<String> = row.get(2)?;
-            let size = sql_u64(row.get(3)?)?;
-            let stored = match &hash {
-                Some(hash) => self.cas.stat_object(hash)?,
-                None => None,
-            };
-            let (finding, body) = match (stored, hash) {
-                (Some(actual), _) if actual == size => continue,
-                (Some(_), _) => (alias_finding(true, &kind, &key), None),
-                (None, Some(hash)) => {
-                    absent.push(hash);
-                    (alias_finding(false, &kind, &key), Some(absent.len() - 1))
+            let mut page = Vec::new();
+            for _ in 0..ABSENT_PAGE {
+                let Some(row) = rows.next()? else { break; };
+                page.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, sql_u64(row.get(3)?)?));
+            }
+            if page.is_empty() { break; }
+            let mut sizes = self.cas.stat_objects(page.iter().filter_map(|(_, _, hash, _)| hash.as_deref()))?.into_iter();
+            for (kind, key, hash, size) in page {
+                check(probe)?;
+                let stored = hash.as_ref().and_then(|_| sizes.next().flatten());
+                let (finding, body) = match (stored, hash) {
+                    (Some(actual), _) if actual == size => continue,
+                    (Some(_), _) => (alias_finding(true, &kind, &key), None),
+                    (None, Some(hash)) => {
+                        absent.push(hash);
+                        (alias_finding(false, &kind, &key), Some(absent.len() - 1))
+                    }
+                    (None, None) => (alias_finding(false, &kind, &key), None),
+                };
+                waiting.push((finding, body));
+                // Nothing to classify ahead of it, so a fail-fast caller still stops here.
+                let settled = body.is_none() && absent.is_empty();
+                if (settled || absent.len() == ABSENT_PAGE)
+                    && !self.flush(&mut waiting, &mut absent, report)?
+                {
+                    return Ok(());
                 }
-                (None, None) => (alias_finding(false, &kind, &key), None),
-            };
-            waiting.push((finding, body));
-            // Nothing to classify ahead of it, so a fail-fast caller still stops here.
-            let settled = body.is_none() && absent.is_empty();
-            if (settled || absent.len() == ABSENT_PAGE)
-                && !self.flush(&mut waiting, &mut absent, report)?
-            {
-                return Ok(());
             }
         }
         self.flush(&mut waiting, &mut absent, report)?;

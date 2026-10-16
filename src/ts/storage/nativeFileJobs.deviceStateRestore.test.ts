@@ -6,7 +6,7 @@ vi.mock('../characterCards', () => ({ applyHubSelection: effects.hub }))
 vi.mock('@tauri-apps/api/core', async importOriginal => ({
     ...await importOriginal<typeof import('@tauri-apps/api/core')>(), invoke: vi.fn(async () => undefined),
 }))
-vi.mock('./sync/bindingRegistry',()=>({prepareBoundLibraryReplacement:async()=>({bound:false,state:{targetAuthority:'0'},fence:async()=>{},assertAuthority:async()=>{},resume:async()=>{}})}))
+vi.mock('./sync/bindingRegistry',()=>({prepareBoundLibraryReplacement:async()=>({bound:false,state:{targetAuthority:'0'},fence:async()=>{},assertAuthority:async()=>{},resume:async()=>{},release:()=>{}})}))
 vi.mock('./upstreamReplacement',()=>({confirmUpstreamLibraryReplacement:async()=>true,acquireUpstreamImportPause:async(runtime:{acquireDestructiveReplacementFence():Promise<{release():void}>})=>{
     const fence=await runtime.acquireDestructiveReplacementFence()
     let finished=false

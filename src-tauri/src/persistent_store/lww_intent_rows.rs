@@ -6,9 +6,12 @@ use risunest_sync_wire::unit::{UnitKey, UnitValue};
 use rusqlite::{params, Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::path::Path;
 
 
 const BATCH_ROWS: usize = 1024;
+const PROJECTION_ORDER: &str = "CASE WHEN json_extract(key,'$[0]')='exists' AND json_extract(key,'$[1]')<>'conversation' THEN 0 WHEN json_extract(key,'$[0]')='exists' THEN 1 WHEN json_extract(key,'$[0]')='archive' THEN 2 ELSE 3 END,key";
+pub(in crate::persistent_store) const BINDING_ORDER: &str = "CASE WHEN json_extract(key,'$[0]')='exists' AND json_extract(key,'$[1]')<>'conversation' THEN 0 WHEN json_extract(key,'$[0]')='archive' THEN 2 WHEN json_extract(key,'$[0]')='exists' THEN 3 WHEN json_extract(key,'$[0]') IN ('conversation','messages') THEN 4 ELSE 1 END,key";
 
 /// The count and digest of one row set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,14 +179,20 @@ fn read(
 /// A scoped disk-backed input. No caller can observe an unverified replay set.
 pub(in crate::persistent_store) struct FrozenRows {
     pub(in crate::persistent_store) db: Connection,
+    _directory: tempfile::TempDir,
 }
 
 impl FrozenRows {
-    pub(in crate::persistent_store) fn new() -> StoreResult<Self> {
-        let db = crate::sqlite_open::open("")?;
-        db.execute_batch("PRAGMA temp_store=FILE; PRAGMA cache_size=-2048;
-            CREATE TABLE rows(ordinal INTEGER PRIMARY KEY,key TEXT NOT NULL UNIQUE,stamp TEXT,value TEXT NOT NULL,source_override INTEGER NOT NULL); BEGIN;")?;
-        Ok(Self { db })
+    pub(in crate::persistent_store) fn new(root: &Path) -> StoreResult<Self> {
+        let directory = crate::external_storage::leftovers::local_scratch(root, "frozen-rows-")?;
+        // Android's SQLITE_TEMP_STORE=3 keeps an empty-filename database in RAM.
+        let db = crate::sqlite_open::open(directory.path().join("rows.sqlite"))?;
+        // Scratch is disposable; durable intents and activation keep their own sync settings.
+        db.execute_batch(&format!("PRAGMA temp_store=FILE; PRAGMA cache_size=-2048; PRAGMA synchronous=OFF;
+            CREATE TABLE rows(ordinal INTEGER PRIMARY KEY,key TEXT NOT NULL UNIQUE,stamp TEXT,value TEXT NOT NULL,source_override INTEGER NOT NULL);
+            CREATE INDEX rows_projection_order ON rows({PROJECTION_ORDER});
+            CREATE INDEX rows_binding_order ON rows({BINDING_ORDER}); BEGIN;"))?;
+        Ok(Self { db, _directory: directory })
     }
 
     pub(in crate::persistent_store) fn insert(&self, row: RowText) -> StoreResult<()> {
@@ -194,7 +203,7 @@ impl FrozenRows {
 
     pub(in crate::persistent_store) fn visit(&self, projection_order: bool, mut visit: impl FnMut(UnitKey, Option<super::Stamp>, UnitValue, bool) -> StoreResult<()>) -> StoreResult<()> {
         let order = if projection_order {
-            "CASE WHEN json_extract(key,'$[0]')='exists' AND json_extract(key,'$[1]')<>'conversation' THEN 0 WHEN json_extract(key,'$[0]')='exists' THEN 1 WHEN json_extract(key,'$[0]')='archive' THEN 2 ELSE 3 END,key"
+            PROJECTION_ORDER
         } else { "key" };
         let mut statement = self.db.prepare(&format!("SELECT key,stamp,value,source_override FROM rows ORDER BY {order}"))?;
         let mut rows = statement.query([])?;
@@ -228,6 +237,13 @@ impl FrozenRows {
     }
 
     pub(in crate::persistent_store) fn refresh_orders_observed(&self, tx: &rusqlite::Transaction<'_>, generation: &str, observe: &mut dyn FnMut() -> StoreResult<()>) -> StoreResult<()> {
+        self.visit_order_scopes(&mut |key| {
+            if let Some(key) = key { super::refresh_orders(tx, generation, &[key])?; }
+            observe()
+        })
+    }
+
+    pub(in crate::persistent_store) fn visit_order_scopes(&self, visit: &mut dyn FnMut(Option<UnitKey>) -> StoreResult<()>) -> StoreResult<()> {
         self.db.execute_batch("CREATE TABLE IF NOT EXISTS scopes(key TEXT PRIMARY KEY); DELETE FROM scopes;")?;
         self.visit(false, |key, _, _, _| {
             let p = key.components();
@@ -246,21 +262,20 @@ impl FrozenRows {
                 _ => None,
             };
             if let Some(scope) = scope { self.db.execute("INSERT OR IGNORE INTO scopes VALUES(?1)", [scope.as_str()])?; }
-            observe()
+            visit(None)
         })?;
         let mut statement = self.db.prepare("SELECT key FROM scopes ORDER BY key")?;
         let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {
             let key = super::wire(row.get::<_, String>(0)?.try_into())?;
-            super::refresh_orders(tx, generation, &[key])?;
-            observe()?;
+            visit(Some(key))?;
         }
         Ok(())
     }
 }
 
-pub(in crate::persistent_store) fn read_replacement(device: &Connection, request_id: &str, expected: &IntentRows) -> StoreResult<FrozenRows> {
-    let frozen = FrozenRows::new()?;
+pub(in crate::persistent_store) fn read_replacement(device: &Connection, root: &Path, request_id: &str, expected: &IntentRows) -> StoreResult<FrozenRows> {
+    let frozen = FrozenRows::new(root)?;
     read(device, request_id, "changes", expected, |key, stamp, value, source_override| {
         if stamp.is_some() { return Err(error("request-id-integrity")); }
         let _: UnitKey = super::wire(key.to_owned().try_into())?;
@@ -270,8 +285,8 @@ pub(in crate::persistent_store) fn read_replacement(device: &Connection, request
     Ok(frozen)
 }
 
-pub(in crate::persistent_store) fn read_target(device: &Connection, request_id: &str, expected: &IntentRows) -> StoreResult<FrozenRows> {
-    let frozen = FrozenRows::new()?;
+pub(in crate::persistent_store) fn read_target(device: &Connection, root: &Path, request_id: &str, expected: &IntentRows) -> StoreResult<FrozenRows> {
+    let frozen = FrozenRows::new(root)?;
     read(device, request_id, "target", expected, |key, stamp, value, source_override| {
         let Some(stamp) = stamp.filter(|_| !source_override) else { return Err(error("request-id-integrity")); };
         let _: UnitKey = super::wire(key.to_owned().try_into())?;
@@ -303,12 +318,14 @@ mod tests {
 
     #[test]
     fn replay_checks_every_row_before_exposing_the_frozen_input() {
-        let mut db = Connection::open_in_memory().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let device_path = root.path().join("device.sqlite");
+        let mut db = crate::sqlite_open::open(&device_path).unwrap();
         db.execute_batch(super::super::DEVICE_SCHEMA).unwrap();
         let expected = write(&mut db, "synthetic", "changes", (0..1025).map(|index| {
             replacement_row(&super::super::unit_key(&["root", &format!("synthetic-{index:04}")])?, &super::super::inline(&serde_json::json!(index))?, index % 2 == 0)
         })).unwrap();
-        let frozen = read_replacement(&db, "synthetic", &expected).unwrap();
+        let frozen = read_replacement(&db, root.path(), "synthetic", &expected).unwrap();
         let mut count = 0;
         frozen.visit(false, |key, stamp, value, source_override| {
             assert_eq!(key, super::super::unit_key(&["root", &format!("synthetic-{count:04}")]).unwrap());
@@ -320,14 +337,30 @@ mod tests {
         }).unwrap();
         assert_eq!(count, 1025);
         assert_eq!(digest("changes", frozen.texts()).unwrap(), expected);
+        let FrozenRows { db: scratch, _directory: directory } = frozen;
+        drop(scratch);
+        let orphan = directory.keep();
+        drop(db);
+        crate::external_storage::leftovers::remove_at_startup(root.path());
+        assert!(!orphan.exists());
+        let db = crate::sqlite_open::open(&device_path).unwrap();
+        let frozen = read_replacement(&db, root.path(), "synthetic", &expected).unwrap();
+        assert_eq!(digest("changes", frozen.texts()).unwrap(), expected);
         db.execute("UPDATE lww_intent_rows SET source_override=1-source_override WHERE request_id='synthetic' AND ordinal=1025", []).unwrap();
-        assert!(read_replacement(&db, "synthetic", &expected).is_err());
+        assert!(read_replacement(&db, root.path(), "synthetic", &expected).is_err());
         db.execute("DELETE FROM lww_intent_rows WHERE request_id='synthetic' AND ordinal=1025", []).unwrap();
-        assert!(read_replacement(&db, "synthetic", &expected).is_err());
+        assert!(read_replacement(&db, root.path(), "synthetic", &expected).is_err());
+        let directory = frozen._directory.path().to_owned();
+        let scratch_root = directory.parent().unwrap().to_owned();
+        assert_eq!(std::fs::read_dir(&scratch_root).unwrap().count(), 1);
+        drop(frozen);
+        assert!(!directory.exists());
+        assert_eq!(std::fs::read_dir(scratch_root).unwrap().count(), 0);
     }
 
     #[test]
     fn target_replay_preserves_stamps_and_rejects_a_late_invalid_row() {
+        let root = tempfile::tempdir().unwrap();
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch(super::super::DEVICE_SCHEMA).unwrap();
         let change = Change {
@@ -336,12 +369,83 @@ mod tests {
             value: super::super::inline(&serde_json::json!("synthetic")).unwrap(),
         };
         let expected = write(&mut db, "target", "target", [target_row(&change)]).unwrap();
-        let frozen = read_target(&db, "target", &expected).unwrap();
+        let frozen = read_target(&db, root.path(), "target", &expected).unwrap();
         frozen.visit(false, |key, stamp, value, source_override| {
             assert_eq!((key,stamp,value,source_override), (change.key.clone(),Some(change.stamp.clone()),change.value.clone(),false));
             Ok(())
         }).unwrap();
         db.execute("UPDATE lww_intent_rows SET stamp=NULL WHERE request_id='target'", []).unwrap();
-        assert!(read_target(&db, "target", &expected).is_err());
+        assert!(read_target(&db, root.path(), "target", &expected).is_err());
+    }
+
+    #[test]
+    fn frozen_rows_spill_and_order_large_values_with_a_bounded_cache() {
+        if crate::test_process::run_isolated(concat!(module_path!(), "::frozen_rows_spill_and_order_large_values_with_a_bounded_cache")) {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        for count in [16, 64] {
+            let frozen = FrozenRows::new(root.path()).unwrap();
+            frozen.db.pragma_update(None, "cache_size", -64).unwrap();
+            let value = super::super::inline(&serde_json::json!("x".repeat(16 * 1024))).unwrap();
+            for index in (0..count).rev() {
+                let key = super::super::unit_key(&["root", &format!("synthetic-{index:04}")]).unwrap();
+                frozen.insert(replacement_row(&key, &value, false).unwrap()).unwrap();
+            }
+            let file = frozen._directory.path().join("rows.sqlite");
+            assert!(std::fs::metadata(&file).unwrap().len() > 64 * 1024);
+            let mut used = 0;
+            let mut high = 0;
+            let status = unsafe {
+                rusqlite::ffi::sqlite3_db_status(frozen.db.handle(), rusqlite::ffi::SQLITE_DBSTATUS_CACHE_USED,
+                    &mut used, &mut high, 0)
+            };
+            assert_eq!(status, rusqlite::ffi::SQLITE_OK);
+            assert!(used < 256 * 1024, "{count} rows retained {used} cache bytes");
+            for projection in [false, true] {
+                let mut seen = 0;
+                frozen.visit(projection, |key, stamp, actual, source_override| {
+                    assert_eq!(key, super::super::unit_key(&["root", &format!("synthetic-{seen:04}")]).unwrap());
+                    assert_eq!(actual, value);
+                    assert!(stamp.is_none() && !source_override);
+                    seen += 1;
+                    Ok(())
+                }).unwrap();
+                assert_eq!(seen, count);
+            }
+            // A sorter would retain complete values in Android's TEMP_STORE=3.
+            for order in [PROJECTION_ORDER, BINDING_ORDER] {
+                let mut statement = frozen.db.prepare(&format!("SELECT key,value FROM rows ORDER BY {order}")).unwrap();
+                let mut rows = statement.query([]).unwrap();
+                let mut seen = 0;
+                while let Some(row) = rows.next().unwrap() {
+                    assert_eq!(row.get::<_, String>(0).unwrap(),
+                        super::super::unit_key(&["root", &format!("synthetic-{seen:04}")]).unwrap().as_str());
+                    assert_eq!(serde_json::from_str::<UnitValue>(&row.get::<_,String>(1).unwrap()).unwrap(), value);
+                    seen += 1;
+                }
+                assert_eq!(seen, count);
+                drop(rows);
+                assert_eq!(statement.get_status(rusqlite::StatementStatus::Sort), 0);
+            }
+            let directory = frozen._directory.path().to_owned();
+            drop(frozen);
+            assert!(!directory.exists());
+        }
+    }
+
+    #[test]
+    fn full_scratch_returns_an_error_and_releases_its_files() {
+        let root = tempfile::tempdir().unwrap();
+        let frozen = FrozenRows::new(root.path()).unwrap();
+        let pages: i64 = frozen.db.query_row("PRAGMA page_count", [], |row| row.get(0)).unwrap();
+        frozen.db.pragma_update(None, "max_page_count", pages).unwrap();
+        let key = super::super::unit_key(&["root", "synthetic"]).unwrap();
+        let value = super::super::inline(&serde_json::json!("x".repeat(64 * 1024))).unwrap();
+        let failure = frozen.insert(replacement_row(&key, &value, false).unwrap()).unwrap_err();
+        assert!(failure.to_string().contains("full"), "{failure}");
+        let directory = frozen._directory.path().to_owned();
+        drop(frozen);
+        assert!(!directory.exists());
     }
 }

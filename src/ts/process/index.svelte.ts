@@ -1,3 +1,4 @@
+import { refuseGenerationWhilePluginsWait } from '../plugins/pluginStartupRefusal'
 import { resolvePinnedConversationPosition } from '../plugins/pinnedConversationPosition'
 import { registerGeneratingConversation } from '../storage/generatingConversationRegistry'
 import { openGenerationRequestPhase } from './generationRequestPhase'
@@ -348,6 +349,7 @@ async function prepareGenerationHistoryWindow(
     isTargetCurrent: () => boolean,
     signal: AbortSignal,
     tailStart?: (totalMessages: number) => number,
+    retry = true,
 ): Promise<GenerationHistoryWindow | null> {
     let target = initialTarget
     let authority = captureSelectedConversationAuthority()
@@ -402,17 +404,25 @@ async function prepareGenerationHistoryWindow(
                 || currentAuthority.totalMessages !== windowedAuthority.totalMessages
             ) throw new PersistentMutationFencedError()
         }
-        const lease = await getPersistentDataStore().acquireRevision(windowedAuthority.storeRevision)
         try {
-            prepared = await select(
-                createStoreHistoryWindowReader(lease, windowedAuthority),
-                () => readStoreMessageMetadata(lease, windowedAuthority, assertCurrent),
-                assertCurrent,
-            )
-        } finally {
-            await lease.release()
+            const lease = await getPersistentDataStore().acquireRevision(windowedAuthority.storeRevision)
+            try {
+                prepared = await select(
+                    createStoreHistoryWindowReader(lease, windowedAuthority),
+                    () => readStoreMessageMetadata(lease, windowedAuthority, assertCurrent),
+                    assertCurrent,
+                )
+            } finally {
+                await lease.release()
+            }
+            assertCurrent()
+        } catch (error) {
+            if (retry && error instanceof PersistentMutationFencedError && !signal.aborted
+                && isTargetCurrent() && sameConversationTarget(captureSelectedConversationTarget(), initialTarget)) {
+                return prepareGenerationHistoryWindow(initialTarget, memory, isTargetCurrent, signal, tailStart, false)
+            }
+            throw error
         }
-        assertCurrent()
         chat = { ...preparation.conversation, message: prepared.selection.messages } as Chat
         initial = captureWindowedConversationMutationController(target, chat, prepared.selection.start)
     } else {
@@ -613,6 +623,7 @@ export async function sendChat(arg:{
     /** A chat-screen send, which may load only recent messages when the device option is on. */
     historyLimit?:boolean
 } = {}, inheritedReservation?: GenerationReservation):Promise<boolean> {
+    if (refuseGenerationWhilePluginsWait()) return false
     const authorityEpoch = getPersistentStorageAuthorityEpoch()
     try {
         assertPersistentMutationAllowed(authorityEpoch)
@@ -1825,7 +1836,12 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
                         })
                     }
                     else{
-                        const captionResult = await runImageEmbedding(inlayData.data) 
+                        const image = await inlayImageForProvider(inlayName, {
+                            data: inlayData.data as string,
+                            width: inlayData.width,
+                            height: inlayData.height,
+                        })
+                        const captionResult = await runImageEmbedding(image.data)
                         formatedChat += `[${captionResult[0].generated_text}]`
                     }
                 }

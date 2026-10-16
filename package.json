@@ -128,7 +128,7 @@
     "mnemonist": "^0.40.4",
     "mobile-drag-drop": "3.0.0-rc.0",
     "monaco-editor": "^0.57.0",
-    "msgpackr": "1.10.1",
+    "msgpackr": "1.11.9",
     "ollama": "^0.6.4",
     "openid-client": "^6.8.8",
     "pdfjs-dist": "^4.10.38",

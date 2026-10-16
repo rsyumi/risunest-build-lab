@@ -47,12 +47,31 @@ final class PortableSourceCustodyTests: XCTestCase {
         wait(for: [rejected], timeout: 5)
         custody.retireUnclaimed(owner: "another-owner")
         XCTAssertNoThrow(try custody.descriptor(token: token, jobId: nil))
-        XCTAssertTrue(custody.orphanReceipts().map { $0.token }.isEmpty)
+        XCTAssertTrue(try custody.orphanReceipts().map { $0.token }.isEmpty)
         let retired = expectation(description: "retired scope finished")
         custody.retireUnclaimed(owner: "active-owner") { retired.fulfill() }
         wait(for: [retired], timeout: 5)
         XCTAssertThrowsError(try custody.descriptor(token: token, jobId: nil))
-        XCTAssertEqual(custody.orphanReceipts().map { $0.token }, [token])
+        XCTAssertEqual(try custody.orphanReceipts().map { $0.token }, [token])
+        XCTAssertTrue(custody.release(token: token, jobId: nil))
+    }
+
+    func testOwnerRetiredBeforeInstallationFailsWithoutAnEnteredCleanupGroup() throws {
+        var custody: PortableSourceCustody!
+        custody = PortableSourceCustody(beforeInstall: { custody.retireUnclaimed(owner: "old-owner") })
+        let file = root.appendingPathComponent("synthetic.risunest")
+        try Data([1, 2, 3]).write(to: file)
+        let rejected = expectation(description: "selection rejected after owner retirement")
+        custody.select(file, owner: "old-owner") { result in
+            switch result {
+            case .success: XCTFail("Retired owner installed a source")
+            case .failure(let error): XCTAssertEqual(error as? PortableSourceError, .ownership)
+            }
+            rejected.fulfill()
+        }
+        wait(for: [rejected], timeout: 5)
+        XCTAssertEqual(try custody.orphanReceipts().map { $0.name }, ["synthetic.risunest"])
+        let token = try select(custody, owner: "new-owner")
         XCTAssertTrue(custody.release(token: token, jobId: nil))
     }
 
@@ -63,7 +82,7 @@ final class PortableSourceCustodyTests: XCTestCase {
         try custody.confirm(token: token, format: "portable")
         XCTAssertNoThrow(try custody.descriptor(token: token, jobId: job))
         custody.retireUnclaimed(owner: "old-owner")
-        XCTAssertTrue(custody.orphanReceipts().map { $0.token }.isEmpty)
+        XCTAssertTrue(try custody.orphanReceipts().map { $0.token }.isEmpty)
         XCTAssertFalse(custody.release(token: token, jobId: nil))
         XCTAssertFalse(custody.release(token: token, jobId: UUID().uuidString))
         XCTAssertNoThrow(try custody.descriptor(token: token, jobId: job))
@@ -98,7 +117,11 @@ final class PortableSourceCustodyTests: XCTestCase {
     }
 
     private func assertOnlySourceRemains(file: StaticString = #filePath, line: UInt = #line) throws {
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), ["synthetic.risunest"], file: file, line: line)
+        let contents = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        XCTAssertEqual(contents.filter { $0 != "custody" }, ["synthetic.risunest"], file: file, line: line)
+        if contents.contains("custody") {
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("custody").path), [], file: file, line: line)
+        }
         XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("synthetic.risunest")), Data(repeating: 7, count: 131072), file: file, line: line)
     }
 
@@ -211,6 +234,7 @@ final class PortableSourceCustodyTests: XCTestCase {
         wait(for: [released], timeout: 5)
         unblock.signal()
         wait(for: [settled], timeout: 5)
+        XCTAssertTrue(try custody.orphanReceipts().isEmpty)
         try assertOnlySourceRemains()
     }
 
@@ -220,13 +244,92 @@ final class PortableSourceCustodyTests: XCTestCase {
         try custody.confirm(token: token, format: "block-risu-save")
         _ = try custody.materialize(token: token, staging: root)
         custody.retireUnclaimed(owner: "unrelated-page")
-        XCTAssertTrue(custody.orphanReceipts().isEmpty)
+        XCTAssertTrue(try custody.orphanReceipts().isEmpty)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path).count, 2)
         XCTAssertThrowsError(try custody.confirm(token: token, format: "portable"))
         XCTAssertThrowsError(try custody.beginProbe(token: token, probeId: UUID().uuidString))
         custody.retireUnclaimed(owner: "old-page")
-        XCTAssertEqual(custody.orphanReceipts().map { $0.token }, [token])
+        XCTAssertEqual(try custody.orphanReceipts().map { $0.token }, [token])
         try assertOnlySourceRemains()
+    }
+
+    func testDeferredCopyCleanupFailureReachesTheNextQueryAndNextStartupSweepsOnlyCustody() throws {
+        let stalled = expectation(description: "copy paused at sync")
+        let unblock = DispatchSemaphore(value: 0)
+        let settled = expectation(description: "cancelled copy returned")
+        let custody = PortableSourceCustody(
+            synchronizeCopy: { _ in stalled.fulfill(); unblock.wait() },
+            removeCopy: { _ in throw CocoaError(.fileWriteNoPermission) }
+        )
+        let token = try select(custody, owner: "owner")
+        try custody.confirm(token: token, format: "local-backup")
+        let staging = root!
+        DispatchQueue.global().async {
+            XCTAssertThrowsError(try custody.materialize(token: token, staging: staging)) { error in
+                XCTAssertEqual(error as? PortableSourceError, .cancelled)
+            }
+            settled.fulfill()
+        }
+        wait(for: [stalled], timeout: 5)
+        let released = expectation(description: "cancel returns before provider")
+        DispatchQueue.global().async {
+            XCTAssertTrue(custody.release(token: token, jobId: nil))
+            released.fulfill()
+        }
+        wait(for: [released], timeout: 5)
+        unblock.signal()
+        wait(for: [settled], timeout: 5)
+        XCTAssertThrowsError(try custody.orphanReceipts()) { error in
+            XCTAssertEqual(error as? PortableSourceError, .cleanupFailed)
+        }
+        XCTAssertTrue(try custody.orphanReceipts().isEmpty)
+        XCTAssertThrowsError(try custody.descriptor(token: token, jobId: nil))
+        let copies = root.appendingPathComponent("custody")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: copies.path).count, 1)
+
+        let export = root.appendingPathComponent(UUID().uuidString)
+        let receipts = root.appendingPathComponent("receipts")
+        try FileManager.default.createDirectory(at: export, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: receipts, withIntermediateDirectories: true)
+        try Data([9]).write(to: export.appendingPathComponent("export.risudat"))
+        try Data([0]).write(to: receipts.appendingPathComponent("unreadable.json"))
+        // A fresh storage lifetime represents the next process, with no active source copies.
+        let restarted = PortableSourceCustody(copyStorage: .init())
+        restarted.sweepCopies(staging: root)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: copies.path))
+        XCTAssertEqual(try Data(contentsOf: export.appendingPathComponent("export.risudat")), Data([9]))
+        XCTAssertEqual(try Data(contentsOf: receipts.appendingPathComponent("unreadable.json")), Data([0]))
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("synthetic.risunest")), Data(repeating: 7, count: 131072))
+    }
+
+    func testStartupSweepDoesNotRemoveAnotherOwnerOrCustodyInstancesActiveCopy() throws {
+        let custody = PortableSourceCustody()
+        let token = try select(custody, owner: "owner")
+        try custody.confirm(token: token, format: "local-backup")
+        let copied = try custody.materialize(token: token, staging: root)
+        PortableSourceCustody().sweepCopies(staging: root)
+        custody.sweepCopies(staging: root)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: copied["path"] as! String)), Data(repeating: 7, count: 131072))
+        XCTAssertTrue(custody.release(token: token, jobId: nil))
+    }
+
+    func testStartupSweepFailureIsReportedAndRetriedByTheNextProcess() throws {
+        let folder = root.appendingPathComponent("custody")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data([1]).write(to: folder.appendingPathComponent("source.risudat"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: root.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path) }
+        let custody = PortableSourceCustody(copyStorage: .init())
+        custody.sweepCopies(staging: root)
+        XCTAssertThrowsError(try custody.orphanReceipts()) { error in
+            XCTAssertEqual(error as? PortableSourceError, .cleanupFailed)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: folder.path))
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+        let restarted = PortableSourceCustody(copyStorage: .init())
+        restarted.sweepCopies(staging: root)
+        XCTAssertTrue(try restarted.orphanReceipts().isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path))
     }
 
     func testReleaseReportsCopyCleanupFailureAfterReleasingTheSource() throws {
@@ -234,8 +337,8 @@ final class PortableSourceCustodyTests: XCTestCase {
         let token = try select(custody, owner: "owner")
         try custody.confirm(token: token, format: "local-backup")
         _ = try custody.materialize(token: token, staging: root)
-        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: root.path)
-        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path) }
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: root.appendingPathComponent("custody").path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.appendingPathComponent("custody").path) }
         XCTAssertFalse(custody.release(token: token, jobId: nil))
         XCTAssertThrowsError(try custody.descriptor(token: token, jobId: nil))
         XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("synthetic.risunest").path))
@@ -270,7 +373,7 @@ final class PortableSourceCustodyTests: XCTestCase {
         XCTAssertFalse(custody.endProbe(token: token, probeId: UUID().uuidString))
         XCTAssertTrue(custody.endProbe(token: token, probeId: probe))
         wait(for: [retired], timeout: 5)
-        XCTAssertEqual(custody.orphanReceipts().map { $0.token }, [token])
+        XCTAssertEqual(try custody.orphanReceipts().map { $0.token }, [token])
         XCTAssertThrowsError(try custody.descriptor(token: token, jobId: nil))
     }
 
@@ -288,12 +391,12 @@ final class PortableSourceCustodyTests: XCTestCase {
         }
         wait(for: [selected], timeout: 5)
         let receipt = try XCTUnwrap(custody.orphanReceipts().first)
-        XCTAssertEqual(custody.orphanReceipts().count, 1)
+        XCTAssertEqual(try custody.orphanReceipts().count, 1)
         XCTAssertEqual(receipt.token, token)
         XCTAssertEqual(receipt.name, "late-synthetic.risunest")
         XCTAssertFalse(receipt.name!.contains(root.path))
         XCTAssertTrue(custody.acknowledgeOrphan(token: receipt.token))
-        XCTAssertTrue(custody.orphanReceipts().isEmpty)
+        XCTAssertTrue(try custody.orphanReceipts().isEmpty)
         XCTAssertFalse(custody.acknowledgeOrphan(token: receipt.token))
     }
 
@@ -305,27 +408,27 @@ final class PortableSourceCustodyTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(nativeDuplicate, 0)
         defer { if nativeDuplicate >= 0 { Darwin.close(nativeDuplicate) } }
         custody.retireUnclaimed(owner: "registered-owner")
-        XCTAssertEqual(custody.orphanReceipts().map { $0.token }, [old])
+        XCTAssertEqual(try custody.orphanReceipts().map { $0.token }, [old])
         var expected = [old]
         for index in 0..<40 {
             let owner = "unregistered-owner-\(index)"
             let token = try select(custody, owner: owner, name: "synthetic-\(index).risunest")
             expected.append(token)
             custody.retireUnclaimed(owner: owner)
-            XCTAssertEqual(custody.orphanReceipts().map { $0.token }, expected)
+            XCTAssertEqual(try custody.orphanReceipts().map { $0.token }, expected)
         }
         var info = stat()
         XCTAssertEqual(fstat(nativeDuplicate, &info), 0)
-        XCTAssertEqual(custody.orphanReceipts().map { $0.token }, expected)
+        XCTAssertEqual(try custody.orphanReceipts().map { $0.token }, expected)
         XCTAssertTrue(custody.release(token: old, jobId: nil))
         XCTAssertFalse(custody.acknowledgeOrphan(token: UUID().uuidString))
-        XCTAssertEqual(custody.orphanReceipts().map { $0.token }, expected)
+        XCTAssertEqual(try custody.orphanReceipts().map { $0.token }, expected)
         // Native calls ACK only after its duplicated descriptor is released.
         XCTAssertEqual(Darwin.close(nativeDuplicate), 0)
         nativeDuplicate = -1
         XCTAssertTrue(custody.acknowledgeOrphan(token: old))
-        XCTAssertEqual(custody.orphanReceipts().map { $0.token }, Array(expected.dropFirst()))
-        XCTAssertEqual(custody.orphanReceipts().map { $0.name }, (0..<40).map { "synthetic-\($0).risunest" })
+        XCTAssertEqual(try custody.orphanReceipts().map { $0.token }, Array(expected.dropFirst()))
+        XCTAssertEqual(try custody.orphanReceipts().map { $0.name }, (0..<40).map { "synthetic-\($0).risunest" })
         XCTAssertFalse(custody.acknowledgeOrphan(token: old))
     }
 }

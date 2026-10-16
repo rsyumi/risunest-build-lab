@@ -75,13 +75,16 @@ fn message(output: &mut impl Write, message: &Message, input: impl Read) -> io::
 impl Snapshot {
     pub fn export_json(&mut self, mut output: impl Write) -> Result<(), String> {
         let result = (|| -> io::Result<()> {
-            let metadata = serde_json::json!({
+            let mut metadata = serde_json::json!({
                 "format": "risunest-network-log", "version": 1, "id": self.record.id,
                 "source": self.record.source, "startedAt": self.record.started_at, "elapsedMs": self.record.elapsed_ms,
                 "capture": { "state": self.record.state, "error": self.record.capture_error,
                     "headerMasking": self.record.header_masking,
                     "truncated": self.record.request.body.truncated || self.record.response.body.truncated },
             });
+            if let Some(operation_id) = &self.record.operation_id {
+                metadata["operationId"] = serde_json::Value::String(operation_id.clone());
+            }
             let bytes = serde_json::to_vec(&metadata).map_err(json_error)?;
             output.write_all(&bytes[..bytes.len() - 1])?;
             output.write_all(b",\"request\":")?;

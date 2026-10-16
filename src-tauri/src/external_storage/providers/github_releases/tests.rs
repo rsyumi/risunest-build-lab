@@ -354,34 +354,279 @@ fn bounded_lookups_do_not_report_unscanned_objects_as_absent() {
 }
 
 #[test]
-fn discovery_returns_a_cursor_when_its_budget_ends_on_a_skipped_release_or_page() {
+fn lease_discovery_crosses_empty_releases_and_ignores_starters() {
     runtime().block_on(async {
-        for start in [0usize, 29] {
-            let tag = job_tag("retained-job", 0);
-            let first: Vec<_> = (0..30).map(|id| release(id + 100, "unrelated")).collect();
-            let second: Vec<_> = (0..30).map(|id| release(id + 200, "unrelated")).collect();
-            let mut third: Vec<_> = (0..30).map(|id| release(id + 300, "unrelated")).collect();
-            if start == 0 { third[2] = release(777, &tag); }
-            let resumed = if start == 0 { third.clone() } else { vec![release(777, &tag)] };
+        let mut replies = existing_repository_replies();
+        let mut releases: Vec<_> = (0..130).map(|id| release(id + 100, &job_tag("old-job", id as u32))).collect();
+        releases.push(release(777, &format!("{PREFIX}-l-0")));
+        for page in releases.chunks(api::RELEASE_PAGE_SIZE) { replies.push(reply(200, json!(page))); }
+        replies.push(reply(200, json!([
+            {"id":998,"name":"lease-work-starter","size":0,"state":"starter"},
+            asset(999, "lease-work-complete", 4, None),
+        ])));
+        let server = github_server(replies);
+        let provider = adapter(dependencies().dependencies);
+        let handle = open(provider.as_ref(), &server, OpenMode::Existing).await.unwrap();
+        let page = provider.list_objects(&handle, Collection::Leases, None, 100, &Cancellation::default()).await.unwrap();
+        assert_eq!(page.objects.len(), 1);
+        assert_eq!(page.objects[0].locator.object, "777/999");
+        assert!(page.objects[0].complete);
+        assert!(page.next_cursor.is_none());
+
+        for empty_pages in [api::MAX_LIST_STEPS - 1, api::MAX_LIST_STEPS * 2 + 1] {
             let mut replies = existing_repository_replies();
-            for page in [first, second, third, resumed] { replies.push(reply(200, json!(page))); }
-            replies.push(reply(200, json!([asset(999, &api::asset_name(ObjectRole::BackupBundle, "snapshot-retained"), 4, None)])));
-            if start == 0 { replies.push(reply(200, json!([]))); }
+            for page in 0..empty_pages {
+                replies.push(reply(200, json!((0..api::RELEASE_PAGE_SIZE).map(|id|
+                    release(u64::from(page) * 100 + id as u64 + 1, "foreign")).collect::<Vec<_>>())));
+            }
+            let owner = release(9999, &format!("{PREFIX}-l-0"));
+            replies.push(reply(200, json!([owner.clone()])));
+            if empty_pages + 1 == api::MAX_LIST_STEPS {
+                replies.push(reply(200, json!([owner])));
+            }
+            replies.push(reply(200, json!([asset(999, "lease-work-complete", 4, None)])));
             let server = github_server(replies);
-            let test = dependencies();
-            let provider = adapter(test.dependencies);
+            let provider = adapter(dependencies().dependencies);
             let handle = open(provider.as_ref(), &server, OpenMode::Existing).await.unwrap();
-            let cancel = Cancellation::default();
-            let cursor = format!("1:{start}:1:0");
-            let first = provider.list_objects(&handle, Collection::Snapshots, Some(&cursor), 100, &cancel).await.unwrap();
-            assert!(first.objects.is_empty());
-            let next = first.next_cursor.expect("A bounded scan has not exhausted the repository");
-            assert_ne!(next, cursor);
-            let resumed = provider.list_objects(&handle, Collection::Snapshots, Some(&next), 100, &cancel).await.unwrap();
-            assert_eq!(resumed.objects.len(), 1);
-            assert!(resumed.objects[0].complete);
-            assert!(resumed.next_cursor.is_none());
+            let mut cursor = None;
+            let calls = if empty_pages < api::MAX_LIST_STEPS { 2 } else { 3 };
+            for index in 0..calls {
+                let before = server.requests.lock().unwrap().len();
+                let page = provider.list_objects(&handle, Collection::Leases, cursor.as_deref(), 100, &Cancellation::default()).await.unwrap();
+                let requests = server.requests.lock().unwrap().len() - before;
+                assert!(requests <= api::MAX_LIST_STEPS as usize);
+                if index + 1 < calls {
+                    assert!(page.objects.is_empty());
+                    assert!(page.next_cursor.is_some());
+                    assert_ne!(page.next_cursor, cursor);
+                } else {
+                    assert_eq!(page.objects[0].locator.object, "9999/999");
+                    assert!(page.next_cursor.is_none());
+                }
+                cursor = page.next_cursor;
+            }
         }
+    });
+}
+
+#[test]
+fn locator_free_lookup_ignores_an_unfinished_upload() {
+    runtime().block_on(async {
+        let mut replies = existing_repository_replies();
+        replies.extend([
+            reply(200, json!([release(60, &job_tag("job-1", 0))])),
+            reply(200, json!([{"id":88,"name":"pack-object","size":0,"state":"starter"}])),
+        ]);
+        let server = github_server(replies);
+        let provider = adapter(dependencies().dependencies);
+        let handle = open(provider.as_ref(), &server, OpenMode::Existing).await.unwrap();
+        let intent = object_intent(&handle, ObjectRole::Pack, "object", b"body");
+        assert!(provider.lookup_metadata(&handle, &intent, None, &Cancellation::default()).await.unwrap().is_none());
+    });
+}
+
+#[test]
+fn cleanup_removes_only_unprotected_zero_byte_starters_after_rechecking() {
+    runtime().block_on(async {
+        for case in 0..9 {
+            let tag = if case == 5 { format!("{PREFIX}-jforeign-0") } else if case == 4 { format!("{PREFIX}-l-0") } else { job_tag("job-1", 0) };
+            let starter = json!({"id":88,"name":if case==4 {"lease-work-abandoned"} else {"pack-object"},"size":0,"state":"starter"});
+            let mut replies = existing_repository_replies();
+            replies.push(reply(200, json!([release(60, &tag)])));
+            if case != 1 && case != 5 {
+                replies.push(reply(200, json!([starter.clone()])));
+                replies.push(reply(200, release(60, if case==6 {"foreign"} else {&tag})));
+                let mut current = starter.clone();
+                if case == 2 { current["state"] = json!("uploaded"); }
+                if case == 3 { current["size"] = json!(10); }
+                if case!=6 {replies.push(reply(200, current));}
+                if matches!(case, 0 | 4 | 7 | 8) {
+                    replies.push(reply(204, json!(null)));
+                    replies.push(reply(200, release(60, if case == 8 {"foreign"} else {&tag})));
+                    if case != 4 && case != 8 {
+                        replies.push(reply(200, if case == 7 { json!([asset(89, "pack-kept", 4, None)]) } else { json!([]) }));
+                        if case == 0 { replies.push(reply(204, json!(null))); }
+                    }
+                }
+            }
+            let server = github_server(replies);
+            let provider = adapter(dependencies().dependencies);
+            let handle = open(provider.as_ref(), &server, OpenMode::Existing).await.unwrap();
+            let protected = if case == 1 { vec!["job-1".to_owned()] } else { vec![] };
+            let removed = provider.cleanup_incomplete_objects(&handle, &protected, None, 10, &|_| {}, &Cancellation::default()).await.unwrap().removed;
+            assert_eq!(removed, u64::from(matches!(case, 0 | 4 | 7 | 8)), "case {case}");
+            let requests = server.requests.lock().unwrap();
+            let deleted = requests.iter().filter(|request| method_of(request)=="DELETE").map(|request| head_line(request)).collect::<Vec<_>>();
+            assert_eq!(deleted.len() as u64, removed + u64::from(case == 0), "case {case}");
+            if case == 0 { assert!(deleted[1].contains("/releases/60 ")); }
+        }
+    });
+}
+
+#[test]
+fn incomplete_cleanup_resumes_past_release_and_asset_pages_without_skipping_shifted_assets() {
+    runtime().block_on(async {
+        let tag = job_tag("old-job", 0);
+        let owner = release(777, &tag);
+        let first = json!({"id": 880, "name": "pack-first", "size": 0, "state": "starter"});
+        let shifted = json!({"id": 881, "name": "pack-shifted", "size": 0, "state": "starter"});
+        let retained = (0..api::ASSET_PAGE_SIZE - 1).map(|id| asset(id as u64 + 1000, "pack-kept", 4, None)).collect::<Vec<_>>();
+        let page_with = |starter: &serde_json::Value| std::iter::once(starter.clone()).chain(retained.iter().cloned()).collect::<Vec<_>>();
+        let mut replies = existing_repository_replies();
+        replies.push(reply(200, json!((0..api::RELEASE_PAGE_SIZE).map(|id| release(id as u64 + 1, "foreign")).collect::<Vec<_>>())));
+        replies.extend([
+            reply(200, json!([owner.clone()])),
+            reply(200, json!((0..api::ASSET_PAGE_SIZE).map(|id| asset(id as u64 + 1, "pack-uploaded", 4, None)).collect::<Vec<_>>())),
+            reply(200, json!([owner.clone()])), reply(200, json!(page_with(&first))),
+            reply(200, owner.clone()), reply(200, first), reply(204, json!(null)),
+            reply(200, owner.clone()), reply(200, json!(retained)),
+            reply(200, json!([owner.clone()])), reply(200, json!(page_with(&shifted))),
+            reply(200, owner.clone()), reply(200, shifted), reply(204, json!(null)),
+            reply(200, owner.clone()), reply(200, json!(retained)),
+            reply(200, json!([owner])), reply(200, json!(retained)),
+        ]);
+        let server = github_server(replies);
+        let provider = adapter(dependencies().dependencies);
+        let handle = open(provider.as_ref(), &server, OpenMode::Existing).await.unwrap();
+        let cancel = Cancellation::default();
+        let mut cursor = None;
+        let mut removed = 0;
+        let mut pages = 0;
+        loop {
+            let page = crate::external_storage::leases::control_request(&cancel,
+                provider.cleanup_incomplete_objects(&handle, &[], cursor.as_deref(), 10, &|_| {}, &cancel)).await.unwrap();
+            pages += 1;
+            removed += page.removed;
+            cursor = page.next_cursor;
+            if cursor.is_none() { break; }
+            assert!(pages < 6);
+        }
+        assert_eq!((pages, removed), (5, 2));
+        let requests = server.requests.lock().unwrap();
+        let asset_pages = requests.iter().filter(|request| head_line(request).contains("/releases/777/assets?"))
+            .map(|request| {
+                let target = head_line(request).split_whitespace().nth(1).unwrap();
+                server.url.join(target).unwrap().query_pairs().find(|(key, _)| key == "page").unwrap().1.into_owned()
+            }).collect::<Vec<_>>();
+        assert_eq!(asset_pages, ["1", "2", "1", "2", "1", "2"], "deletions must not skip assets shifted into page 2");
+        let deleted = requests.iter().filter(|request| method_of(request) == "DELETE")
+            .map(|request| head_line(request).to_owned()).collect::<Vec<_>>();
+        assert_eq!(deleted.len(), 2);
+        assert!(deleted[0].contains("/assets/880 "));
+        assert!(deleted[1].contains("/assets/881 "));
+        drop(requests);
+
+        let next_owner = release(778, &job_tag("next-job", 0));
+        let owner = release(777, &tag);
+        let starter = json!({"id": 882, "name": "pack-last", "size": 0, "state": "starter"});
+        let mut replies = existing_repository_replies();
+        replies.extend([
+            reply(200, json!([owner.clone(), next_owner.clone()])), reply(200, json!([starter.clone()])),
+            reply(200, owner.clone()), reply(200, starter), reply(204, json!(null)),
+            reply(200, owner), reply(200, json!([])), reply(204, json!(null)),
+            reply(200, json!([next_owner.clone()])), reply(200, json!([])),
+            reply(200, next_owner), reply(200, json!([])), reply(204, json!(null)),
+            reply(200, json!([])),
+        ]);
+        let server = github_server(replies);
+        let provider = adapter(dependencies().dependencies);
+        let handle = open(provider.as_ref(), &server, OpenMode::Existing).await.unwrap();
+        let first = provider.cleanup_incomplete_objects(&handle, &[], Some("1:0:2:0"), 10, &|_| {}, &cancel).await.unwrap();
+        assert_eq!(first.removed, 1);
+        assert_eq!(first.next_cursor.as_deref(), Some("1:0:1:0"));
+        let second = provider.cleanup_incomplete_objects(&handle, &[], first.next_cursor.as_deref(), 10, &|_| {}, &cancel).await.unwrap();
+        assert_eq!(second.removed, 0);
+        let last = provider.cleanup_incomplete_objects(&handle, &[], second.next_cursor.as_deref(), 10, &|_| {}, &cancel).await.unwrap();
+        assert!(last.next_cursor.is_none());
+        let requests = server.requests.lock().unwrap();
+        assert!(requests.iter().any(|request| method_of(request) == "DELETE" && head_line(request).contains("/releases/778 ")));
+        assert!(requests.iter().any(|request| head_line(request).contains("/releases/778/assets?per_page=100&page=1 ")));
+    });
+}
+
+#[test]
+fn incomplete_cleanup_marks_only_a_sent_delete_as_uncertain() {
+    runtime().block_on(async {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        for case in 0..11 {
+            let tag = job_tag("old-job", 0);
+            let owner = release(777, &tag);
+            let starter = json!({"id": 880, "name": "pack-first", "size": 0, "state": "starter"});
+            let mut replies = existing_repository_replies();
+            if case != 0 {
+                replies.extend([reply(200, json!([owner.clone()])), reply(200, json!([starter.clone()])),
+                    reply(200, owner.clone()), reply(200, starter)]);
+            }
+            if matches!(case, 4 | 5) {
+                replies.extend([reply(204, json!(null)), reply(200, owner), reply(200, json!([]))]);
+            }
+            replies.push(if matches!(case, 2 | 5) { reply(403, json!({})) }
+                else if case == 3 { reply(500, json!({})) }
+                else if case == 6 { reply(202, json!({})) }
+                else if case == 7 { reply(429, json!({})) }
+                else if case == 8 { Reply::Http { status: 200, headers: vec![("content-type".into(), "text/html".into())], body: b"<html>synthetic refusal</html>".to_vec() } }
+                else if case == 9 { Reply::Http { status: 403, headers: vec![("ETag".into(), "first".into()), ("ETag".into(), "second".into())], body: vec![] } }
+                else if case == 10 { Reply::Http { status: 403, headers: vec![("X-Synthetic".into(), "\u{e9}".into())], body: vec![] } }
+                else { Reply::Lost });
+            let server = github_server(replies);
+            let provider = adapter(dependencies().dependencies);
+            let handle = open(provider.as_ref(), &server, OpenMode::Existing).await.unwrap();
+            let deleting = AtomicBool::new(false);
+            assert!(provider.cleanup_incomplete_objects(&handle, &[], None, 10,
+                &|active| deleting.store(active, Ordering::SeqCst), &Cancellation::default()).await.is_err());
+            assert_eq!(deleting.load(Ordering::SeqCst), matches!(case, 1 | 4), "case {case}");
+        }
+
+        use crate::external_storage::http::{HttpRequest, HttpResponse, HttpTransport};
+        struct CancelAfterResponse(std::sync::Arc<dyn HttpTransport>);
+        impl HttpTransport for CancelAfterResponse {
+            fn send<'a>(&'a self, request: HttpRequest, cancel: &'a Cancellation) -> ProviderFuture<'a, HttpResponse> {
+                Box::pin(async move {
+                    let response = self.0.send(request, cancel).await?;
+                    cancel.cancel();
+                    Ok(response)
+                })
+            }
+        }
+        for case in 0..3 {
+            let server = github_server(if case == 2 { vec![reply(204, json!(null))] } else { vec![] });
+            let mut test = dependencies();
+            if case == 2 { test.dependencies.http = std::sync::Arc::new(CancelAfterResponse(test.dependencies.http.clone())); }
+            let provider = super::GithubReleases { dependencies: test.dependencies };
+            let context = api::Context::new(&config(&server), zeroize::Zeroizing::new("synthetic-token".into())).unwrap();
+            let request = provider.request(&context, reqwest::Method::DELETE, context.asset_url(880).unwrap(), ProviderOperation::Delete);
+            if case != 2 {
+                provider.dependencies.requests.backoff.defer_for(&request.account,
+                    std::time::Duration::from_secs(if case == 0 { 120 } else { 30 }), std::time::Instant::now()).unwrap();
+            }
+            let deleting = AtomicBool::new(false);
+            let cancel = Cancellation::default();
+            let mark = |active| deleting.store(active, Ordering::SeqCst);
+            let operation = provider.send_cleanup_delete(request, &mark, &cancel);
+            let result = if case == 1 {
+                tokio::join!(operation, async { tokio::task::yield_now().await; cancel.cancel(); }).0
+            } else { operation.await };
+            assert_eq!(result.err().unwrap().kind, if case == 0 { ErrorKind::RateLimited } else { ErrorKind::Cancelled }, "boundary case {case}");
+            assert!(!deleting.load(Ordering::SeqCst), "boundary case {case}");
+            assert_eq!(server.requests.lock().unwrap().len(), usize::from(case == 2));
+        }
+
+        let (ready, received) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let server = github_server(vec![Reply::Gated { send_headers: false, ready, release: wait }]);
+        let provider = super::GithubReleases { dependencies: dependencies().dependencies };
+        let context = api::Context::new(&config(&server), zeroize::Zeroizing::new("synthetic-token".into())).unwrap();
+        let request = provider.request(&context, reqwest::Method::DELETE, context.asset_url(880).unwrap(), ProviderOperation::Delete);
+        let cancel = Cancellation::default();
+        let deleting = AtomicBool::new(false);
+        let mark = |active| deleting.store(active, Ordering::SeqCst);
+        let (result, ()) = tokio::join!(provider.send_cleanup_delete(request, &mark, &cancel), async {
+            received.await.unwrap();
+            cancel.cancel();
+        });
+        release.send(()).unwrap();
+        assert_eq!(result.err().unwrap().kind, ErrorKind::Cancelled);
+        assert!(deleting.load(Ordering::SeqCst), "a dispatched delete without a response remains uncertain");
     });
 }
 

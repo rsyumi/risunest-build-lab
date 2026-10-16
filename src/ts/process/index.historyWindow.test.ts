@@ -670,20 +670,45 @@ describe('sendChat with the history window', () => {
         expect(mocks.alertError).toHaveBeenCalledWith(language.chatConversationActionFailed)
     })
 
-    it('tells the user when the conversation changes while the window is read', async () => {
+    it.each([false, true])('retries one window change and refuses a second change (twice: %s)', async (twice) => {
         const stored = messages(1000)
         const { lease } = installWindowed(stored)
         const read = lease.readConversationWindow
         lease.readConversationWindow = async (input) => {
             const page = await read(input)
-            mocks.selectedAuthority = { ...mocks.selectedAuthority, sessionVersion: 1, persistedSessionVersion: 1 }
+            const version = mocks.selectedAuthority.sessionVersion
+            if (twice || version === 0) {
+                mocks.selectedAuthority = { ...mocks.selectedAuthority, sessionVersion: version + 1, persistedSessionVersion: version + 1 }
+            }
             return page
         }
 
-        await expect(sendChat({ historyLimit: true })).resolves.toBe(false)
+        await expect(sendChat({ historyLimit: true })).resolves.toBe(!twice)
 
-        expect(mocks.modelRequests).toHaveLength(0)
-        expect(mocks.alertError).toHaveBeenCalledWith(language.chatConversationActionFailed)
+        expect(mocks.modelRequests).toHaveLength(twice ? 0 : 1)
+        if (twice) expect(mocks.alertError).toHaveBeenCalledWith(language.chatConversationActionFailed)
+        else expect(mocks.alertError).not.toHaveBeenCalled()
+    })
+
+    it('restarts preparation from a conversation promoted while the window is read', async () => {
+        const stored = messages(1000)
+        const { lease, windowed, owner } = installWindowed(stored)
+        const read = lease.readConversationWindow
+        lease.readConversationWindow = async (input) => {
+            const page = await read(input)
+            windowed.current = false
+            mocks.selectedAuthority = null
+            owner.chats[0] = conversationOf(structuredClone(stored))
+            owner.chats[0].scriptstate = { $button: 'applied' }
+            mocks.session = new ActiveConversationSession({
+                characterId: 'character-a', conversationId: 'chat-a', conversation: owner.chats[0], storeRevision: 1,
+            })
+            return page
+        }
+        await expect(sendChat({ historyLimit: true })).resolves.toBe(true)
+        expect(mocks.session.materializeCompatibilityArray().at(-1)?.data).toBe('answer')
+        expect(mocks.session.readChatVariable('button')).toBe('applied')
+        expect(mocks.alertError).not.toHaveBeenCalled()
     })
 
     it('refuses to write the response when the promoted conversation no longer holds the window', async () => {

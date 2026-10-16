@@ -74,6 +74,14 @@ describe('iOS file publication', () => {
         await Promise.all([notice, pick])
         expect(invoke).toHaveBeenLastCalledWith('plugin:ios-native|pick_backup_source')
     })
+    it('propagates deferred native cleanup failure before reopening the picker and permits the next query', async () => {
+        const failure = { code: 'cleanup-failed', message: 'Source cleanup could not be confirmed' }
+        invoke.mockRejectedValueOnce(failure)
+        await expect(pickIOSBackupSource()).rejects.toBe(failure)
+        expect(invoke).not.toHaveBeenCalledWith('plugin:ios-native|pick_backup_source')
+        invoke.mockResolvedValueOnce({ names: [], cleanupFailed: false }).mockResolvedValueOnce({ cancelled: true })
+        await expect(pickIOSBackupSource()).resolves.toBeNull()
+    })
     it('releases native and scoped custody after cancellation during selection', async () => {
         const controller = new AbortController()
         invoke.mockImplementation(async command => {

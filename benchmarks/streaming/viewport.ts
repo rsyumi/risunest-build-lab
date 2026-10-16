@@ -102,6 +102,46 @@ export const viewportProbe = {
       parseWorkMs: metrics.calls.reduce((sum, call) => sum + call.durationMs, 0),
       dependentRowsUpdated: rows().filter((row) => Number(row.dataset.chatIndex) < count - 1 && row.textContent?.includes(data)).length };
   },
+  async streamedReply(options: { auto?: boolean; always?: boolean; manualAtChunk?: number; startOlder?: boolean } = {}) {
+    await this.mount(64);
+    DBState.db.autoScrollToNewMessage = options.auto ?? true;
+    DBState.db.alwaysScrollToNewMessage = options.always ?? false;
+    const container = scroll();
+    container.dispatchEvent(new WheelEvent('wheel', { deltaY: 1 }));
+    container.scrollTop = options.startOlder ? -800 : 0;
+    container.dispatchEvent(new Event('scroll'));
+    await ready();
+    session.append({ role: 'user', chatId: 'synthetic-question', data: 'Synthetic question' });
+    await ready();
+    const index = session.totalMessages;
+    session.append({ role: 'char', chatId: 'synthetic-stream', data: 'Synthetic reply' });
+    const snapshots: Record<string, number>[] = [];
+    const capture = () => {
+      const row = rows().find(value => Number(value.dataset.chatIndex) === index);
+      if (!row) throw new Error('stream-row-not-mounted');
+      const bounds = container.getBoundingClientRect();
+      const rect = row.getBoundingClientRect();
+      return { scrollTop: container.scrollTop, rowTop: rect.top - bounds.top, rowBottom: rect.bottom - bounds.bottom, rowHeight: rect.height };
+    };
+    const started = performance.now();
+    for (let chunk = 1; chunk <= 40; chunk++) {
+      await until(() => performance.now() - started >= chunk * 50, 'stream-chunk-deadline');
+      session.edit(session.locate(index), { role: 'char', chatId: 'synthetic-stream', data: ('Synthetic streamed paragraph. '.repeat(5) + '\n\n').repeat(chunk) });
+      await tick();
+      await pause();
+      if (chunk === options.manualAtChunk) {
+        container.dispatchEvent(new WheelEvent('wheel', { deltaY: -240 }));
+        container.scrollTop -= 240;
+        container.dispatchEvent(new Event('scroll'));
+        await ready();
+        snapshots.push({ chunk, manual: 1, ...capture() });
+      }
+      if (chunk === 10 || chunk === 20 || chunk === 40) snapshots.push({ chunk, ...capture() });
+    }
+    currentCharacter.chats[0].isStreaming = false;
+    await ready();
+    return { options, snapshots, settled: capture(), newestVisible: capture().rowBottom <= 1 };
+  },
   async seekMiddle() {
     const container = scroll();
     container.dispatchEvent(new WheelEvent("wheel", { deltaY: -1 }));

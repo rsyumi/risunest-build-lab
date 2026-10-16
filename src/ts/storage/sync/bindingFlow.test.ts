@@ -306,8 +306,24 @@ it('ordinary replacement switch failure restores unchanged plugins and active ad
     expect(s.events).toContain('resume')
     expect((await s.deps.native.state()).targetAuthority).toBe('1')
 })
+it.each(['preparation', 'activation'] as const)('keeps unreadable binding recovery after %s failure and restarts only proven unchanged plugins', async failure => {
+    const s = setup()
+    let fenced = false
+    let attempted = false
+    s.deps.plugins.fenceExecution = async () => { fenced = true; if (failure === 'preparation') throw new Error('preparation failed') }
+    const state = s.deps.native.state
+    s.deps.native.state = async () => { if ((failure === 'preparation' && fenced) || attempted) throw new Error('binding unavailable'); return state() }
+    s.deps.native.switchTarget = async () => { attempted = true; throw new Error('activation outcome unknown') }
+    await expect(s.flow.bind(target, s.transport)).rejects.toThrow()
+    if (failure === 'preparation') expect(s.events).toContain('restart')
+    else expect(s.events).not.toContain('restart')
+    expect(s.events).not.toContain('resume')
+    expect(s.events).not.toContain('activate-database')
+})
 it.each(['result', 'cache', 'refresh', 'state'])('postactivation %s failure keeps stale captures fenced and never resumes or publishes', async failure => {
     const s = setup(); newDeviceTransport(s)
+    const registerFailure = vi.fn()
+    s.deps.recovery = { setLifecycle: vi.fn(), registerFailure }
     let guarded = false
     let staleWrites = 0
     const complete = vi.fn(() => { guarded = false })
@@ -329,6 +345,7 @@ it.each(['result', 'cache', 'refresh', 'state'])('postactivation %s failure keep
     expect(staleWrites).toBe(0)
     expect(complete).not.toHaveBeenCalled()
     expect(abortUnchanged).not.toHaveBeenCalled()
+    expect(registerFailure).toHaveBeenCalledWith(expect.any(Error), expect.any(Function))
     for (const event of ['restart', 'resume', 'resume-new-device', 'publish']) expect(s.events).not.toContain(event)
 })
 it('only unchanged native failure aborts the activation guard before restarting old state', async () => {
@@ -367,6 +384,25 @@ it('successful activated projection holds the guard through fresh plugin restart
 })
 
 describe('transport-neutral first binding', () => {
+    it('resumes the unchanged binding when an authority read fails inside a same-target activation', async () => {
+        const s = setup({ previouslyBoundLibrary: true })
+        const persisted: SyncBindingState = { target, targetAuthority: '4', selectionEpoch: 'persisted', libraryId: 'library', progress: null }
+        s.setState(persisted)
+        s.deps.resolveTransport = () => s.transport
+        const registerFailure = vi.fn()
+        s.deps.recovery = { setLifecycle: vi.fn(), registerFailure }
+        const assertAuthority = s.deps.native.assertAuthority
+        let inActivation = false, activationChecks = 0
+        s.deps.gate.runTransition = async operation => { inActivation = true; return operation() }
+        s.deps.native.assertAuthority = async expected => {
+            if (inActivation && ++activationChecks === 2) throw new Error('temporary authority read failure')
+            await assertAuthority(expected)
+        }
+        await expect(s.flow.bind(target, s.transport)).rejects.toThrow('temporary authority read failure')
+        expect(s.events).toContain('resume')
+        expect(registerFailure).not.toHaveBeenCalled()
+        expect(await s.deps.native.state()).toEqual(persisted)
+    })
     it.each(['server', 'external'] as const)('owns the resumed persisted %s signal and fences it before disconnect', async kind => {
         const s = setup()
         const persisted: SyncBindingState = { target: { kind, connectionId: 'persisted' }, targetAuthority: '4', selectionEpoch: 'persisted', libraryId: 'library', progress: null }

@@ -26,6 +26,18 @@ const READ_AHEAD_PAGES: usize = 4;
 /// reference, so its snapshot pages leave them out.
 static COVERED: LazyLock<Mutex<BTreeMap<String, BTreeSet<String>>>> =
     LazyLock::new(Default::default);
+static POINTS: LazyLock<Mutex<BTreeMap<String, control::PointHistoryCache>>> = LazyLock::new(Default::default);
+pub(super) async fn list_points(
+    connected: &ConnectedRepository,
+    cursor: Option<&str>,
+    cancel: &Cancellation,
+) -> Result<control::BackupPointPage> {
+    let scope=format!("{}:{}:{}",connected.handle.connection_identity,connected.stored.descriptor.repository_id,hex::encode(hash(&connected.root_key[..])));
+    let mut points=POINTS.lock().map_err(|_|corrupt())?.remove(&scope).unwrap_or_default();
+    let result=control::list_ordered_backup_points_page(connected,&mut points,cursor,PAGE,cancel).await;
+    POINTS.lock().map_err(|_|corrupt())?.insert(scope,points);
+    result
+}
 fn corrupt() -> ProviderError {
     ProviderError::new(ErrorKind::Corrupt)
 }
@@ -207,7 +219,7 @@ pub(crate) async fn external_storage_list_history(
     app: AppHandle,
     request: HistoryRequest,
 ) -> Result<Value> {
-    logged("external_storage_list_history", async move {
+    logged("external_storage_list_history", Box::pin(async move {
         let state = decode_cursor(&request)?;
         let connected =
             super::connection_commands::open_connected(&app, &request.connection_id).await?;
@@ -225,13 +237,7 @@ pub(crate) async fn external_storage_list_history(
             provider,
         };
         let next = if state.phase == "points" {
-            let page = control::list_connected_backup_points_page(
-                &connected,
-                state.provider.as_deref(),
-                PAGE,
-                &cancel,
-            )
-            .await?;
+            let page=list_points(&connected,state.provider.as_deref(),&cancel).await?;
             let mut referenced = Vec::new();
             for point in page.points {
                 let kind = match point.document.kind {
@@ -311,7 +317,7 @@ pub(crate) async fn external_storage_list_history(
             output["nextCursor"] = json!(encode_cursor(next)?);
         }
         Ok(output)
-    }.await)
+    }).await)
 }
 #[cfg(test)]
 mod tests {
