@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { risuChatParser } from 'src/ts/parser/parser.svelte'
     import { pluginStartupGate } from 'src/ts/plugins/pluginStartupGate'
     import { refuseGenerationWhilePluginsWait } from 'src/ts/plugins/pluginStartupRefusal'
     import { captureChatParserContextSeed, createChatParserContextSeed } from 'src/ts/chatParserContextSeed.svelte'
@@ -962,6 +963,7 @@
         updateInputSizeAll()
     });
 
+    let inputTranslationFailed = false
     async function updateInputTransateMessage(reverse: boolean) {
         if (!DBState.db.useAutoTranslateInput) return
         const snapshot = captureComposerInput()
@@ -978,10 +980,18 @@
         }
         if (experimental) await sleep(1500)
         if (!chatScreenState.matchesComposer(snapshot)) return
-        const translatedMessage = await translate(input, reverse)
-        if (translatedMessage && chatScreenState.matchesComposer(snapshot)) {
-            if (reverse) snapshot.composer.text = translatedMessage
-            else snapshot.composer.translation = translatedMessage
+        try {
+            const translatedMessage = await translate(input, reverse, undefined, 'throw')
+            if (!chatScreenState.matchesComposer(snapshot)) return
+            inputTranslationFailed = false
+            if (translatedMessage) {
+                if (reverse) snapshot.composer.text = translatedMessage
+                else snapshot.composer.translation = translatedMessage
+            }
+        } catch (error) {
+            if (!chatScreenState.matchesComposer(snapshot)) return
+            if (!inputTranslationFailed) alertError(error)
+            inputTranslationFailed = true
         }
     }
 
@@ -1004,6 +1014,7 @@
                 renderContext: createScreenshotRenderContext(source, chat),
             }, {
                 store: runtime.store,
+                parseFirstPass: risuChatParser,
                 flushPendingData: (reason) => runtime.flushPendingData(reason),
                 getNavigationGeneration: () => runtime.getNavigationGeneration(),
                 getActiveConversationSession: () => runtime.getActiveConversationSession(),
@@ -1317,6 +1328,7 @@
                     },
                 },
             })
+            await sourceLease.close()
             alertNormal(language.screenshotSaved)
             screenshotDialogOpen = false
             screenshotDialogSnapshot = null
@@ -1352,6 +1364,7 @@
                 screenshotDialogOpen = false
             }
         } finally {
+            await sourceLease.close().catch(console.error)
             if (screenshotController === controller) screenshotController = null
             screenshotRunning = false
         }

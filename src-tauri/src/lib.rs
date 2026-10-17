@@ -14,6 +14,7 @@ mod app_update;
 #[cfg(desktop)]
 mod appimage_integration;
 mod asset_repository;
+mod asset_byte_transport;
 mod boot_marker;
 #[cfg(windows)]
 mod windows_session;
@@ -40,6 +41,7 @@ mod lossless_f0;
 mod macos_lifecycle;
 pub mod native_file_jobs;
 pub(crate) mod native_log;
+mod diagnostics;
 mod network_log;
 mod native_media;
 mod native_tokenizer;
@@ -830,6 +832,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         server_sync::commands::server_sync_lww_retry,
         server_sync::commands::server_sync_lww_drain,
         server_sync::commands::server_sync_cancel,
+        server_sync::commands::server_sync_claim_offline_notice,
         server_sync::commands::server_sync_notify_start,
         server_sync::commands::server_sync_notify_stop,
         server_sync::commands::server_sync_asset_policy,
@@ -865,6 +868,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::data_health::pds_data_health_undo,
         network_log::network_log_command,
         native_log::native_log_tail,
+        diagnostics::diagnostic_device_info,
         native_log::native_log_error,
         native_log::native_log_file_path,
         native_log::native_log_set_file_enabled,
@@ -872,11 +876,12 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         native_media::native_media_encode_inlay_image,
         native_media::ipc::native_media_inlay_input_open,
         native_media::ipc::native_media_inlay_input_chunk,
+        native_media::ipc::native_media_inlay_input_chunk_raw,
         native_media::ipc::native_media_inlay_input_cancel,
         native_media::ipc::native_media_encode_inlay_finish,
         native_media::ipc::native_media_inlay_output_read,
         native_media::ipc::native_media_inlay_output_cancel,
-        asset_repository::commands::asset_cas_read_object_range,
+        asset_repository::commands::asset_cas_read_bytes,
         asset_repository::commands::asset_cas_stat_object,
         asset_repository::commands::asset_remote_stat_object,
         asset_repository::commands::asset_remote_hydrate_object,
@@ -884,6 +889,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         asset_repository::commands::asset_cas_job_prepare,
         asset_repository::commands::asset_cas_job_upload_open,
         asset_repository::commands::asset_cas_job_upload_chunk,
+        asset_repository::commands::asset_cas_job_upload_chunk_raw,
+        asset_byte_transport::native_asset_bytes_probe,
         asset_repository::commands::asset_cas_job_upload_finish,
         asset_repository::commands::asset_cas_job_upload_cancel,
         asset_repository::commands::asset_cas_job_pin_existing,

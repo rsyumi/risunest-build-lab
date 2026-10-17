@@ -203,6 +203,11 @@ function clonePluginStorageValue<T>(value: T): T {
     return detachReactiveValue(value) as T
 }
 
+/** Plugin storage persists `JSON.stringify` output, as upstream RisuAI does. */
+export function toPluginStorageJsonValue(value: unknown): unknown {
+    if (typeof value === 'string') return value
+    return JSON.parse(JSON.stringify(value) ?? 'null')
+}
 
 export function createPluginStorageStore(
     dependencies: PluginStorageStoreDependencies,
@@ -394,7 +399,7 @@ export function createPluginStorageStore(
                 ? { type: 'clear', owner }
                 : mutation.type === 'delete' || mutation.value === undefined
                   ? { type: 'delete', owner, key: mutation.key }
-                  : { type: 'set', owner, key: mutation.key, value: clonePluginStorageValue(mutation.value) },
+                  : { type: 'set', owner, key: mutation.key, value: toPluginStorageJsonValue(mutation.value) },
         )
         const check = observation.prepareWrite(normalized)
         await initialize()

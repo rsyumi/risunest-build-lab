@@ -1,7 +1,9 @@
+import { nativeAssetByteSender, type NativeByteInvoke } from './nativeAssetByteTransport'
+
 export const NATIVE_MEDIA_IPC_CHUNK_BYTES = 64 * 1024
 export const MAX_NATIVE_MEDIA_TRANSFER_BYTES = 512 * 1024 * 1024
 
-type InvokeCommand = (command: string, args?: Record<string, unknown>) => Promise<unknown>
+type InvokeCommand = NativeByteInvoke
 
 interface BoundedInputCommand {
     data: Uint8Array
@@ -78,21 +80,20 @@ export async function invokeWithBoundedNativeMediaInput<T>(
     }
 
     const uploadId = crypto.randomUUID()
+    const sender = await nativeAssetByteSender(invokeCommand)
     return preserveCleanupFailure(async () => {
         const opened = await invokeCommand('native_media_inlay_input_open', {
             uploadId,
             totalBytes: data.byteLength,
+            binary: sender.binary,
         }) as { capacity?: unknown }
-        if (opened?.capacity !== NATIVE_MEDIA_IPC_CHUNK_BYTES) {
+        if (opened?.capacity !== sender.capacity) {
             throw new TypeError('Native media input upload returned an invalid chunk capacity')
         }
         for (let offset = 0; offset < data.byteLength;) {
-            const end = Math.min(offset + NATIVE_MEDIA_IPC_CHUNK_BYTES, data.byteLength)
-            const acknowledged = safeSize(await invokeCommand('native_media_inlay_input_chunk', {
-                uploadId,
-                offset,
-                data: Array.from(data.subarray(offset, end)),
-            }), 'Native media input upload')
+            const end = Math.min(offset + sender.capacity, data.byteLength)
+            const acknowledged = safeSize(await sender.append('native_media_inlay_input_chunk',
+                uploadId, offset, data.subarray(offset, end)), 'Native media input upload')
             if (acknowledged !== end) {
                 throw new Error('Native media input upload returned an invalid acknowledgement')
             }

@@ -6,6 +6,7 @@ use std::sync::{atomic::{AtomicBool, AtomicU64, Ordering}, Arc, Mutex};
 use tauri::{AppHandle, Manager};
 #[derive(Default)]
 pub(crate) struct ServerSyncCommandState {
+    offline_notice_claimed: AtomicBool,
     cleanup_closed: AtomicBool,
     running: AtomicBool,
     cancelled: Mutex<Arc<AtomicBool>>,
@@ -16,6 +17,15 @@ pub(crate) struct ServerSyncCommandState {
     transports: Mutex<TransportJobs>,
     stage: Mutex<Option<Arc<AtomicBool>>>,
     asset_operation: Arc<Mutex<Option<AssetOperationSlot>>>,
+}
+impl ServerSyncCommandState {
+    fn claim_offline_notice(&self) -> bool {
+        !self.offline_notice_claimed.swap(true, Ordering::Relaxed)
+    }
+}
+#[tauri::command]
+pub(crate) fn server_sync_claim_offline_notice(state: tauri::State<'_, ServerSyncCommandState>) -> bool {
+    state.claim_offline_notice()
 }
 struct AssetOperationSlot {
     id: String,
@@ -448,6 +458,14 @@ async fn start_notification_job<R: tauri::Runtime>(app:AppHandle<R>,request:crat
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn offline_notice_is_shared_until_the_app_state_is_recreated() {
+        let state = super::ServerSyncCommandState::default();
+        assert!(state.claim_offline_notice());
+        assert!(!state.claim_offline_notice());
+        assert!(!state.claim_offline_notice());
+        assert!(super::ServerSyncCommandState::default().claim_offline_notice());
+    }
     #[test]
     fn scoped_download_cancellation_does_not_cancel_transport_or_a_later_retry() {
         use super::*;

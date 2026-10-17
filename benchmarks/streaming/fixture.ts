@@ -134,7 +134,22 @@ export function startStreamingSmoke() {
         .then(({ runParserScreenProbe }) => runParserScreenProbe(assets, baseline, () => unmount(fixture))),
       checkPersistenceReload,
       run: (profile = "smoke") =>
-        profile === "viewport"
+        profile === "asset-bytes" || profile === "asset-bytes-legacy"
+            ? import('../native-assets/suite').then(async ({ runNativeAssetMeasurements, verifyConcurrentNativeByteWriters }) => {
+              const { SqlitePersistentDataStore } = await import('../../src/ts/storage/sqlitePersistentDataStore')
+              const store = new SqlitePersistentDataStore()
+              await store.open()
+              const descriptor = Object.getOwnPropertyDescriptor(window, 'RisuNestCommit')
+              try {
+                if (profile === 'asset-bytes-legacy') Object.defineProperty(window, 'RisuNestCommit', { configurable: true, value: undefined })
+                const measurements = await runNativeAssetMeasurements(store)
+                const concurrency = await verifyConcurrentNativeByteWriters(store)
+                return { passed: true, cases: [{ id: 'native-asset-bytes', measurements }, { id: 'concurrent-byte-writers', ...concurrency }] }
+              } finally {
+                if (descriptor) Object.defineProperty(window, 'RisuNestCommit', descriptor)
+              }
+            })
+          : profile === "viewport"
           ? unmount(fixture).then(() => viewportProbe.run())
           : profile === "hypa-summary"
             ? runHypaSummaryProbe(() => unmount(fixture))

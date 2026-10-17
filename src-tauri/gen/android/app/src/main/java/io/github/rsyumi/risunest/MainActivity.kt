@@ -767,11 +767,11 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
 
   override fun onWebViewCreate(webView: WebView) {
     super.onWebViewCreate(webView)
+    frontendReady.cancel()
     if (lifecycleWebView != null) {
       cancelUnclaimedReservedDestination()
       retireSafDestinationRenderer()
     }
-    frontendReady.cancel()
     frontendReady = AndroidFrontendReady()
     lifecycleWebView = webView
     exitListenerReady = false

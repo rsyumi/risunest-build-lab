@@ -15,6 +15,7 @@ export interface alertData{
     submsg?: string
     datalist?: [string, string][],
     stackTrace?: string;
+    wrapCode?: boolean
     defaultValue?: string
     checkboxConfirm?: AlertCheckboxConfirmOptions
     onCheckboxConfirm?: (result: AlertCheckboxConfirmResult) => void
@@ -95,9 +96,9 @@ export function alertNormal(msg:string){
     })
 }
 
-export async function alertNormalWait(msg:string){
+export async function alertNormalWait(msg:string, type: 'normal' | 'error' = 'normal'){
     await alertStoreImported.open({
-        'type': 'normal',
+        'type': type,
         'msg': msg
     })
 }

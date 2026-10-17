@@ -98,7 +98,7 @@ describe('ChatConversationStart', () => {
         expect(chatMountProbe.unmounts).toHaveLength(0)
     })
 
-    test('keeps the greeting mounted while a reload prepares its replacement parser lease', async () => {
+    test.each(['reload', 'stale history'])('keeps the greeting mounted while a %s prepares its replacement parser lease', async (trigger) => {
         const release = vi.fn()
         let finishReload!: (value: null) => void
         const acquire = vi
@@ -125,10 +125,15 @@ describe('ChatConversationStart', () => {
         })
         await vi.waitFor(() => expect(chatMountProbe.mounts).toHaveLength(1))
         const greeting = target.querySelector('[data-chat-probe]')
-        ;(
-            mounted as { refreshConversationStartParser(): void }
-        ).refreshConversationStartParser()
+        if (trigger === 'reload') {
+            ;(
+                mounted as { refreshConversationStartParser(): void }
+            ).refreshConversationStartParser()
+        } else acquire.mock.calls[0][0].onStale()
         await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(2))
+        // A replaced lease cannot restart preparation.
+        acquire.mock.calls[0][0].onStale()
+        expect(acquire).toHaveBeenCalledTimes(2)
         expect(release).toHaveBeenCalledOnce()
         expect(chatMountProbe.mounts[0].parserAbortSignal?.aborted).toBe(true)
         expect(target.querySelector('[data-chat-probe]')).toBe(greeting)

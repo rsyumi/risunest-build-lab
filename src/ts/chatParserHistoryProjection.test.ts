@@ -181,48 +181,38 @@ describe('live chat parser history projection', () => {
             revision: REVISION,
             totalMessages: 100,
             chatID: 99,
-            projectedChatID: 4,
-            historyOffset: 95,
+            projectedChatID: 0,
+            historyOffset: 99,
         })
         if (result.kind !== 'bounded') throw new Error('Expected bounded projection')
         expect(result.messages.map((message) => message.data)).toEqual([
-            'turn 95',
-            'turn 96',
-            'turn 97',
-            'turn 98',
             'turn 99',
         ])
         expect(
             result.context.parserContext.character.chats[0].message,
         ).toEqual(result.messages)
-        expect(result.context.parserContext.historyOffset).toBe(95)
+        expect(result.context.parserContext.historyAccess?.length).toBe(100)
         expect(input.contextSeed).toEqual(originalSeed)
         expect(reads[0]).toEqual({ startIndex: 99, limit: 1 })
         expect(reads).toEqual([
             { startIndex: 99, limit: 1 },
-            { startIndex: 91, limit: 8 },
         ])
     })
 
     it('expands backward batches only while role dependencies remain unresolved', async () => {
         const messages = makeMessages(300)
         for (let index = 250; index < messages.length; index += 1) messages[index].role = 'char'
-        const { input, reads } = makeInput(messages, 299)
+        const { input, reads } = makeInput(messages, 299, { parserSource: '{{messageidleduration}}' })
 
         const result = await createChatParserHistoryProjection(input)
 
-        expect(result).toMatchObject({ kind: 'bounded', historyOffset: 247 })
+        expect(result).toMatchObject({ kind: 'bounded' })
         if (result.kind !== 'bounded') throw new Error('Expected bounded projection')
-        expect(result.messages).toEqual(messages.slice(247))
-        expect(reads).toEqual([
-            { startIndex: 299, limit: 1 },
-            { startIndex: 291, limit: 8 },
-            { startIndex: 275, limit: 16 },
-            { startIndex: 243, limit: 32 },
-        ])
+        expect(result.context.parserContext.historyAccess?.previous('user', 300, 2)).toEqual([messages[249], messages[247]])
+        expect(reads.reduce((sum, read) => sum + read.limit, 0)).toBeLessThanOrEqual(65)
     })
 
-    it('keeps a literal previouschatlog index in one exact contiguous projection', async () => {
+    it('prepares a literal previouschatlog row without the intervening history', async () => {
         const messages = makeMessages(100)
         messages[89].data = '{{previouschatlog::10}}'
         const { input, reads } = makeInput(messages, 89, { maxProjectionMessages: 80 })
@@ -231,20 +221,19 @@ describe('live chat parser history projection', () => {
 
         expect(result).toMatchObject({
             kind: 'bounded',
-            historyOffset: 10,
-            projectedChatID: 79,
+            historyOffset: 89,
+            projectedChatID: 0,
         })
         if (result.kind !== 'bounded') throw new Error('Expected bounded projection')
-        expect(result.messages).toHaveLength(80)
-        expect(result.messages[0].data).toBe('turn 10')
-        expect(result.messages[79].data).toBe('{{previouschatlog::10}}')
+        expect(result.messages).toHaveLength(1)
+        expect(result.context.parserContext.historyAccess?.row(10)?.data).toBe('turn 10')
         expect(reads).toEqual([
             { startIndex: 89, limit: 1 },
-            { startIndex: 10, limit: 79 },
+            { startIndex: 10, limit: 1 },
         ])
     })
 
-    it('falls back without spreading an imported message with many literal indices', async () => {
+    it('handles an imported message with many literal indices without spreading them into function arguments', async () => {
         const literalCount = 200_000
         const currentAbsoluteIndex = literalCount + 1
         const currentMessage: Message = { role: 'char', data: 'current' }
@@ -277,8 +266,9 @@ describe('live chat parser history projection', () => {
 
         const result = await createChatParserHistoryProjection(input)
 
-        expect(result.kind).toBe('complete')
-        expect(input.acquireCompleteProjection).toHaveBeenCalledOnce()
+        expect(result.kind).toBe('bounded')
+        if (result.kind !== 'bounded') throw new Error('Expected bounded projection')
+        expect(result.context.parserContext.historyAccess?.row(literalCount - 1)?.data).toBe('current')
     })
 
     it('includes the prior character row and two prior user rows needed by parser semantics', async () => {
@@ -293,22 +283,21 @@ describe('live chat parser history projection', () => {
             { role: 'user', data: 'near user' },
             { role: 'char', data: 'current' },
         ]
-        const { input } = makeInput(messages, 8, { maxProjectionMessages: 8 })
+        const { input } = makeInput(messages, 8, { maxProjectionMessages: 8,
+            parserSource: '{{previouscharchat}}|{{previoususerchat}}|{{messageidleduration}}' })
 
         const result = await createChatParserHistoryProjection(input)
 
         expect(result).toMatchObject({
             kind: 'bounded',
-            historyOffset: 5,
-            projectedChatID: 3,
+            historyOffset: 8,
+            projectedChatID: 0,
         })
         if (result.kind !== 'bounded') throw new Error('Expected bounded projection')
-        expect(result.messages.map((message) => message.data)).toEqual([
-            'second needed user',
-            'previous same role',
-            'near user',
-            'current',
-        ])
+        const history = result.context.parserContext.historyAccess!
+        expect(history.previous('char', 8, 1).map((message) => message.data)).toEqual(['previous same role'])
+        expect(history.previous('user', 8, 1).map((message) => message.data)).toEqual(['near user'])
+        expect(history.previous('user', 9, 2).map((message) => message.data)).toEqual(['near user', 'second needed user'])
     })
 
     it('scans large same-role history in linear work', async () => {
@@ -323,6 +312,7 @@ describe('live chat parser history projection', () => {
         }))
         const { input, reader } = makeInput(messages, messageCount - 1, {
             maxProjectionMessages: messageCount,
+            parserSource: '{{previoususerchat}}',
         })
         reader.readConversationWindow = async (query) => {
             const startIndex = query.startIndex ?? 0
@@ -350,7 +340,7 @@ describe('live chat parser history projection', () => {
         expect(roleReads).toBeLessThanOrEqual(messageCount * 3 + 2)
     })
 
-    it('falls back before exceeding the bounded budget for a distant literal dependency', async () => {
+    it('reads a distant literal dependency without promoting the conversation', async () => {
         const messages = makeMessages(100)
         messages[99].data = '{{previouschatlog::10}}'
         const complete = vi.fn(async () => makeCompleteLease(messages))
@@ -361,18 +351,14 @@ describe('live chat parser history projection', () => {
 
         const result = await createChatParserHistoryProjection(input)
 
-        expect(result.kind).toBe('complete')
-        expect(complete).toHaveBeenCalledOnce()
-        expect(complete).toHaveBeenCalledWith(
-            expect.objectContaining({
-                reasons: ['projection-budget'],
-                currentAbsoluteIndex: 99,
-            }),
-        )
-        expect(reads).toEqual([{ startIndex: 99, limit: 1 }])
+        expect(result.kind).toBe('bounded')
+        if (result.kind !== 'bounded') throw new Error('Expected bounded projection')
+        expect(result.context.parserContext.historyAccess?.row(10)?.data).toBe('turn 10')
+        expect(complete).not.toHaveBeenCalled()
+        expect(reads).toEqual([{ startIndex: 99, limit: 1 }, { startIndex: 10, limit: 1 }])
     })
 
-    it('falls back when the backward-role scan would exceed the projection budget', async () => {
+    it('discards backward scan pages instead of promoting when no matching role exists', async () => {
         const messages = Array.from({ length: 100 }, (_, index) => ({
             role: 'char' as const,
             data: `turn ${index}`,
@@ -381,26 +367,23 @@ describe('live chat parser history projection', () => {
         const { input, reads } = makeInput(messages, 99, {
             maxProjectionMessages: 8,
             acquireCompleteProjection: complete,
+            parserSource: '{{previoususerchat}}',
         })
 
         const result = await createChatParserHistoryProjection(input)
 
-        expect(result.kind).toBe('complete')
-        expect(complete).toHaveBeenCalledOnce()
-        expect(reads).toEqual([
-            { startIndex: 99, limit: 1 },
-            { startIndex: 92, limit: 7 },
-        ])
+        expect(result.kind).toBe('bounded')
+        if (result.kind !== 'bounded') throw new Error('Expected bounded projection')
+        expect(result.context.parserContext.historyAccess?.previous('user', 99, 1)).toEqual([])
+        expect(complete).not.toHaveBeenCalled()
+        expect(reads.reduce((sum, read) => sum + read.limit, 0)).toBe(100)
     })
 
     it.each([
-        '{{lastmessage}}',
-        '{{lastmessageid}}',
-        '{{pick::one::two}}',
-        '{{rollp::1d6}}',
         '{{previouschatlog::{{getvar::target}}}}',
         '<risu-style>not-hex</risu-style>',
-    ])('conservatively acquires complete tail or ambiguous evidence for %s', async (source) => {
+        '{{{{getvar::macro}}}}',
+    ])('conservatively acquires complete evidence for opaque %s', async (source) => {
         const messages = makeMessages(20)
         const complete = vi.fn(async () => makeCompleteLease(messages))
         const { input, reads } = makeInput(messages, 19, {
@@ -479,7 +462,6 @@ describe('live chat parser history projection', () => {
         expect(acquiredReasons).toEqual([
             'plugin-v2',
             'full-history-cbs',
-            'projection-budget',
         ])
     })
 
@@ -501,7 +483,7 @@ describe('live chat parser history projection', () => {
 
     it('fails closed when complete history is required but no callback is available', async () => {
         const messages = makeMessages(100)
-        messages[99].data = '{{previouschatlog::0}}'
+        messages[99].data = '{{history}}'
         const { input } = makeInput(messages, 99, { maxProjectionMessages: 16 })
 
         await expect(createChatParserHistoryProjection(input)).rejects.toBeInstanceOf(

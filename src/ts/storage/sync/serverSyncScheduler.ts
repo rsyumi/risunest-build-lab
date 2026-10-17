@@ -8,6 +8,7 @@ export interface ServerSyncSchedulerDependencies {
     automaticSyncAvailable?(): boolean
     failed(error: unknown): void
     recovered?(): void
+    retrying?(): void
     /** Called after a send, receive or clock check starts or settles. */
     activity?(): void
 }
@@ -21,6 +22,14 @@ export function serverSyncErrorCode(error: unknown): string {
     return 'code' in error ? String(error.code) : ''
 }
 const isCancellation = (error: unknown) => serverSyncErrorCode(error) === 'cancelled' || (typeof error === 'object' && !!error && 'name' in error && error.name === 'AbortError')
+export function isServerSyncUnavailable(error: unknown): boolean {
+    if (typeof error === 'object' && error && 'retryable' in error && error.retryable === false) return false
+    const code = serverSyncErrorCode(error)
+    if (['server-unreachable', 'server-timeout', 'request-timeout', 'incomplete-response', 'directory-unreachable', 'directory-response-error', 'directory-incomplete-response', 'sync-retry-budget-exhausted'].includes(code)) return true
+    // Tunnel/gateway HTML responses have no Sync error body.
+    return code === 'server-response-error' && typeof error === 'object' && error !== null
+        && 'status' in error && typeof error.status === 'number' && error.status >= 500 && error.status < 600
+}
 type Lane = 'push' | 'pull' | 'connect'
 
 export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDependencies) {
@@ -44,6 +53,20 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
     let checkingClock: Promise<boolean> | undefined
     let disconnecting: Promise<void> | undefined
     let connecting: Promise<void> | undefined
+    let outageTimer: ReturnType<typeof setTimeout> | undefined
+    let outageUntil = 0
+    let outageAttempt = 0
+    let outageEpoch = 0
+    const waiting = () => Date.now() < outageUntil
+    const resetOutage = () => { clearTimeout(outageTimer); outageUntil = 0; outageAttempt = 0 }
+    const scheduleOutage = () => {
+        clearTimeout(outageTimer)
+        if (!foreground || blocked || !waiting()) return
+        outageTimer = setTimeout(() => {
+            connect(); void pull().catch(() => {}); void push().catch(() => {})
+            dependencies.retrying?.()
+        }, outageUntil - Date.now())
+    }
     const failedLanes = new Set<Lane>()
     const disconnect = () => {
         if (!disconnecting) disconnecting = (async () => {
@@ -55,11 +78,26 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
         return disconnecting
     }
     const code = serverSyncErrorCode
-    const succeeded = (lane: Lane) => { if (failedLanes.delete(lane) && failedLanes.size === 0 && !blocked) dependencies.recovered?.() }
+    const succeeded = (lane: Lane, epoch: number) => {
+        if (epoch !== outageEpoch) return
+        if (failedLanes.delete(lane) && failedLanes.size === 0 && !blocked) {
+            resetOutage()
+            dependencies.recovered?.()
+        }
+    }
     const fail = (error: unknown, lane?: Lane) => {
         if (isCancellation(error)) return
         if (blocked && !clockCodes.includes(blockedCode)) return
         if (lane) failedLanes.add(lane)
+        else if (isServerSyncUnavailable(error)) failedLanes.add('pull')
+        // Concurrent lane failures share one delay. Edits and foreground changes do not bypass it.
+        if (isServerSyncUnavailable(error) && !waiting()) {
+            outageEpoch++
+            outageUntil = Date.now() + Math.min(300_000, 5_000 * 2 ** Math.min(outageAttempt++, 6))
+            clear()
+            scheduleOutage()
+        }
+        // A settled, cancelled publication can report server-unreachable with a nonretryable 409.
         if ((typeof error === 'object' && error && 'retryable' in error && error.retryable === false && code(error) !== 'server-unreachable') || integrityCodes.includes(code(error))) {
             blocked = true
             blockedCode = code(error)
@@ -68,19 +106,22 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
         }
         dependencies.failed(error)
     }
-    const clear = () => { clearTimeout(pushTimer); clearTimeout(pullTimer); clearTimeout(retryTimer); clearTimeout(sendRetryTimer) }
+    const clear = () => { clearTimeout(pushTimer); clearTimeout(pullTimer); clearTimeout(retryTimer); clearTimeout(sendRetryTimer); clearTimeout(outageTimer) }
     const schedulePull = () => {
         clearTimeout(pullTimer)
+        if (waiting()) { scheduleOutage(); return }
         if (foreground && !blocked) pullTimer = setTimeout(() => { void pull().catch(() => {}) }, connected ? 60_000 : 5_000)
     }
     const push = (): Promise<void> => {
         clearTimeout(pushTimer)
         clearTimeout(sendRetryTimer)
+        if (waiting()) { scheduleOutage(); return Promise.resolve() }
         if (!foreground || blocked || !available()) return Promise.resolve()
         if (sending) { pushAgain = true; return sending }
-        sending = dependencies.push().then(() => { sendRetryAttempt = 0; succeeded('push') }).catch(error => {
+        const epoch = outageEpoch
+        sending = dependencies.push().then(() => { sendRetryAttempt = 0; succeeded('push', epoch) }).catch(error => {
             fail(error, 'push')
-            if (foreground && !blocked) sendRetryTimer = setTimeout(() => { void push().catch(() => {}) }, Math.min(30_000, 1000 * 2 ** sendRetryAttempt++))
+            if (foreground && !blocked && !waiting()) sendRetryTimer = setTimeout(() => { void push().catch(() => {}) }, Math.min(30_000, 1000 * 2 ** sendRetryAttempt++))
             throw error
         }).finally(() => {
             sending = undefined
@@ -92,10 +133,12 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
     }
     const pull = (completeAvailable = false): Promise<void> => {
         clearTimeout(pullTimer)
+        if (!completeAvailable && waiting()) { scheduleOutage(); return Promise.resolve() }
         if (((!foreground || !available()) && !completeAvailable) || blocked) return Promise.resolve()
         if (!completeAvailable && completingReceive) { pullAgain = true; return completingReceive }
         if (receiving) { pullAgain = true; return receiving }
-        receiving = dependencies.pull(completeAvailable).then(() => succeeded('pull'), error => { fail(error, 'pull'); throw error }).finally(() => {
+        const epoch = outageEpoch
+        receiving = dependencies.pull(completeAvailable).then(() => succeeded('pull', epoch), error => { fail(error, 'pull'); throw error }).finally(() => {
             receiving = undefined
             if (pullAgain && foreground && !completingReceive) { pullAgain = false; void pull().catch(() => {}) }
             else schedulePull()
@@ -105,8 +148,10 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
         return receiving
     }
     const connect = () => {
+        if (waiting()) { scheduleOutage(); return }
         if (!foreground || blocked || connecting || !available()) return
-        const attempt: Promise<void> = dependencies.connect(notificationOperationId ??= crypto.randomUUID()).then(() => succeeded('connect'), error => { fail(error, 'connect'); socket(false) })
+        const epoch = outageEpoch
+        const attempt: Promise<void> = dependencies.connect(notificationOperationId ??= crypto.randomUUID()).then(() => succeeded('connect', epoch), error => { fail(error, 'connect'); socket(false) })
             .finally(() => { if (connecting === attempt) connecting = undefined })
         connecting = attempt
     }
@@ -114,7 +159,7 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
         connected = value
         clearTimeout(retryTimer)
         if (value) { reconnectAttempt = 0; notificationOperationId = undefined }
-        else if (foreground && !blocked) {
+        else if (foreground && !blocked && !waiting()) {
             void pull().catch(() => {})
             retryTimer = setTimeout(connect, Math.min(30_000, 1000 * 2 ** reconnectAttempt++))
         }
@@ -123,9 +168,10 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
     // Pending work goes out before the app may be suspended. A foreground push started meanwhile waits for it.
     const publishHidden = async () => {
         await sending?.catch(() => {})
-        if (foreground || blocked || sending || !available()) return
+        if (foreground || blocked || sending || !available() || waiting()) return
         pushAgain = false
-        sending = dependencies.publishHidden!().then(() => { sendRetryAttempt = 0; succeeded('push') }, error => { fail(error, 'push') }).finally(() => {
+        const epoch = outageEpoch
+        sending = dependencies.publishHidden!().then(() => { sendRetryAttempt = 0; succeeded('push', epoch) }, error => { fail(error, 'push') }).finally(() => {
             sending = undefined
             if (pushAgain && foreground) { pushAgain = false; void push().catch(() => {}) }
             dependencies.activity?.()
@@ -185,8 +231,8 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
             })
             return completingReceive
         },
-        retry() { blocked = false; blockedCode = ''; sendRetryAttempt = 0; connect(); void pull().catch(() => {}); return push() },
-        reset() { blocked = false; blockedCode = ''; sendRetryAttempt = 0; reconnectAttempt = 0; notificationOperationId = undefined; failedLanes.clear() },
+        retry() { resetOutage(); blocked = false; blockedCode = ''; sendRetryAttempt = 0; connect(); void pull().catch(() => {}); return push() },
+        reset() { resetOutage(); blocked = false; blockedCode = ''; sendRetryAttempt = 0; reconnectAttempt = 0; notificationOperationId = undefined; failedLanes.clear() },
         async waitForIdle() {
             while (sending || receiving || completingReceive || checkingClock) {
                 await Promise.allSettled([sending, receiving, completingReceive, checkingClock])
@@ -202,6 +248,7 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
         },
         reportFailure: fail,
         isBlocked: () => blocked,
+        isWaiting: waiting,
         /** The failure that stopped sync until a retry, or '' while it is not stopped. */
         blockedCode: () => blocked ? blockedCode : '',
         isRunning: () => !!sending || !!receiving || !!completingReceive || !!checkingClock,

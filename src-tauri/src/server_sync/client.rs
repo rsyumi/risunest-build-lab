@@ -11,6 +11,34 @@ use std::{
 const RETRY_BUDGET: Duration = Duration::from_secs(5 * 60);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 
+#[derive(Default)]
+struct DirectoryRetries(std::collections::HashMap<String, (Instant, u32)>);
+impl DirectoryRetries {
+    fn admit(&mut self, record: &str, now: Instant) -> bool {
+        if self.0.get(record).is_some_and(|(next, _)| now < *next) { return false; }
+        if self.0.len() >= 64 && !self.0.contains_key(record) {
+            if let Some(oldest) = self.0.iter().min_by_key(|(_, (next, _))| *next).map(|(key, _)| key.clone()) {
+                self.0.remove(&oldest);
+            }
+        }
+        let (_, attempt) = self.0.entry(record.to_owned()).or_insert((now, 0));
+        let delay = Duration::from_secs((30 * (1u64 << (*attempt).min(4))).min(300));
+        *attempt = attempt.saturating_add(1);
+        let attempt = *attempt;
+        self.0.insert(record.to_owned(), (now + delay, attempt));
+        true
+    }
+}
+fn directory_retries() -> &'static std::sync::Mutex<DirectoryRetries> {
+    static RETRIES: std::sync::OnceLock<std::sync::Mutex<DirectoryRetries>> = std::sync::OnceLock::new();
+    RETRIES.get_or_init(Default::default)
+}
+fn reset_directory_retry(config: &ServerConfig) {
+    if let Some(record) = config.directory.as_ref().and_then(|directory| directory.record_url().ok()) {
+        directory_retries().lock().unwrap_or_else(|error| error.into_inner()).0.remove(record.as_str());
+    }
+}
+
 struct ObservedBodyRead<'a, R> {
     inner: R,
     position: u64,
@@ -309,7 +337,7 @@ impl ServerClient {
     pub fn resolve_identity(&self) -> Result<RemoteHead> {
         let verify = |client: &Self| -> Result<RemoteHead> { Ok(client.identity()?.head) };
         let original = match verify(self) {
-            Ok(head) => return Ok(head),
+            Ok(head) => { reset_directory_retry(&self.config()); return Ok(head); },
             Err(error) => error,
         };
         if matches!(original.status, 401 | 403 | 409) || original.code == "cancelled" {
@@ -320,10 +348,15 @@ impl ServerClient {
             return Err(original);
         };
         self.ensure_active()?;
+        let record = directory.record_url()?;
+        // All lanes and short-lived clients share this admission, including internal HTTP retries.
+        if !directory_retries().lock().unwrap_or_else(|error| error.into_inner()).admit(record.as_str(), Instant::now()) {
+            return Err(original);
+        }
         // A separate unauthenticated request. Device and library headers are never sent.
         let request = self
             .http
-            .get(directory.record_url()?)
+            .get(record)
             .header("accept-encoding", "identity")
             .header("cache-control", "no-cache")
             .timeout(Duration::from_secs(15))
@@ -375,6 +408,7 @@ impl ServerClient {
         candidate.retryable_failure = self.retryable_failure.clone();
         candidate.activity = self.activity.clone();
         let head = verify(&candidate)?;
+        reset_directory_retry(&candidate_config);
         *self.url.write().unwrap_or_else(|error| error.into_inner()) = candidate
             .url
             .read()

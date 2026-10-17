@@ -270,6 +270,8 @@ describe.each<Mode>(['history-limit', 'complete', 'standard-hypa'])('public chat
             initial.hypaV3 = true
             initial.characters[0].supaMemory = true
             initialChat.hypaV3Data = { summaries: [{ chatMemos: ['a', 'b'], summary: 'covered' }] } as any
+            // Nested conditions and arithmetic keep bounded admission.
+            initial.mainPrompt = '{{#if {{getvar::brief}}}}Be brief.{{/if}} HP {{? {{getvar::hp}}+1}}'
         }
         initial.characters.push({
             ...structuredClone(initial.characters[0]), chaId: 'character-b', name: 'Character B',

@@ -30,14 +30,16 @@ internal class AndroidCommitBridge private constructor(private val view: WebView
     WebViewCompat.addWebMessageListener(view, NAME, COMMIT_ORIGINS) { _, message, origin, mainFrame, reply ->
       if (closed.get() || !acceptsBinaryCommit(origin.toString(), mainFrame) ||
         message.type != WebMessageCompat.TYPE_ARRAY_BUFFER) return@addWebMessageListener
-      // Admission happens before a worker task is queued. At most one bounded packet is retained.
-      if (!busy.compareAndSet(false, true)) return@addWebMessageListener
       val packet = message.arrayBuffer
       if (packet.size <= 40 || packet.size > 40 + 256 * 1024) {
-        busy.set(false)
         return@addWebMessageListener
       }
       val id = String(packet, 0, 36, Charsets.US_ASCII)
+      // Never queue a second packet or leave its producer waiting for an acknowledgement.
+      if (!busy.compareAndSet(false, true)) {
+        runCatching { reply.postMessage(JSONObject().put("id", id).put("error", "busy").toString()) }
+        return@addWebMessageListener
+      }
       executor.execute {
         val offset = if (closed.get()) -1 else runCatching { AndroidCommitNative.append(packet) }.getOrDefault(-1)
         view.post {

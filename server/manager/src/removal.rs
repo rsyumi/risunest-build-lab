@@ -833,8 +833,17 @@ fn resume_finalization_at(
     profiles: impl FnOnce() -> Result<Vec<PathBuf>>,
 ) -> Result<bool> {
     let receipt = read_finalization(registry, server)?;
-    let data_kept = delete_data && !record_path(registry, &receipt.data).exists();
-    if delete_data && !data_kept {
+    let registered = delete_data
+        && record_path(registry, &receipt.data)
+            .try_exists()
+            .map_err(|_| "removal-path-unavailable")?;
+    let data_kept = delete_data
+        && !registered
+        && receipt
+            .data
+            .try_exists()
+            .map_err(|_| "removal-path-unavailable")?;
+    if delete_data && registered {
         delete_registered_data_at(registry, &receipt.data, server, profiles)?;
     }
     let _lock = if receipt.data.exists() {
@@ -1993,13 +2002,19 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn resumed_delete_data_uses_registration_and_keeps_data_after_forgetting() {
-        for registered in [false, true] {
+        for (registered, deleted) in [false, true]
+            .into_iter()
+            .flat_map(|registered| [false, true].map(move |deleted| (registered, deleted)))
+        {
             let (_temp, root, server, registry) = fixture();
             fs::write(root.join("metadata.sqlite"), b"synthetic").unwrap();
             let install = server.parent().unwrap();
             let helper = install.join("source-helper");
             fs::write(&helper, b"synthetic").unwrap();
             prepare_finalization(&registry, &root, &server, false, &helper).unwrap();
+            if deleted {
+                delete_registered_data_at(&registry, &root, &server, || Ok(Vec::new())).unwrap();
+            }
             if !registered {
                 for file in final_files(install) {
                     remove_file(&file).unwrap();
@@ -2007,9 +2022,12 @@ mod tests {
                 forget_finalization_at(&registry, &root, &server).unwrap();
             }
             let kept = resume_finalization_at(&registry, &server, true, || Ok(Vec::new())).unwrap();
-            assert_eq!(kept, !registered);
-            assert_eq!(root.join("metadata.sqlite").exists(), !registered);
-            assert_eq!(root.exists(), !registered);
+            assert_eq!(kept, !registered && !deleted);
+            assert_eq!(
+                root.join("metadata.sqlite").exists(),
+                !registered && !deleted
+            );
+            assert_eq!(root.exists(), !registered && !deleted);
             assert!(!record_path(&registry, &root).exists());
         }
     }

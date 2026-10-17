@@ -230,6 +230,7 @@ test.each([0, 12])(
                 }),
         )
         scriptingState.runtime = {
+            getActiveConversationViewportSource: () => null,
             captureSelectedConversationTarget: () => targetIdentity,
             acquireCompleteConversation: acquire,
             subscribeActiveConversationViewportSource: () => () => {},

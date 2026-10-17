@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import type { NativeByteInvoke } from './nativeAssetByteTransport'
 
 import {
     NATIVE_MEDIA_IPC_CHUNK_BYTES,
@@ -7,6 +8,102 @@ import {
 } from './nativeMediaIpc'
 
 describe('native media IPC', () => {
+    it('does not open an upload after a failed capability probe and can retry the probe', async () => {
+        const commands: string[] = []
+        const invoke: NativeByteInvoke = async command => {
+            commands.push(command)
+            throw new Error('probe unavailable')
+        }
+        const command = { data: new Uint8Array(128 * 1024), directCommand: 'direct', streamedFinishCommand: 'finish', args: {} }
+        await expect(invokeWithBoundedNativeMediaInput(invoke, command)).rejects.toThrow('probe unavailable')
+        await expect(invokeWithBoundedNativeMediaInput(invoke, command)).rejects.toThrow('probe unavailable')
+        expect(commands).toEqual(['native_asset_bytes_probe', 'native_asset_bytes_probe'])
+    })
+
+    it.each([false, true])('transfers owned bytes with a cached binary capability (%s)', async raw => {
+        const source = Uint8Array.from({ length: 256 * 1024 + 19 }, (_, i) => i % 256)
+        const original = source.slice()
+        let probes = 0
+        let received = new Uint8Array(source.length)
+        let offset = 0
+        const invoke: NativeByteInvoke = async (command, args, options) => {
+            if (command === 'native_asset_bytes_probe') { probes++; return raw }
+            const control = args as Record<string, unknown>
+            if (command === 'native_media_inlay_input_open') {
+                received = new Uint8Array(source.length)
+                offset = 0
+                return { capacity: raw ? 256 * 1024 : 64 * 1024 }
+            }
+            if (command.startsWith('native_media_inlay_input_chunk')) {
+                const headers = new Headers(options?.headers)
+                const start = raw ? Number(headers.get('x-risunest-offset')) : Number(control.offset)
+                const part = raw ? args as Uint8Array : Uint8Array.from(control.data as number[])
+                expect(start).toBe(offset)
+                expect(part.length).toBeLessThanOrEqual(raw ? 256 * 1024 : 64 * 1024)
+                if (raw) expect(headers.get('x-risunest-upload-id')).toMatch(/^[0-9a-f-]{36}$/)
+                received.set(part, start)
+                offset += part.length
+                return offset
+            }
+            if (command === 'finish') return received
+        }
+        const run = (data: Uint8Array) => invokeWithBoundedNativeMediaInput(invoke, {
+            data, directCommand: 'direct', streamedFinishCommand: 'finish', args: {},
+        })
+        const first = run(source)
+        source.fill(0)
+        await expect(first).resolves.toEqual(original)
+        await expect(run(original)).resolves.toEqual(original)
+        expect(probes).toBe(1)
+    })
+
+    it.each(['raw-body-unavailable', 'timeout', 'malformed'] as const)('never replays a raw part after %s', async failure => {
+        let probes = 0
+        let rawParts = 0
+        let legacyParts = 0
+        let cancelled = 0
+        let failed = false
+        const invoke: NativeByteInvoke = async (command, args) => {
+            if (command === 'native_asset_bytes_probe') { probes++; return true }
+            if (command === 'native_media_inlay_input_open') {
+                return { capacity: (args as Record<string, unknown>).binary ? 256 * 1024 : 64 * 1024 }
+            }
+            if (command.endsWith('_chunk_raw')) {
+                rawParts++
+                // The first attempt may have been accepted before Tauri's resend failed.
+                failed = true
+                if (failure === 'malformed') return 'unknown acknowledgement'
+                throw { code: failure }
+            }
+            if (command.endsWith('_chunk')) {
+                legacyParts++
+                const control = args as Record<string, unknown>
+                return Number(control.offset) + (control.data as number[]).length
+            }
+            if (command.endsWith('_cancel')) cancelled++
+            if (command === 'finish') return true
+        }
+        const run = () => invokeWithBoundedNativeMediaInput(invoke, {
+            data: new Uint8Array(128 * 1024), directCommand: 'direct', streamedFinishCommand: 'finish', args: {},
+        })
+        await expect(run()).rejects.toBeDefined()
+        expect(failed).toBe(true)
+        expect(rawParts).toBe(1)
+        expect(legacyParts).toBe(0)
+        expect(cancelled).toBe(1)
+        if (failure === 'raw-body-unavailable') {
+            await expect(run()).resolves.toBe(true)
+            expect(legacyParts).toBe(2)
+            expect(rawParts).toBe(1)
+        } else {
+            await expect(run()).rejects.toBeDefined()
+            expect(rawParts).toBe(2)
+            expect(legacyParts).toBe(0)
+        }
+        expect(probes).toBe(1)
+        expect(cancelled).toBe(2)
+    })
+
     it('keeps small input on the bounded direct command and snapshots its bytes', async () => {
         let release!: () => void
         const pending = new Promise<void>((resolve) => { release = resolve })
@@ -37,6 +134,7 @@ describe('native media IPC', () => {
         source[NATIVE_MEDIA_IPC_CHUNK_BYTES] = 7
         const calls: Array<[string, Record<string, unknown> | undefined]> = []
         const invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+            if (command === 'native_asset_bytes_probe') return false
             calls.push([command, args])
             if (command === 'native_media_inlay_input_open') {
                 return { capacity: NATIVE_MEDIA_IPC_CHUNK_BYTES }
@@ -75,6 +173,7 @@ describe('native media IPC', () => {
         const cleanup = new Error('cancel failed')
         const report = vi.spyOn(console, 'error').mockImplementation(() => undefined)
         const invoke = vi.fn(async (command: string) => {
+            if (command === 'native_asset_bytes_probe') return false
             if (command === 'native_media_inlay_input_open') {
                 return { capacity: NATIVE_MEDIA_IPC_CHUNK_BYTES }
             }

@@ -23,6 +23,7 @@ import { releasePersistentRevisionLease } from './storage/persistentRecordIterat
 import type { WindowedConversationPersistenceAuthority } from './storage/saveCoordinator'
 
 export interface ChatScreenshotSourceDependencies extends PersistentConversationReadDependencies {
+    parseFirstPass?: typeof import('./parser/parser.svelte').risuChatParser
     getActiveConversationSession(): ActiveConversationSession | null
     captureSelectedConversationTarget(): SelectedConversationTarget | null
     captureSelectedConversationAuthority(): WindowedConversationPersistenceAuthority | null
@@ -335,6 +336,7 @@ export async function openChatScreenshotSourceLease(
                     start,
                     end,
                     jobSignal,
+                    dependencies.parseFirstPass,
                 )
                 activeJob = job
                 let jobFailed = false
@@ -345,11 +347,7 @@ export async function openChatScreenshotSourceLease(
                     throw error
                 } finally {
                     if (activeJob === job) activeJob = null
-                    try {
-                        await release()
-                    } catch (error) {
-                        if (!jobFailed) throw error
-                    }
+                    if (jobFailed) await release().catch(() => {})
                 }
             },
             async close() {

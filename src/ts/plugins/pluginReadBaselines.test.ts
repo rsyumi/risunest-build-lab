@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { attachPluginReadProvenance, collectPluginReadProvenance, diffPluginReadBaseline, PluginReadBaselines, rebasePluginFieldIntents } from './pluginReadBaselines'
+import { attachPluginReadProvenance, collectPluginReadProvenance, diffPluginReadBaseline, PluginReadBaselines, rebasePluginFieldIntents, type PluginSnapshotChunk } from './pluginReadBaselines'
+import { createPluginSnapshotStream } from './pluginSnapshotStream'
 import { pluginUnitIntents } from './pluginUnitIntents'
 
 /** Every string reachable from `root` through own properties, Map and Set entries; typed array contents are not strings. */
@@ -42,6 +43,131 @@ function fixture() {
 }
 
 describe('plugin immutable read baselines', () => {
+    it.each(['database', 'character', 'conversation'] as const)('publishes the same %s provenance and field intents from incremental chunks', kind => {
+        const { character } = fixture()
+        const characters = [character, { ...structuredClone(character), name: 'Duplicate target' }]
+        const presets = [{ id: 'preset', mainPrompt: 'Synthetic preset' }, { mainPrompt: 'Missing ID' }]
+        const root = { username: 'Synthetic', characters, botPresets: presets, pluginCustomStorage: JSON.parse('{"__proto__":{"keep":true},"value":0}') }
+        const legacy = new PluginReadBaselines('owner', () => 1)
+        const incremental = new PluginReadBaselines('owner', () => 1)
+        const target = kind === 'database' ? 'database' : kind === 'character' ? character.chaId : JSON.stringify([character.chaId, character.chats[0].id])
+        const select = (value: typeof root) => kind === 'database' ? value : kind === 'character' ? value.characters[0] : value.characters[0].chats[0]
+        if (kind !== 'database') root.characters = [character]
+        const expected = structuredClone(root)
+        legacy.track(select(expected), kind, target, 2)
+        const builder = incremental.beginSnapshot(kind, target)
+        const chunks: PluginSnapshotChunk[] = [
+            { type: 'set', key: 'username', value: root.username },
+            { type: 'arrayStart', key: 'characters' },
+        ]
+        for (const item of root.characters) {
+            chunks.push({ type: 'characterStart', key: 'characters', value: item })
+            for (const chat of item.chats) {
+                chunks.push({ type: 'conversationStart', key: 'characters', value: chat })
+                chunks.push(...chat.message.map(value => ({ type: 'message' as const, key: 'characters' as const, value })))
+            }
+        }
+        if (kind === 'database') {
+            chunks.push({ type: 'arrayStart', key: 'botPresets' })
+            chunks.push(...presets.map(value => ({ type: 'arrayPush' as const, key: 'botPresets', value })))
+            chunks.push({ type: 'recordStart', key: 'pluginCustomStorage' })
+            for (const [entryKey, value] of Object.entries(root.pluginCustomStorage)) chunks.push({ type: 'recordSet', key: 'pluginCustomStorage', entryKey, value })
+        }
+        for (const chunk of chunks) builder.add(chunk)
+        expect(incremental.hasRead(kind, target)).toBe(false)
+        const entries = builder.finish()
+        const tokenShape = (entries: ReturnType<typeof collectPluginReadProvenance>) => {
+            const tokens = new Map<string, number>()
+            return entries.map(entry => {
+                if (!tokens.has(entry.token)) tokens.set(entry.token, tokens.size)
+                return { path: entry.path, token: tokens.get(entry.token) }
+            })
+        }
+        expect(tokenShape(entries)).toEqual(tokenShape(collectPluginReadProvenance(expected)))
+        attachPluginReadProvenance(root, entries)
+        root.characters[0].chats[0].note = 'Changed note'
+        root.characters[0].chats[0].message[0].data = 'Changed message'
+        expected.characters[0].chats[0].note = 'Changed note'
+        expected.characters[0].chats[0].message[0].data = 'Changed message'
+        expect(incremental.intent(select(root), kind, target, {})).toEqual(legacy.intent(select(expected), kind, target, {}))
+    })
+
+    it('batches by count and cost, preserves oversized chunks, and does not publish a cancelled read', async () => {
+        const { registry, character } = fixture()
+        registry.track(structuredClone(character), 'character', character.chaId, 1)
+        const chunks: PluginSnapshotChunk[] = [
+            { type: 'arrayStart', key: 'characters' },
+            { type: 'characterStart', key: 'characters', value: { ...character, name: 'New read', chats: [] } },
+            { type: 'conversationStart', key: 'characters', value: { id: 'chat-a' } },
+            ...['small', 'x'.repeat(2000), 'last'].map(data => ({ type: 'message' as const, key: 'characters' as const, value: { data } })),
+        ]
+        const source = async function* () { yield* chunks }
+        let released = 0
+        const stream = createPluginSnapshotStream(source(), registry.beginSnapshot('character', character.chaId), async () => { released++ }, { maxChunks: 2, maxBytes: 1024 })
+        const frames = []
+        for await (const frame of stream) frames.push(frame)
+        expect(frames.flatMap(frame => frame.type === 'batch' ? frame.chunks : [frame]).slice(0, -1)).toEqual(chunks)
+        expect(frames.length).toBeLessThan(chunks.length + 1)
+        expect(frames.filter(frame => frame.type === 'batch').every(frame => frame.chunks.length <= 2)).toBe(true)
+        expect(frames.some(frame => frame.type === 'message')).toBe(true)
+        expect(released).toBe(1)
+        const cancelled = createPluginSnapshotStream(source(), registry.beginSnapshot('character', character.chaId), async () => { released++ }, { maxChunks: 1 })
+        const reader = cancelled.getReader()
+        await reader.read()
+        await reader.cancel()
+        expect(released).toBe(2)
+        const same = { ...character, name: 'New read', chats: [{ id: 'chat-a', message: [{ data: 'small' }, { data: 'x'.repeat(2000) }, { data: 'last' }] }] }
+        expect(registry.intent(same, 'character', character.chaId, {})).toEqual([])
+    })
+
+    it('composes delayed partial snapshots with the newest nested conversation read', () => {
+        const { registry, character } = fixture()
+        const root = registry.track({ username: 'Old', characters: [structuredClone(character)], personas: [{ id: 'p', name: 'Keep' }] }, 'database', 'database', 1)
+        const delayed = registry.beginSnapshot('database', 'database')
+        delayed.add({ type: 'set', key: 'username', value: 'Delayed completion' })
+        const quicker = registry.beginSnapshot('database', 'database')
+        quicker.add({ type: 'set', key: 'username', value: 'Earlier completion' })
+        quicker.finish()
+        delayed.finish()
+        const conversation = registry.beginSnapshot('conversation', JSON.stringify([character.chaId, 'chat-a']))
+        conversation.add({ type: 'arrayStart', key: 'characters' })
+        conversation.add({ type: 'characterStart', key: 'characters', value: character })
+        conversation.add({ type: 'conversationStart', key: 'characters', value: { ...character.chats[0], note: 'Remote' } })
+        for (const value of character.chats[0].message) conversation.add({ type: 'message', key: 'characters', value })
+        conversation.finish()
+        root.username = 'Delayed completion'
+        root.characters[0].chats[0].note = 'Remote'
+        expect(registry.intent(root, 'database', 'database', {})).toEqual([])
+        root.personas[0].name = 'Edited'
+        expect(registry.intent(root, 'database', 'database', {})).toEqual([{ path: ['personas', 'p', 'name'], type: 'set', value: 'Edited' }])
+    })
+
+    it.each(['source', 'release', 'abort', 'authority'] as const)('does not publish a provisional baseline after %s failure', async failure => {
+        let authority = 1
+        const registry = new PluginReadBaselines('owner', () => authority)
+        registry.track({ username: 'Completed' }, 'database', 'database', 1)
+        const controller = new AbortController()
+        const builder = registry.beginSnapshot('database', 'database')
+        const source = async function* (): AsyncGenerator<PluginSnapshotChunk> {
+            yield { type: 'set', key: 'username', value: 'Incomplete' }
+            if (failure === 'source') throw new Error('source failed')
+        }
+        let releases = 0
+        const stream = createPluginSnapshotStream(source(), builder, async () => {
+            releases++
+            if (failure === 'release') throw new Error('release failed')
+            if (failure === 'abort') controller.abort()
+            if (failure === 'authority') {
+                authority++
+                registry.expire()
+                registry.track({ username: 'Completed' }, 'database', 'database', 2)
+            }
+        }, { signal: controller.signal })
+        await expect((async () => { for await (const _frame of stream) { /* Drain the actual stream. */ } })()).rejects.toThrow()
+        expect(releases).toBe(1)
+        expect(registry.intent({ username: 'Completed' }, 'database', 'database', {})).toEqual([])
+    })
+
     it('uses the exact read and preserves untouched fields changed after that read', () => {
         const { registry, character } = fixture()
         const read = registry.track(structuredClone(character), 'character', character.chaId, 3)

@@ -5,14 +5,17 @@
     import CreatorQuote from './CreatorQuote.svelte'
     import { onMount } from 'svelte'
     import LoadingIndicator from 'src/lib/UI/GUI/LoadingIndicator.svelte'
-    import type { LiveChatParserConversationStartRequest } from 'src/ts/selectedConversationLiveParserProjection'
+    import type { LiveChatParserConversationStartRequest, BoundedLiveChatParserProjection } from 'src/ts/selectedConversationLiveParserProjection'
     import type { SelectedConversationOperations } from 'src/ts/selectedConversationOperations'
+    import type { ConversationViewportSnapshot } from 'src/ts/conversationViewportSource'
+    import { CbsHistoryDependencies, hasCbsHistoryChanges } from 'src/ts/cbsHistoryAccess'
 
     let {
         currentCharacter,
         resolvedImage,
         showAiWarning,
         totalMessages,
+        historySnapshot,
         onReroll,
         unReroll,
         onRemoveCreatorQuote,
@@ -24,12 +27,13 @@
         resolvedImage: string
         showAiWarning: boolean
         totalMessages: number
+        historySnapshot?: ConversationViewportSnapshot
         onReroll: () => void
         unReroll: () => void
         onRemoveCreatorQuote: () => void
         acquireConversationStartParserLease?: (
             request: LiveChatParserConversationStartRequest,
-        ) => Promise<{ release(): void } | null>
+        ) => Promise<{ projection?: BoundedLiveChatParserProjection; release(): void } | null>
         selectedConversationOperations?: SelectedConversationOperations
         onDisplaySettled?: () => void
     } = $props()
@@ -45,12 +49,14 @@
                   currentCharacter.firstMessage),
     )
     let parserReady = $state(false)
+    let parserProjection = $state.raw<BoundedLiveChatParserProjection | undefined>()
     let parserLoadFailed = $state(false)
     let parserLease: { release(): void } | null = null
     let parserController = $state<AbortController | null>(null)
     let preparingController: AbortController | null = null
     let parserRequestGeneration = 0
     let destroyed = false
+    let historyDependencies = new CbsHistoryDependencies()
 
     export function updateConversationStartPresentation(state: {
         resolvedImage: string
@@ -65,22 +71,29 @@
         parserLease = null
         const generation = ++parserRequestGeneration
         const controller = new AbortController()
+        historyDependencies = new CbsHistoryDependencies()
         preparingController = controller
         parserLoadFailed = false
         const isCurrent = () => !destroyed && generation === parserRequestGeneration
         try {
             const lease =
                 (await acquireConversationStartParserLease?.({
+                    dependencies: historyDependencies,
                     greeting,
                     totalMessages,
                     signal: controller.signal,
                     isCurrent,
+                    onStale: () => {
+                        if (isCurrent()) void prepareParser()
+                    },
                 })) ?? null
             if (!isCurrent()) {
                 lease?.release()
                 return
             }
             parserLease = lease
+            if (lease && !lease.projection) historyDependencies.all = true
+            parserProjection = lease?.projection
             parserController = controller
             parserReady = true
         } catch {
@@ -93,8 +106,17 @@
 
     export function refreshConversationStartParser(
         nextTotalMessages = totalMessages,
+        nextSnapshot?: ConversationViewportSnapshot,
+        forced = false,
     ): void {
         totalMessages = nextTotalMessages
+        const previous = historySnapshot
+        if (!forced && previous && nextSnapshot && previous.sourceToken === nextSnapshot.sourceToken
+            && previous.version === nextSnapshot.version && !hasCbsHistoryChanges(nextSnapshot, previous.historyVersion, historyDependencies)) {
+            historySnapshot = nextSnapshot
+            return
+        }
+        historySnapshot = nextSnapshot
         void prepareParser()
     }
 
@@ -161,6 +183,7 @@
             {selectedConversationOperations}
             {onDisplaySettled}
             parserAbortSignal={parserController?.signal}
+            {parserProjection}
         />
     {/if}
     {#if showAiWarning && totalMessages === 0}

@@ -19,16 +19,22 @@
                     character={currentChar}
                     refreshRevision={$ReloadGUIPointer + $ScriptDisplayRefreshPointer}
                     preservePendingContent
+                    parseFirst
                 >
-                    {#snippet children(signal)}
+                    {#snippet children(signal, projection)}
                         <DeferredMarkdown
-                            data={risuChatParser(
+                            data={projection?.parsedSource ?? risuChatParser(
                                 (backgroundHTML || '') + '\n' + ($moduleBackgroundEmbedding || ''),
-                                { chara: currentChar },
+                                projection ? {
+                                    ...projection.context.parserContext,
+                                    db: projection.context.parserContext.database,
+                                    chara: projection.context.parserContext.character,
+                                } : { chara: currentChar },
                             )}
                             character={currentChar}
                             mode="back"
                             {signal}
+                            scriptContext={projection?.context}
                             preservePendingContent
                         />
                     {/snippet}

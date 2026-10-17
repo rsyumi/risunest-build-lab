@@ -1,14 +1,50 @@
-import { spawn } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
 import { once } from 'node:events'
 import { mkdtemp, rm, readFile } from 'node:fs/promises'
 import net from 'node:net'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
-import { transformWithEsbuild } from 'vite'
+import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
+import { createHash } from 'node:crypto'
+import ts from 'typescript'
 import { REALM_BLOCKED_URL_PATTERNS } from '../../scripts/realmBlocklist.mjs'
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))
+
+const args = new Map(process.argv.slice(2).map(arg => {
+    const [key, ...value] = arg.replace(/^--/, '').split('=')
+    return [key, value.join('=') || 'true']
+}))
+function positiveOption(name, fallback) {
+    const value = Number(args.get(name) ?? fallback)
+    if (!Number.isSafeInteger(value) || value < 1) throw new Error(`Invalid --${name}`)
+    return value
+}
+const fixture = {
+    characters: positiveOption('characters', 4),
+    messagesPerConversation: positiveOption('messages', 4096),
+    messageBodyBytes: positiveOption('body-bytes', 2048),
+    nonMessageBytes: positiveOption('field-bytes', 8192),
+}
+const iterations = positiveOption('iterations', 3)
+const hostOnly = args.has('host-only')
+const baselineRef = args.get('baseline-ref')
+const require = createRequire(import.meta.url)
+const { build } = createRequire(require.resolve('vite'))('esbuild')
+const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
+async function productSource(relative) {
+    return baselineRef
+        ? execFileSync('git', ['show', `${baselineRef}:${relative}`], { cwd: repository, encoding: 'utf8', windowsHide: true })
+        : readFile(path.join(repository, relative), 'utf8')
+}
+function declaration(source, name) {
+    const file = ts.createSourceFile('fixture.ts', source, ts.ScriptTarget.Latest, true)
+    const node = file.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name)
+    if (!node) throw new Error(`Production function unavailable: ${name}`)
+    return node.getText(file)
+}
 
 class Cdp {
     nextId = 1
@@ -100,13 +136,13 @@ async function processTree(browser) {
     }
 }
 
-async function sample(page, browser, label) {
+async function sample(page, browser, label, includeProcessTree) {
     const heap = await page.call('Runtime.getHeapUsage')
     return {
         label,
         webViewHeapUsedBytes: heap.usedSize,
         webViewHeapTotalBytes: heap.totalSize,
-        processTree: await processTree(browser),
+        processTree: includeProcessTree ? await processTree(browser) : null,
     }
 }
 
@@ -146,80 +182,158 @@ try {
         if (await evaluate(page, 'globalThis.isSecureContext && document.readyState === "complete"')) break
         await delay(50)
     }
-    const source = await readFile(new URL('../../src/ts/plugins/apiV3/factory.ts', import.meta.url), 'utf8')
-    const compiled = await transformWithEsbuild(source, 'factory.ts', { format: 'iife', globalName: 'SandboxModule', define: { 'import.meta.env.DEV': 'false' } })
-    await evaluate(page, compiled.code)
-    await evaluate(page, `(() => {
-        window.logical = { maximumParentChunkBytes: 0 };
-        const frame = document.createElement('iframe');
-        document.body.append(frame);
-        window.fixtureHost = new SandboxModule.SandboxHost({
-            _getPropertiesForInitialization: () => ({ apiVersion: '3.0', list: ['apiVersion'] }),
-            _getAliases: () => ({}),
-            snapshot: () => ({
-                __type: 'IFRAME_OBJECT_STREAM',
-                value: new ReadableStream({
-                    start(controller) { window.fixtureController = controller; }
-                }, { highWaterMark: 1 }),
-            }),
-            assembled: (metrics) => { window.assembledMetrics = metrics; },
-        });
-        window.fixtureHost.run(frame, 'window.snapshotPromise = risuai.snapshot().then(value => { window.snapshot = value; return risuai.assembled({ messageCount: value.characters[0].chats[0].message.length, characterCount: value.characters.length, jsonBytes: new TextEncoder().encode(JSON.stringify(value)).byteLength }); });', 'synthetic-memory');
-    })()`)
-    for (let attempt = 0; attempt < 100; attempt++) {
-        if (await evaluate(page, 'Boolean(window.fixtureController)')) break
-        await delay(50)
+    const factory = await productSource('src/ts/plugins/apiV3/factory.ts')
+    const baselines = await productSource('src/ts/plugins/pluginReadBaselines.ts')
+    const incremental = baselines.includes('beginSnapshot(')
+    let implementation = baselines
+    if (incremental) {
+        implementation += '\n' + await productSource('src/ts/plugins/pluginSnapshotStream.ts')
+    } else {
+        const access = await productSource('src/ts/plugins/pluginDatabaseAccess.ts')
+        implementation += '\n' + await productSource('src/ts/storage/ownEnumerableProperty.ts')
+        implementation += '\nexport ' + declaration(access, 'accumulatePluginSnapshotChunk')
+    }
+    const compiledHashes = {}
+    for (const [source, name] of [[factory, 'SandboxModule'], [implementation, 'BaselineModule']]) {
+        const compiled = await build({
+            stdin: { contents: source, loader: 'ts', resolveDir: path.join(repository, name === 'SandboxModule' ? 'src/ts/plugins/apiV3' : 'src/ts/plugins') },
+            bundle: true, write: false, platform: 'browser', conditions: ['browser'],
+            format: 'iife', globalName: name, define: { 'import.meta.env.DEV': 'false' },
+            plugins: [{ name: 'source-revision', setup(build) {
+                if (baselineRef) build.onLoad({ filter: /\.ts$/ }, async ({ path: filename }) => {
+                    const relative = path.relative(repository, filename).replaceAll('\\', '/')
+                    if (!relative.startsWith('src/')) return
+                    return { contents: await productSource(relative), loader: 'ts' }
+                })
+            } }],
+        })
+        compiledHashes[name] = createHash('sha256').update(compiled.outputFiles[0].text).digest('hex')
+        await evaluate(page, compiled.outputFiles[0].text)
     }
     await evaluate(page, `(() => {
-        window.fixtureController.enqueue({ type: 'arrayStart', key: 'characters' });
-        window.fixtureController.enqueue({ type: 'characterStart', key: 'characters', value: { chaId: 'synthetic-character', name: 'Synthetic' } });
-        window.fixtureController.enqueue({ type: 'conversationStart', key: 'characters', value: { id: 'synthetic-conversation', name: 'Synthetic' } });
-    })()`)
-    await evaluate(page, 'globalThis.gc?.()')
-    const samples = [await sample(page, browser, 'baseline')]
-    for (let start = 0; start < 16384; start += 512) {
-        await evaluate(page, `(async () => {
-            for (let index = ${start}; index < ${start + 512}; index++) {
-                while (window.fixtureController.desiredSize <= 0) await new Promise(resolve => setTimeout(resolve, 0));
-                const chunk = { type: 'message', key: 'characters', value: {
-                    role: index % 2 ? 'char' : 'user', data: String(index).padStart(6, '0') + 'x'.repeat(2042), chatId: 'synthetic-' + index,
-                } };
-                window.logical.maximumParentChunkBytes = Math.max(window.logical.maximumParentChunkBytes, new TextEncoder().encode(JSON.stringify(chunk)).byteLength);
-                window.fixtureController.enqueue(chunk);
+        window.fixture = ${JSON.stringify(fixture)};
+        window.longTasks = [];
+        new PerformanceObserver(list => window.longTasks.push(...list.getEntries().map(e => ({ start: e.startTime, duration: e.duration }))))
+            .observe({ type: 'longtask', buffered: true });
+        window.runFixture = async () => {
+            const start = performance.now();
+            window.pausedAt = 0;
+            window.releaseSource = undefined;
+            window.completed = undefined;
+            window.longTasks.length = 0;
+            const metrics = { frames: 0, reads: 0, logicalChunks: 0, maximumFrameChunks: 0, maximumSourcePauseMs: 0 };
+            window.baselines = new BaselineModule.PluginReadBaselines('synthetic', () => 1);
+            async function* source() {
+                yield { type: 'set', key: 'username', value: 'Synthetic' };
+                yield { type: 'arrayStart', key: 'characters' };
+                for (let character = 0; character < fixture.characters; character++) {
+                    yield { type: 'characterStart', key: 'characters', value: { chaId: 'character-' + character, name: 'Synthetic', desc: 'd'.repeat(fixture.nonMessageBytes) } };
+                    yield { type: 'conversationStart', key: 'characters', value: { id: 'conversation-' + character, name: 'Synthetic' } };
+                    for (let i = 0; i < fixture.messagesPerConversation; i++) {
+                        yield { type: 'message', key: 'characters', value: {
+                            role: i % 2 ? 'char' : 'user', data: (String(i) + ':').padEnd(fixture.messageBodyBytes, 'x'), chatId: character + ':' + i,
+                        } };
+                    }
+                }
+                window.pausedAt = performance.now();
+                await new Promise(resolve => { window.releaseSource = resolve; });
             }
-        })()`)
-        samples.push(await sample(page, browser, `after-${start + 512}-messages`))
-    }
-    await evaluate(page, 'window.fixtureController.close()')
-    for (let attempt = 0; attempt < 100; attempt++) {
-        if (await evaluate(page, 'window.assembledMetrics?.messageCount === 16384')) break
-        await delay(50)
-    }
-    if (!await evaluate(page, 'window.assembledMetrics?.messageCount === 16384')) throw new Error('Guest assembly did not finish')
-    await evaluate(page, 'globalThis.gc?.()')
-    samples.push(await sample(page, browser, 'retained-after-gc'))
-    const logical = await evaluate(page, `(() => {
-        return {
-            ...window.logical,
-            iframeCharacterCount: window.assembledMetrics.characterCount,
-            iframeRetainedJsonBytes: window.assembledMetrics.jsonBytes,
+            let stream;
+            if (${incremental}) {
+                stream = BaselineModule.createPluginSnapshotStream(source(), baselines.beginSnapshot('database', 'database'), async () => {},
+                    { maxChunks: ${positiveOption('max-chunks', 128)}, maxBytes: ${positiveOption('max-bytes', 256 * 1024)} });
+            } else {
+                const iterator = source();
+                let copy = {};
+                stream = new ReadableStream({ async pull(controller) {
+                    const next = await iterator.next();
+                    if (next.done) {
+                        baselines.track(copy, 'database', 'database', 1);
+                        controller.enqueue({ type: 'provenance', entries: BaselineModule.collectPluginReadProvenance(copy) });
+                        copy = undefined;
+                        controller.close();
+                    } else {
+                        BaselineModule.accumulatePluginSnapshotChunk(copy, next.value);
+                        controller.enqueue(next.value);
+                    }
+                } });
+            }
+            const reader = stream.getReader();
+            const measured = new ReadableStream({ async pull(controller) {
+                metrics.reads++;
+                const before = performance.now();
+                const next = await reader.read();
+                const duration = performance.now() - before;
+                if (!window.pausedAt) metrics.maximumSourcePauseMs = Math.max(metrics.maximumSourcePauseMs, duration);
+                if (next.done) controller.close();
+                else {
+                    const count = next.value.type === 'batch' ? next.value.chunks.length : 1;
+                    metrics.frames++;
+                    metrics.logicalChunks += count;
+                    metrics.maximumFrameChunks = Math.max(metrics.maximumFrameChunks, count);
+                    controller.enqueue(next.value);
+                }
+            }, cancel: reason => reader.cancel(reason) }, { highWaterMark: 0 });
+            const finish = assembled => {
+                window.completed = { ...metrics, ...assembled,
+                    callMs: (assembled.publicCallMs ?? performance.now() - start) - window.measurementPauseMs,
+                    pauseMs: window.measurementPauseMs,
+                    baselines: baselines.retainedBaselineCount,
+                    maxLongTaskMs: Math.max(0, ...window.longTasks.map(e => e.duration)),
+                    longTaskCount: window.longTasks.length,
+                };
+            };
+            if (${hostOnly}) {
+                const drain = measured.getReader();
+                while (!(await drain.read()).done) {}
+                finish({});
+            } else {
+                const frame = document.createElement('iframe');
+                window.fixtureFrame = frame;
+                document.body.append(frame);
+                window.fixtureHost = new SandboxModule.SandboxHost({
+                    _getPropertiesForInitialization: () => ({ apiVersion: '3.0', list: ['apiVersion'] }),
+                    _getAliases: () => ({}),
+                    snapshot: () => ({ __type: 'IFRAME_OBJECT_STREAM', value: measured }),
+                    assembled: finish,
+                });
+                fixtureHost.run(frame, 'const started = performance.now(); risuai.snapshot().then(value => { const publicCallMs = performance.now() - started; window.snapshot = value; return risuai.assembled({ publicCallMs, messageCount: value.characters.reduce((n, c) => n + c.chats[0].message.length, 0), characterCount: value.characters.length }); });', 'synthetic-memory');
+            }
         };
     })()`)
-    const peak = (field) => Math.max(...samples.map((entry) =>
-        field === 'heap'
-            ? entry.webViewHeapUsedBytes
-            : entry.processTree.workingSetBytes))
+    const runs = []
+    async function waitFor(expression) {
+        for (let attempt = 0; attempt < 2400; attempt++) {
+            if (await evaluate(page, expression)) return
+            await delay(25)
+        }
+        throw new Error(`Fixture timed out: ${expression}`)
+    }
+    for (let iteration = 0; iteration < iterations; iteration++) {
+        await evaluate(page, 'window.fixtureHost?.terminate(); window.fixtureFrame?.remove(); window.fixtureFrame = undefined; window.fixtureHost = undefined; window.baselines = undefined; globalThis.gc?.()')
+        const before = await sample(page, browser, 'before', iteration === 0)
+        await evaluate(page, 'void runFixture().catch(error => { window.fixtureError = String(error); })')
+        await waitFor('Boolean(window.releaseSource || window.fixtureError)')
+        const error = await evaluate(page, 'window.fixtureError')
+        if (error) throw new Error(error)
+        await evaluate(page, 'globalThis.gc?.()')
+        const beforePublication = await sample(page, browser, 'before-publication-after-gc', iteration === 0)
+        await evaluate(page, 'window.measurementPauseMs = performance.now() - window.pausedAt; window.releaseSource(); window.releaseSource = undefined;')
+        await waitFor('Boolean(window.completed || window.fixtureError)')
+        const metrics = await evaluate(page, 'window.completed')
+        if (!metrics || (!hostOnly && metrics.messageCount !== fixture.characters * fixture.messagesPerConversation)) {
+            throw new Error('Guest assembly returned an incorrect message count')
+        }
+        await evaluate(page, 'globalThis.gc?.()')
+        const retained = await sample(page, browser, 'retained-after-gc', iteration === 0)
+        runs.push({ cache: iteration === 0 ? 'cold-runtime' : 'warm-runtime', metrics, samples: [before, beforePublication, retained] })
+    }
     console.log(JSON.stringify({
-        fixture: { characters: 1, conversationsPerCharacter: 1, messagesPerConversation: 16384,
-            messageBodyBytes: 2048 },
-        implementation: 'Production SandboxHost and iframe assembly, synthetic bounded source (storage reads excluded)',
-        logicalDomains: logical,
-        peaks: {
-            webViewHeapUsedBytes: peak('heap'),
-            totalProcessTreeWorkingSetBytes: peak('tree'),
-        },
-        samples,
+        source: baselineRef ?? 'working-tree', compiledHashes, browser: version.Browser, fixture, hostOnly, incremental,
+        implementation: 'Production SandboxHost, assembly and baseline algorithms; synthetic source, storage reads excluded. Heap measurements belong to the parent CDP target; a separate guest process heap is not sampled. Process-tree samples include guest processes and are collected on cold runs only. Host-only runs measure baseline retention without iframe delivery. Long-task observation reports tasks of at least 50 ms.',
+        runs,
     }, null, 2))
+
 } finally {
     await browser.call('Browser.close').catch(() => {})
     fixtureServer.close()

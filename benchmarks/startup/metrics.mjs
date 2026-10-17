@@ -29,8 +29,7 @@ const commands = new Set([
     'pds_asset_gc_maintenance',
     'plugin:fs|read_dir',
     'plugin:fs|stat',
-    'asset_cas_read_object',
-    'asset_cas_read_object_range',
+    'asset_cas_read_bytes',
     'asset_cas_stat_object',
 ])
 const phases = new Set(['storage', 'data', 'compatibility', 'plugins', 'sync'])

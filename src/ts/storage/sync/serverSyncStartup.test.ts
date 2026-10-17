@@ -88,18 +88,18 @@ beforeEach(async () => {
 afterEach(async () => { if (component) await ui.unmount(component); component = undefined; production.disposeNativeSyncBindings(); document.body.replaceChildren() })
 async function offlineStartup() {
     await expect(production.installServerSyncProduction()).resolves.toBeUndefined()
-    expect(commands()).toContain('server_sync_lww_fence')
+    expect(commands()).not.toContain('server_sync_lww_fence')
     expect(commands()).not.toContain('server_sync_notify_start')
     expect(commands()).not.toContain('server_sync_lww_retry')
     expect(commands()).not.toContain('pds_lww_switch_target')
-    expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, running: false, paused: true, error: 'server-unreachable' })
+    expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, running: false, paused: false, error: 'server-unreachable' })
 }
 async function settings() { const Settings = (await import('src/lib/Setting/Pages/ServerSyncSettings.svelte')).default; component = ui.mount(Settings, { target: document.body }); await settle() }
 
 describe('persisted server offline startup', () => {
-    it('keeps real retry and disconnect settings actions after the actual installer fences a failed activation', async () => {
+    it('keeps real retry and disconnect settings actions while the installer waits to activate offline', async () => {
         await offlineStartup(); await settings()
-        expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: true, error: 'server-unreachable' })
+        expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: false, error: 'server-unreachable' })
         expect(button(language.risuNest.serverSync.syncNow)).toBeDefined(); expect(button(language.risuNest.serverSync.disconnect)).toBeDefined()
         f.offline = false
         button(language.risuNest.serverSync.syncNow)!.click(); await settle()
@@ -124,10 +124,10 @@ describe('persisted server offline startup', () => {
         await expect(production.retryServerSync()).rejects.toThrow('Sync binding is unavailable')
         expect(commands()).not.toContain('server_sync_lww_activate'); expect(commands()).not.toContain('server_sync_lww_retry')
     })
-    it('keeps a repeated offline retry stopped and recoverable without reinstalling or changing registration', async () => {
+    it('keeps a repeated offline retry recoverable without reinstalling or changing registration', async () => {
         await offlineStartup(); await production.installServerSyncProduction()
         await expect(production.retryServerSync()).rejects.toMatchObject({ code: 'server-unreachable', status: 503, retryable: true })
-        expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: true, error: 'server-unreachable' })
+        expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: false, error: 'server-unreachable' })
         expect(commands()).not.toContain('server_sync_lww_retry'); expect(commands()).not.toContain('server_sync_configure')
         f.offline = false; await production.retryServerSync()
         expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: false, error: '' })
@@ -147,29 +147,42 @@ describe('persisted server offline startup', () => {
         { code: 'directory-unreachable', status: 503, retryable: true },
         { code: 'server-response-error', status: 502, retryable: true },
         { code: 'sync-retry-budget-exhausted', status: 503, retryable: true },
-    ])('keeps the fenced binding paused and opens the library when activation fails with transient $code', async failure => {
-        f.activationError = failure
-        await expect(production.installServerSyncProduction()).resolves.toBeUndefined()
-        expect(commands()).toContain('server_sync_lww_fence')
-        expect(commands()).not.toContain('server_sync_notify_start'); expect(commands()).not.toContain('pds_lww_switch_target')
-        expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, running: false, paused: true, error: failure.code })
-        f.activationError = undefined; f.offline = false
-        await production.retryServerSync()
-        expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: false, error: '' })
+    ])('automatically activates the persisted binding after transient $code recovers', async failure => {
+        vi.useFakeTimers()
+        try {
+            f.activationError = failure
+            Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+            await expect(production.installServerSyncProduction()).resolves.toBeUndefined()
+            const transfers = () => commands().filter(command => ['server_sync_lww_push', 'server_sync_lww_pull', 'server_sync_lww_hydrate', 'server_sync_notify_start'].includes(command))
+            expect(transfers()).toEqual([])
+            expect(commands()).not.toContain('pds_lww_switch_target')
+            expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, running: false, paused: false, error: failure.code })
+            await vi.advanceTimersByTimeAsync(5000)
+            expect(transfers()).toEqual([])
+            f.activationError = undefined; f.offline = false
+            await vi.advanceTimersByTimeAsync(9999)
+            expect(transfers()).toEqual([])
+            await vi.advanceTimersByTimeAsync(1); await settle()
+            expect(transfers()).toContain('server_sync_lww_pull')
+            expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: false, error: '' })
+        } finally { vi.useRealTimers() }
     })
-    it('keeps the binding paused when the startup fence cannot reach the server either', async () => {
+    it('preserves the selected binding when disconnect fencing fails after an offline startup', async () => {
+        await offlineStartup()
+        const before = structuredClone(f.binding)
         f.fenceError = { code: 'server-unreachable', status: 503, retryable: true }
-        await expect(production.installServerSyncProduction()).resolves.toBeUndefined()
+        await expect(production.disconnectServerSync()).rejects.toEqual(f.fenceError)
         expect(commands()).not.toContain('server_sync_notify_start'); expect(commands()).not.toContain('pds_lww_switch_target')
-        expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, running: false, paused: true, error: 'server-unreachable' })
-        f.fenceError = undefined; f.offline = false
-        await production.retryServerSync()
-        expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: false, error: '' })
+        expect(f.binding).toEqual(before)
+        f.fenceError = undefined
+        await production.disconnectServerSync()
+        expect(f.binding.target).toEqual({ kind: 'none' })
     })
     it.each([
         { code: 'equal-stamp-integrity', retryable: false },
         { code: 'binding-authority-stale', retryable: false },
-    ])('rejects startup when the fence after an offline activation fails with $code', async fenceError => {
+    ])('rejects startup when fencing a refused activation fails with $code', async fenceError => {
+        f.activationError = { code: 'local-validation', retryable: false }
         f.fenceError = fenceError
         const before = structuredClone(f.binding)
         await expect(production.installServerSyncProduction()).rejects.toBeInstanceOf(AggregateError)

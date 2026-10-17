@@ -42,6 +42,44 @@ SectionEnd
 });
 import { readFileSync, mkdirSync, copyFileSync, symlinkSync, unlinkSync } from 'node:fs';
 
+test('released uninstall validation selects exact previous sources and keeps the legacy baseline', { skip: process.platform !== 'win32' }, () => {
+  const directory = mkdtempSync(join(tmpdir(), 'risunest-frozen-selection-'));
+  try {
+    const source = readFileSync('server/manager/install/windows.test.ps1', 'utf8');
+    const start = source.indexOf('                $frozenCases =');
+    const end = source.indexOf('                foreach ($frozenCase in $frozenCases)', start);
+    assert.ok(start >= 0 && end > start, 'frozen source selection must precede fixture execution');
+    const selection = source.slice(start, end);
+    const script = join(directory, 'select.ps1');
+    writeFileSync(script, `
+$ErrorActionPreference = 'Stop'
+$directory = $PSScriptRoot
+$released = 'previous-bundle'
+$next = 'current-bundle'
+$fixture = New-Item -ItemType Directory (Join-Path $directory 'legacy')
+'{"version":"1.0.4"}' | Set-Content (Join-Path $fixture 'risunest-sync-bundle.json')
+$LegacyReleasedBundle = Join-Path $directory 'legacy.zip'
+Compress-Archive -Path (Join-Path $fixture '*') -DestinationPath $LegacyReleasedBundle
+$result = @()
+foreach ($releasedVersion in @('1.0.4', '1.0.5')) {
+  $nextVersion = if ($releasedVersion -eq '1.0.4') { '1.0.5' } else { '1.0.6' }
+  $testRoot = New-Item -ItemType Directory (Join-Path $directory $releasedVersion)
+${selection}
+  $result += ,@($frozenCases | ForEach-Object { @{ version=$_.Version; source=$_.Ref; directory=$_.Directory.ToString() } })
+}
+ConvertTo-Json -Depth 8 -InputObject $result
+`);
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-File', script], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const [legacyPrevious, resumablePrevious] = JSON.parse(result.stdout);
+    assert.deepEqual(legacyPrevious.map(item => [item.version, item.source]), [['1.0.4', 'sync-v1.0.4'], ['1.0.5', null]]);
+    assert.deepEqual(resumablePrevious.map(item => [item.version, item.source]), [['1.0.5', 'sync-v1.0.5'], ['1.0.4', 'sync-v1.0.4'], ['1.0.6', null]]);
+    assert.equal(resumablePrevious[0].directory, 'previous-bundle');
+    assert.equal(resumablePrevious[2].directory, 'current-bundle');
+    assert.equal(existsSync(join(resumablePrevious[1].directory, 'risunest-sync-bundle.json')), true);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 const q = value => value.replaceAll('$', '$$').replaceAll('"', '$\\"');
 function buildManagerStub(directory) {
   const stubSource = join(directory, 'manager.rs');
@@ -329,8 +367,8 @@ SectionEnd
       assert.equal(existsSync(retry), false, `${boundary}: retry artifacts removed`);
       assert.equal(existsSync(join(location, 'local/RisuNestSyncData')), true, `${boundary}: preserved data`);
     }
-    for (const boundary of ['pending', 'forgotten', 'complete']) {
-      const location = join(directory, `delete-resume-${boundary}`);
+    for (const [boundary, deleted] of ['pending', 'forgotten', 'complete'].flatMap(boundary => [false, true].map(deleted => [boundary, deleted]))) {
+      const location = join(directory, `delete-resume-${boundary}-${deleted}`);
       const data = join(location, 'custom data 경로');
       mkdirSync(data, { recursive: true });
       writeFileSync(join(data, 'synthetic'), 'fixture');
@@ -343,10 +381,12 @@ SectionEnd
       writeFileSync(join(retry, 'receipt.json'), '{}');
       rmSync(join(location, 'risunest-sync-manager.exe'));
       if (boundary === 'complete') writeFileSync(join(retry, 'complete'), 'true');
+      if (deleted) rmSync(data, { recursive: true });
       const result = spawnSync(join(location, 'uninstall.exe'), ['/S', '/DELETEAPPDATA', `_?=${location}`], { timeout: 30000, windowsHide: true });
       assert.equal(result.status, 0, boundary);
-      assert.equal(existsSync(data), boundary !== 'pending', boundary);
-      if (boundary !== 'pending') {
+      assert.equal(existsSync(data), !deleted && boundary !== 'pending', boundary);
+      assert.equal(existsSync(join(location, 'data-kept')), !deleted && boundary !== 'pending');
+      if (!deleted && boundary !== 'pending') {
         const message = readFileSync(join(location, 'data-kept'), 'utf16le');
         assert.ok(message === `Server data could not be deleted. Data folder: ${data}` || message === `서버 데이터를 삭제하지 못했습니다. 데이터 폴더: ${data}`, message);
       }
