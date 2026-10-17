@@ -97,7 +97,7 @@ import { beginAndroidGenerationKeepAlive, endAndroidGenerationKeepAlive } from '
 import { beginIOSGeneration, notifyIOSGenerationComplete, isBackgroundExpiryReason } from "../iosNative";
 import { isTauriIOS, isTauriAndroid, isTauriDesktop } from "../platform";
 import { notifyDesktop } from "../desktopNotifications";
-import { classifyChatParserHistory } from '../chatParserHistory'
+import { planChatParserHistory } from '../chatParserHistory'
 import { getDeviceSettings } from '../storage/deviceSettings'
 import { cloneConversationMetadata, isMetadataOnlySelectedConversation } from '../storage/selectedConversationLifecycle'
 import {
@@ -570,7 +570,7 @@ export function getSelectedBoundedGenerationFallbackReason(): string | null {
         ]
         : []
     const parserHistory = conversation && hypaSettings
-        ? classifyChatParserHistory({
+        ? planChatParserHistory({
             source: [
                 DBState.db.mainPrompt,
                 DBState.db.additionalPrompt,

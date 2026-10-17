@@ -116,6 +116,15 @@ test("source validation and downstream builds use the resolved tag and checked c
   assert.match(validation, /SOURCE_COMMIT: \$\{\{ steps\.identity\.outputs\.source_commit \}\}/);
 });
 
+test("Windows retained uninstallers use the previous release and an independent signed legacy baseline", () => {
+  const fetch = workflow.slice(workflow.indexOf("      - name: Fetch and verify the previous published Windows Sync bundle"), workflow.indexOf("      - name: Apply and roll back the produced macOS Sync app"));
+  assert.match(fetch, /verifiedBundle\(previous\.release, previous\.version\)/);
+  assert.match(fetch, /verifiedBundle\(await github\.getByTag\("sync-v1\.0\.4"\), "1\.0\.4"\)/);
+  assert.match(fetch, /await verifyFileSignature\(bundle, signature, process\.env\.RISUNEST_UPDATE_PUBLIC_KEY\)/);
+  assert.match(fetch, /git fetch --no-tags --depth=1 origin "refs\/tags\/\$\(\$tag\):refs\/tags\/\$\(\$tag\)"/);
+  assert.match(fetch, /'-LegacyReleasedBundle', \$env:RISUNEST_LEGACY_SYNC_BUNDLE/);
+});
+
 test("manual release runs default to a non-publishing main rehearsal", () => {
   const dispatch = workflow.slice(workflow.indexOf("  workflow_dispatch:"), workflow.indexOf("\npermissions:"));
   assert.match(dispatch, /source_ref:\n\s+description:[^\n]+\n\s+type: string\n\s+default: main/);

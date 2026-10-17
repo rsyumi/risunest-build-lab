@@ -2149,6 +2149,7 @@ export const languageKorean = {
             registrationRequired: '새 등록 코드 필요',
             blocked: '자동 동기화 중지됨',
             failed: '동기화 실패',
+            offlineNotice: 'Sync 서버에 접속할 수 없습니다. 앱이 열려 있는 동안 자동으로 다시 시도합니다.',
             errorHelp:
                 '동기화를 마치지 못했습니다. 이 기기에서 고친 내용은 그대로 있습니다. 다시 시도하세요.',
             "connectRowHelpScan": '서버에서 만든 등록 코드를 붙여넣거나 QR 코드를 스캔하세요. 기기마다 별도의 등록 코드가 필요합니다.',

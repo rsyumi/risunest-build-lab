@@ -86,6 +86,16 @@ describe('externalErrorMessage', () => {
     it('reports unsupported operations without asking users to change the strategy', () => {
         const refused = { kind: 'unsupported', httpStatus: null, retryAtMs: null }
         expect(externalErrorMessage(strings, refused)).toBe(strings.unsupportedOperation)
+        for (const locale of ['ko', 'en']) {
+            const copy = externalStorageStrings(locale)
+            const expected = copy.requestLengthRequired
+            for (const failure of [{ kind: 'unsupported', httpStatus: 411 }, { code: 'unsupported', httpStatus: 411 }]) {
+                expect(externalErrorMessage(copy, failure)).toBe(`${expected}\nHTTP 411`)
+                expect(externalErrorMessage(copy, { ...failure,
+                    message: 'This operation is unavailable for this repository.', detail: 'Length Required',
+                })).toBe(`${expected}\nHTTP 411\nLength Required`)
+            }
+        }
     })
 
     it('shows the OAuth error code and provider description', () => {

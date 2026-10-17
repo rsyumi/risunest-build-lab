@@ -1,5 +1,6 @@
 <script lang="ts">
     import { language } from 'src/lang'
+    import { diagnosticInfo, formatErrorDetails } from 'src/ts/diagnostics'
     import { alertToast } from 'src/ts/alert'
     import { isTauri, isTauriAndroid, isTauriIOS } from 'src/ts/platform'
     import { nativeRoots } from 'src/ts/storage/nativePaths'
@@ -42,11 +43,11 @@
         }
     }
 
-    const details = (value: BootFailure) => [
+    const details = (value: BootFailure) => formatErrorDetails($diagnosticInfo, [
         copy.title,
         value.message,
         value.stage ? `${copy.stage}: ${value.stage}` : '',
-    ].filter((line) => line !== '').join('\n')
+    ].filter((line) => line !== '').join('\n'))
 
     const copyDetails = async (value: BootFailure) => {
         const text = details(value)
@@ -83,10 +84,7 @@
                 {/if}
             </div>
         {/if}
-        <code class="text-xs font-mono select-text break-all whitespace-pre-wrap border border-darkborderc rounded-md p-3 text-textcolor2">{failure.message}</code>
-        {#if failure.stage}
-            <span class="text-xs text-textcolor2 select-text">{copy.stage}: {failure.stage}</span>
-        {/if}
+        <code class="text-xs font-mono select-text break-all whitespace-pre-wrap border border-darkborderc rounded-md p-3 text-textcolor2">{details(failure)}</code>
         {#if isTauri && failure.stage !== 'native-setup'}
             <div class="rounded-md border border-darkborderc p-3">
                 <p class="text-sm font-bold">{language.risuNest.recovery.exportTitle}</p>

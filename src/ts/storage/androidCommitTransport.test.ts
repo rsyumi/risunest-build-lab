@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { sendAndroidCommit, ANDROID_COMMIT_CHUNK_BYTES } from './androidCommitTransport'
+import { prepareCasObject } from './nativeAssetRepository'
 import {
     ANDROID_BINARY_CHUNK_BYTES,
     type AndroidBinaryCommitBridge,
@@ -22,6 +23,73 @@ function harness(options: { fail?: string; badAck?: boolean } = {}) {
 }
 
 describe('Android bounded commit transport', () => {
+    it('keeps concurrent database, device and asset writes on their own transfer until cleanup', async () => {
+        vi.useFakeTimers()
+        try {
+            let active: string | undefined
+            let assetId: string | undefined
+            const received = new Map<string, Uint8Array[]>()
+            const saved: Array<{ command: string; bytes: Uint8Array }> = []
+            const bridge: AndroidBinaryCommitBridge = {
+                onmessage: null,
+                postMessage(packet) {
+                    const bytes = new Uint8Array(packet)
+                    const id = new TextDecoder().decode(bytes.subarray(0, 36))
+                    if (id !== active && id !== assetId) throw new Error('Wrong native transfer')
+                    received.get(id)!.push(bytes.slice(40))
+                    queueMicrotask(() => bridge.onmessage?.({ data: JSON.stringify({
+                        id, offset: new DataView(packet).getUint32(36, true) + bytes.length - 40,
+                    }) }))
+                },
+            }
+            vi.stubGlobal('window', { RisuNestCommit: bridge })
+            const invoke = async (command: string, args: any) => {
+                if (command === 'asset_cas_job_upload_open') {
+                    assetId = args.uploadId
+                    received.set(assetId!, [])
+                    return { capacity: ANDROID_BINARY_CHUNK_BYTES }
+                }
+                if (command === 'asset_cas_job_upload_finish') {
+                    saved.push({ command, bytes: Buffer.concat(received.get(assetId!)!) })
+                    return { contentHash: '22'.repeat(32), physicalKey: `assets/objects/22/${'22'.repeat(31)}`,
+                        byteSize: saved.at(-1)!.bytes.length, deduplicated: false }
+                }
+                if (command === 'asset_cas_job_upload_cancel') { assetId = undefined; return }
+                if (command === 'pds_commit_android_open') {
+                    if (active) throw new Error('Android persistence transfer already active')
+                    active = args.id
+                    received.set(args.id, [])
+                    return { capacity: ANDROID_BINARY_CHUNK_BYTES }
+                }
+                if (command.endsWith('_finish')) {
+                    if (args.id !== active) throw new Error('Wrong native finish')
+                    saved.push({ command, bytes: Buffer.concat(received.get(args.id)!) })
+                    return { revision: saved.length }
+                }
+                if (command === 'pds_commit_android_cancel' && args.id === active) active = undefined
+            }
+            const database = new TextEncoder().encode('database'.repeat(40_000))
+            const device = new TextEncoder().encode('device'.repeat(24_000))
+            const asset = Uint8Array.from({ length: 1024 * 1024 + 3 }, (_, i) => i % 256)
+            const outcomes = Promise.allSettled([
+                prepareCasObject('synthetic-session', asset, 'direct-object', invoke),
+                sendAndroidCommit(database, invoke as any, bridge),
+                sendAndroidCommit(device, invoke as any, bridge, 'pds_plugin_write_android_finish'),
+            ])
+            await vi.runAllTimersAsync()
+            expect((await outcomes).map(result => result.status)).toEqual(['fulfilled', 'fulfilled', 'fulfilled'])
+            expect(saved.map(item => item.command)).toEqual(['pds_commit_android_finish', 'pds_plugin_write_android_finish', 'asset_cas_job_upload_finish'])
+            expect(Buffer.from(saved[0].bytes).equals(database)).toBe(true)
+            expect(Buffer.from(saved[1].bytes).equals(device)).toBe(true)
+            expect(Buffer.from(saved[2].bytes).equals(asset)).toBe(true)
+            expect(active).toBeUndefined()
+            expect(bridge.onmessage).toBeNull()
+        } finally {
+            vi.unstubAllGlobals()
+            vi.useRealTimers()
+        }
+    })
+
     it('waits only for pre-transfer finishing-busy responses', async () => {
         vi.useFakeTimers()
         try {
@@ -46,6 +114,7 @@ describe('Android bounded commit transport', () => {
             drop?: boolean
             reject?: boolean
             finishFails?: boolean
+            busy?: number
         } = {},
     ) {
         const packets: Uint8Array[] = []
@@ -62,7 +131,7 @@ describe('Android bounded commit transport', () => {
                             data: JSON.stringify({
                                 id,
                                 offset: offset + (options.badAck ? 1 : 0),
-                                error: options.reject ? 'invalid' : undefined,
+                                error: packets.length <= (options.busy ?? 0) ? 'busy' : options.reject ? 'invalid' : undefined,
                             }),
                         }),
                     )
@@ -97,6 +166,20 @@ describe('Android bounded commit transport', () => {
             'pds_commit_android_cancel',
         ])
         expect(h.bridge.onmessage).toBeNull()
+    })
+    it('retries an explicit pre-admission busy reply without switching transport', async () => {
+        vi.useFakeTimers()
+        try {
+            const h = binaryHarness({ busy: 1 })
+            const bytes = new TextEncoder().encode('busy-byte-channel')
+            const result = sendAndroidCommit(bytes, h.invoke as any, h.bridge)
+            await vi.runAllTimersAsync()
+            await expect(result).resolves.toEqual({ revision: 4 })
+            expect(Buffer.concat(h.packets.slice(1)).equals(bytes)).toBe(true)
+            expect(h.bridge.onmessage).toBeNull()
+        } finally {
+            vi.useRealTimers()
+        }
     })
     it.each([{ badAck: true }, { reject: true }, { finishFails: true }])(
         'does not replay failed binary transfer %j',

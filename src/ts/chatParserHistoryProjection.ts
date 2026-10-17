@@ -1,10 +1,12 @@
 import rfdc from 'rfdc'
 import { forkChatParserContext } from './chatParserContextSeed.svelte'
 import {
-    classifyChatParserHistory,
+    planChatParserHistory,
     type ChatParserHistoryReason,
     type ChatParserUnsafeHistoryDependency,
 } from './chatParserHistory'
+import { prepareCbsHistory } from './prepareCbsHistory'
+import { CbsHistoryDependencies } from './cbsHistoryAccess'
 import type { ProcessScriptCaptureContext } from './process/scripts'
 import type { Message } from './storage/database.svelte'
 import {
@@ -15,8 +17,6 @@ import {
 } from './storage/persistentDataStore'
 
 const cloneProjectionData = rfdc()
-const INITIAL_BACKWARD_SCAN_BATCH_SIZE = 8
-const MAX_BACKWARD_SCAN_BATCH_SIZE = 128
 
 export type ChatParserCompleteProjectionReason =
     | ChatParserHistoryReason
@@ -27,6 +27,7 @@ export interface ChatParserHistoryProjectionReader {
     readConversationWindow: PersistentRevisionReader['readConversationWindow']
     /** Rows must belong to this revision and remain leased until projection capture finishes. */
     readResidentMessage?(absoluteIndex: number): Readonly<Message> | undefined
+    readRoleWindow?: PersistentRevisionReader['readConversationMessageMetadataWindow']
 }
 
 export interface ChatParserCompleteProjectionRequest {
@@ -50,6 +51,7 @@ export interface ChatParserCompleteProjectionLease {
 }
 
 export interface ChatParserHistoryProjectionInput {
+    dependencies?: CbsHistoryDependencies
     characterId: string
     conversationId: string
     revision: DataRevision
@@ -82,6 +84,7 @@ export interface BoundedChatParserHistoryProjection extends ChatParserHistoryPro
     readonly kind: 'bounded'
     readonly messages: readonly Message[]
     readonly context: ProcessScriptCaptureContext
+    readonly parsedSource?: string
 }
 
 export interface CompleteChatParserHistoryProjection extends ChatParserHistoryProjectionBase {
@@ -125,63 +128,48 @@ export async function createChatParserHistoryProjection(
         input.currentAbsoluteIndex + 1,
     )
     const currentMessage = cloneProjectionData(readCurrentMessage)
-    const classification = classifyChatParserHistory({
+    const classification = planChatParserHistory({
         source: [input.parserSource, currentMessage],
         indirections: input.parserIndirections,
         unsafeDependencies: input.unsafeDependencies,
     })
-    let initialStart = input.currentAbsoluteIndex
-    let initialEnd = input.currentAbsoluteIndex + 1
-    for (const index of classification.absoluteMessageIndices) {
-        if (index < 0 || index >= input.totalMessages) continue
-        initialStart = Math.min(initialStart, index)
-        initialEnd = Math.max(initialEnd, index + 1)
+    if (classification.requiresFullHistory) {
+        return acquireCompleteProjection(input, currentMessage, classification.reasons)
     }
-    const reasons: ChatParserCompleteProjectionReason[] = [...classification.reasons]
-    if (initialEnd - initialStart > input.maxProjectionMessages) {
-        reasons.push('projection-budget')
-    }
-    if (reasons.length > 0) {
-        return acquireCompleteProjection(input, currentMessage, uniqueReasons(reasons))
-    }
-
-    let prefixStart = initialStart
-    const initialPrefix = prefixStart === input.currentAbsoluteIndex
-        ? []
-        : await readExactRange(input, prefixStart, input.currentAbsoluteIndex)
-    const prefixSegmentsNewestFirst = initialPrefix.length > 0 ? [initialPrefix] : []
-    const suffix = initialEnd === input.currentAbsoluteIndex + 1
-        ? []
-        : await readExactRange(input, input.currentAbsoluteIndex + 1, initialEnd)
-
-    const backward = createBackwardRowScan(currentMessage, input.currentAbsoluteIndex)
-    inspectBackwardRows(initialPrefix, prefixStart, backward)
-    let backwardBatchSize = INITIAL_BACKWARD_SCAN_BATCH_SIZE
-    while (!backwardRowsSatisfied(backward) && prefixStart > 0) {
-        const minimumAllowedStart = initialEnd - input.maxProjectionMessages
-        const nextStart = Math.max(
-            0,
-            minimumAllowedStart,
-            prefixStart - backwardBatchSize,
-        )
-        if (nextStart === prefixStart) {
-            return acquireCompleteProjection(input, currentMessage, ['projection-budget'])
-        }
-        const extension = await readExactRange(input, nextStart, prefixStart)
-        prefixSegmentsNewestFirst.push(extension)
-        prefixStart = nextStart
-        inspectBackwardRows(extension, prefixStart, backward)
-        backwardBatchSize = Math.min(backwardBatchSize * 2, MAX_BACKWARD_SCAN_BATCH_SIZE)
-    }
-
-    const historyOffset = Math.min(initialStart, backward.requiredStart)
-    const prefix = [...prefixSegmentsNewestFirst].reverse().flat()
-    const retainedPrefix = prefix.slice(historyOffset - prefixStart)
-    const messages = [...retainedPrefix, currentMessage, ...suffix]
-    if (messages.length > input.maxProjectionMessages) {
-        return acquireCompleteProjection(input, currentMessage, ['projection-budget'])
-    }
+    const historyAccess = await prepareCbsHistory({
+        dependencies: input.dependencies,
+        characterId: input.characterId,
+        conversationId: input.conversationId,
+        totalMessages: input.totalMessages,
+        chatID: input.currentAbsoluteIndex,
+        plan: classification,
+        reader: {
+            ...input.reader,
+            readResidentMessage: (index) => index === input.currentAbsoluteIndex
+                ? currentMessage : input.reader.readResidentMessage?.(index),
+        },
+        signal: input.signal,
+        assertCurrent: () => assertProjectionCurrent(input),
+    })
+    const historyOffset = input.currentAbsoluteIndex
+    const messages = [currentMessage]
     const context = buildBoundedContext(input.contextSeed, input, messages, historyOffset)
+    context.parserContext.historyAccess = historyAccess
+    const preparedRows = new Map(historyAccess.preparedRows())
+    preparedRows.set(input.currentAbsoluteIndex, currentMessage)
+    context.parserContext.prepareHistory = async (source, chatID, complete) => {
+        const access = await prepareCbsHistory({
+            dependencies: historyAccess.dependencies,
+            characterId: input.characterId, conversationId: input.conversationId,
+            totalMessages: input.totalMessages, chatID,
+            plan: planChatParserHistory({ source, indirections: input.parserIndirections,
+                unsafeDependencies: complete ? ['regex-reparse'] : [] }),
+            reader: { ...input.reader, readResidentMessage: (index) => preparedRows.get(index) ?? input.reader.readResidentMessage?.(index) }, signal: input.signal,
+            assertCurrent: () => assertProjectionCurrent(input),
+        })
+        for (const [index, message] of access.preparedRows()) preparedRows.set(index, message)
+        return access
+    }
     assertProjectionCurrent(input)
     return {
         kind: 'bounded',
@@ -303,46 +291,6 @@ function validateWindow(
         'Chat parser history conversation window contains an invalid message row',
         'Chat parser history conversation window message rows must be dense',
     )
-}
-
-interface BackwardRowScan {
-    readonly pendingRoles: Set<Message['role']>
-    remainingUsers: number
-    requiredStart: number
-}
-
-function createBackwardRowScan(
-    currentMessage: Message,
-    currentAbsoluteIndex: number,
-): BackwardRowScan {
-    return {
-        pendingRoles: new Set<Message['role']>([currentMessage.role, 'char']),
-        remainingUsers: 2,
-        requiredStart: currentAbsoluteIndex,
-    }
-}
-
-function inspectBackwardRows(
-    prefix: readonly Message[],
-    prefixStart: number,
-    scan: BackwardRowScan,
-): void {
-    for (let offset = prefix.length - 1; offset >= 0; offset -= 1) {
-        const message = prefix[offset]
-        const absoluteIndex = prefixStart + offset
-        const role = message.role
-        if (scan.pendingRoles.delete(role)) {
-            scan.requiredStart = Math.min(scan.requiredStart, absoluteIndex)
-        }
-        if (role === 'user' && scan.remainingUsers > 0) {
-            scan.remainingUsers -= 1
-            scan.requiredStart = Math.min(scan.requiredStart, absoluteIndex)
-        }
-    }
-}
-
-function backwardRowsSatisfied(scan: BackwardRowScan): boolean {
-    return scan.pendingRoles.size === 0 && scan.remainingUsers === 0
 }
 
 async function acquireCompleteProjection(
@@ -552,10 +500,4 @@ function validateBoundedContext(
     ) {
         throw new Error('Bounded projection context could not preserve exact conversation identity')
     }
-}
-
-function uniqueReasons(
-    reasons: readonly ChatParserCompleteProjectionReason[],
-): ChatParserCompleteProjectionReason[] {
-    return [...new Set(reasons)]
 }

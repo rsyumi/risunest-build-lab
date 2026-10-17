@@ -3,6 +3,7 @@ use super::job_pins::{
     CasJobOwnerKind, CasObjectRole, CasReleaseOutcome, DurableCasJob, DurableCasJobOwnership,
 };
 use super::{PayloadCas, PreparedPayload};
+use super::payload_cas::{ObjectPart, OwnedPayloadUpload};
 use crate::asset_repository::owner_manifest_codec::{
     decode_owner_manifest, encode_owner_manifest, OWNER_MANIFEST_V1_MAX_CANONICAL_BYTES,
 };
@@ -15,8 +16,8 @@ use crate::persistent_store::{self, PersistentStore, PersistentStoreState, Store
 use crate::trust_boundary::is_lower_hex_256;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
-use std::io::{self, Cursor, ErrorKind, Seek, SeekFrom, Write};
-use std::sync::Mutex;
+use std::io::{self, Cursor, ErrorKind};
+use std::sync::{Arc, Mutex, atomic::{AtomicU8, Ordering}};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, State};
 
@@ -54,6 +55,7 @@ struct AbandonedCasJobs {
     root: std::path::PathBuf,
     journal_ids: Vec<String>,
     listing_failure: Option<String>,
+    cleanup_uploads: bool,
 }
 
 impl AbandonedCasJobs {
@@ -62,11 +64,16 @@ impl AbandonedCasJobs {
             Ok(ids) => (ids, None),
             Err(error) => (Vec::new(), Some(error.to_string())),
         };
-        Self { root: root.to_owned(), journal_ids, listing_failure }
+        Self { root: root.to_owned(), journal_ids, listing_failure, cleanup_uploads: false }
     }
 
     fn release(self, probe: &CasJobOwnerProbe) -> Result<(), String> {
         let mut failure = self.listing_failure;
+        if self.cleanup_uploads {
+            if let Err(error) = PayloadCas::new(&self.root).and_then(|cas| cas.sweep_abandoned_uploads()) {
+                failure.get_or_insert(error.to_string());
+            }
+        }
         for id in &self.journal_ids {
             if let Err(error) = release_if_owner_ended(&self.root, id, probe) {
                 failure.get_or_insert(format!("{id}: {error}"));
@@ -231,7 +238,7 @@ impl DurableCasJobState {
     }
 
     fn release_in_background<R: tauri::Runtime>(&self, app: &AppHandle<R>, abandoned: AbandonedCasJobs) {
-        if !abandoned.journal_ids.is_empty() || abandoned.listing_failure.is_some() {
+        if abandoned.cleanup_uploads || !abandoned.journal_ids.is_empty() || abandoned.listing_failure.is_some() {
             let app = app.clone();
             tauri::async_runtime::spawn_blocking(move || {
                 if let Err(error) = release_abandoned(&app, abandoned) {
@@ -250,7 +257,9 @@ impl DurableCasJobState {
             .map_err(|error| format!("CAS job session mutex poisoned: {error}"))?
             .clear();
         // Journals are listed now, before the new page can begin its own.
-        Ok(AbandonedCasJobs::snapshot(root))
+        let mut abandoned = AbandonedCasJobs::snapshot(root);
+        abandoned.cleanup_uploads = true;
+        Ok(abandoned)
     }
 
     #[cfg(test)]
@@ -272,17 +281,70 @@ struct CasUpload {
     session_id: String,
     role: CasObjectRole,
     total_bytes: u64,
-    received: u64,
-    file: tempfile::NamedTempFile,
+    state: AtomicU8,
+    file: Mutex<Option<OwnedPayloadUpload>>,
+    capacity: usize,
+    _receiver: Option<Arc<crate::asset_byte_transport::AndroidReceiver>>,
+}
+
+const UPLOAD_RECEIVING: u8 = 0;
+const UPLOAD_FINISHING: u8 = 1;
+const UPLOAD_CANCELLED: u8 = 2;
+
+impl CasUpload {
+    fn append(&self, offset: u64, chunk: &[u8]) -> io::Result<u64> {
+        let mut owned = self.file.lock().map_err(|_| io::Error::other("CAS upload poisoned"))?;
+        if self.state.load(Ordering::Acquire) != UPLOAD_RECEIVING {
+            owned.take();
+            return Err(io::Error::new(ErrorKind::NotFound, "CAS upload is closed"));
+        }
+        let file = owned.as_mut().ok_or_else(|| io::Error::other("CAS upload is closed"))?;
+        if offset != file.byte_size() || chunk.is_empty() || chunk.len() > self.capacity {
+            return Err(io::Error::new(ErrorKind::InvalidInput, "invalid CAS upload chunk"));
+        }
+        let next = offset.checked_add(chunk.len() as u64)
+            .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "CAS upload length overflow"))?;
+        if next > self.total_bytes {
+            return Err(io::Error::new(ErrorKind::InvalidInput, "CAS upload exceeds declared length"));
+        }
+        if let Err(error) = file.append(chunk) {
+            self.state.store(UPLOAD_CANCELLED, Ordering::Release);
+            owned.take();
+            return Err(error);
+        }
+        if self.state.load(Ordering::Acquire) != UPLOAD_RECEIVING {
+            owned.take();
+            return Err(io::Error::new(ErrorKind::Interrupted, "CAS upload cancelled"));
+        }
+        Ok(next)
+    }
+
+    fn take_complete(&self) -> io::Result<OwnedPayloadUpload> {
+        let mut owned = self.file.lock().map_err(|_| io::Error::other("CAS upload poisoned"))?;
+        let file = owned.as_ref().ok_or_else(|| io::Error::new(ErrorKind::NotFound, "CAS upload is closed"))?;
+        if file.byte_size() != self.total_bytes {
+            return Err(io::Error::new(ErrorKind::InvalidInput, "CAS upload is incomplete"));
+        }
+        self.state.compare_exchange(UPLOAD_RECEIVING, UPLOAD_FINISHING, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| io::Error::new(ErrorKind::NotFound, "CAS upload is closed"))?;
+        Ok(owned.take().expect("completed CAS upload"))
+    }
+
+    fn cancel(&self) {
+        if self.state.compare_exchange(UPLOAD_RECEIVING, UPLOAD_CANCELLED, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            if let Ok(mut file) = self.file.try_lock() { file.take(); }
+        }
+    }
 }
 
 #[derive(Default)]
 struct CasUploadPool {
-    uploads: HashMap<String, CasUpload>,
+    uploads: HashMap<String, Arc<CasUpload>>,
     reserved_bytes: u64,
 }
 
 impl CasUploadPool {
+    #[cfg(test)]
     fn open(
         &mut self,
         cas: &PayloadCas,
@@ -290,6 +352,13 @@ impl CasUploadPool {
         session_id: String,
         role: CasObjectRole,
         total_bytes: u64,
+    ) -> io::Result<()> {
+        self.open_with_capacity(cas, upload_id, session_id, role, total_bytes, CAS_UPLOAD_CHUNK_BYTES, None)
+    }
+
+    fn open_with_capacity(
+        &mut self, cas: &PayloadCas, upload_id: String, session_id: String, role: CasObjectRole,
+        total_bytes: u64, capacity: usize, receiver: Option<Arc<crate::asset_byte_transport::AndroidReceiver>>,
     ) -> io::Result<()> {
         if uuid::Uuid::parse_str(&upload_id).is_err() {
             return Err(io::Error::new(
@@ -320,78 +389,40 @@ impl CasUploadPool {
                 "CAS upload byte quota is unavailable",
             ));
         }
-        let file = cas.create_ipc_staging_file()?;
+        let file = cas.begin_owned_upload()?;
         self.uploads.insert(
             upload_id,
-            CasUpload {
-                session_id,
-                role,
-                total_bytes,
-                received: 0,
-                file,
-            },
+            Arc::new(CasUpload {
+                session_id, role, total_bytes,
+                state: AtomicU8::new(UPLOAD_RECEIVING), file: Mutex::new(Some(file)),
+                capacity, _receiver: receiver,
+            }),
         );
         self.reserved_bytes = reserved_bytes;
         Ok(())
     }
 
-    fn append(&mut self, upload_id: &str, offset: u64, chunk: &[u8]) -> io::Result<u64> {
-        let upload = self
-            .uploads
-            .get(upload_id)
-            .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "CAS upload is missing"))?;
-        if offset != upload.received || chunk.is_empty() || chunk.len() > CAS_UPLOAD_CHUNK_BYTES {
-            return Err(io::Error::new(
-                ErrorKind::InvalidInput,
-                "invalid CAS upload chunk",
-            ));
-        }
-        let next = upload
-            .received
-            .checked_add(chunk.len() as u64)
-            .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "CAS upload length overflow"))?;
-        if next > upload.total_bytes {
-            return Err(io::Error::new(
-                ErrorKind::InvalidInput,
-                "CAS upload exceeds declared length",
-            ));
-        }
-        let write_result = self
-            .uploads
-            .get_mut(upload_id)
-            .expect("validated CAS upload")
-            .file
-            .write_all(chunk);
-        if let Err(error) = write_result {
-            self.cancel(upload_id);
-            return Err(error);
-        }
-        self.uploads
-            .get_mut(upload_id)
-            .expect("written CAS upload")
-            .received = next;
-        Ok(next)
+    fn get(&self, upload_id: &str) -> io::Result<Arc<CasUpload>> {
+        self.uploads.get(upload_id).cloned()
+            .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "CAS upload is missing"))
     }
 
-    fn take_complete(&mut self, upload_id: &str) -> io::Result<CasUpload> {
-        let upload = self
-            .uploads
-            .get(upload_id)
-            .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "CAS upload is missing"))?;
-        if upload.received != upload.total_bytes {
-            return Err(io::Error::new(
-                ErrorKind::InvalidInput,
-                "CAS upload is incomplete",
-            ));
-        }
-        let upload = self.uploads.remove(upload_id).expect("checked CAS upload");
-        self.reserved_bytes -= upload.total_bytes;
-        Ok(upload)
+    #[cfg(test)]
+    fn append(&mut self, upload_id: &str, offset: u64, chunk: &[u8]) -> io::Result<u64> {
+        self.get(upload_id)?.append(offset, chunk)
+    }
+
+    #[cfg(test)]
+    fn take_complete(&mut self, upload_id: &str) -> io::Result<OwnedPayloadUpload> {
+        let file = self.get(upload_id)?.take_complete()?;
+        self.cancel(upload_id);
+        Ok(file)
     }
 
     fn cancel(&mut self, upload_id: &str) {
         if let Some(upload) = self.uploads.remove(upload_id) {
             self.reserved_bytes -= upload.total_bytes;
+            upload.cancel();
         }
     }
 
@@ -402,14 +433,11 @@ impl CasUploadPool {
             .filter(|(_, upload)| upload.session_id == session_id)
             .map(|(id, upload)| (id.clone(), upload.total_bytes))
             .collect::<Vec<_>>();
-        for (id, total_bytes) in removed {
-            self.uploads.remove(&id);
-            self.reserved_bytes -= total_bytes;
-        }
+        for (id, _) in removed { self.cancel(&id); }
     }
 
     fn clear(&mut self) {
-        self.uploads.clear();
+        for (_, upload) in self.uploads.drain() { upload.cancel(); }
         self.reserved_bytes = 0;
     }
 }
@@ -522,6 +550,7 @@ pub(crate) async fn asset_cas_job_upload_open(
     session_id: String,
     role: CasObjectRole,
     total_bytes: u64,
+    binary: Option<bool>,
 ) -> Result<CasUploadOpened, String> {
     logged("asset_cas_job_upload_open", async move {
         tauri::async_runtime::spawn_blocking(move || {
@@ -544,11 +573,22 @@ pub(crate) async fn asset_cas_job_upload_open(
             if job.is_sealed() || job.is_released() {
                 return Err("sealed or released CAS job cannot accept an upload".to_owned());
             }
+            let capacity = if binary.unwrap_or(false) { crate::asset_byte_transport::BINARY_PART_BYTES } else { CAS_UPLOAD_CHUNK_BYTES };
+            #[cfg(not(target_os = "android"))]
+            let receiver = None;
+            #[cfg(target_os = "android")]
+            let receiver = if binary.unwrap_or(false) {
+                let receiver_app = app.clone();
+                let receiver_id = upload_id.clone();
+                Some(crate::asset_byte_transport::register_android_receiver(&upload_id, Arc::new(move |offset, bytes| {
+                    append_upload(&receiver_app, &receiver_id, offset, bytes)
+                }))?)
+            } else { None };
             uploads
-                .open(&cas, upload_id, session_id, role, total_bytes)
+                .open_with_capacity(&cas, upload_id, session_id, role, total_bytes, capacity, receiver)
                 .map_err(|error| error.to_string())?;
             Ok(CasUploadOpened {
-                capacity: CAS_UPLOAD_CHUNK_BYTES,
+                capacity,
             })
         })
         .await
@@ -565,20 +605,32 @@ pub(crate) async fn asset_cas_job_upload_chunk(
 ) -> Result<u64, String> {
     logged("asset_cas_job_upload_chunk", async move {
         tauri::async_runtime::spawn_blocking(move || {
-            let _operation = app
-                .state::<PersistentStoreState>()
-                .admit_renderer_operation()
-                .map_err(|error| error.to_string())?;
-            app.state::<DurableCasJobState>()
-                .uploads
-                .lock()
-                .map_err(|error| format!("CAS upload mutex poisoned: {error}"))?
-                .append(&upload_id, offset, &data)
-                .map_err(|error| error.to_string())
+            if data.len() > CAS_UPLOAD_CHUNK_BYTES { return Err("CAS JSON part exceeds its capacity".to_owned()); }
+            append_upload(&app, &upload_id, offset, &data)
         })
         .await
         .map_err(|error| format!("failed to join CAS upload chunk operation: {error}"))?
     }.await)
+}
+
+fn append_upload(app: &AppHandle, upload_id: &str, offset: u64, data: &[u8]) -> Result<u64, String> {
+    let _operation = app.state::<PersistentStoreState>().admit_renderer_operation().map_err(|error| error.to_string())?;
+    let state = app.state::<DurableCasJobState>();
+    let upload = state.uploads.lock().map_err(|error| format!("CAS upload mutex poisoned: {error}"))?
+        .get(upload_id).map_err(|error| error.to_string())?;
+    let result = upload.append(offset, data);
+    if upload.state.load(Ordering::Acquire) == UPLOAD_CANCELLED {
+        state.uploads.lock().map_err(|error| error.to_string())?.cancel(upload_id);
+    }
+    result.map_err(|error| error.to_string())
+}
+
+#[tauri::command(async)]
+pub(crate) fn asset_cas_job_upload_chunk_raw(
+    app: AppHandle, request: tauri::ipc::Request<'_>,
+) -> Result<u64, crate::asset_byte_transport::ByteTransferError> {
+    logged("asset_cas_job_upload_chunk_raw", crate::asset_byte_transport::raw_part(&request)
+        .and_then(|(id, offset, bytes)| append_upload(&app, &id, offset, bytes).map_err(Into::into)))
 }
 
 #[tauri::command(async)]
@@ -595,28 +647,17 @@ pub(crate) async fn asset_cas_job_upload_finish(
             let root = repository_root(&app)?;
             let cas = PayloadCas::new(&root).map_err(|error| error.to_string())?;
             let state = app.state::<DurableCasJobState>();
-            let mut upload = state
-                .uploads
-                .lock()
+            let upload = state.uploads.lock()
                 .map_err(|error| format!("CAS upload mutex poisoned: {error}"))?
-                .take_complete(&upload_id)
-                .map_err(|error| error.to_string())?;
-            upload.file.flush().map_err(|error| error.to_string())?;
-            upload
-                .file
-                .as_file()
-                .sync_all()
-                .map_err(|error| error.to_string())?;
-            upload
-                .file
-                .seek(SeekFrom::Start(0))
-                .map_err(|error| error.to_string())?;
+                .get(&upload_id).map_err(|error| error.to_string())?;
+            let file = upload.take_complete().map_err(|error| error.to_string())?;
+            state.uploads.lock().map_err(|error| error.to_string())?.cancel(&upload_id);
             let mut jobs = state
                 .jobs
                 .lock()
                 .map_err(|error| format!("CAS job session mutex poisoned: {error}"))?;
             recover_job(&mut jobs, &root, &upload.session_id)?
-                .prepare_reader(&cas, &mut upload.file, upload.role)
+                .prepare_owned_upload(&cas, file, upload.role)
                 .map_err(|error| error.to_string())
         })
         .await
@@ -799,30 +840,71 @@ fn with_content_session_at_root<T>(
     operation(job)
 }
 
+/// The largest part one CAS read command returns.
+pub(crate) const CAS_READ_PART_BYTES: u64 = 1024 * 1024;
+const CAS_OBJECT_MISSING: &str = "cas-object-missing";
+const CAS_OBJECT_SIZE_MISMATCH: &str = "cas-object-size-mismatch";
+
+/// Reads one part of an object of `expected_size` bytes. Nothing outlives the
+/// call: the file is opened and closed inside it.
 #[tauri::command(async)]
-pub(crate) async fn asset_cas_read_object_range(
+pub(crate) async fn asset_cas_read_bytes(
     app: AppHandle,
     content_hash: String,
     start: u64,
     end_exclusive: u64,
-) -> Result<Option<Vec<u8>>, String> {
-    logged("asset_cas_read_object_range", async move {
-        if end_exclusive < start || end_exclusive - start > CAS_UPLOAD_CHUNK_BYTES as u64 {
-            return Err("CAS range read exceeds the IPC chunk limit".to_owned());
-        }
+    expected_size: u64,
+) -> Result<tauri::ipc::Response, String> {
+    let result = async {
+        let dispatched = app
+            .state::<PersistentStoreState>()
+            .renderer_dispatch_epoch()
+            .map_err(|error| error.to_string())?;
+        check_cas_read_range(start, end_exclusive, expected_size)?;
         let root = repository_root(&app)?;
         tauri::async_runtime::spawn_blocking(move || {
-            let _operation = app
-                .state::<PersistentStoreState>()
-                .admit_renderer_operation()
-                .map_err(|error| error.to_string())?;
-            PayloadCas::new(&root)
-                .and_then(|cas| cas.read_object_range(&content_hash, start, end_exclusive))
-                .map_err(|error| error.to_string())
+            read_cas_part(&app.state::<PersistentStoreState>(), dispatched, &root, &content_hash, start, end_exclusive, expected_size)
+                .map(tauri::ipc::Response::new)
         })
         .await
-        .map_err(|error| format!("failed to join CAS range operation: {error}"))?
-    }.await)
+        .map_err(|error| format!("failed to join CAS read: {error}"))?
+    }
+    .await;
+    match result {
+        // Remote-only aliases make misses routine, so a miss is not a failure.
+        Err(code) if code == CAS_OBJECT_MISSING => Err(code),
+        result => logged("asset_cas_read_bytes", result),
+    }
+}
+
+fn check_cas_read_range(start: u64, end_exclusive: u64, expected_size: u64) -> Result<(), String> {
+    if end_exclusive < start || end_exclusive - start > CAS_READ_PART_BYTES || end_exclusive > expected_size {
+        return Err("invalid CAS read range".to_owned());
+    }
+    Ok(())
+}
+
+fn read_cas_part(
+    store: &PersistentStoreState,
+    dispatched: u64,
+    root: &std::path::Path,
+    content_hash: &str,
+    start: u64,
+    end_exclusive: u64,
+    expected_size: u64,
+) -> Result<Vec<u8>, String> {
+    check_cas_read_range(start, end_exclusive, expected_size)?;
+    let _operation = store
+        .admit_renderer_operation_dispatched_at(dispatched)
+        .map_err(|error| error.to_string())?;
+    let part = PayloadCas::new(root)
+        .and_then(|cas| cas.read_object_part(content_hash, start, end_exclusive, expected_size))
+        .map_err(|error| error.to_string())?;
+    match part {
+        ObjectPart::Bytes(bytes) => Ok(bytes),
+        ObjectPart::Missing => Err(CAS_OBJECT_MISSING.to_owned()),
+        ObjectPart::SizeMismatch => Err(CAS_OBJECT_SIZE_MISMATCH.to_owned()),
+    }
 }
 
 #[tauri::command(async)]
@@ -1627,8 +1709,6 @@ mod tests {
 
     #[test]
     fn cas_upload_pool_enforces_offsets_lengths_and_cleanup() {
-        use std::io::Read;
-
         let directory = TempDir::new().expect("create upload pool directory");
         let cas = PayloadCas::new(directory.path()).expect("open payload CAS");
         let upload_id = uuid::Uuid::new_v4().to_string();
@@ -1657,16 +1737,85 @@ mod tests {
                 .expect("append final chunk"),
             CAS_UPLOAD_CHUNK_BYTES as u64 + 3
         );
-        let mut upload = pool
-            .take_complete(&upload_id)
-            .expect("take completed upload");
-        upload.file.seek(SeekFrom::Start(0)).expect("rewind upload");
-        let mut bytes = Vec::new();
-        upload.file.read_to_end(&mut bytes).expect("read upload");
+        let late_sender = pool.get(&upload_id).unwrap();
+        let upload = pool.take_complete(&upload_id).expect("take completed upload");
+        let prepared = upload.finish(&cas).expect("publish received file");
+        let bytes = std::fs::read(directory.path().join(prepared.physical_key)).unwrap();
+        assert!(pool.append(&upload_id, CAS_UPLOAD_CHUNK_BYTES as u64 + 3, &[11]).is_err());
+        assert!(late_sender.append(CAS_UPLOAD_CHUNK_BYTES as u64 + 3, &[11]).is_err());
         assert_eq!(bytes.len(), CAS_UPLOAD_CHUNK_BYTES + 3);
         assert_eq!(&bytes[..3], &[7, 7, 7]);
         assert_eq!(&bytes[CAS_UPLOAD_CHUNK_BYTES..], &[8, 9, 10]);
         assert_eq!(pool.reserved_bytes, 0);
+    }
+
+    #[test]
+    fn binary_upload_routes_bounded_parts_to_the_owned_file_and_releases_the_receiver() {
+        use crate::asset_byte_transport::{append_android, register_android_receiver, BINARY_PART_BYTES};
+        let directory = TempDir::new().unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut pool = CasUploadPool::default();
+        let bytes: Vec<u8> = (0..BINARY_PART_BYTES + 17).map(|i| (i % 256) as u8).collect();
+        pool.open_with_capacity(&cas, id.clone(), "binary-session".to_owned(), CasObjectRole::DirectObject,
+            bytes.len() as u64, BINARY_PART_BYTES, None).unwrap();
+        let upload = pool.get(&id).unwrap();
+        let weak = Arc::downgrade(&upload);
+        let receiver = register_android_receiver(&id, Arc::new(move |offset, bytes| {
+            weak.upgrade().ok_or("closed upload")?.append(offset, bytes).map_err(|error| error.to_string())
+        })).unwrap();
+        assert!(register_android_receiver(&id, receiver.clone()).is_err());
+        assert_eq!(append_android(&id, 0, &bytes[..BINARY_PART_BYTES]).unwrap().unwrap(), BINARY_PART_BYTES as u64);
+        assert!(append_android(&id, 0, &bytes[..1]).unwrap().is_err());
+        assert_eq!(append_android(&id, BINARY_PART_BYTES as u64, &bytes[BINARY_PART_BYTES..]).unwrap().unwrap(), bytes.len() as u64);
+        let staged = pool.take_complete(&id).unwrap();
+        let prepared = staged.finish(&cas).unwrap();
+        assert!(append_android(&id, bytes.len() as u64, &[0]).unwrap().is_err());
+        assert_eq!(cas.read_object(&prepared.content_hash).unwrap().unwrap(), bytes);
+        drop(receiver);
+        assert!(append_android(&id, 0, &[0]).is_none());
+        assert_eq!(pool.reserved_bytes, 0);
+    }
+
+    #[test]
+    fn cas_part_reads_check_the_range_size_and_admission_and_leave_no_handle_open() {
+        use crate::asset_repository::body_io::{register_object_purpose, reset_body_io, take_body_io, BodyPurpose};
+        let directory = TempDir::new().unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let part = CAS_READ_PART_BYTES as usize;
+        let bytes: Vec<u8> = (0..part + 7).map(|i| (i % 251) as u8).collect();
+        let size = bytes.len() as u64;
+        let prepared = cas.prepare_bytes(&bytes).unwrap();
+        let hash = prepared.content_hash.as_str();
+        let store = PersistentStoreState::default();
+        let read = |start: u64, end: u64, expected: u64| {
+            read_cas_part(&store, store.renderer_dispatch_epoch().unwrap(), directory.path(), hash, start, end, expected)
+        };
+        reset_body_io();
+        register_object_purpose(hash, BodyPurpose::Asset);
+
+        assert_eq!(read(0, part as u64, size).unwrap(), bytes[..part]);
+        assert_eq!(read(part as u64, size, size).unwrap(), bytes[part..]);
+        assert_eq!(read(size, size, size).unwrap(), Vec::<u8>::new());
+        assert_eq!(read(0, 10, size + 1).unwrap_err(), CAS_OBJECT_SIZE_MISMATCH);
+        assert!(read(0, part as u64 + 1, size).is_err());
+        assert!(read(2, 1, size).is_err());
+        assert!(read(0, size, size - 1).is_err());
+        assert_eq!(read(0, 1, 1).unwrap_err(), CAS_OBJECT_SIZE_MISMATCH);
+
+        let dispatched = store.renderer_dispatch_epoch().unwrap();
+        let maintenance = store.acquire_raw_capture().unwrap();
+        assert!(read(0, 1, size).is_err());
+        drop(maintenance);
+        assert!(read_cas_part(&store, dispatched, directory.path(), hash, 0, 1, size).is_err());
+        assert_eq!(read(0, 1, size).unwrap(), bytes[..1]);
+
+        let work = take_body_io();
+        assert!(work.complete());
+        assert_eq!(work.objects[hash].work.outstanding_readers, 0);
+        std::fs::remove_file(directory.path().join(&prepared.physical_key)).unwrap();
+        assert_eq!(read(0, 0, size).unwrap_err(), CAS_OBJECT_MISSING);
+        assert_eq!(read(0, 1, size).unwrap_err(), CAS_OBJECT_MISSING);
     }
 
     #[test]
@@ -1716,7 +1865,7 @@ mod tests {
             CAS_UPLOAD_CHUNK_BYTES as u64 + 1,
         )
         .expect("open upload for reset");
-        let staging_path = pool.uploads[&upload_id].file.path().to_path_buf();
+        let staging_path = pool.uploads[&upload_id].file.lock().unwrap().as_ref().unwrap().path().to_path_buf();
         assert!(staging_path.is_file());
         pool.clear();
         assert!(pool.uploads.is_empty());

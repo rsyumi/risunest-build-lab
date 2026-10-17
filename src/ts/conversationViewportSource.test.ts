@@ -7,6 +7,7 @@ import {
 } from './conversationViewportSource'
 import { ActiveConversationSession } from './storage/activeConversationSession'
 import { createConversationOperationContext } from './process/conversationOperationContext'
+import { CbsHistoryDependencies, hasCbsHistoryChanges } from './cbsHistoryAccess'
 import type { Chat, Message, character } from './storage/database.svelte'
 import type {
     ConversationWindowQuery,
@@ -439,9 +440,23 @@ describe('PersistentConversationViewportSource', () => {
             characterId: 'character-a', conversationId: 'conversation-a', revision: 1, totalMessages: 2, rowBudget: 64,
         })
         const lookup = source.findLatestMessagePair(new AbortController().signal)
-        source.applyOptimisticRange(1, 1, [{ role: 'user', data: 'changed' }])
+        const before = source.snapshot().historyVersion
+        const rollback = source.applyOptimisticRange(1, 1, [{ role: 'user', data: 'changed' }])
+        expect(source.snapshot().historyVersion).not.toBe(before)
         pending.resolve({ revision: 1, value: persistentWindow(0, [{ role: 'user', data: 'old-u' }, { role: 'char', data: 'old-c' }], 2) })
         await expect(lookup).rejects.toMatchObject({ name: 'AbortError' })
+        source.applyOptimisticRange(0, 1, [{ role: 'user', data: 'later edit' }])
+        source.applyOptimisticRange(2, 0, [{ role: 'char', data: 'later append' }])
+        const changed = source.snapshot().historyVersion
+        const earlierRow = new CbsHistoryDependencies()
+        earlierRow.range(0, 1)
+        const count = new CbsHistoryDependencies()
+        count.count = true
+        rollback()
+        expect(source.snapshot().historyVersion).not.toBe(changed)
+        expect(source.snapshot().totalMessages).toBe(2)
+        expect(hasCbsHistoryChanges(source.snapshot(), changed, earlierRow)).toBe(true)
+        expect(hasCbsHistoryChanges(source.snapshot(), changed, count)).toBe(true)
         source.dispose()
     })
 

@@ -4,12 +4,17 @@ import { writable } from 'svelte/store'
 import { beforeEach, expect, test, vi } from 'vitest'
 import type { Database, Message, character, customscript } from '../../../storage/database.svelte'
 import type { ChatScreenshotRenderContext } from '../../../chatScreenshotRange'
+import { planChatParserHistory } from '../../../chatParserHistory'
+import { captureResidentCbsHistory, prepareCbsHistory, type CbsHistoryReader } from '../../../prepareCbsHistory'
+import { createCbsHistoryAccess, CbsHistoryAccessError } from '../../../cbsHistoryAccess'
+import type { PersistentDataRuntime } from '../../../storage/persistentDataRuntime'
 
 vi.mock('../../../platform', async () => (await import('../../../platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 
 const live = vi.hoisted(() => ({
     database: {} as Database,
     modules: [] as Array<{ id: string; name: string; namespace?: string }>,
+    runtime: null as unknown as PersistentDataRuntime,
 }))
 const bergamotTranslate = vi.hoisted(() => vi.fn(async (
     _text: string,
@@ -41,6 +46,7 @@ vi.mock('../../../process/modules', () => ({
     getModuleLorebooks: () => [],
     getModuleAssets: () => [],
     getModuleRegexScripts: () => [],
+    getModuleTriggers: () => [],
 }))
 vi.mock('../../../process/memory/hypamemory', () => ({ HypaProcesser: class {} }))
 vi.mock('../../../process/scriptings', () => ({ runLuaEditTrigger: vi.fn() }))
@@ -50,6 +56,13 @@ vi.mock('../../../plugins/plugins.svelte', () => ({
 vi.mock('../../../process/triggers', () => ({ runTrigger: vi.fn() }))
 vi.mock('../../../alert', () => ({ alertError: vi.fn(), alertNormal: vi.fn() }))
 vi.mock('../../../process/index.svelte', () => ({ doingChat: writable(false) }))
+vi.mock('../../../storage/persistentDataRuntime.svelte', async (importOriginal) => ({
+    ...await importOriginal<typeof import('../../../storage/persistentDataRuntime.svelte')>(),
+    getPersistentStorageAuthorityEpoch: () => 0,
+    assertPersistentMutationAllowed: () => {},
+    peekActiveConversationSession: () => null,
+    getPersistentDataRuntime: () => live.runtime,
+}))
 vi.mock('../../../process/request/request', () => ({ requestChatData: vi.fn() }))
 vi.mock('../../../translator/bergamotTranslator', () => ({ bergamotTranslate }))
 
@@ -62,6 +75,11 @@ const {
 } = await import('../../../chatScreenshotRange')
 const { clearLLMCache, setLLMCache, translate, translateHTML } = await import('../../../translator/translator')
 const { runLuaEditTrigger } = await import('../../../process/scriptings')
+const { parseRisuChat } = await import('../../../plugins/parseRisuChat')
+const { pluginV2 } = await import('../../../plugins/plugins.svelte')
+const { createMetadataOnlySelectedConversation } = await import('../../../storage/selectedConversationLifecycle')
+const { acquireLiveDisplayParserLease, subscribeLiveDisplayParserSelection, captureLiveDisplayParserInputs } = await import('../../../liveDisplayParserLease')
+const { PersistentConversationViewportSource } = await import('../../../conversationViewportSource')
 
 function makeCharacter(name: string, messages = [
     { role: 'user' as const, data: `${name} previous` },
@@ -110,6 +128,7 @@ async function createProductScreenshotJob(input: {
     start: number
     end: number
     renderContext: ChatScreenshotRenderContext
+    bodyIndices?: number[]
 }) {
     const parserContext = input.renderContext.parserContext
     const sourceCharacter = parserContext.character
@@ -135,6 +154,7 @@ async function createProductScreenshotJob(input: {
         revision: 1,
         totalTurns: frozenMessages.length,
         async readRange(startIndex: number, limit: number) {
+            for (let index = startIndex; index < startIndex + limit; index++) input.bodyIndices?.push(index)
             return structuredClone(frozenMessages.slice(startIndex, startIndex + limit))
         },
     }
@@ -151,12 +171,401 @@ async function createProductScreenshotJob(input: {
         reader,
         input.start,
         input.end,
+        undefined,
+        risuChatParser,
     )
 }
 
 beforeEach(() => {
     live.database = makeDatabase(makeCharacter('Live'), 'Live')
     live.modules = [{ id: 'live', name: 'Live', namespace: 'live-module' }]
+    pluginV2.editprocess.clear()
+    vi.mocked(runLuaEditTrigger).mockImplementation(async (_char, _mode, content) => content)
+})
+
+test('Plugin parsing keeps upstream defaults, condition precedence and variable effects', async () => {
+    expect(await parseRisuChat('{{previoususerchat}}|{{lastmessageindex}}')).toBe('|1')
+    expect(await parseRisuChat('{{role}}', { role: 'user', cbsConditions: { chatRole: 'char' } })).toBe('char')
+    await parseRisuChat('{{setvar::score::written}}', { runVar: true })
+    expect(live.database.characters[0].chats[0].scriptstate.$score).toBe('written')
+    await expect(parseRisuChat('', { messageIndex: 2 })).rejects.toThrow('Invalid messageIndex: 2')
+    await expect(parseRisuChat('', { messageIndex: 0.5 })).rejects.toThrow('Invalid messageIndex: 0.5')
+})
+
+test('Plugin editprocess prepares the second CBS pass, permits reentrant calls and retains its target', async () => {
+    const original = live.database.characters[0]
+    original.chats[0].scriptstate.$expanded = '{{lastmessage}}'
+    let entered!: () => void
+    const inside = new Promise<void>((resolve) => { entered = resolve })
+    let resume!: () => void
+    const wait = new Promise<void>((resolve) => { resume = resolve })
+    pluginV2.editprocess.add(async (data) => {
+        expect(await parseRisuChat('{{lastmessageindex}}')).toBe('1')
+        entered()
+        await wait
+        return data
+    })
+    const pending = parseRisuChat('{{getvar::expanded}}', { processRegex: true })
+    await inside
+    live.database.characters[0] = makeCharacter('Navigated')
+    resume()
+    expect(await pending).toBe('Live current')
+})
+
+test.each(['navigate', 'stream', 'promote', 'unload'])('Plugin parsing retains its captured window and releases its lease after %s', async (action) => {
+    const character = live.database.characters[0]
+    const messages = character.chats[0].message
+    character.chats[0].id = 'original-conversation'
+    const completeChat = character.chats[0]
+    character.chats[0] = createMetadataOnlySelectedConversation(character.chats[0])
+    let finish!: () => void
+    const waiting = new Promise<void>((resolve) => { finish = resolve })
+    const release = vi.fn(async () => {})
+    const controller = new AbortController()
+    live.runtime = {
+        captureSelectedConversationAuthority: () => ({ totalMessages: 2, storeRevision: 1 }),
+        getActiveConversationViewportSource: () => ({ captureResidentRows: () => [{ absoluteIndex: 1, message: messages[1] }] }),
+        store: { acquireRevision: async () => ({ revision: 1, release,
+            readConversationWindow: async (query) => {
+                await waiting
+                return { revision: 1, value: {
+                    characterId: character.chaId, conversationId: 'original-conversation',
+                    startIndex: query.startIndex, endIndex: query.startIndex + query.limit,
+                    totalMessages: 2, messages: messages.slice(query.startIndex, query.startIndex + query.limit),
+                    hasMoreBefore: query.startIndex > 0, hasMoreAfter: false,
+                } }
+            },
+        }) },
+    } as unknown as PersistentDataRuntime
+    const pending = parseRisuChat('{{previouschatlog::0}}|{{lastmessage}}', undefined, controller.signal)
+    if (action === 'navigate') live.database.characters[0] = makeCharacter('Navigated')
+    if (action === 'stream') messages[1].data = 'next stream token'
+    let promoted: Promise<string> | undefined
+    if (action === 'promote') {
+        character.chats[0] = completeChat
+        promoted = parseRisuChat('{{lastmessage}}')
+        messages[1].data = 'next stream token'
+    }
+    if (action === 'unload') controller.abort()
+    finish()
+    if (action === 'unload') await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    else expect(await pending).toBe('Live previous|Live current')
+    if (promoted) expect(await promoted).toBe('Live current')
+    expect(release).toHaveBeenCalledOnce()
+    if (action === 'stream') expect(await parseRisuChat('{{lastmessage}}')).toBe('next stream token')
+})
+
+test('Plugin regex passes read only the history exposed by their actual output', async () => {
+    const character = live.database.characters[0]
+    const messages: Message[] = Array.from({ length: 80 }, (_, index) => ({ role: 'char', data: `row ${index}` }))
+    character.chats[0].id = 'chat'
+    character.chats[0] = createMetadataOnlySelectedConversation(character.chats[0])
+    character.chats[0].scriptstate.$expanded = '{{previouschatlog::70}}'
+    character.customscript = [{ type: 'editprocess', in: 'HP', out: '<b>HP</b>', flag: 'g', ableFlag: true }] as any
+    const indices: number[] = []
+    const release = vi.fn(async () => {})
+    live.runtime = {
+        captureSelectedConversationAuthority: () => ({ totalMessages: messages.length, storeRevision: 1 }),
+        getActiveConversationViewportSource: () => undefined,
+        store: { acquireRevision: async () => ({ revision: 1, release,
+            readConversationWindow: async (query) => {
+                const start = query.startIndex!, end = start + query.limit!
+                for (let index = start; index < end; index++) indices.push(index)
+                return { revision: 1, value: { characterId: character.chaId, conversationId: 'chat',
+                    startIndex: start, endIndex: end, totalMessages: messages.length,
+                    messages: messages.slice(start, end), hasMoreBefore: start > 0, hasMoreAfter: end < messages.length } }
+            },
+        }) },
+    } as unknown as PersistentDataRuntime
+    expect(await parseRisuChat('{{#when::1::is::1}}HP{{/when}}|{{lastmessageindex}}', { processRegex: true })).toBe('<b>HP</b>\n|79')
+    expect(indices).toEqual([])
+    expect(await parseRisuChat('{{getvar::expanded}}', { processRegex: true })).toBe('row 70')
+    expect(indices).toEqual([70])
+    indices.length = 0
+    character.customscript = [{ type: 'editprocess', in: 'H([0-9]+)', out: '{{previouschatlog::$1}}', flag: 'g', ableFlag: true }] as any
+    expect(await parseRisuChat('H2', { processRegex: true })).toBe('row 2')
+    expect(indices).toEqual([2])
+    messages[2].data = 'updated row 2'
+    expect(await parseRisuChat('H2', { processRegex: true })).toBe('updated row 2')
+    expect(indices).toEqual([2, 2])
+    expect(release).toHaveBeenCalledTimes(4)
+})
+
+test('prepared CBS reads match complete history for composed expressions and sparse rows', async () => {
+    const messages: Message[] = Array.from({ length: 80 }, (_, index) => ({
+        role: index % 3 ? 'char' : 'user', data: `turn ${index}`, time: 1_000_000 + index * 1000,
+    }))
+    const character = makeCharacter('Prepared', messages)
+    character.chats[0].id = 'conversation'
+    const db = makeDatabase(character, 'Prepared')
+    const readIndices: number[] = []
+    const reader: CbsHistoryReader = {
+        revision: 1,
+        async readConversationWindow(query) {
+            const start = query.startIndex!
+            const end = start + query.limit!
+            for (let i = start; i < end; i++) readIndices.push(i)
+            return { revision: 1, value: {
+                characterId: character.chaId, conversationId: 'conversation',
+                messages: messages.slice(start, end), startIndex: start, endIndex: end,
+                totalMessages: messages.length, hasMoreBefore: start > 0, hasMoreAfter: end < messages.length,
+            } }
+        },
+    }
+    const expressions = [
+        'plain text', '{{char}}', '{{lastmessageindex}}', '{{pick::a::b::c}}',
+        '{{previouschatlog::2}}|{{previous_chat_log::70}}', '{{lastmessage}}',
+        '{{previouscharchat}}', '{{previoususerchat}}', '{{messageidleduration}}',
+        '{{messagetime}}|{{messagedate}}|{{role}}', '{{idleduration}}',
+        '{{history}}', '{{userhistory}}', '{{charhistory}}', '{{messageunixtimearray}}',
+        '{{{{getvar::macro}}}}', '{{#if 1}}{{lastmessage}}{{/if}}',
+        '{{#pure}}{{lastmessage}}{{/pure}}', '{{#each {{array::a::b}}}}{{previouscharchat}}{{/each}}',
+        '{{#when::1::is::1}}{{previouschatlog::2}}{{/when}}',
+        '{{#escape}}{{history}}{{/escape}}', '{{#pure}}{{#if 1}}{{history}}{{/if}}{{/pure}}',
+        '{{#func::f}}{{lastmessage}}{{/func}}{{call::f}}', '<user>|<char>',
+        '{{#if {{getvar::flag}}}}{{lastmessage}}{{/if}}', '{{#when {{getvar::flag}}}}{{previouscharchat}}{{/when}}',
+        '{{? {{getvar::hp}}+{{lastmessageindex}}}}', '{{last message{{getvar::empty}}}}',
+        '<risu-style>7b7b6c6173746d657373616765696e6465787d7d</risu-style>',
+    ]
+    for (const chatID of [-1, 0, 16, 79]) {
+        for (const [index, expression] of expressions.entries()) {
+            const source = `${expression}|${expressions[(index + 3) % expressions.length]}`
+            const context = { db, chara: character, chatID, selectedCharID: 0,
+                chatVariables: { macro: 'lastmessage', flag: '1', hp: '3', empty: '' }, currentTime: 2_000_000 }
+            const expected = risuChatParser(source, { ...context })
+            const historyAccess = await prepareCbsHistory({ characterId: character.chaId,
+                conversationId: 'conversation', totalMessages: messages.length, chatID,
+                plan: planChatParserHistory({ source }), reader, pageSize: 4 })
+            const actual = risuChatParser(source, { ...context, historyAccess })
+            historyAccess.assertComplete()
+            expect(actual, `${chatID}: ${source}`).toBe(expected)
+        }
+    }
+    readIndices.length = 0
+    const source = '{{previouschatlog::2}}|{{previouschatlog::70}}'
+    const historyAccess = await prepareCbsHistory({ characterId: character.chaId,
+        conversationId: 'conversation', totalMessages: messages.length, chatID: -1,
+        plan: planChatParserHistory({ source }), reader })
+    expect(risuChatParser(source, { db, chara: character, historyAccess })).toBe('turn 2|turn 70')
+    expect(readIndices).toEqual([2, 70])
+    readIndices.length = 0
+    await prepareCbsHistory({ characterId: character.chaId, conversationId: 'conversation',
+        totalMessages: messages.length, chatID: 16,
+        plan: planChatParserHistory({ source: '{{lastmessageindex}}|{{pick::a::b}}' }), reader })
+    expect(readIndices).toEqual([])
+    for (const [source, index, affected] of [
+        ['plain', 79, false], ['{{lastmessageindex}}', 79, false],
+        ['{{previouschatlog::2}}', 79, false], ['{{previouschatlog::2}}', 2, true],
+        ['{{lastmessage}}', 78, false], ['{{lastmessage}}', 79, true],
+        ['{{previouscharchat}}', 13, false], ['{{previouscharchat}}', 15, true],
+        ['{{messageidleduration}}', 11, false], ['{{messageidleduration}}', 12, true],
+    ] as const) {
+        const access = await prepareCbsHistory({ characterId: character.chaId, conversationId: 'conversation',
+            totalMessages: messages.length, chatID: 16, plan: planChatParserHistory({ source }), reader })
+        expect(access.dependencies.affectedBy([{ start: index, end: index + 1, countChanged: false }]), source).toBe(affected)
+    }
+    const count = captureResidentCbsHistory(messages, planChatParserHistory({ source: '{{lastmessageindex}}' }), -1)
+    expect(count.dependencies.affectedBy([{ start: 80, end: 81, countChanged: true }])).toBe(true)
+})
+
+test('background and bookmark contexts read precise history and refresh on unpersisted tail edits', async () => {
+    const character = live.database.characters[0]
+    const messages = character.chats[0].message
+    character.chats[0].id = 'chat'
+    character.chats[0] = createMetadataOnlySelectedConversation(character.chats[0])
+    const bodyIndices: number[] = []
+    const readConversationWindow: CbsHistoryReader['readConversationWindow'] = async (query) => {
+        const start = query.startIndex!, end = start + query.limit!
+        for (let index = start; index < end; index++) bodyIndices.push(index)
+        return { revision: 1, value: { characterId: character.chaId, conversationId: 'chat',
+            startIndex: start, endIndex: end, totalMessages: 2, messages: messages.slice(start, end),
+            hasMoreBefore: start > 0, hasMoreAfter: end < 2 } }
+    }
+    const source = new PersistentConversationViewportSource({ characterId: character.chaId,
+        conversationId: 'chat', revision: 1, totalMessages: 2, rowBudget: 8, reader: { readConversationWindow } })
+    const release = vi.fn(async () => {})
+    const acquireRevision = vi.fn(async () => ({ revision: 1, readConversationWindow, release }))
+    live.runtime = {
+        captureSelectedConversationTarget: () => ({ characterId: character.chaId, conversationId: 'chat', storeRevision: 1, navigationGeneration: 0 }),
+        captureSelectedConversationAuthority: () => ({ totalMessages: source.snapshot().totalMessages, storeRevision: 1 }),
+        getActiveConversationViewportSource: () => source,
+        subscribeActiveConversationViewportSource: (listener) => { listener(source); return () => {} },
+        store: { acquireRevision },
+        acquireCompleteConversation: () => { throw new Error('Unexpected complete promotion') },
+    } as unknown as PersistentDataRuntime
+    const observed = vi.fn()
+    const unsubscribe = subscribeLiveDisplayParserSelection(observed)
+    const prepare = (text: string, parseFirst = true) => acquireLiveDisplayParserLease({
+        source: text, character, signal: new AbortController().signal, parseFirst, chatID: parseFirst ? -1 : 1,
+    })
+    character.customscript = [{ type: 'editdisplay', in: 'HP', out: '<b>HP</b>', flag: 'g', ableFlag: true }] as any
+    const plain = await prepare('{{#when::1::is::1}}HP{{/when}}')
+    expect(await ParseMarkdown(plain!.projection!.parsedSource!, character, 'back', -1, {}, {
+        scriptContext: plain!.projection!.context,
+    })).toBe('<b>HP</b>\n')
+    expect(bodyIndices).toEqual([])
+    // Each regex pass prepares its output, but none of them needs a stored row.
+    expect(acquireRevision).not.toHaveBeenCalled()
+    plain?.release()
+    await expect(plain!.projection!.context.parserContext.prepareHistory!('{{lastmessage}}', -1, false)).rejects.toThrow('Live display lease is closed')
+    const background = await prepare('{{previouscharchat}}|{{lastmessageindex}}')
+    expect(background?.projection?.parsedSource).toBe('Live current|1')
+    const inputs = captureLiveDisplayParserInputs('{{getvar::live}}', character)
+    character.chats[0].scriptstate.$live = 'new variable value'
+    expect(captureLiveDisplayParserInputs('{{getvar::live}}', character)).not.toEqual(inputs)
+    expect((await prepare('{{getvar::live}}'))?.projection?.parsedSource).toBe('new variable value')
+    const before = observed.mock.lastCall?.[1]
+    const fixed = await prepare('{{previouschatlog::0}}', false)
+    const fixedUpdates = vi.fn()
+    const unsubscribeFixed = subscribeLiveDisplayParserSelection(fixedUpdates, () => fixed?.projection?.context.parserContext.historyAccess?.dependencies)
+    fixedUpdates.mockClear()
+    observed.mockClear()
+    source.applyOptimisticRange(1, 1, [{ role: 'char', data: 'streamed tail' }])
+    expect(fixedUpdates).not.toHaveBeenCalled()
+    expect(observed).toHaveBeenCalledOnce()
+    expect(observed.mock.lastCall?.[1]).not.toBe(before)
+    expect((await prepare('{{lastmessage}}'))?.projection?.parsedSource).toBe('streamed tail')
+    source.applyOptimisticRange(2, 0, [{ role: 'user', data: 'appended' }])
+    expect(fixedUpdates).not.toHaveBeenCalled()
+    expect((await prepare('{{lastmessage}}|{{lastmessageindex}}'))?.projection?.parsedSource).toBe('appended|2')
+    const bookmark = await prepare('{{previouschatlog::0}}', false)
+    const parser = bookmark!.projection!.context.parserContext
+    expect(risuChatParser('{{previouschatlog::0}}', { ...parser, db: parser.database, chara: parser.character, chatID: 1 })).toBe('Live previous')
+    source.applyOptimisticRange(0, 1, [{ role: 'user', data: 'edited dependency' }])
+    expect(fixedUpdates).toHaveBeenCalledOnce()
+    unsubscribeFixed()
+    fixed?.release()
+    unsubscribe()
+    observed.mockClear()
+    source.applyOptimisticRange(2, 1, [{ role: 'user', data: 'later' }])
+    expect(observed).not.toHaveBeenCalled()
+    expect(bodyIndices.every((index) => index === 0 || index === 1)).toBe(true)
+    expect(release).toHaveBeenCalled()
+    // A display regex can expose a row only after an edit that the lease's own reads skipped.
+    character.customscript = [{ type: 'editdisplay', in: 'HP', out: '{{lastmessage}}', flag: 'g', ableFlag: true }] as any
+    const onStale = vi.fn()
+    const render = async (lease: Awaited<ReturnType<typeof prepare>>) => ParseMarkdown(lease!.projection!.parsedSource!, character, 'back', -1, {}, {
+        scriptContext: lease!.projection!.context,
+    })
+    const late = await acquireLiveDisplayParserLease({ source: 'HP', character, signal: new AbortController().signal, parseFirst: true, chatID: -1, onStale })
+    const lateUpdates = vi.fn()
+    const unsubscribeLate = subscribeLiveDisplayParserSelection(lateUpdates, () => late?.projection?.context.parserContext.historyAccess?.dependencies)
+    lateUpdates.mockClear()
+    source.applyOptimisticRange(3, 0, [{ role: 'char', data: 'late tail' }])
+    expect(lateUpdates).not.toHaveBeenCalled()
+    await expect(render(late)).rejects.toThrow('Live display conversation changed during preparation')
+    expect(onStale).toHaveBeenCalledOnce()
+    // The owner hears about it after the parse call stack, which can be a Svelte derived.
+    const repeated = late!.projection!.context.parserContext.prepareHistory!('{{lastmessage}}', -1, false)
+    expect(onStale).toHaveBeenCalledOnce()
+    await expect(repeated).rejects.toThrow('Live display conversation changed during preparation')
+    expect(onStale).toHaveBeenCalledTimes(2)
+    unsubscribeLate()
+    late?.release()
+    await expect(late!.projection!.context.parserContext.prepareHistory!('{{lastmessage}}', -1, false)).rejects.toThrow('Live display lease is closed')
+    expect(onStale).toHaveBeenCalledTimes(2)
+    expect(await render(await prepare('HP'))).toBe('late tail')
+    source.dispose()
+})
+
+test.each([false, true])('prepares newly exposed screenshot CBS and subsequent style parsing (style %s)', async (style) => {
+    const character = makeCharacter('Stages', [
+        { role: 'user', data: style ? '{{previouschatlog::2}}' : '{{lastmessage}}' },
+        { role: 'char', data: '{{previouschatlog::0}}' },
+        ...(style ? [{ role: 'char' as const, data: `<risu-style>${Buffer.from('.sample { content: "{{lastmessage}}"; }').toString('hex')}</risu-style>` }] : []),
+        { role: 'char', data: 'captured tail' },
+    ])
+    const database = makeDatabase(character, 'Stages')
+    const context = {
+        character: null, characterName: character.name, moduleAssets: [], presetRegex: [], moduleRegexScripts: [],
+        parserContext: { database, character, userName: 'User', personaPrompt: '', modules: [],
+            moduleLorebooks: [], selectedCharID: 0, chatVariables: {}, globalChatVariables: {}, currentTime: 1 },
+        settings: { autoTranslate: false, dynamicAssets: false, dynamicAssetsEditDisplay: false },
+    } as unknown as ChatScreenshotRenderContext
+    const job = await createProductScreenshotJob({ characterId: character.chaId, chatId: 'chat',
+        messages: character.chats[0].message, start: 2, end: 2, renderContext: context })
+    const captured = job.renderContext
+    expect(captured.preparedDisplayText?.[1]).toEqual({ source: '{{previouschatlog::0}}', text: style ? '{{previouschatlog::2}}' : '{{lastmessage}}' })
+    const output = await ParseMarkdown(captured.preparedDisplayText![1].text, character, 'back', 1, {}, {
+        scriptContext: { ...captured, dynamicAssets: false, dynamicAssetsEditDisplay: false } as any,
+    })
+    expect(output).toContain('captured tail')
+    expect(() => captured.parserContext.historyAccess!.assertComplete()).not.toThrow()
+    if (style) {
+        const messages = character.chats[0].message
+        const source = captured.preparedDisplayText![1].text
+        const liveContext = { ...context, dynamicAssets: false, dynamicAssetsEditDisplay: false,
+            parserContext: { ...context.parserContext,
+                historyAccess: captureResidentCbsHistory(messages, planChatParserHistory({ source }), 1),
+                prepareHistory: async (text: string, index: number) =>
+                    captureResidentCbsHistory(messages, planChatParserHistory({ source: text }), index),
+            } }
+        expect(await ParseMarkdown(source, character, 'back', 1, {}, { scriptContext: liveContext })).toContain('captured tail')
+    }
+})
+
+test.each([false, true])('screenshots defer regex-created CBS reads until rendering (translation %s)', async (translate) => {
+    const messages: Message[] = Array.from({ length: 80 }, (_, index) => ({ role: 'char', data: index === 6 ? 'H2' : `row ${index}` }))
+    const character = makeCharacter('Screenshot', messages)
+    character.customscript = [{ type: 'editdisplay', in: 'H([0-9]+)', out: '{{previouschatlog::$1}}', flag: 'g', ableFlag: true }] as any
+    const database = { ...makeDatabase(character, 'Screenshot'), translatorType: 'bergamot', htmlTranslation: true,
+        translator: 'ko', aiModel: 'gpt' } as Database
+    const context = { character: null, characterName: character.name, moduleAssets: [], presetRegex: [], moduleRegexScripts: [],
+        parserContext: { database, character, userName: 'User', personaPrompt: '', modules: [], moduleLorebooks: [],
+            selectedCharID: 0, chatVariables: {}, globalChatVariables: {}, currentTime: 1 },
+        settings: { autoTranslate: translate, dynamicAssets: false, dynamicAssetsEditDisplay: false },
+    } as unknown as ChatScreenshotRenderContext
+    const bodyIndices: number[] = []
+    const job = await createProductScreenshotJob({ characterId: character.chaId, chatId: 'chat', messages,
+        start: 7, end: 7, renderContext: context, bodyIndices })
+    expect(bodyIndices).toEqual([6])
+    const scriptContext = { ...job.renderContext, dynamicAssets: false, dynamicAssetsEditDisplay: false } as any
+    let text = job.messages[0].data
+    if (translate) {
+        bergamotTranslate.mockResolvedValueOnce('H2')
+        text = await translateHTML(text, false, character, 6, false, { scriptContext })
+    }
+    expect(await ParseMarkdown(text, character, 'back', 6, {}, { scriptContext })).toBe('row 2')
+    expect(bodyIndices).toEqual([6, 2])
+})
+
+test.each([false, true])('backward CBS scans use backend-aware bounded reads (projected %s)', async (projected) => {
+    const messages: Message[] = Array.from({ length: 12 }, (_, index) => ({
+        role: index === 2 ? 'user' : 'char', data: `row ${index}`,
+    }))
+    const bodyIndices: number[] = []
+    const roleIndices: number[] = []
+    const reader: CbsHistoryReader = { revision: 1, async readConversationWindow(query) {
+        const start = query.startIndex!, end = start + query.limit!
+        for (let index = start; index < end; index++) bodyIndices.push(index)
+        return { revision: 1, value: { characterId: 'c', conversationId: 'chat', startIndex: start, endIndex: end,
+            totalMessages: 12, messages: messages.slice(start, end), hasMoreBefore: start > 0, hasMoreAfter: end < 12 } }
+    } }
+    if (projected) reader.readRoleWindow = async (query) => {
+        const start = query.startIndex!, end = start + query.limit!
+        for (let index = start; index < end; index++) roleIndices.push(index)
+        return { revision: 1, value: { characterId: 'c', conversationId: 'chat', startIndex: start, endIndex: end,
+            totalMessages: 12, messages: messages.slice(start, end).map(({ role }) => ({ role, parserInert: true })),
+            hasMoreBefore: start > 0, hasMoreAfter: end < 12 } }
+    }
+    const access = await prepareCbsHistory({ characterId: 'c', conversationId: 'chat', totalMessages: 12,
+        chatID: 11, pageSize: 4, plan: planChatParserHistory({ source: '{{previoususerchat}}' }), reader })
+    expect(access.previous('user', 11, 1).map(({ data }) => data)).toEqual(['row 2'])
+    expect(new Set(bodyIndices).size).toBe(bodyIndices.length)
+    expect(bodyIndices.length).toBe(projected ? 1 : 11)
+    expect(roleIndices.length).toBe(projected ? 11 : 0)
+    expect(Array.from({ length: 12 }, (_, index) => access.peek(index)).filter(Boolean)).toHaveLength(1)
+})
+
+test('a missing prepared row is observable and does not replay preceding variable writes', () => {
+    const historyAccess = createCbsHistoryAccess({ length: 2, rows: new Map() })
+    const writes: string[] = []
+    expect(() => risuChatParser('{{setvar::score::changed}}{{lastmessage}}', {
+        db: live.database, historyAccess, runVar: true,
+        setChatVar: (key, value) => writes.push(`${key}:${value}`),
+    })).toThrow(CbsHistoryAccessError)
+    expect(writes).toEqual(['score:changed'])
+    expect(() => historyAccess.assertComplete()).toThrow(CbsHistoryAccessError)
 })
 
 test('does not rerun live display Lua after an obsolete translation finishes', async () => {
@@ -552,7 +961,8 @@ test('keeps the original final message and absolute id for a middle capture rang
     )
 
     expect(output).toContain('original final turn|4')
-    expect(capture.parserContext.character.chats[0].message).toHaveLength(5)
+    expect(capture.parserContext.historyAccess?.length).toBe(5)
+    expect(capture.parserContext.historyAccess?.row(4)?.data).toBe('original final turn')
 })
 
 test('uses frozen parser and regex inputs through real cached auto-translation', async () => {

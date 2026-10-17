@@ -89,9 +89,9 @@ export async function measureEntryCount({ count, directory, evaluate, memory, sa
         assert.equal(item.key, `assets/${name(index)}`);
         assert.equal(item.size, bodyLength);
         assert.equal(item.objectHash, digest(body(index)));
-        return { contentHash: item.objectHash, start: 0, endExclusive: bodyLength };
+        return { contentHash: item.objectHash, start: 0, endExclusive: bodyLength, expectedSize: bodyLength };
       });
-      const values = await evaluate(`Promise.all(${JSON.stringify(expected)}.map(args=>globalThis.__TAURI_INTERNALS__.invoke('asset_cas_read_object_range',args)))`);
+      const values = await evaluate(`Promise.all(${JSON.stringify(expected)}.map(args=>globalThis.__TAURI_INTERNALS__.invoke('asset_cas_read_bytes',args).then(bytes=>Array.from(new Uint8Array(bytes)))))`);
       for (let offset = 0; offset < values.length; offset++) assert.deepEqual(Buffer.from(values[offset]), body(verified + offset));
       verified += items.length;
     }

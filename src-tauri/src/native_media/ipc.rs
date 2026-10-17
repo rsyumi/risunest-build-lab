@@ -34,6 +34,8 @@ struct Uploading {
     total_bytes: u64,
     received: u64,
     file: tempfile::NamedTempFile,
+    capacity: usize,
+    _receiver: Option<std::sync::Arc<crate::asset_byte_transport::AndroidReceiver>>,
 }
 
 struct Processing {
@@ -90,11 +92,19 @@ impl TransferPool {
             .ok_or_else(|| "native media transfer quota is unavailable".to_owned())
     }
 
+    #[cfg(test)]
     fn open(
         &mut self,
         id: String,
         total_bytes: u64,
         file: tempfile::NamedTempFile,
+    ) -> Result<(), String> {
+        self.open_with_capacity(id, total_bytes, file, NATIVE_MEDIA_IPC_CHUNK_BYTES, None)
+    }
+
+    fn open_with_capacity(
+        &mut self, id: String, total_bytes: u64, file: tempfile::NamedTempFile, capacity: usize,
+        receiver: Option<std::sync::Arc<crate::asset_byte_transport::AndroidReceiver>>,
     ) -> Result<(), String> {
         if uuid::Uuid::parse_str(&id).is_err() {
             return Err("invalid native media transfer ID".to_owned());
@@ -115,6 +125,7 @@ impl TransferPool {
                 total_bytes,
                 received: 0,
                 file,
+                capacity, _receiver: receiver,
             }),
         );
         self.reserved_bytes = reserved_bytes;
@@ -127,7 +138,7 @@ impl TransferPool {
         };
         if offset != upload.received
             || chunk.is_empty()
-            || chunk.len() > NATIVE_MEDIA_IPC_CHUNK_BYTES
+            || chunk.len() > upload.capacity
         {
             return Err("invalid native media input chunk".to_owned());
         }
@@ -543,6 +554,7 @@ pub(crate) async fn native_media_inlay_input_open(
     app: AppHandle,
     upload_id: String,
     total_bytes: u64,
+    binary: Option<bool>,
 ) -> Result<NativeMediaInputOpened, String> {
     logged("native_media_inlay_input_open", async move {
         tauri::async_runtime::spawn_blocking(move || {
@@ -552,13 +564,24 @@ pub(crate) async fn native_media_inlay_input_open(
                 .map_err(|error| error.to_string())?;
             let state = app.state::<NativeMediaIpcState>();
             let file = state.create_spool()?;
+            let capacity = if binary.unwrap_or(false) { crate::asset_byte_transport::BINARY_PART_BYTES } else { NATIVE_MEDIA_IPC_CHUNK_BYTES };
+            #[cfg(not(target_os = "android"))]
+            let receiver = None;
+            #[cfg(target_os = "android")]
+            let receiver = if binary.unwrap_or(false) {
+                let receiver_app = app.clone();
+                let receiver_id = upload_id.clone();
+                Some(crate::asset_byte_transport::register_android_receiver(&upload_id, std::sync::Arc::new(move |offset, bytes| {
+                    append_input(&receiver_app, &receiver_id, offset, bytes)
+                }))?)
+            } else { None };
             state
                 .pool
                 .lock()
                 .map_err(|error| format!("native media transfer mutex poisoned: {error}"))?
-                .open(upload_id, total_bytes, file)?;
+                .open_with_capacity(upload_id, total_bytes, file, capacity, receiver)?;
             Ok(NativeMediaInputOpened {
-                capacity: NATIVE_MEDIA_IPC_CHUNK_BYTES,
+                capacity,
             })
         })
         .await
@@ -575,19 +598,27 @@ pub(crate) async fn native_media_inlay_input_chunk(
 ) -> Result<u64, String> {
     logged("native_media_inlay_input_chunk", async move {
         tauri::async_runtime::spawn_blocking(move || {
-            let _operation = app
-                .state::<PersistentStoreState>()
-                .admit_renderer_operation()
-                .map_err(|error| error.to_string())?;
-            app.state::<NativeMediaIpcState>()
-                .pool
-                .lock()
-                .map_err(|error| format!("native media transfer mutex poisoned: {error}"))?
-                .append(&upload_id, offset, &data)
+            if data.len() > NATIVE_MEDIA_IPC_CHUNK_BYTES { return Err("Native media JSON part exceeds its capacity".to_owned()); }
+            append_input(&app, &upload_id, offset, &data)
         })
         .await
         .map_err(|error| format!("failed to join native media input chunk operation: {error}"))?
     }.await)
+}
+
+fn append_input(app: &AppHandle, upload_id: &str, offset: u64, data: &[u8]) -> Result<u64, String> {
+    let _operation = app.state::<PersistentStoreState>().admit_renderer_operation().map_err(|error| error.to_string())?;
+    app.state::<NativeMediaIpcState>().pool.lock()
+        .map_err(|error| format!("native media transfer mutex poisoned: {error}"))?
+        .append(upload_id, offset, data)
+}
+
+#[tauri::command(async)]
+pub(crate) fn native_media_inlay_input_chunk_raw(
+    app: AppHandle, request: tauri::ipc::Request<'_>,
+) -> Result<u64, crate::asset_byte_transport::ByteTransferError> {
+    logged("native_media_inlay_input_chunk_raw", crate::asset_byte_transport::raw_part(&request)
+        .and_then(|(id, offset, bytes)| append_input(&app, &id, offset, bytes).map_err(Into::into)))
 }
 
 #[tauri::command]

@@ -56,6 +56,7 @@ macro_rules! async_commands {
 }
 
 async_commands![
+    diagnostics::diagnostic_device_info,
     network_log::network_log_command,
     app_paths::app_paths_roots,
     app_cleanup::app_cleanup_request,
@@ -132,7 +133,7 @@ async_commands![
     native_media::ipc::native_media_inlay_input_chunk,
     native_media::ipc::native_media_encode_inlay_finish,
     native_media::ipc::native_media_inlay_output_read,
-    asset_repository::commands::asset_cas_read_object_range,
+    asset_repository::commands::asset_cas_read_bytes,
     asset_repository::commands::asset_cas_stat_object,
     asset_repository::commands::asset_remote_stat_object,
     asset_repository::commands::asset_remote_hydrate_object,

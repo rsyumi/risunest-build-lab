@@ -1,5 +1,5 @@
 #[test]
-#[ignore = "explicit synthetic encrypted database, attachment and record resource measurements"]
+#[ignore = "explicit synthetic encrypted database, attachment, asset and record resource measurements"]
 fn native_backup_resource_measurement() {
     use std::sync::atomic::{AtomicBool, AtomicU64};
     let manifest_path = PathBuf::from(std::env::var_os("RISUNEST_RESTORE_RESOURCE_MANIFEST").expect("synthetic fixture manifest"));
@@ -95,22 +95,27 @@ fn native_backup_resource_measurement() {
         assert_eq!(seen, count);
         assert_eq!(hex::encode(projection.finalize()), character["projectionSha256"]);
     }
-    if let Some(attachment) = manifest.get("attachment") {
+    let attachments = manifest.get("attachments").and_then(Value::as_array).cloned()
+        .unwrap_or_else(|| manifest.get("attachment").cloned().into_iter().collect());
+    if !attachments.is_empty() {
         let aliases = payloads["aliases"].as_array().unwrap();
-        assert_eq!(aliases.len(), 1);
-        let alias = &aliases[0];
-        assert_eq!(alias["objectHash"], attachment["sha256"]);
-        assert_eq!(alias["size"], attachment["bytes"]);
-        let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
-        let hash = attachment["sha256"].as_str().unwrap();
-        let mut body = cas.open_object_tracked(hash).unwrap().unwrap();
-        let mut digest = Sha256::new();
-        loop {
-            let count = body.read(&mut buffer).unwrap();
-            if count == 0 { break; }
-            digest.update(&buffer[..count]);
+        assert_eq!(aliases.len(), attachments.len());
+        for attachment in &attachments {
+            let alias = aliases.iter().find(|alias| alias["objectHash"] == attachment["sha256"]).unwrap();
+            if let Some(key) = attachment.get("key") { assert_eq!(&alias["key"], key); }
+            assert_eq!(alias["objectHash"], attachment["sha256"]);
+            assert_eq!(alias["size"], attachment["bytes"]);
+            let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
+            let hash = attachment["sha256"].as_str().unwrap();
+            let mut body = cas.open_object_tracked(hash).unwrap().unwrap();
+            let mut digest = Sha256::new();
+            loop {
+                let count = body.read(&mut buffer).unwrap();
+                if count == 0 { break; }
+                digest.update(&buffer[..count]);
+            }
+            assert_eq!(hex::encode(digest.finalize()), hash);
         }
-        assert_eq!(hex::encode(digest.finalize()), hash);
     }
     fs::write(report_path, serde_json::to_vec_pretty(&json!({
         "schema":"risunest.synthetic-restore-resources-result/v1", "synthetic":true,
@@ -124,6 +129,6 @@ fn native_backup_resource_measurement() {
         "sampledPeakStagingBytes":staging_peak.load(Ordering::Acquire),
         "sampledPeakDatabaseBytes":database_peak.load(Ordering::Acquire),
         "diskAfterBytes":disk_bytes(directory.path()),"elapsedMs":restore_elapsed,
-        "characterCount":result.character_count,"verified":true,
+        "characterCount":result.character_count,"assetCount":attachments.len(),"verified":true,
     })).unwrap()).unwrap();
 }

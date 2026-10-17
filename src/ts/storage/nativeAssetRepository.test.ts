@@ -4,78 +4,234 @@ import {
     beginCasJob,
     createNativeDurableAssetWriteSessionFactory,
     createNativeDurableCasJobSessionFactory,
+    createNativeCasReadBudget,
     createNativeImmutablePayloadCas,
     createNativeRemoteAssetReader,
     createNativeNewInlayImageEncoder,
     finalizeContentCasJob,
-    NATIVE_CAS_IPC_CHUNK_BYTES,
+    NATIVE_CAS_READ_PART_BYTES,
+    NativeCasReadStallError,
     pinExistingCasObject,
     prepareCasObject,
     releaseCasJob,
     sealCasJob,
 } from './nativeAssetRepository'
+import { PayloadSizeMismatchError } from './payloadCas'
 
-describe('native asset repository adapters', () => {
-    it('rejects bare native writes and uses native CAS commands for bounded reads', async () => {
-        const invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => {
-            if (command === 'asset_cas_read_object_range') {
-                return args?.start === 0 ? [1, 2, 3] : [2]
-            }
-            if (command === 'asset_cas_stat_object') return 3
-            throw new Error(`Unexpected command ${command}`)
-        })
-        const cas = createNativeImmutablePayloadCas(invoke)
+const P = NATIVE_CAS_READ_PART_BYTES
+const objectHash = '11'.repeat(32)
 
-        await expect(cas.prepare(Uint8Array.of(1, 2, 3))).rejects.toThrow(
-            'durable ownership session',
-        )
-        await expect(cas.readObject('11'.repeat(32))).resolves.toEqual(Uint8Array.of(1, 2, 3))
-        await expect(cas.readObjectRange('11'.repeat(32), {
-            start: 1,
-            endExclusive: 2,
-        })).resolves.toEqual(Uint8Array.of(2))
-        await expect(cas.statObject('11'.repeat(32))).resolves.toBe(3)
-        expect(invoke).toHaveBeenCalledWith('asset_cas_read_object_range', {
-            contentHash: '11'.repeat(32),
-            start: 1,
-            endExclusive: 2,
-        })
+function sameBytes(actual: Uint8Array | null, expected: Uint8Array): boolean {
+    return actual !== null && Buffer.from(actual).equals(Buffer.from(expected))
+}
+
+/** Serves one stored object the way `asset_cas_read_bytes` answers, including its input checks. */
+function servedObject(source: Uint8Array | null) {
+    return vi.fn(async (command: string, args?: Record<string, unknown>) => {
+        if (command === 'asset_cas_stat_object') return source?.length ?? null
+        if (command !== 'asset_cas_read_bytes') throw new Error(`Unexpected command ${command}`)
+        const start = Number(args?.start)
+        const end = Number(args?.endExclusive)
+        if (end < start || end - start > P || end > Number(args?.expectedSize)) throw 'invalid CAS read range'
+        if (source === null) throw 'cas-object-missing'
+        if (source.length !== args?.expectedSize) throw 'cas-object-size-mismatch'
+        return source.slice(start, end).buffer
+    })
+}
+
+function readCommands(invoke: ReturnType<typeof vi.fn>) {
+    return invoke.mock.calls.filter(([command]) => command === 'asset_cas_read_bytes')
+}
+
+describe('native CAS reads', () => {
+    it('reads an object of at most one part in one call without a stat when its size is known', async () => {
+        const source = Uint8Array.from({ length: 100 * 1024 }, (_, index) => index % 251)
+        const invoke = servedObject(source)
+        const cas = createNativeImmutablePayloadCas(invoke, createNativeCasReadBudget())
+
+        await expect(cas.prepare(Uint8Array.of(1, 2, 3))).rejects.toThrow('durable ownership session')
+        expect(sameBytes(await cas.readObject(objectHash, source.length), source)).toBe(true)
+        expect(invoke.mock.calls).toEqual([['asset_cas_read_bytes', {
+            contentHash: objectHash, start: 0, endExclusive: source.length, expectedSize: source.length,
+        }]])
+
+        invoke.mockClear()
+        expect(sameBytes(await cas.readObject(objectHash), source)).toBe(true)
+        expect(invoke.mock.calls.map(([command]) => command)).toEqual(['asset_cas_stat_object', 'asset_cas_read_bytes'])
+        await expect(cas.statObject(objectHash)).resolves.toBe(source.length)
     })
 
-    it('hydrates remote bytes once and reconstructs bounded CAS responses', async () => {
-        const source = Uint8Array.from({ length: 200 * 1024 }, (_, index) => index % 251)
+    it.each([0, 1, 64 * 1024 - 1, 64 * 1024, 64 * 1024 + 1, 256 * 1024 - 1, 256 * 1024, 256 * 1024 + 1, P - 1, P, P + 1, 3 * P + 5])(
+        'reads a %i-byte object exactly, one call per part',
+        async (size) => {
+            const source = Uint8Array.from({ length: size }, (_, index) => (index * 7) % 251)
+            const invoke = servedObject(source)
+            const result = await createNativeImmutablePayloadCas(invoke, createNativeCasReadBudget()).readObject(objectHash, size)
+            expect(sameBytes(result, source)).toBe(true)
+            expect(readCommands(invoke)).toHaveLength(Math.max(1, Math.ceil(size / P)))
+        },
+    )
+
+    it('reads ranges that cross parts, end at EOF or start beyond it', async () => {
+        const size = 3 * P + 5
+        const source = Uint8Array.from({ length: size }, (_, index) => (index * 13) % 251)
+        const cas = createNativeImmutablePayloadCas(servedObject(source), createNativeCasReadBudget())
+        for (const [start, end] of [
+            [P - 3, P + 3], [P - 1, 2 * P + 1], [5, 5], [size - 10, size], [size - 10, size + 99],
+            [0, Number.MAX_SAFE_INTEGER], [size, size + 1], [size + 1, Number.MAX_SAFE_INTEGER],
+        ]) {
+            const result = await cas.readObjectRange(objectHash, { start, endExclusive: end }, size)
+            expect(sameBytes(result, source.subarray(Math.min(start, size), Math.min(end, size)))).toBe(true)
+        }
+        await expect(cas.readObjectRange(objectHash, { start: 2, endExclusive: 1 }, size)).rejects.toThrow(RangeError)
+    })
+
+    it('returns null for a missing object, even for an empty range, and empty bytes for an empty object', async () => {
+        const missing = createNativeImmutablePayloadCas(servedObject(null), createNativeCasReadBudget())
+        await expect(missing.readObject(objectHash, 10)).resolves.toBeNull()
+        await expect(missing.readObject(objectHash)).resolves.toBeNull()
+        await expect(missing.readObjectRange(objectHash, { start: 0, endExclusive: 0 }, 10)).resolves.toBeNull()
+        await expect(missing.readObjectRange(objectHash, { start: 20, endExclusive: 30 }, 10)).resolves.toBeNull()
+
+        const empty = createNativeImmutablePayloadCas(servedObject(new Uint8Array()), createNativeCasReadBudget())
+        await expect(empty.readObject(objectHash, 0)).resolves.toEqual(new Uint8Array())
+        await expect(empty.readObject(objectHash)).resolves.toEqual(new Uint8Array())
+    })
+
+    it('reports a size mismatch and never reserves a result before the first part confirms the object', async () => {
+        const budget = createNativeCasReadBudget()
+        const changed = createNativeImmutablePayloadCas(servedObject(new Uint8Array(200)), budget)
+        await expect(changed.readObjectRange(objectHash, { start: 0, endExclusive: 10 }, 100))
+            .rejects.toBeInstanceOf(PayloadSizeMismatchError)
+        // A result of this size cannot be allocated, so only a deferred allocation reaches native.
+        const huge = Number.MAX_SAFE_INTEGER
+        await expect(createNativeImmutablePayloadCas(servedObject(null), budget).readObject(objectHash, huge)).resolves.toBeNull()
+        await expect(changed.readObject(objectHash, huge)).rejects.toBeInstanceOf(PayloadSizeMismatchError)
+        await expect(changed.readObject(objectHash, -1)).rejects.toThrow(TypeError)
+    })
+
+    it.each(['missing', 'changed', 'failed', 'short'] as const)('settles a read above one part when a later part is %s', async (outcome) => {
+        const size = 2 * P + 1
+        const invoke = vi.fn(async (_command: string, args?: Record<string, unknown>) => {
+            const start = Number(args?.start)
+            const end = Number(args?.endExclusive)
+            if (start > 0) {
+                if (outcome === 'missing') throw 'cas-object-missing'
+                if (outcome === 'changed') throw 'cas-object-size-mismatch'
+                if (outcome === 'failed') throw 'persistent storage is unavailable during device backup maintenance'
+                return new Uint8Array(end - start - 1).buffer
+            }
+            return new Uint8Array(end - start).buffer
+        })
+        const result = createNativeImmutablePayloadCas(invoke, createNativeCasReadBudget()).readObject(objectHash, size)
+        if (outcome === 'missing') await expect(result).resolves.toBeNull()
+        else if (outcome === 'changed') await expect(result).rejects.toBeInstanceOf(PayloadSizeMismatchError)
+        else if (outcome === 'failed') await expect(result).rejects.toBe('persistent storage is unavailable during device backup maintenance')
+        else await expect(result).rejects.toThrow('invalid length')
+        expect(readCommands(invoke)).toHaveLength(2)
+    })
+
+    it('completes 64 concurrent reads above and below one part within the document budget', async () => {
+        const sources = new Map(Array.from({ length: 64 }, (_, index) => [
+            index.toString(16).padStart(2, '0').repeat(32),
+            new Uint8Array(index % 2 ? P + 3 + index : 100 + index).fill(index),
+        ]))
+        let inFlight = 0
+        let peak = 0
+        const invoke = vi.fn(async (_command: string, args?: Record<string, unknown>) => {
+            const length = Number(args?.endExclusive) - Number(args?.start)
+            const weight = Math.max(length, 256 * 1024)
+            inFlight += weight
+            peak = Math.max(peak, inFlight)
+            await new Promise((resolve) => setTimeout(resolve, 0))
+            inFlight -= weight
+            const source = sources.get(String(args?.contentHash))!
+            return source.slice(Number(args?.start), Number(args?.endExclusive)).buffer
+        })
+        const cas = createNativeImmutablePayloadCas(invoke, createNativeCasReadBudget())
+        const results = await Promise.all([...sources].map(([hash, source]) => cas.readObject(hash, source.length)))
+        expect(results.every((result, index) => sameBytes(result, [...sources.values()][index]))).toBe(true)
+        expect(peak).toBeGreaterThan(P)
+        expect(peak).toBeLessThanOrEqual(8 * 1024 * 1024)
+    })
+
+    it('shares one default budget between CAS and remote reads and sends nothing beyond it until an invoke settles', async () => {
+        const held: (() => void)[] = []
+        const invoke = vi.fn((command: string, args?: Record<string, unknown>) => {
+            if (command === 'asset_remote_hydrate_object') return Promise.resolve(P)
+            const length = Number(args?.endExclusive) - Number(args?.start)
+            return new Promise((resolve) => held.push(() => resolve(new Uint8Array(length).buffer)))
+        })
+        const reads = [
+            ...Array.from({ length: 6 }, () => createNativeImmutablePayloadCas(invoke).readObject(objectHash, P)),
+            ...Array.from({ length: 6 }, () => createNativeRemoteAssetReader(invoke).readObject(objectHash)),
+        ]
+        await vi.waitFor(() => expect(readCommands(invoke)).toHaveLength(8))
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        expect(readCommands(invoke)).toHaveLength(8)
+        held.shift()!()
+        await vi.waitFor(() => expect(readCommands(invoke)).toHaveLength(9))
+        while (held.length > 0 || readCommands(invoke).length < 12) {
+            if (held.length > 0) held.shift()!()
+            await new Promise((resolve) => setTimeout(resolve, 0))
+        }
+        expect((await Promise.all(reads)).every((result) => result?.byteLength === P)).toBe(true)
+    })
+
+    it('serves waiting reads in order and releases a stalled invoke once, discarding its late result', async () => {
+        vi.useFakeTimers()
+        try {
+            const held: ((value: unknown) => void)[] = []
+            const invoke = vi.fn(() => new Promise((resolve) => held.push(resolve)))
+            const budget = createNativeCasReadBudget({ capacityBytes: 2, minimumWeightBytes: 1, stallMs: 1000 })
+            const cas = createNativeImmutablePayloadCas(invoke, budget)
+            const stalled = cas.readObject(objectHash, 1)
+            const large = cas.readObject(objectHash, 2)
+            const small = cas.readObject(objectHash, 1)
+            await vi.advanceTimersByTimeAsync(999)
+            expect(readCommands(invoke)).toHaveLength(1)
+            const failed = expect(stalled).rejects.toBeInstanceOf(NativeCasReadStallError)
+            await vi.advanceTimersByTimeAsync(1)
+            await failed
+            expect(readCommands(invoke)).toHaveLength(2)
+            held[0](Uint8Array.of(9).buffer)
+            await vi.advanceTimersByTimeAsync(0)
+            expect(readCommands(invoke)).toHaveLength(2)
+            held[1](Uint8Array.of(1, 2).buffer)
+            await expect(large).resolves.toEqual(Uint8Array.of(1, 2))
+            await vi.advanceTimersByTimeAsync(0)
+            held[2](Uint8Array.of(3).buffer)
+            await expect(small).resolves.toEqual(Uint8Array.of(3))
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('reads hydrated remote bytes at the hydrated size and treats a vanished object as missing', async () => {
+        const source = Uint8Array.from({ length: P + 200 }, (_, index) => index % 251)
+        let present = true
+        const served = servedObject(source)
         const invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => {
             if (command === 'asset_remote_hydrate_object') return source.length
-            if (command === 'asset_cas_read_object_range') {
-                expect(Number(args?.endExclusive) - Number(args?.start)).toBeLessThanOrEqual(64 * 1024)
-                return source.slice(Number(args?.start), Number(args?.endExclusive))
-            }
-            throw new Error(`Unexpected command ${command}`)
+            if (!present && Number(args?.start) > 0) throw 'cas-object-missing'
+            return served(command, args)
         })
-        const remote = createNativeRemoteAssetReader(invoke)
-        await expect(remote.readObject('11'.repeat(32))).resolves.toEqual(source)
+        const remote = createNativeRemoteAssetReader(invoke, createNativeCasReadBudget())
+        expect(sameBytes(await remote.readObject(objectHash), source)).toBe(true)
         expect(invoke.mock.calls.filter(([command]) => command === 'asset_remote_hydrate_object')).toHaveLength(1)
-        expect(invoke.mock.calls.filter(([command]) => command === 'asset_cas_read_object_range')).toHaveLength(4)
-        await expect(remote.readObject('11'.repeat(32), { start: 199 * 1024, endExclusive: 300 * 1024 }))
-            .resolves.toEqual(source.slice(199 * 1024))
+        expect(readCommands(invoke)).toHaveLength(2)
+        expect(sameBytes(await remote.readObject(objectHash, { start: P - 1, endExclusive: P + 999 }), source.subarray(P - 1))).toBe(true)
+        present = false
+        await expect(remote.readObject(objectHash)).resolves.toBeNull()
     })
+})
 
-    it.each([null, new Uint8Array(1)])('treats missing or short hydrated chunks as missing (%s)', async (missing) => {
-        const invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => {
-            if (command === 'asset_remote_hydrate_object') return 200 * 1024
-            if (command === 'asset_cas_read_object_range') {
-                return args?.start === 0 ? new Uint8Array(64 * 1024) : missing
-            }
-            throw new Error(`Unexpected command ${command}`)
-        })
-        await expect(createNativeRemoteAssetReader(invoke).readObject('11'.repeat(32))).resolves.toBeNull()
-        expect(invoke).toHaveBeenCalledTimes(3)
-    })
-
+describe('native asset repository adapters', () => {
     it('streams large CAS writes through bounded chunks and always cancels the spool', async () => {
         const hash = '22'.repeat(32)
         const acknowledgements: number[] = []
         const invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+            if (command === 'native_asset_bytes_probe') return false
             if (command === 'asset_cas_job_upload_open') {
                 return { capacity: 64 * 1024 }
             }
@@ -104,6 +260,7 @@ describe('native asset repository adapters', () => {
 
         expect(acknowledgements).toEqual([64 * 1024, 64 * 1024 + 3])
         expect(invoke.mock.calls.map(([command]) => command)).toEqual([
+            'native_asset_bytes_probe',
             'asset_cas_job_upload_open',
             'asset_cas_job_upload_chunk',
             'asset_cas_job_upload_chunk',
@@ -115,27 +272,6 @@ describe('native asset repository adapters', () => {
             .filter(([command]) => command === 'asset_cas_job_upload_chunk')
             .map(([, args]) => (args?.data as number[]).length)
         expect(chunks).toEqual([64 * 1024, 3])
-    })
-
-    it('assembles large CAS reads from bounded range responses', async () => {
-        const source = new Uint8Array(NATIVE_CAS_IPC_CHUNK_BYTES + 5)
-        source[source.length - 1] = 9
-        const invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => {
-            if (command === 'asset_cas_stat_object') return source.byteLength
-            if (command === 'asset_cas_read_object_range') {
-                return Array.from(source.subarray(Number(args?.start), Number(args?.endExclusive)))
-            }
-            throw new Error(`Unexpected command ${command}`)
-        })
-
-        await expect(createNativeImmutablePayloadCas(invoke).readObject('11'.repeat(32)))
-            .resolves.toEqual(source)
-        const rangeCalls = invoke.mock.calls.filter(
-            ([command]) => command === 'asset_cas_read_object_range',
-        )
-        expect(rangeCalls).toHaveLength(2)
-        expect(rangeCalls.map(([, args]) => Number(args?.endExclusive) - Number(args?.start)))
-            .toEqual([NATIVE_CAS_IPC_CHUNK_BYTES, 5])
     })
 
     it('forwards configurable inlay options and accepts truthful PNG metadata', async () => {
@@ -186,6 +322,7 @@ describe('native asset repository adapters', () => {
         const output = new Uint8Array(transferSize)
         output[transferSize - 1] = 7
         const invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+            if (command === 'native_asset_bytes_probe') return false
             if (command === 'native_media_inlay_input_open') return { capacity: 64 * 1024 }
             if (command === 'native_media_inlay_input_chunk') {
                 return Number(args?.offset) + (args?.data as number[]).length
@@ -218,6 +355,7 @@ describe('native asset repository adapters', () => {
         )).resolves.toMatchObject({ data: output })
 
         expect(invoke.mock.calls.map(([command]) => command)).toEqual([
+            'native_asset_bytes_probe',
             'native_media_inlay_input_open',
             'native_media_inlay_input_chunk',
             'native_media_inlay_input_chunk',

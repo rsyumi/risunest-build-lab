@@ -5,8 +5,9 @@ import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { get } from 'svelte/store'
 import type { Chat, Database, Message, character } from '../storage/database.svelte'
-import { DBState, selectedCharID, settingsOpen } from '../stores.svelte'
+import { DBState, selectedCharID, settingsOpen, ReloadChatPointer } from '../stores.svelte'
 import { IndexedDbPersistentDataStore } from '../storage/indexedDbPersistentDataStore'
 import {
     capturePersistentRoot,
@@ -69,7 +70,10 @@ vi.mock('./request/request', async () => (await import('./tests/sendChatTestHarn
     }),
 }))))
 vi.mock('../parser/chatML', async () => (await import('./tests/sendChatTestHarness')).chatMLModule())
-vi.mock('../parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
+vi.mock('../parser/parser.svelte', async (importOriginal) => ({
+    ...(await import('src/ts/parser/parser.testSupport')).parserStubModule(),
+    risuChatParser: (await importOriginal<typeof import('../parser/parser.svelte')>()).risuChatParser,
+}))
 vi.mock('./lorebook.svelte', async () => (await import('./tests/sendChatTestHarness')).lorebookModule())
 vi.mock('./stableDiff', async () => (await import('./tests/sendChatTestHarness')).stableDiffModule({ generateAIImage: vi.fn() }))
 vi.mock('./templates/templates', async () => (await import('./tests/sendChatTestHarness')).templatesModule())
@@ -86,7 +90,10 @@ vi.mock('./memory/hanuraiMemory', async () => (await import('./tests/sendChatTes
 vi.mock('./memory/hypav2', async () => (await import('./tests/sendChatTestHarness')).hypav2Module())
 vi.mock('./memory/hypav3', async () => (await import('./tests/sendChatTestHarness')).hypav3Module())
 vi.mock('../model/modellist', async () => (await import('./tests/sendChatTestHarness')).modellistModule())
-vi.mock('./modules', async () => (await import('./tests/sendChatTestHarness')).modulesModule())
+vi.mock('./modules', async (importOriginal) => ({
+    ...await importOriginal<typeof import('./modules')>(),
+    ...(await import('./tests/sendChatTestHarness')).modulesModule(),
+}))
 vi.mock('../globalApi.svelte', async () => (await import('./tests/sendChatTestHarness')).globalApiModule({
     fetchNative: vi.fn(),
     downloadFile: vi.fn(),
@@ -303,6 +310,166 @@ afterAll(() => {
 })
 
 describe('a windowed send through the production runtime', () => {
+    it.each(['direct', 'expanded'])('uses a shared complete lease for %s full-history background CBS', async (kind) => {
+        await bootWindowedConversation(storedMessages(), (seed) => {
+            seed.characters[0].customscript = []
+            seed.characters[0].triggerscript = []
+            seed.characters[0].chats[0].scriptstate = { $expanded: '{{history}}' }
+        })
+        const { acquireLiveDisplayParserLease } = await import('../liveDisplayParserLease')
+        const { risuChatParser } = await import('../parser/parser.svelte')
+        const shared = vi.spyOn(current.runtime, 'acquireCompleteConversation')
+        const controller = new AbortController()
+        const lease = await acquireLiveDisplayParserLease({
+            source: kind === 'direct' ? '{{history}}' : '{{getvar::expanded}}',
+            character: DBState.db.characters[0], signal: controller.signal, parseFirst: true,
+        })
+        try {
+            expect(shared).toHaveBeenCalledOnce()
+            if (kind === 'expanded') {
+                expect(lease?.projection?.parsedSource).toBe('{{history}}')
+                const parser = lease!.projection!.context.parserContext
+                const result = risuChatParser(lease!.projection!.parsedSource!, {
+                    ...parser, db: parser.database, chara: parser.character,
+                })
+                expect(result).toContain('m0')
+                expect(parser.historyAccess!.row(999)?.data).toBe('m999')
+                expect(result).toBe(risuChatParser('{{history}}', { db: DBState.db, chara: DBState.db.characters[0] }))
+                parser.historyAccess!.assertComplete()
+            }
+        } finally { lease?.release(); controller.abort(); shared.mockRestore() }
+    })
+    it('orders concurrent parser variable increments before reentrant script callbacks', async () => {
+        const { reopen, backgroundErrors } = await bootWindowedConversation(storedMessages(), (seed) => {
+            seed.characters[0].customscript = []
+            seed.characters[0].triggerscript = []
+            seed.characters[0].chats[0].scriptstate = { $counter: '0' }
+        })
+        const { parseRisuChat } = await import('../plugins/parseRisuChat')
+        const { pluginV2 } = await import('../plugins/plugins.svelte')
+        const increment = '{{setvar::counter::{{calc::{{getvar::counter}}+1}}}}{{getvar::counter}}'
+        expect(await Promise.all([
+            parseRisuChat(increment, { runVar: true }),
+            parseRisuChat(increment, { runVar: true }),
+            parseRisuChat('{{getvar::counter}}'),
+        ])).toEqual(['1', '2', '2'])
+        const hook = async (data: string) => `${data}:${await parseRisuChat(increment, { runVar: true })}`
+        pluginV2.editprocess.add(hook)
+        try {
+            expect(await parseRisuChat(increment, { runVar: true, processRegex: true })).toBe('3:4')
+        } finally { pluginV2.editprocess.delete(hook) }
+        expect((await reopen()).scriptstate.$counter).toBe('4')
+        expect(backgroundErrors).toEqual([])
+    })
+    it.each(['variable', 'inject'])('persists a delayed parser %s write to the invocation conversation after navigation', async (effect) => {
+        const { store, reopen, backgroundErrors } = await bootWindowedConversation(storedMessages(), (seed) => {
+            seed.characters[0].customscript = effect === 'inject'
+                ? [{ type: 'editprocess', in: 'm999', out: '@@inject', flag: 'g', ableFlag: true }] as any : []
+            seed.characters[0].triggerscript = []
+            seed.characters[0].chats.push({ ...seed.characters[0].chats[0], id: 'chat-b',
+                message: [{ role: 'user', data: 'other conversation' }], scriptstate: {} })
+        })
+        const { parseRisuChat } = await import('../plugins/parseRisuChat')
+        let entered!: () => void
+        const reading = new Promise<void>((resolve) => { entered = resolve })
+        let release!: () => void
+        const wait = new Promise<void>((resolve) => { release = resolve })
+        const acquire = store.acquireRevision.bind(store)
+        let delayed = false
+        const spy = vi.spyOn(store, 'acquireRevision').mockImplementation(async (revision) => {
+            const lease = await acquire(revision)
+            const read = lease.readConversationWindow.bind(lease)
+            lease.readConversationWindow = async (query) => {
+                if (!delayed && query.conversationId === 'chat-a') {
+                    delayed = true
+                    entered()
+                    await wait
+                }
+                return read(query)
+            }
+            return lease
+        })
+        const pending = parseRisuChat('{{lastmessage}}|{{setvar::captured::yes}}{{getvar::captured}}', {
+            runVar: true, processRegex: effect === 'inject', messageIndex: 0,
+        })
+        try {
+            await reading
+            await current.runtime.activateConversation('chat-b')
+            release()
+            expect(await pending).toBe(effect === 'inject' ? '|yes' : 'm999|yes')
+            await current.runtime.flushPendingData('parser-navigation')
+            expect((await reopen()).scriptstate.$captured).toBe('yes')
+            expect((await reopen()).message[0].data).toBe(effect === 'inject' ? 'm999|yes' : 'm0')
+            expect((await store.readConversation('character-a', 'chat-b'))?.value.scriptstate?.$captured).toBeUndefined()
+            expect((await store.readConversation('character-a', 'chat-b'))?.value.message[0].data).toBe('other conversation')
+            expect(backgroundErrors).toEqual([])
+        } finally { release(); spy.mockRestore() }
+    })
+
+    it('allows parseRisuChat and its variable writes inside the provider callback without waiting for the send', async () => {
+        const { reopen, backgroundErrors } = await bootWindowedConversation(storedMessages(), (seed) => {
+            seed.characters[0].customscript = []
+            seed.characters[0].triggerscript = []
+            seed.mainPrompt = '{{#when::1::is::1}}system{{/when}}{{#if 1}}prompt{{/if}}{{#pure}}plain{{/pure}}'
+        })
+        const complete = vi.spyOn(current.runtime, 'acquireCompleteConversation')
+        const { sendChat } = await import('./index.svelte')
+        const { requestChatData } = await import('./request/request')
+        const { parseRisuChat } = await import('../plugins/parseRisuChat')
+        const results: string[] = []
+        const { registerDisplayRow, DisplayReadRecord } = await import('./scriptVariableReads')
+        const row = registerDisplayRow(() => 0)
+        const reads = new DisplayReadRecord()
+        reads.note('api_write')
+        row.track('body', reads)
+        vi.mocked(requestChatData).mockImplementationOnce(async () => {
+            results.push(await parseRisuChat('{{lastmessageindex}}|{{previouschatlog::0}}'))
+            const previousReload = get(ReloadChatPointer)[0] ?? 0
+            results.push(await parseRisuChat('{{setvar::api_write::saved}}{{getvar::api_write}}', { runVar: true }))
+            expect(get(ReloadChatPointer)[0] ?? 0).toBeGreaterThan(previousReload)
+            results.push(await parseRisuChat('{{previouschatlog::0}}', { processRegex: true }))
+            return { type: 'success', result: 'api answer' }
+        })
+        vi.spyOn(console, 'log').mockImplementation(() => undefined)
+        try { await expect(sendChat({ historyLimit: true })).resolves.toBe(true) }
+        finally { row.dispose() }
+        expect(results).toEqual(['999|m0', 'saved', 'm0'])
+        const stored = await reopen()
+        expect(stored.message.at(-1)?.data).toBe('api answer')
+        expect(stored.scriptstate.$api_write).toBe('saved')
+        expect(backgroundErrors).toEqual([])
+        expect(complete).not.toHaveBeenCalled()
+        complete.mockRestore()
+    })
+
+    it('keeps parser reads and variable commits available inside successive streaming output callbacks', async () => {
+        const { reopen, backgroundErrors } = await bootWindowedConversation(storedMessages(), (seed) => {
+            seed.characters[0].customscript = []
+            seed.characters[0].triggerscript = []
+        })
+        const { sendChat } = await import('./index.svelte')
+        const { pluginV2 } = await import('../plugins/plugins.svelte')
+        const { parseRisuChat } = await import('../plugins/parseRisuChat')
+        const counts: string[] = []
+        const output = async (data: string) => {
+            counts.push(await parseRisuChat('{{lastmessageindex}}', { processRegex: true }))
+            await parseRisuChat(`{{setvar::stream_calls::${counts.length}}}`, { runVar: true })
+            return data
+        }
+        pluginV2.editoutput.add(output)
+        current.snapshots = ['first token', 'second token']
+        vi.spyOn(console, 'log').mockImplementation(() => undefined)
+        try {
+            await expect(sendChat({ historyLimit: true })).resolves.toBe(true)
+            expect(counts.length).toBeGreaterThanOrEqual(2)
+            expect(counts.every((count) => count === '1000')).toBe(true)
+            const stored = await reopen()
+            expect(stored.message.at(-1)?.data).toBe('second token')
+            expect(stored.scriptstate.$stream_calls).toBe(String(counts.length))
+            expect(backgroundErrors).toEqual([])
+        } finally { pluginV2.editoutput.delete(output); current.snapshots = ['answer'] }
+    })
+
     it.each(['success', 'streaming'] as const)('persists a delayed %s response while settings remain open', async (type) => {
         const { reopen, backgroundErrors } = await bootWindowedConversation(storedMessages())
         const { sendChat } = await import('./index.svelte')

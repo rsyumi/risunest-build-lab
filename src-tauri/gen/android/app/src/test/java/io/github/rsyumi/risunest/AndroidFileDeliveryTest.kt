@@ -50,4 +50,23 @@ class AndroidFileDeliveryTest {
     assertFalse(delivered)
     assertFalse(ready.isReady)
   }
+
+  @Test fun completedReadinessIsRevokedBeforeQueuedOrLateDelivery() = runBlocking {
+    val ready = AndroidFrontendReady()
+    val delivered = mutableListOf<String>()
+    val queued = launch(start = CoroutineStart.UNDISPATCHED) { ready.await(); delivered.add("queued") }
+    assertTrue(ready.markReady())
+    ready.await()
+    assertTrue(ready.isReady)
+
+    ready.cancel()
+    assertFalse(ready.isReady)
+    assertFalse(ready.markReady())
+    val late = launch(start = CoroutineStart.UNDISPATCHED) { ready.await(); delivered.add("late") }
+    queued.join()
+    late.join()
+    assertTrue(queued.isCancelled)
+    assertTrue(late.isCancelled)
+    assertTrue(delivered.isEmpty())
+  }
 }

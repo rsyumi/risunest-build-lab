@@ -577,6 +577,8 @@ export class SnapshotReleasedError extends Error {
 }
 
 export interface PersistentRevisionReader {
+    /** Whether metadata reads avoid materializing message bodies in the caller. */
+    readonly messageMetadataReadMode?: 'projected' | 'materialized'
     readonly revision: DataRevision
     readRoot(): Promise<Versioned<PersistentRoot>>
     queryPresets(): Promise<PresetCatalog>
@@ -623,6 +625,7 @@ export interface PersistentDatabaseReplacementStage {
 }
 
 export interface PersistentDataStore {
+    readonly messageMetadataReadMode?: 'projected' | 'materialized'
     lwwBindingState?(): Promise<{ targetAuthority: string }>
     lwwReadOutbox?(request: LwwOutboxRequest): Promise<LwwOutboxPage>
     lwwCommitReplacement?(request: LwwReplacementRequest): Promise<{ revision: DataRevision }>

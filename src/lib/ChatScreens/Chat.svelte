@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { CbsHistoryAccessError } from 'src/ts/cbsHistoryAccess'
     import ResponseCandidateControls from './ResponseCandidateControls.svelte'
     import { activeRerollConversations } from 'src/ts/durableReroll'
     import { innerWidth } from 'svelte/reactivity/window'
@@ -248,6 +249,7 @@
                 ? captureParserIndex
                 : parserProjection?.projectedChatID,
             historyOffset: parser.historyOffset,
+            historyAccess: parser.historyAccess,
             userName: parser.userName,
             personaPrompt: parser.personaPrompt,
             modules: parser.modules,
@@ -798,6 +800,11 @@
     }
 
     function displaya(message:string){
+        const prepared = captureContext?.preparedDisplayText?.[idx]
+        if (prepared?.source === message) {
+            msgDisplay = prepared.text
+            return
+        }
         const reads = new DisplayReadRecord()
         msgDisplay = recordChatVariableReads(reads, () => risuChatParser(message, {
             chara: name,
@@ -917,6 +924,7 @@
             }), 'text/html')
             return doc.body   
         } catch (error) {
+            if (error instanceof CbsHistoryAccessError) throw error
             const placeholder = document.createElement('div')
             return placeholder
         }

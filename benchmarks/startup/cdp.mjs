@@ -121,7 +121,7 @@ export const instrumentation = `(() => {
         'pds_read_root', 'pds_query_characters', 'pds_snapshot_create', 'pds_snapshot_list',
         'pds_read_character', 'pds_query_conversations', 'pds_read_conversation_window', 'pds_read_conversation',
         'pds_asset_gc_maintenance', 'plugin:fs|read_dir', 'plugin:fs|stat',
-        'asset_cas_read_object', 'asset_cas_read_object_range', 'asset_cas_stat_object']);
+        'asset_cas_read_bytes', 'asset_cas_stat_object']);
     const state = window.__startupMetrics = { calls: [], longTasks: [], operations: [], phases: [], active: {}, elapsedSeen: false, firstRevision: null, interaction: null };
     state.peakHeapBytes = 0; state.mediaInFlight = 0; state.maxMediaInFlight = 0; state.cleanChunksReason = 0;
     const heap = () => state.peakHeapBytes = Math.max(state.peakHeapBytes, performance.memory?.usedJSHeapSize ?? 0);
@@ -231,7 +231,7 @@ export const instrumentation = `(() => {
             if ((parsed.hostname === 'ipc.localhost' || parsed.protocol === 'ipc:') && commands.has(command)) {
                 entry = {command, start: performance.now(), ms: null, bytes: null, success: false};
                 state.calls.push(entry);
-                if (command === 'asset_cas_read_object' || command === 'asset_cas_read_object_range') {
+                if (command === 'asset_cas_read_bytes') {
                     state.mediaInFlight++;
                     state.maxMediaInFlight = Math.max(state.maxMediaInFlight, state.mediaInFlight);
                 }
@@ -241,7 +241,7 @@ export const instrumentation = `(() => {
             if (entry) {
                 entry.ms = performance.now() - entry.start;
                 entry.success = response.ok;
-                if (entry.command === 'asset_cas_read_object' || entry.command === 'asset_cas_read_object_range') state.mediaInFlight--;
+                if (entry.command === 'asset_cas_read_bytes') state.mediaInFlight--;
                 if (entry.command === 'pds_open') response.clone().text().then(text => {
                     entry.bytes = new TextEncoder().encode(text).byteLength;
                     const revision = JSON.parse(text).revision;
@@ -252,7 +252,7 @@ export const instrumentation = `(() => {
         }, error => {
             if (entry) {
                 entry.ms = performance.now() - entry.start;
-                if (entry.command === 'asset_cas_read_object' || entry.command === 'asset_cas_read_object_range') state.mediaInFlight--;
+                if (entry.command === 'asset_cas_read_bytes') state.mediaInFlight--;
             }
             throw error;
         });

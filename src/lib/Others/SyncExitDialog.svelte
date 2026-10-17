@@ -1,6 +1,7 @@
 <script lang="ts">
     import { AlertTriangleIcon, LoaderCircleIcon, SaveIcon } from '@lucide/svelte'
     import { language } from 'src/lang'
+    import ErrorDetails from './ErrorDetails.svelte'
     import SettingButton from 'src/lib/Setting/RisuNest/SettingButton.svelte'
     import {
         decideSyncExit,
@@ -90,6 +91,9 @@
                         </p>
                     </div>
                 </header>
+                {#if localFailure || dialogState.phase === 'remote-blocked'}
+                    <ErrorDetails message={`${title}\n${detail}`} />
+                {/if}
 
                 {#if !needsChoice}
                     <div class="h-1.5 overflow-hidden rounded-full bg-darkbutton" role="progressbar" aria-label={detail}>

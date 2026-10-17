@@ -249,15 +249,15 @@ describe('chat screenshot ranges', () => {
             100,
         )
 
-        expect(job.renderContext.historyStartIndex).toBe(95)
-        expect(job.renderContext.parserContext.character.chats[0].message).toHaveLength(5)
+        expect(job.renderContext.historyStartIndex).toBe(99)
+        expect(job.renderContext.parserContext.character.chats[0].message).toHaveLength(1)
         expect(job.messages).toHaveLength(1)
         expect(reads[0]).toEqual({ startIndex: 99, limit: 1 })
         expect(reads).not.toContainEqual({ startIndex: 0, limit: 100 })
-        expect(reads.at(-1)).toEqual({ startIndex: 95, limit: 4 })
+        expect(reads).toEqual([{ startIndex: 99, limit: 1 }])
     })
 
-    it('pages the full pinned history only when parser semantics require it', async () => {
+    it('reads only the tail for lastmessage in a middle screenshot', async () => {
         const messages = Array.from({ length: 5_000 }, (_, index) => ({
             role: index % 2 === 0 ? 'char' as const : 'user' as const,
             data: index === 2_499 ? '{{lastmessage}}' : `turn ${index + 1}`,
@@ -279,12 +279,11 @@ describe('chat screenshot ranges', () => {
             2_500,
         )
 
-        expect(job.renderContext.historyStartIndex).toBe(0)
-        expect(job.renderContext.parserContext.character.chats[0].message).toHaveLength(5_000)
+        expect(job.renderContext.parserContext.historyAccess?.row(4_999)?.data).toBe('turn 5000')
+        expect(job.renderContext.parserContext.historyAccess?.length).toBe(5_000)
         expect(reads[0]).toEqual({ startIndex: 2_499, limit: 1 })
         expect(reads.slice(1)).toEqual([
-            { startIndex: 0, limit: 2_499 },
-            { startIndex: 2_500, limit: 2_500 },
+            { startIndex: 4_999, limit: 1 },
         ])
     })
 
@@ -315,8 +314,12 @@ describe('chat screenshot ranges', () => {
             100,
         )
 
-        expect(job.renderContext.historyStartIndex).toBe(0)
-        expect(job.renderContext.parserContext.character.chats[0].message).toHaveLength(100)
+        expect(job.renderContext.parserContext.historyAccess?.length).toBe(100)
+        if (macro === '{{message_unixtime_array}}') {
+            expect(job.renderContext.parserContext.historyAccess?.all()).toHaveLength(100)
+        } else {
+            expect(job.renderContext.parserContext.character.chats[0].message).toHaveLength(1)
+        }
     })
 
     it.each([
@@ -375,11 +378,11 @@ describe('chat screenshot ranges', () => {
             90,
         )
 
-        expect(job.renderContext.historyStartIndex).toBe(10)
-        expect(job.renderContext.firstParserMessageIndex).toBe(79)
-        expect(job.renderContext.parserContext.character.chats[0].message).toHaveLength(80)
+        expect(job.renderContext.historyStartIndex).toBe(89)
+        expect(job.renderContext.firstParserMessageIndex).toBe(0)
+        expect(job.renderContext.parserContext.historyAccess?.row(10)?.data).toBe('turn 11')
         expect(reads[0]).toEqual({ startIndex: 89, limit: 1 })
-        expect(reads.at(-1)).toEqual({ startIndex: 10, limit: 79 })
+        expect(reads.at(-1)).toEqual({ startIndex: 10, limit: 1 })
     })
 
     it('hydrates only speaker characters referenced by the pinned parser projection', async () => {
@@ -429,14 +432,12 @@ describe('chat screenshot ranges', () => {
 
         const parserMessages = job.renderContext.parserContext.character.chats[0].message
         expect(parserMessages.map((message) => message.data)).toEqual([
-            'too old',
-            'previous',
             'selected one',
             'selected two',
         ])
-        expect(parserMessages[2]).toBe(job.messages[0])
-        expect(job.renderContext.historyStartIndex).toBe(0)
-        expect(job.renderContext.firstParserMessageIndex).toBe(2)
+        expect(parserMessages[0]).toBe(job.messages[0])
+        expect(job.renderContext.historyStartIndex).toBe(2)
+        expect(job.renderContext.firstParserMessageIndex).toBe(0)
     })
 
     it('keeps the parser history projection bounded when full history is not requested', async () => {
@@ -446,8 +447,8 @@ describe('chat screenshot ranges', () => {
         }))
         const job = await createProductScreenshotJob(messages, 100, 100)
 
-        expect(job.renderContext.historyStartIndex).toBe(95)
-        expect(job.renderContext.parserContext.character.chats[0].message).toHaveLength(5)
+        expect(job.renderContext.historyStartIndex).toBe(99)
+        expect(job.renderContext.parserContext.character.chats[0].message).toHaveLength(1)
         expect(job.messages).toHaveLength(1)
     })
 })

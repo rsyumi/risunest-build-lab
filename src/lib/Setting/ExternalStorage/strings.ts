@@ -124,6 +124,7 @@ const english = {
     recoveryKeyMismatch: 'The recovery key does not match this repository. Check the key.',
     repositoryMismatch: 'This location holds a different repository. Check the folder, bucket and address.',
     unsupportedOperation: 'This repository cannot do that.',
+    requestLengthRequired: 'The server rejected the request.',
     interrupted: 'This stopped before it finished. Try again.',
     endpointRejected: 'The server address was rejected. Check the address.',
     deviceVaultUnavailable: 'Unlock this device or its keyring, then try again.',
@@ -324,6 +325,7 @@ const korean: typeof english = {
     recoveryKeyMismatch: '복구 키가 이 저장소와 맞지 않습니다. 복구 키를 확인하세요.',
     repositoryMismatch: '이 위치에 다른 저장소가 있습니다. 폴더·버킷과 주소를 확인하세요.',
     unsupportedOperation: '이 저장소에서는 할 수 없는 작업입니다.',
+    requestLengthRequired: '서버가 요청을 거부했습니다.',
     interrupted: '끝나기 전에 멈췄습니다. 다시 시도하세요.',
     endpointRejected: '서버 주소를 사용할 수 없습니다. 주소를 확인하세요.',
     deviceVaultUnavailable: '기기 또는 키링의 잠금을 해제한 뒤 다시 시도하세요.',
@@ -471,7 +473,8 @@ export function externalErrorMessage(
     if (typeof value === 'object' && value !== null) {
         const error = value as { httpStatus?: unknown; detail?: unknown; message?: unknown }
         if (typeof error.httpStatus === 'number') details.push(`HTTP ${error.httpStatus}`)
-        for (const detail of [error.detail, error.message]) {
+        const message = externalErrorKind(value) === 'unsupported' && error.httpStatus === 411 ? undefined : error.message
+        for (const detail of [error.detail, message]) {
             if (typeof detail === 'string' && detail.trim() && !summary.includes(detail) && !details.includes(detail)) {
                 details.push(detail)
             }
@@ -528,7 +531,8 @@ function externalErrorSummary(strings: ExternalStorageStrings, value: unknown): 
         case 'corrupt': return strings.corrupted
         case 'recoveryKeyMismatch': return strings.recoveryKeyMismatch
         case 'repositoryMismatch': return strings.repositoryMismatch
-        case 'unsupported': return strings.unsupportedOperation
+        case 'unsupported': return (value as { httpStatus?: unknown }).httpStatus === 411
+            ? strings.requestLengthRequired : strings.unsupportedOperation
         case 'cancelled': return strings.interrupted
         case 'transient': return strings.retry
         default: return strings.errorGeneric

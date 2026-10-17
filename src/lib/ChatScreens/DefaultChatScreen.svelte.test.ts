@@ -521,6 +521,29 @@ it('does not start generation when input processing finishes after Stop', async 
     expect(mocks.generate).not.toHaveBeenCalled()
 })
 
+it('keeps drafts editable and reports an input translation outage once until a successful translation', async () => {
+    DBState.db.useAutoTranslateInput = true
+    mocks.translate.mockRejectedValue(new TypeError('Load failed'))
+    await tick()
+    type('First draft'); await tick(); await tick()
+    type('Second draft'); await tick(); await tick()
+    expect(mocks.error).toHaveBeenCalledOnce()
+    expect(document.querySelector<HTMLTextAreaElement>('textarea.input-text')!.value).toBe('Second draft')
+    mocks.translate.mockResolvedValueOnce('Translated draft')
+    type('Third draft'); await tick(); await tick()
+    expect(document.querySelector<HTMLTextAreaElement>('#messageInputTranslate')!.value).toBe('Translated draft')
+    type('Fourth draft'); await tick(); await tick()
+    expect(mocks.error).toHaveBeenCalledTimes(2)
+})
+
+it('ordinary typing does not invoke translation when input translation is disabled', async () => {
+    mocks.translate.mockRejectedValue(new TypeError('Load failed'))
+    type('Ordinary input'); await tick()
+    expect(mocks.translate).not.toHaveBeenCalled()
+    expect(mocks.error).not.toHaveBeenCalled()
+    expect(document.querySelector<HTMLTextAreaElement>('textarea.input-text')!.value).toBe('Ordinary input')
+})
+
 it('a late translation cannot replace newer text or write into another conversation', async () => {
     DBState.db.useAutoTranslateInput = true
     DBState.db.characters[0].chats.push({ id: 'other', message: [] } as any)
@@ -528,7 +551,7 @@ it('a late translation cannot replace newer text or write into another conversat
     mocks.translate.mockImplementationOnce(() => new Promise(resolve => { finishTranslation = resolve }))
     await tick()
     type('Original for translation')
-    await vi.waitFor(() => expect(mocks.translate).toHaveBeenCalledWith('Original for translation', false))
+    await vi.waitFor(() => expect(mocks.translate).toHaveBeenCalledWith('Original for translation', false, undefined, 'throw'))
     type('New original')
     DBState.db.characters[0].chatPage = 1
     await tick()

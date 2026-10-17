@@ -17,8 +17,8 @@ try {
 
 const [axis, sizeText, destination] = process.argv.slice(2);
 const size = Number(sizeText);
-assert.ok(['encrypted-database', 'attachment', 'record'].includes(axis));
-assert.ok((axis === 'record' ? [1, 8, 32] : [100, 300, 600]).includes(size));
+assert.ok(['encrypted-database', 'attachment', 'record', 'assets'].includes(axis));
+assert.ok((axis === 'record' ? [1, 8, 32] : axis === 'assets' ? [64, 256] : [100, 300, 600]).includes(size));
 assert.ok(destination, 'Pass a new synthetic fixture directory');
 const directory = path.resolve(destination);
 await mkdir(directory);
@@ -69,6 +69,7 @@ const addEntry = async (name, file) => {
   for await (const chunk of createReadStream(file, { highWaterMark: 64 * 1024 })) await archive.writeFile(chunk);
 };
 let attachment;
+const attachments = [];
 try {
   await addEntry('database.risudat', databaseSource);
   if (axis === 'encrypted-database') {
@@ -93,11 +94,24 @@ try {
     await addEntry('synthetic-attachment.bin', body);
     attachment = { bytes: size * 1_000_000, sha256: digest.digest('hex') };
   }
+  if (axis === 'assets') {
+    for (let index = 0; index < size; index++) {
+      const bytes = Buffer.alloc(96 * 1024);
+      for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 73 + (i >>> 8) + index) % 256;
+      bytes.writeUInt32LE(index);
+      const name = `synthetic-asset-${index}.bin`;
+      const body = path.join(directory, name);
+      await writeFile(body, bytes);
+      await addEntry(name, body);
+      attachments.push({ key: `assets/${name}`, bytes: bytes.length, sha256: hash(bytes) });
+    }
+  }
 } finally { await archive.close(); }
 const sourceDigest = createHash('sha256');
 for await (const chunk of createReadStream(source)) sourceDigest.update(chunk);
 const manifest = { schema: 'risunest.synthetic-restore-resources/v1', synthetic: true, axis, size,
   source: 'source.bin', sourceBytes: (await stat(source)).size, sourceSha256: sourceDigest.digest('hex'),
-  databaseBytes: (await stat(database)).size, key: axis === 'encrypted-database' ? key : undefined, expected, attachment };
+  databaseBytes: (await stat(database)).size, key: axis === 'encrypted-database' ? key : undefined, expected, attachment,
+  ...(attachments.length ? { attachments } : {}) };
 await writeFile(path.join(directory, 'manifest.json'), JSON.stringify(manifest, null, 2));
 console.log(JSON.stringify({ axis, size, sourceBytes: manifest.sourceBytes, databaseBytes: manifest.databaseBytes, characters: expected.length }));

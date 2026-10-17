@@ -9,7 +9,8 @@ import {
     type DurableAssetWriteSessionFactory,
     type RemoteAssetReader,
 } from './assetRepository'
-import type { ImmutablePayloadCas } from './payloadCas'
+import { createNativeCasReadBudget, createNativeImmutablePayloadCas } from './nativeAssetRepository'
+import { createImmutablePayloadCas, type ImmutablePayloadCas } from './payloadCas'
 import { RevisionConflictError, type AssetAlias, type AssetAliasIdentity } from './persistentDataStore'
 
 const assetHash = 'a'.repeat(64)
@@ -517,7 +518,6 @@ describe('complete AssetRepository BlobStore facade', () => {
             readAssetAlias: vi.fn(async () => ({ revision: 4, value: alias })),
         })
         const cas = createCas({
-            statObject: vi.fn(async () => 4),
             readObjectRange: vi.fn(async () => new Uint8Array([2, 3])),
         })
         const { facade } = createFacade({ store, cas })
@@ -527,11 +527,37 @@ describe('complete AssetRepository BlobStore facade', () => {
         expect(cas.readObjectRange).toHaveBeenCalledWith(assetHash, {
             start: 1,
             endExclusive: 3,
-        })
+        }, alias.size)
+        expect(cas.statObject).not.toHaveBeenCalled()
 
         vi.mocked(cas.readObjectRange).mockResolvedValueOnce(null)
         await expect(facade.read('assets/photo.bin', { start: 1, endExclusive: 3 }))
             .resolves.toBeNull()
+    })
+
+    it.each(['web', 'native'] as const)('fails a %s read when the alias records another object size', async (platform) => {
+        const stored = new Uint8Array(200).fill(7)
+        const cas = platform === 'web'
+            ? createImmutablePayloadCas({
+                putIfAbsent: async () => false,
+                read: async () => stored,
+                readRange: async (_key, range) => stored.slice(range.start, range.endExclusive),
+                stat: async () => stored.length,
+            })
+            : createNativeImmutablePayloadCas(async (_command, args) => {
+                const { start, endExclusive, expectedSize } = args as Record<string, number>
+                if (expectedSize !== stored.length) throw 'cas-object-size-mismatch'
+                return stored.slice(start, endExclusive).buffer
+            }, createNativeCasReadBudget())
+        const store = createStore({
+            readAssetAlias: vi.fn(async () => ({ revision: 4, value: assetAlias({ size: 100 }) })),
+        })
+        const { facade } = createFacade({ store, cas })
+
+        await expect(facade.read('assets/photo.bin', { start: 0, endExclusive: 10 }))
+            .rejects.toThrow('Asset alias size mismatch for assets/photo.bin')
+        await expect(facade.read('assets/photo.bin'))
+            .rejects.toThrow('Asset alias size mismatch for assets/photo.bin')
     })
 
     it('treats an explicit null-hash alias as missing payload', async () => {

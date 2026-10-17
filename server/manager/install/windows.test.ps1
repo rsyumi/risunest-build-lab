@@ -1,5 +1,6 @@
 param(
     [string]$ReleasedBundle,
+    [string]$LegacyReleasedBundle,
     [string]$ManagerBinary,
     [string]$BackgroundBinary
 )
@@ -546,33 +547,41 @@ FunctionEnd
                 }
                 Write-Output 'Normal and forced removal do not recreate an absent data directory.'
 
-                foreach ($resumeState in @('pending', 'forgotten', 'complete')) {
-                    Run-Installer $syncFixture @('/S', '/NS', "/D=$syncInstall") 0 $releasedInstallerTimeoutSeconds
-                    Invoke-Manager @('uninstall', 'lock-held')
-                    Invoke-Manager @('installer', 'forget-removal')
-                    $resumeData = Join-Path $testRoot 'custom data 경로'
-                    if (!(Test-Path (Join-Path $resumeData 'metadata.sqlite'))) {
-                        & $server init --data-dir $resumeData | Out-Null
-                        if ($LASTEXITCODE -ne 0) { throw 'Could not initialize custom synthetic data.' }
-                    }
-                    & $ManagerBinary --data-dir $resumeData --server $server installer register
-                    if ($LASTEXITCODE -ne 0) { throw 'Could not register custom synthetic data.' }
-                    & $ManagerBinary --data-dir $resumeData --server $server installer remove-files-resumable normal
-                    if ($LASTEXITCODE -ne 0) { throw 'Could not create synthetic pending removal.' }
-                    if ($resumeState -ne 'pending') {
-                        & $ManagerBinary --data-dir $resumeData --server $server installer forget-removal-resumable
-                        if ($LASTEXITCODE -ne 0) { throw 'Could not create synthetic forgotten removal.' }
-                    }
-                    if ($resumeState -eq 'complete') {
-                        & $ManagerBinary --data-dir $resumeData --server $server installer commit-removal
-                        if ($LASTEXITCODE -ne 0) { throw 'Could not create synthetic completed removal.' }
-                    }
-                    Remove-Item -LiteralPath $detailLog -ErrorAction SilentlyContinue
-                    Run-Installer (Join-Path $syncInstall 'uninstall.exe') @('/S', '/DELETEAPPDATA', "_?=$syncInstall") 0 $releasedInstallerTimeoutSeconds
-                    if ((Test-Path $resumeData) -ne ($resumeState -ne 'pending')) { throw "Resumed $resumeState removal ignored the data ownership state." }
-                    if ($resumeState -ne 'pending') {
-                        $detail = Get-Content -LiteralPath $detailLog -Raw -Encoding Unicode
-                        if (!$detail.Contains($resumeData) -or ($detail -notmatch 'Server data could not be deleted|서버 데이터를 삭제하지 못했습니다')) { throw 'Resumed removal did not report kept custom data and its path.' }
+                foreach ($alreadyDeleted in @($false, $true)) {
+                    foreach ($resumeState in @('pending', 'forgotten', 'complete')) {
+                        Run-Installer $syncFixture @('/S', '/NS', "/D=$syncInstall") 0 $releasedInstallerTimeoutSeconds
+                        Invoke-Manager @('uninstall', 'lock-held')
+                        Invoke-Manager @('installer', 'forget-removal')
+                        $resumeData = Join-Path $testRoot 'custom data 경로'
+                        if (!(Test-Path (Join-Path $resumeData 'metadata.sqlite'))) {
+                            & $server init --data-dir $resumeData | Out-Null
+                            if ($LASTEXITCODE -ne 0) { throw 'Could not initialize custom synthetic data.' }
+                        }
+                        & $ManagerBinary --data-dir $resumeData --server $server installer register
+                        if ($LASTEXITCODE -ne 0) { throw 'Could not register custom synthetic data.' }
+                        if ($alreadyDeleted) {
+                            & $ManagerBinary --data-dir $resumeData --server $server installer delete-data
+                            if ($LASTEXITCODE -ne 0) { throw 'Could not delete registered synthetic data before retry.' }
+                        }
+                        & $ManagerBinary --data-dir $resumeData --server $server installer remove-files-resumable normal
+                        if ($LASTEXITCODE -ne 0) { throw 'Could not create synthetic pending removal.' }
+                        if ($resumeState -ne 'pending') {
+                            & $ManagerBinary --data-dir $resumeData --server $server installer forget-removal-resumable
+                            if ($LASTEXITCODE -ne 0) { throw 'Could not create synthetic forgotten removal.' }
+                        }
+                        if ($resumeState -eq 'complete') {
+                            & $ManagerBinary --data-dir $resumeData --server $server installer commit-removal
+                            if ($LASTEXITCODE -ne 0) { throw 'Could not create synthetic completed removal.' }
+                        }
+                        Remove-Item -LiteralPath $detailLog -ErrorAction SilentlyContinue
+                        Run-Installer (Join-Path $syncInstall 'uninstall.exe') @('/S', '/DELETEAPPDATA', "_?=$syncInstall") 0 $releasedInstallerTimeoutSeconds
+                        $kept = !$alreadyDeleted -and $resumeState -ne 'pending'
+                        if ((Test-Path $resumeData) -ne $kept) { throw "Resumed $resumeState removal ignored the data ownership state." }
+                        $detail = if (Test-Path $detailLog) { Get-Content -LiteralPath $detailLog -Raw -Encoding Unicode } else { '' }
+                        if (($detail -match 'Server data could not be deleted|서버 데이터를 삭제하지 못했습니다') -ne $kept) { throw 'Resumed removal reported the wrong data deletion outcome.' }
+                        if ($kept) {
+                            if (!$detail.Contains($resumeData) -or ($detail -notmatch 'Server data could not be deleted|서버 데이터를 삭제하지 못했습니다')) { throw 'Resumed removal did not report kept custom data and its path.' }
+                        }
                     }
                 }
                 Run-Installer $syncFixture @('/S', '/NS', "/D=$syncInstall") 0 $releasedInstallerTimeoutSeconds
@@ -586,68 +595,92 @@ FunctionEnd
 
                 # Archive updates retain the installed uninstaller. Build that frozen script,
                 # then apply the archive file set without replacing uninstall.exe.
-                if ($releasedVersion -ne '1.0.4') { throw 'Frozen-uninstaller verification requires the Sync 1.0.4 archive.' }
-                $releasedHook = (& git -C $repo show 'sync-v1.0.4:server/manager/install/windows.nsh') -join "`n"
-                if ($LASTEXITCODE -ne 0) { throw 'The sync-v1.0.4 hook is required.' }
-                $releasedTemplate = (& git -C $repo show 'sync-v1.0.4:src-tauri/windows-installer.nsi') -join "`n"
-                if ($LASTEXITCODE -ne 0) { throw 'The sync-v1.0.4 template is required.' }
-                $releasedCommon = (& git -C $repo show 'sync-v1.0.4:src-tauri/windows-common.nsh') -join "`n"
-                if ($LASTEXITCODE -ne 0) { throw 'The sync-v1.0.4 common installer macros are required.' }
-                $releasedCommonPath = Join-Path $project 'released-common.nsh'
-                $releasedCommon | Set-Content -Encoding utf8 $releasedCommonPath
-                $releasedHook = $releasedHook.Replace('!include "${__FILEDIR__}\..\..\..\src-tauri\windows-common.nsh"', "!include `"$releasedCommonPath`"").Replace('$LOCALAPPDATA', $local)
-                $releasedHook = "!define SYNC_INSTALLER_MANAGER `"$(Join-Path $released 'risunest-sync-manager.exe')`"`n!define SYNC_INSTALLER_BACKGROUND `"$(Join-Path $released 'risunest-sync-manager-background.exe')`"`n" + $releasedHook
-                $releasedHookPath = Join-Path $project 'released-hooks.nsh'
-                $releasedTemplatePath = Join-Path $project 'released-template.nsi'
-                $releasedHook | Set-Content -Encoding utf8 $releasedHookPath
-                $releasedTemplate | Set-Content -Encoding utf8 $releasedTemplatePath
-                $config.version = $releasedVersion
-                $config.bundle.windows.nsis.installerHooks = $releasedHookPath
-                $config.bundle.windows.nsis.template = $releasedTemplatePath
-                $resources = @{}
-                foreach ($file in Get-ChildItem $released -File) { $resources[$file.FullName] = $file.Name }
-                $config.bundle.resources = $resources
-                $config | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $project 'tauri.conf.json')
-                Push-Location $project
-                try {
-                    $env:CARGO_TARGET_DIR = $sharedTarget
-                    & node (Join-Path $repo 'node_modules/@tauri-apps/cli/tauri.js') bundle --ci --no-sign --no-binary-patching
-                    if ($LASTEXITCODE -ne 0) { throw 'Frozen Sync installer generation failed.' }
-                } finally { $env:CARGO_TARGET_DIR = $priorTarget; Pop-Location }
-                $frozenSource = [IO.File]::ReadAllText((Join-Path $generatedRoot 'installer.nsi'))
-                $frozenFixture = Compile-Template 'frozen-1.0.4' $frozenSource
-                $releasedManager = Join-Path $released 'risunest-sync-manager.exe'
-                foreach ($shape in @(@('remove-files-resumable', 'normal'), @('forget-removal-resumable'))) {
-                    & $releasedManager --data-dir $data --server $server installer @shape 2>&1 | Out-Null
-                    if ($LASTEXITCODE -eq 0) { throw "The 1.0.4 manager accepted a new command shape: $shape" }
+                $frozenCases = @(@{ Version = $releasedVersion; Directory = $released; Ref = "sync-v$releasedVersion" })
+                if ($releasedVersion -ne '1.0.4') {
+                    if (!$LegacyReleasedBundle) { throw 'The fixed Sync 1.0.4 compatibility archive is required alongside the previous release.' }
+                    $legacy = Join-Path $testRoot 'legacy-1.0.4'
+                    Expand-Archive -LiteralPath $LegacyReleasedBundle -DestinationPath $legacy
+                    if ((Get-Content (Join-Path $legacy 'risunest-sync-bundle.json') -Raw | ConvertFrom-Json).version -ne '1.0.4') { throw 'The legacy compatibility archive must be Sync 1.0.4.' }
+                    $frozenCases += @{ Version = '1.0.4'; Directory = $legacy; Ref = 'sync-v1.0.4' }
                 }
-                foreach ($retryMode in @('normal', 'force')) {
-                    Run-Installer $frozenFixture @('/S', '/NS', "/D=$syncInstall") 0 $releasedInstallerTimeoutSeconds
-                    Invoke-Manager @('uninstall', 'lock-held')
-                    $frozenUninstaller = Join-Path $syncInstall 'uninstall.exe'
-                    $frozenHash = (Get-FileHash $frozenUninstaller).Hash
-                    $instanceName = (Get-Content (Join-Path $data 'risunest-sync-instance.json') -Raw | ConvertFrom-Json).instance
-                    $instanceRecord = Join-Path $local ".risunest-sync-instances/$instanceName.json"
-                    foreach ($file in Get-ChildItem $next -File) { Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $syncInstall $file.Name) -Force }
-                    if ((Get-FileHash $frozenUninstaller).Hash -ne $frozenHash) { throw 'Archive application replaced the frozen uninstaller.' }
-                    # A final-file lock leaves the released entry points available for retry.
-                    $heldMarker = [IO.File]::Open($oldManager, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+                # The current hook exercises the resumable retained-uninstaller contract before its next release.
+                $frozenCases += @{ Version = $nextVersion; Directory = $next; Ref = $null }
+                foreach ($frozenCase in $frozenCases) {
+                    $frozenVersion = $frozenCase.Version
+                    $frozenBundle = $frozenCase.Directory
+                    $frozenName = if ($frozenCase.Ref) { "frozen-$frozenVersion" } else { 'current-resumable' }
+                    function Read-FrozenSource([string]$path) {
+                        if (!$frozenCase.Ref) { return [IO.File]::ReadAllText((Join-Path $repo $path)) }
+                        $source = (& git -C $repo show "$($frozenCase.Ref):$path") -join "`n"
+                        if ($LASTEXITCODE -ne 0) { throw "The $($frozenCase.Ref) source is required: $path" }
+                        return $source
+                    }
+                    $releasedHook = Read-FrozenSource 'server/manager/install/windows.nsh'
+                    $resumable = $releasedHook -match 'installer remove-files-resumable\b'
+                    if (!$resumable -and $releasedHook -notmatch 'installer remove-files ') { throw 'Unknown frozen removal command contract.' }
+                    $releasedTemplate = Read-FrozenSource 'src-tauri/windows-installer.nsi'
+                    $releasedCommon = Read-FrozenSource 'src-tauri/windows-common.nsh'
+                    $releasedCommonPath = Join-Path $project 'released-common.nsh'
+                    $releasedCommon | Set-Content -Encoding utf8 $releasedCommonPath
+                    $releasedHook = $releasedHook.Replace('!include "${__FILEDIR__}\..\..\..\src-tauri\windows-common.nsh"', "!include `"$releasedCommonPath`"").Replace('$LOCALAPPDATA', $local)
+                    $releasedHook = "!define SYNC_INSTALLER_MANAGER `"$(Join-Path $frozenBundle 'risunest-sync-manager.exe')`"`n!define SYNC_INSTALLER_BACKGROUND `"$(Join-Path $frozenBundle 'risunest-sync-manager-background.exe')`"`n" + $releasedHook
+                    $releasedHookPath = Join-Path $project 'released-hooks.nsh'
+                    $releasedTemplatePath = Join-Path $project 'released-template.nsi'
+                    $releasedHook | Set-Content -Encoding utf8 $releasedHookPath
+                    $releasedTemplate | Set-Content -Encoding utf8 $releasedTemplatePath
+                    $config.version = $frozenVersion
+                    $config.bundle.windows.nsis.installerHooks = $releasedHookPath
+                    $config.bundle.windows.nsis.template = $releasedTemplatePath
+                    $resources = @{}
+                    foreach ($file in Get-ChildItem $frozenBundle -File) { $resources[$file.FullName] = $file.Name }
+                    $config.bundle.resources = $resources
+                    $config | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $project 'tauri.conf.json')
+                    Push-Location $project
                     try {
-                        Run-Installer $frozenUninstaller @('/S', "_?=$syncInstall") 1 $releasedInstallerTimeoutSeconds
-                        if (!(Test-Path $oldManager)) { throw 'Released retry lost its manager before the final-file failure.' }
-                        if (Test-Path (Join-Path $syncInstall '.risunest-sync-removal')) { throw 'A frozen command created resumable artifacts.' }
-                    } finally { $heldMarker.Dispose() }
-                    $retryArgs = if ($retryMode -eq 'force') { @('/S', '/FORCE', '/DELETEAPPDATA') } else { @('/S') }
-                    Run-Installer $frozenUninstaller $retryArgs 0 $releasedInstallerTimeoutSeconds
-                    $removedDeadline = [DateTime]::UtcNow.AddSeconds(30)
-                    while (((Test-Path $syncInstall) -or (Test-Path $instanceRecord)) -and [DateTime]::UtcNow -lt $removedDeadline) { Start-Sleep -Milliseconds 50 }
-                    if (Test-Path $syncInstall) { throw "Frozen $retryMode removal left the installation directory." }
-                    if (Test-Path $instanceRecord) { throw "Frozen $retryMode removal left its registration." }
-                    if ((Test-Path $data) -ne ($retryMode -eq 'normal')) { throw 'Frozen removal did not honor its data choice.' }
-                    Run-Installer $syncFixture @('/S', '/NS', "/D=$syncInstall") 0 $releasedInstallerTimeoutSeconds
-                    Run-Installer (Join-Path $syncInstall 'uninstall.exe') @('/S', "_?=$syncInstall") 0 $releasedInstallerTimeoutSeconds
+                        $env:CARGO_TARGET_DIR = $sharedTarget
+                        & node (Join-Path $repo 'node_modules/@tauri-apps/cli/tauri.js') bundle --ci --no-sign --no-binary-patching
+                        if ($LASTEXITCODE -ne 0) { throw 'Frozen Sync installer generation failed.' }
+                    } finally { $env:CARGO_TARGET_DIR = $priorTarget; Pop-Location }
+                    $frozenSource = [IO.File]::ReadAllText((Join-Path $generatedRoot 'installer.nsi'))
+                    $frozenFixture = Compile-Template $frozenName $frozenSource
+                    $releasedManager = Join-Path $frozenBundle 'risunest-sync-manager.exe'
+                    if (!$resumable) {
+                        foreach ($shape in @(@('remove-files-resumable', 'normal'), @('forget-removal-resumable'))) {
+                            & $releasedManager --data-dir $data --server $server installer @shape 2>&1 | Out-Null
+                            if ($LASTEXITCODE -eq 0) { throw "The legacy manager accepted a new command shape: $shape" }
+                        }
+                    }
+                    foreach ($retryMode in @('normal', 'force')) {
+                        Run-Installer $frozenFixture @('/S', '/NS', "/D=$syncInstall") 0 $releasedInstallerTimeoutSeconds
+                        Invoke-Manager @('uninstall', 'lock-held')
+                        $frozenUninstaller = Join-Path $syncInstall 'uninstall.exe'
+                        $frozenHash = (Get-FileHash $frozenUninstaller).Hash
+                        $instanceName = (Get-Content (Join-Path $data 'risunest-sync-instance.json') -Raw | ConvertFrom-Json).instance
+                        $instanceRecord = Join-Path $local ".risunest-sync-instances/$instanceName.json"
+                        foreach ($file in Get-ChildItem $next -File) { Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $syncInstall $file.Name) -Force }
+                        if ((Get-FileHash $frozenUninstaller).Hash -ne $frozenHash) { throw 'Archive application replaced the frozen uninstaller.' }
+                        # A final-file lock leaves the released entry points available for retry.
+                        $heldMarker = [IO.File]::Open($oldManager, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+                        try {
+                            Run-Installer $frozenUninstaller @('/S', "_?=$syncInstall") 1 $releasedInstallerTimeoutSeconds
+                            if (!(Test-Path $oldManager)) { throw 'Released retry lost its manager before the final-file failure.' }
+                            $retry = Join-Path $syncInstall '.risunest-sync-removal'
+                            if ($resumable) {
+                                if (!(Test-Path (Join-Path $retry 'receipt.json')) -or !(Test-Path (Join-Path $retry 'manager.exe'))) { throw 'A resumable frozen command lost its retry entry points.' }
+                            } elseif (Test-Path $retry) { throw 'A legacy frozen command created resumable artifacts.' }
+                        } finally { $heldMarker.Dispose() }
+                        $retryArgs = if ($retryMode -eq 'force') { @('/S', '/FORCE', '/DELETEAPPDATA') } else { @('/S') }
+                        Run-Installer $frozenUninstaller $retryArgs 0 $releasedInstallerTimeoutSeconds
+                        $removedDeadline = [DateTime]::UtcNow.AddSeconds(30)
+                        while (((Test-Path $syncInstall) -or (Test-Path $instanceRecord)) -and [DateTime]::UtcNow -lt $removedDeadline) { Start-Sleep -Milliseconds 50 }
+                        if (Test-Path $syncInstall) { throw "Frozen $retryMode removal left the installation directory." }
+                        if (Test-Path $instanceRecord) { throw "Frozen $retryMode removal left its registration." }
+                        if ((Test-Path $data) -ne ($retryMode -eq 'normal')) { throw 'Frozen removal did not honor its data choice.' }
+                        Run-Installer $syncFixture @('/S', '/NS', "/D=$syncInstall") 0 $releasedInstallerTimeoutSeconds
+                        Run-Installer (Join-Path $syncInstall 'uninstall.exe') @('/S', "_?=$syncInstall") 0 $releasedInstallerTimeoutSeconds
+                    }
+                    Write-Output "$frozenName uninstallers remove archive-updated installs, retry normally and with force, and permit reinstall (resumable=$resumable)."
                 }
-                Write-Output 'Frozen Sync 1.0.4 uninstallers remove archive-updated installs, retry normally and with force, and permit reinstall.'
             } finally {
                 if (Test-Path $oldManager) {
                     & $oldManager --data-dir $data --server $server uninstall lock-held | Out-Null

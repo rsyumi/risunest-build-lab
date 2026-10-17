@@ -663,3 +663,35 @@ describe('key-scoped plugin storage publication', () => {
         expect(commit).toHaveBeenCalledOnce()
     })
 })
+
+describe('V3 plugin storage values', () => {
+    it('stores JSON.stringify results and reads the same value before and after a reload', async () => {
+        const database = makeDatabase()
+        const { store, revision } = await createPersistentStoreHarness(database)
+        const coordinator = new SaveCoordinator({ store, captureRoot: () => captureRoot(database),
+            captureSelectedCharacter: () => null, replaceDatabase: () => {} })
+        coordinator.initialize(revision)
+        const pluginStorage = () => createPluginStorageStore({
+            store,
+            getStorageAuthorityEpoch: () => coordinator.storageAuthorityEpoch,
+            assertPersistentMutationAllowed: (epoch) => coordinator.assertPersistentMutationAllowed(epoch),
+            mutate: (mutations, check) => coordinator.mutatePersistentPluginStorage('plugin-v3-storage', mutations, check),
+        })
+        const when = new Date(Date.UTC(2026, 9, 17, 12, 30))
+        const values: Record<string, unknown> = {
+            stamp: when,
+            nested: { when, list: [when], bytes: new Uint8Array([1, 2]) },
+        }
+        const session = pluginStorage().forOwner('synthetic-plugin')
+        for (const [key, value] of Object.entries(values)) await session.setItem(key, value)
+
+        const reloaded = pluginStorage().forOwner('synthetic-plugin')
+        for (const [key, value] of Object.entries(values)) {
+            // Upstream RisuAI persists plugin storage values as JSON.stringify output.
+            const expected = JSON.parse(JSON.stringify(value))
+            expect(await session.getItem(key)).toEqual(expected)
+            expect((await store.readPluginStorage('synthetic-plugin', key))?.value).toEqual(expected)
+            expect(await reloaded.getItem(key)).toEqual(expected)
+        }
+    })
+})
