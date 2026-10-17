@@ -269,7 +269,7 @@ describe('chat screenshot source lease', () => {
             totalTurns: 2,
         })
         expect('messages' in lease.snapshot).toBe(false)
-        expect(source.release).toHaveBeenCalledTimes(1)
+        expect(source.release).not.toHaveBeenCalled()
         await lease.close()
         expect(source.release).toHaveBeenCalledTimes(1)
     })
@@ -312,6 +312,7 @@ describe('chat screenshot source lease', () => {
         expect(source.session.storeRevision).toBe(7)
         expect(lease.snapshot.revision).toBe(8)
         expect((await lease.createJob(1, 1)).messages[0].data).toBe('same conversation')
+        await lease.close()
         expect(source.release).toHaveBeenCalledTimes(1)
     })
 
@@ -373,6 +374,7 @@ describe('chat screenshot source lease', () => {
             totalTurns: 1,
         })
         expect((await screenshot.createJob(1, 1)).messages[0].data).toBe('after flush')
+        await screenshot.close()
         expect(source.release).toHaveBeenCalledTimes(1)
     })
 
@@ -401,6 +403,7 @@ describe('chat screenshot source lease', () => {
         expect(job.messages.map((message) => message.data)).toEqual([
             'pinned conversation',
         ])
+        await lease.close()
         expect(source.release).toHaveBeenCalledTimes(1)
     })
 
@@ -490,7 +493,8 @@ describe('chat screenshot source lease', () => {
             renderContext: renderContext(source.owner),
         }, source.dependencies)
 
-        await expect(lease.createJob(1, 1)).rejects.toBe(firstError)
+        await lease.createJob(1, 1)
+        await expect(lease.close()).rejects.toBe(firstError)
         await expect(lease.close()).resolves.toBeUndefined()
 
         expect(source.release).toHaveBeenCalledTimes(3)

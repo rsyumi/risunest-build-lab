@@ -130,7 +130,10 @@ class SafFileBridgeTest {
     val store = SafDestinationStateStore(file, testAtomicPublisher)
     val session = SafDestinationRendererSession()
     store.save(terminalDestinationRecord(id, id, SafDestinationSourceKind.RISU_SAVE, false))
-    val recovered = session.reconcile(store.load()!!, 3_000, store::save, { true }, store::clear, true)!!
+    val retiredReady = AndroidFrontendReady()
+    assertTrue(retiredReady.markReady())
+    retiredReady.cancel()
+    val recovered = session.reconcile(store.load()!!, 3_000, store::save, { true }, store::clear, !retiredReady.isReady)!!
     assertEquals(recovered, store.load())
     assertEquals(listOf(recovered), session.pending())
     assertFalse(session.acknowledge(id, store.load()) { false })

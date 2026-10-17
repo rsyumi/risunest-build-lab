@@ -1,4 +1,5 @@
 import { pluginStartupGate } from '../pluginStartupGate'
+import { parseRisuChat } from '../parseRisuChat'
 import { createPluginDeviceKeyspace } from '../pluginDeviceKeyspace'
 import type { PluginOwnerStorage } from '../pluginStorageStore'
 import { Mutex } from "src/ts/mutex";
@@ -1104,6 +1105,8 @@ const makeRisuaiAPIV3 = (
                 fullObjectContext(),
             )
         },
+        parseRisuChat: (text: string, options?: Parameters<typeof parseRisuChat>[1]) =>
+            parseRisuChat(text, options, pluginLifetime.signal),
         setChatToIndex: (characterIndex:number, chatIndex:number, chat:any) => {
             return databaseAccess.setChatToIndex(
                 characterIndex,

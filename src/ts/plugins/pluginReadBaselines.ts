@@ -5,6 +5,23 @@ export interface PluginReadProvenance {
     token: string
 }
 
+export type PluginSnapshotChunk =
+    | { type: 'provenance'; entries: PluginReadProvenance[] }
+    | { type: 'set'; key: string; value: unknown }
+    | { type: 'arrayStart'; key: string }
+    | { type: 'arrayPush'; key: string; value: unknown }
+    | { type: 'recordStart'; key: string }
+    | { type: 'recordSet'; key: string; entryKey: string; value: unknown }
+    | { type: 'characterStart'; key: 'characters'; value: unknown }
+    | { type: 'conversationStart'; key: 'characters'; value: unknown }
+    | { type: 'message'; key: 'characters'; value: unknown }
+
+interface DigestCost { bytes: number }
+
+function accountValue(value: unknown, cost?: DigestCost): void {
+    if (cost) cost.bytes += typeof value === 'string' ? 16 + value.length * 2 : 16
+}
+
 const provenance = new WeakMap<object, string>()
 
 export function attachPluginReadProvenance(value: unknown, entries: readonly PluginReadProvenance[]): void {
@@ -118,7 +135,8 @@ function arrayDigest(digests: ArrayLike<number>): number {
     return end()
 }
 
-function digestValue(value: unknown, memo?: WeakMap<object, number>): number {
+function digestValue(value: unknown, memo?: WeakMap<object, number>, cost?: DigestCost): number {
+    accountValue(value, cost)
     if (typeof value === 'string') {
         begin(STRING)
         mixText(value)
@@ -134,12 +152,15 @@ function digestValue(value: unknown, memo?: WeakMap<object, number>): number {
     let digest: number
     if (Array.isArray(value)) {
         const digests = new Float64Array(value.length)
-        for (let index = 0; index < value.length; index++) digests[index] = digestValue(value[index], memo)
+        for (let index = 0; index < value.length; index++) digests[index] = digestValue(value[index], memo, cost)
         digest = arrayDigest(digests)
     } else {
         const keys = Object.keys(value)
         const digests = new Float64Array(keys.length)
-        for (let index = 0; index < keys.length; index++) digests[index] = digestValue((value as Record<string, unknown>)[keys[index]], memo)
+        for (let index = 0; index < keys.length; index++) {
+            accountValue(keys[index], cost)
+            digests[index] = digestValue((value as Record<string, unknown>)[keys[index]], memo, cost)
+        }
         digest = objectDigest(keys, digests)
     }
     memo?.set(value, digest)
@@ -187,31 +208,36 @@ function recordsNode(items: readonly BaselineNode[], identity?: unknown): Record
     return new RecordsNode(arrayDigest(items.map(item => item.digest)), items, identity)
 }
 
-function fieldNode(value: unknown, field: string, databaseRoot: boolean): BaselineNode {
-    return descendsInto(field, databaseRoot) ? buildNode(value, field, false) : new ValueNode(digestValue(value))
+function fieldNode(value: unknown, field: string, databaseRoot: boolean, cost?: DigestCost): BaselineNode {
+    return descendsInto(field, databaseRoot) ? buildNode(value, field, false, undefined, cost) : new ValueNode(digestValue(value, undefined, cost))
 }
 
 // `field` is the last path element, which selects the record identity of an array.
-function buildNode(value: unknown, field: string | undefined, databaseRoot: boolean, identity?: unknown): BaselineNode {
+function buildNode(value: unknown, field: string | undefined, databaseRoot: boolean, identity?: unknown, cost?: DigestCost): BaselineNode {
     if (Array.isArray(value)) {
         const id = recordIdentityOf(field)
-        if (!id) return new ValueNode(digestValue(value), identity)
+        if (!id) return new ValueNode(digestValue(value, undefined, cost), identity)
+        accountValue(value, cost)
         const whole = wholeRecordFields.includes(field!)
         const items: BaselineNode[] = []
         for (let index = 0; index < value.length; index++) {
             const item = value[index]
             const itemIdentity = identityValue(item?.[id])
             items.push(whole
-                ? new ValueNode(digestValue(item), itemIdentity)
-                : buildNode(item, typeof itemIdentity === 'string' ? itemIdentity : undefined, false, itemIdentity))
+                ? new ValueNode(digestValue(item, undefined, cost), itemIdentity)
+                : buildNode(item, typeof itemIdentity === 'string' ? itemIdentity : undefined, false, itemIdentity, cost))
         }
         return recordsNode(items, identity)
     }
     if (value && typeof value === 'object') {
         const keys = Object.keys(value)
-        return objectNode(keys, keys.map(key => fieldNode((value as Record<string, unknown>)[key], key, databaseRoot)), databaseRoot, identity)
+        accountValue(value, cost)
+        return objectNode(keys, keys.map(key => {
+            accountValue(key, cost)
+            return fieldNode((value as Record<string, unknown>)[key], key, databaseRoot, cost)
+        }), databaseRoot, identity)
     }
-    return new ValueNode(digestValue(value), identity)
+    return new ValueNode(digestValue(value, undefined, cost), identity)
 }
 
 function withRecordField(node: ObjectNode, field: string, value: BaselineNode): ObjectNode {
@@ -300,6 +326,118 @@ type StoredValue =
     | { kind: 'character'; detail: BaselineNode; chats?: string[] }
     | { kind: 'database'; fields: Map<string, { childKind: PluginReadKind; targets: unknown[] } | BaselineNode> }
 
+interface PreparedRead {
+    kind: PluginReadKind
+    target: string
+    path: Array<string | number>
+    stored: StoredValue
+}
+
+/** Provisional digest-only state. No baseline is changed until finish succeeds. */
+export class PluginSnapshotBaseline {
+    private readonly reads: PreparedRead[] = []
+    private readonly fields = new Map<string, { childKind: PluginReadKind; targets: unknown[] } | BaselineNode>()
+    private readonly records = new Map<string, Map<string, BaselineNode>>()
+    private readonly arrays = new Map<string, BaselineNode[]>()
+    private character?: { target: string; index: number; chats: string[] }
+    private conversation?: { read: PreparedRead; metadata: ObjectNode; digests: number[] }
+    private characterIndex = -1
+    private finished = false
+
+    constructor(
+        private readonly kind: 'database' | 'character' | 'conversation',
+        private readonly target: string,
+        private readonly publish: (reads: PreparedRead[]) => PluginReadProvenance[],
+    ) {
+        if (kind === 'database') this.reads.push({ kind, target, path: [], stored: { kind, fields: this.fields } })
+    }
+
+    private finishConversation(): void {
+        if (!this.conversation) return
+        const { read, metadata, digests } = this.conversation
+        read.stored = { kind: 'conversation', node: withRecordField(metadata, 'message', new ValueNode(arrayDigest(digests))) }
+        this.conversation = undefined
+    }
+
+    add(chunk: PluginSnapshotChunk): number {
+        if (this.finished) throw new Error('Plugin snapshot baseline is closed')
+        const cost = { bytes: 64 }
+        if (chunk.type === 'provenance') return cost.bytes
+        accountValue(chunk.key, cost)
+        if (chunk.type !== 'message') this.finishConversation()
+        if (chunk.type === 'set') {
+            this.fields.set(chunk.key, fieldNode(chunk.value, chunk.key, true, cost))
+        } else if (chunk.type === 'arrayStart') {
+            const nested = nestedRecords.find(([key]) => key === chunk.key)
+            if (nested) this.fields.set(chunk.key, { childKind: nested[1], targets: [] })
+            else this.arrays.set(chunk.key, [])
+        } else if (chunk.type === 'arrayPush') {
+            const field = this.fields.get(chunk.key)
+            if (field && 'targets' in field) {
+                // Characters stream through characterStart; only presets arrive whole.
+                if (field.childKind !== 'preset') throw new Error('Invalid plugin snapshot record chunk')
+                const value = chunk.value as any
+                const target = value?.id
+                this.reads.push({ kind: 'preset', target, path: [chunk.key, field.targets.length],
+                    stored: { kind: 'preset', node: buildNode(value, undefined, false, identityValue(target), cost) } })
+                field.targets.push(target)
+            } else {
+                const value = chunk.value as any
+                const id = recordIdentityOf(chunk.key)
+                const identity = identityValue(id ? value?.[id] : undefined)
+                this.arrays.get(chunk.key)!.push(id && !wholeRecordFields.includes(chunk.key)
+                    ? buildNode(value, typeof identity === 'string' ? identity : undefined, false, identity, cost)
+                    : new ValueNode(digestValue(value, undefined, cost), identity))
+            }
+        } else if (chunk.type === 'recordStart') {
+            this.records.set(chunk.key, new Map())
+        } else if (chunk.type === 'recordSet') {
+            accountValue(chunk.entryKey, cost)
+            this.records.get(chunk.key)!.set(chunk.entryKey, fieldNode(chunk.value, chunk.entryKey, false, cost))
+        } else if (chunk.type === 'characterStart') {
+            const { chats, ...detail } = chunk.value as any
+            const target = this.kind === 'character' ? this.target : detail.chaId
+            this.character = { target, index: ++this.characterIndex, chats: [] }
+            const node = buildNode(detail, undefined, false, identityValue(detail.chaId), cost)
+            // The guest replaces the source's chats field; it still occupies transfer bytes.
+            if (chats !== undefined) digestValue(chats, undefined, cost)
+            if (this.kind !== 'conversation') {
+                this.reads.push({ kind: 'character', target, path: ['characters', this.characterIndex],
+                    stored: { kind: 'character', detail: node, chats: this.character.chats } })
+                const field = this.fields.get('characters')
+                if (field && 'targets' in field) field.targets.push(target)
+            }
+        } else if (chunk.type === 'conversationStart') {
+            const value = chunk.value as any
+            const character = this.character!
+            const target = this.kind === 'conversation' ? this.target : JSON.stringify([character.target, value?.id])
+            const read: PreparedRead = { kind: 'conversation', target,
+                path: ['characters', character.index, 'chats', character.chats.length],
+                stored: { kind: 'conversation', node: new ValueNode(0) } }
+            character.chats.push(target)
+            this.reads.push(read)
+            const metadata = buildNode({ ...value, message: undefined }, undefined, false, identityValue(value?.id), cost) as ObjectNode
+            if (value?.message !== undefined) digestValue(value.message, undefined, cost)
+            this.conversation = { read, metadata, digests: [] }
+        } else if (chunk.type === 'message') {
+            this.conversation!.digests.push(digestValue(chunk.value, undefined, cost))
+        }
+        return cost.bytes
+    }
+
+    finish(): PluginReadProvenance[] {
+        if (this.finished) throw new Error('Plugin snapshot baseline is closed')
+        this.finished = true
+        this.finishConversation()
+        for (const [key, fields] of this.records) {
+            this.fields.set(key, objectNode([...fields.keys()], [...fields.values()], false))
+        }
+        for (const [key, items] of this.arrays) this.fields.set(key, recordIdentityOf(key)
+            ? recordsNode(items) : new ValueNode(arrayDigest(items.map(item => item.digest))))
+        return this.publish(this.reads)
+    }
+}
+
 interface Baseline {
     token: string
     authority: number
@@ -347,7 +485,21 @@ export class PluginReadBaselines {
         return value
     }
 
-    private store(value: unknown, kind: PluginReadKind, target: string, authority: number): void {
+    beginSnapshot(kind: 'database' | 'character' | 'conversation', target: string, expectedAuthority = this.authority()): PluginSnapshotBaseline {
+        return new PluginSnapshotBaseline(kind, target, reads => {
+            this.assertOpen()
+            if (expectedAuthority !== this.authority()) throw new PluginReadBaselineError('stale')
+            return reads.map(read => {
+                const baseline = this.ensure(read.kind, read.target, expectedAuthority)
+                if (read.stored.kind === 'database' && baseline.stored.kind === 'database') {
+                    for (const [key, value] of read.stored.fields) baseline.stored.fields.set(key, value)
+                } else baseline.stored = read.stored
+                return { path: read.path, token: baseline.token }
+            })
+        })
+    }
+
+    private ensure(kind: PluginReadKind, target: string, authority: number): Baseline {
         const key = JSON.stringify([kind, target])
         let baseline = this.baselines.get(key)
         if (!baseline || baseline.authority !== authority) {
@@ -357,6 +509,11 @@ export class PluginReadBaselines {
             this.tokens.set(baseline.token, { kind, target })
         }
         this.history.add(JSON.stringify([this.owner, kind, target]))
+        return baseline
+    }
+
+    private store(value: unknown, kind: PluginReadKind, target: string, authority: number): void {
+        const baseline = this.ensure(kind, target, authority)
         if (value && typeof value === 'object') provenance.set(value, baseline.token)
         const record = value as any
         if (kind === 'database') {

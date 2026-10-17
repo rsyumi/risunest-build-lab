@@ -12,6 +12,7 @@
     } from 'src/ts/storage/database.svelte'
     import { language } from 'src/lang'
     import LoadingIndicator from '../UI/GUI/LoadingIndicator.svelte'
+    import type { BoundedLiveChatParserProjection } from 'src/ts/selectedConversationLiveParserProjection'
 
     let {
         source,
@@ -19,32 +20,43 @@
         children,
         refreshRevision = 0,
         preservePendingContent = false,
+        chatID = -1,
+        parseFirst = false,
     }: {
         source: unknown
         character: Parameters<typeof captureLiveDisplayParserInputs>[1]
-        children: Snippet<[AbortSignal]>
+        children: Snippet<[AbortSignal, BoundedLiveChatParserProjection | undefined]>
+        chatID?: number
+        parseFirst?: boolean
         refreshRevision?: number
         preservePendingContent?: boolean
     } = $props()
     let readySignal = $state<AbortSignal | null>(null)
+    let projection = $state.raw<BoundedLiveChatParserProjection | undefined>()
+    let historyRevision = $state('')
     let failed = $state(false)
     let retry = $state(0)
     let activeController: AbortController | null = null
     let readyOwner: string | null = null
+    let preparing = false
     let selectionRevision = 0
     let selectionIdentity = $state(untrack(captureLiveDisplayParserSelection))
     onMount(() =>
-        subscribeLiveDisplayParserSelection((identity) => {
+        subscribeLiveDisplayParserSelection((identity, revision) => {
             selectionRevision++
+            if (preparing && identity === selectionIdentity) return
+            historyRevision = revision ?? ''
             if (identity !== selectionIdentity) activeController?.abort()
             else if (failed) retry++
             selectionIdentity = identity
-        }),
+        }, () => projection?.context.parserContext.historyAccess?.dependencies),
     )
     const signature = $derived(
         JSON.stringify({
             characterId: getCurrentCharacter()?.chaId,
             conversationId: getCurrentChat()?.id,
+            chatID,
+            parseFirst,
             inputs: captureLiveDisplayParserInputs(source, character),
         }),
     )
@@ -61,9 +73,11 @@
         void selectionIdentity
         void retry
         void refreshRevision
+        void historyRevision
         const requestedOwner = owner
         const requestedRevision = selectionRevision
         const controller = new AbortController()
+        preparing = true
         activeController = controller
         let lease: { release(): void } | null = null
         // Retain the published DOM while a refresh is admitted, but never carry
@@ -76,6 +90,13 @@
                 source,
                 character,
                 signal: controller.signal,
+                chatID,
+                parseFirst,
+                // Abort first so the stale render is discarded rather than shown as failed.
+                onStale: () => {
+                    controller.abort()
+                    retry++
+                },
             }),
         )
             .then((acquired) => {
@@ -84,11 +105,14 @@
                     return
                 }
                 lease = acquired
+                preparing = false
+                projection = acquired?.projection
                 readyOwner = requestedOwner
                 readySignal = controller.signal
             })
             .catch(() => {
                 if (controller.signal.aborted) return
+                preparing = false
                 // Preparation may complete elsewhere before this rejection arrives.
                 if (selectionRevision !== requestedRevision) retry++
                 else failed = true
@@ -103,7 +127,7 @@
 </script>
 
 {#if readySignal}
-    {@render children(readySignal)}
+    {@render children(readySignal, projection)}
 {/if}
 {#if failed}
     <div

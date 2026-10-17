@@ -258,6 +258,7 @@ function batches<T>(values: T[], limit: number): T[][] {
 }
 
 export class SqlitePersistentDataStore implements PersistentDataStore {
+    readonly messageMetadataReadMode = 'projected' as const
     /** Latest native revision; every open still reaches the store. */
     lastOpenResult: PersistentStoreOpenResult | null = null
 
@@ -522,6 +523,7 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
 
         const revisionLease: NativePersistentRevisionLease = {
             revision,
+            messageMetadataReadMode: 'projected',
             [nativePersistentRevisionLease]: lease,
             readRoot: async () => {
                 assertActive()

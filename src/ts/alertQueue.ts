@@ -27,7 +27,7 @@ export interface AlertQueue extends Readable<alertData> {
 }
 
 function sameNotice(a: alertData, b: alertData): boolean {
-    return a.type === b.type && a.msg === b.msg && (a.submsg ?? '') === (b.submsg ?? '')
+    return a.type === b.type && a.msg === b.msg && (a.submsg ?? '') === (b.submsg ?? '') && !!a.wrapCode === !!b.wrapCode
 }
 
 /**
@@ -121,6 +121,6 @@ export function createAlertQueue(initial: alertData, options: { gapMs?: number }
 
 export const alertStore = createAlertQueue({ type: 'none', msg: 'n' })
 
-export function alertMd(msg: string) {
-    alertStore.set({ type: 'markdown', msg })
+export function alertMd(msg: string, wrapCode = false) {
+    alertStore.set({ type: 'markdown', msg, ...(wrapCode ? { wrapCode: true } : {}) })
 }

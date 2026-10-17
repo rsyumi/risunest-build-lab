@@ -341,6 +341,19 @@ impl DurableCasJob {
         Ok(prepared)
     }
 
+    pub(crate) fn prepare_owned_upload(
+        &mut self,
+        cas: &PayloadCas,
+        upload: super::payload_cas::OwnedPayloadUpload,
+        role: CasObjectRole,
+    ) -> io::Result<PreparedPayload> {
+        self.ensure_preparable()?;
+        self.ensure_cas(cas)?;
+        let prepared = upload.finish(cas)?;
+        self.record_prepared(cas, &prepared, role)?;
+        Ok(prepared)
+    }
+
     pub(crate) fn prepare_reader_expected(
         &mut self,
         cas: &PayloadCas,

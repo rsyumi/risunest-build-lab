@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { CbsHistoryDependencies, hasCbsHistoryChanges } from 'src/ts/cbsHistoryAccess'
     import type { character, Message, StreamingDisplayOptimizationMode } from 'src/ts/storage/database.svelte'
     import { mount, onDestroy, onMount, tick, unmount, untrack } from 'svelte'
     import { get } from 'svelte/store'
@@ -125,7 +126,7 @@
         captureEditorDraft?: () => Omit<ChatEditorDraft, 'caret'> | null
         restoreEditor?: (draft: ChatEditorDraft) => void
         refreshParserProjection?: (projection?: BoundedLiveChatParserProjection) => void
-        refreshConversationStartParser?: (totalMessages?: number) => void
+        refreshConversationStartParser?: (totalMessages?: number, snapshot?: ConversationViewportSnapshot, forced?: boolean) => void
         updateConversationStartPresentation?: (state: { resolvedImage: string }) => void
         updateStreamingDisplay?: (state: {
             isOptimizedStreamingMessage: boolean
@@ -164,10 +165,12 @@
     let latestPairLookup: Promise<number[]> | null = null
     let latestPairController = new AbortController()
     interface RowParserProjectionState {
+        dependencies: CbsHistoryDependencies
         readonly controller: AbortController
         readonly source: ConversationViewportSource
         readonly sourceToken: string
         readonly sourceVersion: number
+        historyVersion?: number
         readonly row: ConversationViewportRow
         readonly totalMessages: number
         readonly renderSignature: ChatRenderSignature
@@ -1708,6 +1711,7 @@
     ): void {
         const character = currentCharacter as character
         const currentChat = character.chats[character.chatPage]
+        const historySnapshot = activeViewportSource?.snapshot()
         const signature = JSON.stringify([
             character.chaId,
             currentChat.id,
@@ -1721,17 +1725,20 @@
             totalMessages,
             parserCharacterStamp,
             get(ReloadGUIPointer),
+            [historySnapshot?.storeRevision, historySnapshot?.historyVersion ?? 0],
         ])
         const previousSignature = element.dataset.chatConversationStartSignature
         if (previousSignature && previousSignature !== signature && mountInstances.has(key)) {
             const previousInputs = JSON.parse(previousSignature)
             const nextInputs = JSON.parse(signature)
-            // Recheck history admission on reload or a new message count without discarding the greeting.
+            // Recheck history admission on reload or history edits without discarding the greeting.
             previousInputs[9] = nextInputs[9]
             previousInputs[11] = nextInputs[11]
+            previousInputs[12] = nextInputs[12]
             if (JSON.stringify(previousInputs) === signature) {
                 element.dataset.chatConversationStartSignature = signature
-                untrack(() => mountInstances.get(key)?.refreshConversationStartParser?.(totalMessages))
+                const forced = JSON.parse(previousSignature)[11] !== nextInputs[11]
+                untrack(() => mountInstances.get(key)?.refreshConversationStartParser?.(totalMessages, historySnapshot, forced))
                 return
             }
         }
@@ -1764,6 +1771,7 @@
                         resolvedImage: resolvedCharacterImage ?? '',
                         showAiWarning,
                         totalMessages,
+                        historySnapshot,
                         onReroll: onFirstMessageReroll,
                         unReroll: unFirstMessageReroll,
                         onRemoveCreatorQuote,
@@ -2029,20 +2037,26 @@
         const existing = rowParserProjections.get(key)
         if (
             existing
+            && !existing.controller.signal.aborted
             && existing.source === source
             && existing.sourceToken === sourceSnapshot.sourceToken
             && existing.sourceVersion === sourceSnapshot.version
+            && !hasCbsHistoryChanges(sourceSnapshot, existing.historyVersion, existing.dependencies)
             && existing.row.key === row.key
             && existing.row.absoluteIndex === row.absoluteIndex
             && existing.row.sourceVersion === row.sourceVersion
-            && existing.totalMessages === totalMessages
             && areChatRenderSignaturesEqual(existing.renderSignature, renderSignature)
-        ) return existing
+        ) {
+            if (existing.displayStarted && !activeRowPreparations.has(key)) existing.historyVersion = sourceSnapshot.historyVersion
+            return existing
+        }
 
         const preserveMountedRuntime = sourceHandoffRuntimeKeys.has(key) || (
             existing?.source === source && (
-                existing.sourceToken !== sourceSnapshot.sourceToken
+                existing.controller.signal.aborted
+                || existing.sourceToken !== sourceSnapshot.sourceToken
                 || existing.sourceVersion !== sourceSnapshot.version
+                || existing.historyVersion !== sourceSnapshot.historyVersion
                 || existing.row.key !== row.key
                 || existing.row.absoluteIndex !== row.absoluteIndex
                 || existing.row.sourceVersion !== row.sourceVersion
@@ -2051,11 +2065,15 @@
         )
         releaseRowParserProjection(key)
         const controller = new AbortController()
+        const dependencies = new CbsHistoryDependencies()
+        dependencies.range(row.absoluteIndex, row.absoluteIndex + 1)
         const state: RowParserProjectionState = {
+            dependencies,
             controller,
             source,
             sourceToken: sourceSnapshot.sourceToken,
             sourceVersion: sourceSnapshot.version,
+            historyVersion: sourceSnapshot.historyVersion,
             row,
             totalMessages,
             renderSignature,
@@ -2077,11 +2095,14 @@
         state: RowParserProjectionState,
     ): void {
         void parserProjectionResolver!.resolve({
+            dependencies: state.dependencies,
             row: state.row,
             totalMessages: state.totalMessages,
             signal: state.controller.signal,
             isCurrent: () => isRowParserProjectionCurrent(key, state),
+            onStale: () => handleRowParserProjectionStale(key, state),
         }).then((projection) => {
+            if (projection.kind === 'complete') state.dependencies.all = true
             if (!isRowParserProjectionCurrent(key, state)) {
                 if (projection.kind === 'complete') projection.release()
                 return
@@ -2114,8 +2135,11 @@
     ): void {
         finishRowPreparation(key, state)
         releaseResolvedRowParserProjection(state)
+        if (!isRowParserProjectionCurrent(key, state)) {
+            if (rowParserProjections.get(key) === state && !state.controller.signal.aborted) queueProjectionReconcile()
+            return
+        }
         if (
-            !isRowParserProjectionCurrent(key, state) ||
             state.retryTimer !== null
         )
             return
@@ -2140,6 +2164,17 @@
         }, PARSER_PROJECTION_RETRY_DELAY_MS)
     }
 
+    // A later CBS pass read history that changed before it registered the read.
+    // Abort that render and prepare the row again, as for a covered history change.
+    function handleRowParserProjectionStale(
+        key: string,
+        state: RowParserProjectionState,
+    ): void {
+        if (rowParserProjections.get(key) !== state || state.controller.signal.aborted) return
+        state.controller.abort()
+        queueProjectionReconcile()
+    }
+
     function isRowParserProjectionCurrent(
         key: string,
         state: RowParserProjectionState,
@@ -2154,7 +2189,7 @@
             !snapshot
             || snapshot.sourceToken !== state.sourceToken
             || snapshot.version !== state.sourceVersion
-            || snapshot.totalMessages !== state.totalMessages
+            || hasCbsHistoryChanges(snapshot, state.historyVersion, state.dependencies)
         ) return false
         const currentRow = snapshot.rowAt(state.row.absoluteIndex)
         return currentRow?.key === state.row.key

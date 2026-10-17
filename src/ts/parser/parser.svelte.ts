@@ -1,4 +1,5 @@
 import DOMPurify from 'dompurify';
+import { CbsHistoryAccessError, type CbsHistoryAccess } from '../cbsHistoryAccess';
 import markdownit from 'markdown-it'
 import { appVer, getCurrentCharacter, getDatabase, type Database, type character, type customscript, type loreBook, type triggerscript } from '../storage/database.svelte';
 import { DBState, selIdState } from '../stores.svelte';
@@ -756,6 +757,7 @@ export async function ParseMarkdown(
 ) {
     renderContext.signal?.throwIfAborted()
     renderContext = { ...renderContext, deferredInlays: renderContext.deferredInlays ?? new DeferredInlayMarkerRegistry() }
+    const prepareStyleHistory = renderContext.scriptContext?.parserContext.prepareHistory
     let firstParsed = ''
     const additionalAssetMode = (mode === 'back') ? 'back' : 'normal'
     let char = (typeof(charArg) === 'string') ? (findCharacterbyId(charArg)) : (charArg)
@@ -799,6 +801,12 @@ export async function ParseMarkdown(
         if(mode === 'notrim'){
             return data
         }
+    }
+    if (prepareStyleHistory && /<risu-style\b/i.test(data)) {
+        const context = renderContext.scriptContext!
+        const historyAccess = await prepareStyleHistory(data, chatID, false)
+        renderContext = { ...renderContext, scriptContext: { ...context,
+            parserContext: { ...context.parserContext, historyAccess } } }
     }
     return recordChatVariableReads(renderContext.variableReads, () => trimMarkdown(data, {
         hideAllImages: renderContext.hideAllImages,
@@ -1047,6 +1055,7 @@ function decodeStyleContent(
             chatID: renderContext.chatID,
             projectedChatID: renderContext.projectedChatID,
             historyOffset: parser.historyOffset,
+            historyAccess: parser.historyAccess,
             cbsConditions: renderContext.cbsConditions,
             db: parser.database,
             chara: parser.chara ?? parser.character,
@@ -1075,6 +1084,7 @@ function decodeStyleContent(
             })
         }
     } catch (error) {
+        if (error instanceof CbsHistoryAccessError) throw error
         if(renderContext.returnCSSError ?? DBState.db.returnCSSError){
             return { fallback: `CSS ERROR: ${error}` }
         }
@@ -1203,7 +1213,9 @@ function matcher (p1:string,matcherArg:matcherArg,vars:{[key:string]:string}|nul
                 activeMatcherContext = previousContext
             }
         }
-    } catch (error) {}
+    } catch (error) {
+        if (error instanceof CbsHistoryAccessError) throw error
+    }
 
     return null
 }
@@ -1684,6 +1696,7 @@ export function risuChatParser(da:string, arg:{
     chatID?:number
     projectedChatID?:number
     historyOffset?:number
+    historyAccess?: CbsHistoryAccess
     db?:Database
     chara?:string|character
     rmVar?:boolean,
@@ -1756,6 +1769,7 @@ export function risuChatParser(da:string, arg:{
         chatID: chatID,
         projectedChatID: arg.projectedChatID,
         historyOffset: arg.historyOffset,
+        historyAccess: arg.historyAccess,
         chara: chara,
         rmVar: arg.rmVar ?? false,
         db: db,

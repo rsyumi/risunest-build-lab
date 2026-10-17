@@ -1,5 +1,5 @@
 import { get } from 'svelte/store'
-import { getDatabase } from '../storage/database.svelte'
+import { getDatabase, type Chat } from '../storage/database.svelte'
 import { peekActiveConversationSession } from '../storage/persistentDataRuntime.svelte'
 import { selectedCharID } from '../stores.svelte'
 import { requestScriptDisplayRefresh } from './scriptDisplayRefresh'
@@ -12,11 +12,15 @@ import { requestScriptDisplayRefresh } from './scriptDisplayRefresh'
 export function setSelectedChatVariable(key: string, value: string): void {
     const character = getDatabase().characters[get(selectedCharID)]
     const chat = character.chats[character.chatPage]
+    setConversationChatVariable(character.chaId, chat, key, value)
+}
+
+export function setConversationChatVariable(characterId: string, chat: Chat, key: string, value: string): void {
     const session = peekActiveConversationSession()
     if (
         session?.isActive &&
         !session.isTransactionActive &&
-        session.materializeCompatibilityArray() === chat.message
+        session.matchesConversation(characterId, chat)
     ) {
         requestScriptDisplayRefresh({ keys: session.updateChatVariables(new Map([[key, value]])) })
         return

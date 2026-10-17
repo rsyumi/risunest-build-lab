@@ -297,6 +297,50 @@ pub(super) struct OwnedIdentity {
     hash: String,
     owner: ThreadId,
 }
+
+pub(super) struct OwnedReceiveObservation {
+    scope: Arc<Mutex<BodyIo>>,
+    work: Arc<Mutex<BodyWork>>,
+    hash: Option<String>,
+}
+
+impl OwnedReceiveObservation {
+    pub(super) fn new() -> Self {
+        let scope = current_scope();
+        scope.lock().unwrap().pending_owned_identities += 1;
+        Self { scope, work: Arc::new(Mutex::new(BodyWork::default())), hash: None }
+    }
+
+    pub(super) fn enter(&self) -> OwnedReceiveScope {
+        let previous = current_scope();
+        WORK.with(|work| *work.borrow_mut() = self.scope.clone());
+        PENDING_OWNED.with(|pending| pending.borrow_mut().push((self.scope.clone(), self.work.clone())));
+        OwnedReceiveScope(previous)
+    }
+
+    pub(super) fn verified(&mut self, hash: &str) { self.hash = Some(hash.to_owned()); }
+}
+
+impl Drop for OwnedReceiveObservation {
+    fn drop(&mut self) {
+        let mut scope = self.scope.lock().unwrap();
+        scope.pending_owned_identities -= 1;
+        if scope.closed { scope.scope_violations += 1; }
+        let work = self.work.lock().unwrap();
+        match &self.hash {
+            Some(hash) => scope.objects.entry(hash.clone()).or_default().owned_work.add(&work),
+            None => scope.unattributed_owned.add(&work),
+        }
+    }
+}
+
+pub(super) struct OwnedReceiveScope(Arc<Mutex<BodyIo>>);
+impl Drop for OwnedReceiveScope {
+    fn drop(&mut self) {
+        PENDING_OWNED.with(|pending| { pending.borrow_mut().pop(); });
+        WORK.with(|work| *work.borrow_mut() = self.0.clone());
+    }
+}
 impl OwnedIdentity {
     pub(super) fn transfer_to(&mut self, owner: ThreadId) {
         self.check_scope();

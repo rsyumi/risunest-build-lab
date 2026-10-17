@@ -1,14 +1,19 @@
+import type { Database, character, Chat } from './storage/database.svelte'
+
 export type ChatParserUnsafeHistoryDependency =
     | 'lua'
     | 'plugin-v2'
     | 'display-trigger'
     | 'inject'
+    | 'repeat-back'
+    | 'regex-reparse'
 
 export type ChatParserHistoryReason =
     | ChatParserUnsafeHistoryDependency
     | 'full-history-cbs'
     | 'dynamic-previous-chat-log'
     | 'ambiguous-risu-style'
+    | 'opaque-cbs'
 
 export interface ChatParserHistoryClassification {
     readonly requiresFullHistory: boolean
@@ -20,6 +25,21 @@ export interface ChatParserHistoryClassificationInput {
     readonly source: unknown
     readonly unsafeDependencies?: readonly ChatParserUnsafeHistoryDependency[]
     readonly indirections?: Readonly<Record<string, unknown>>
+}
+
+export type CbsHistoryRequirement = 'count' | 'current' | 'tail' | 'previouschar' | 'previoususer' | 'idle'
+
+export interface CbsHistoryPlan extends ChatParserHistoryClassification {
+    readonly requirements: readonly CbsHistoryRequirement[]
+}
+
+const HISTORY_REQUIREMENTS: Readonly<Record<string, CbsHistoryRequirement>> = {
+    lastmessageid: 'count', lastmessageindex: 'count', pick: 'count', rollp: 'count', rollpick: 'count',
+    messagetime: 'current', messagedate: 'current', role: 'current',
+    lastmessage: 'tail', idleduration: 'tail',
+    previouscharchat: 'previouschar', lastcharmessage: 'previouschar',
+    previoususerchat: 'previoususer', lastusermessage: 'previoususer',
+    messageidleduration: 'idle',
 }
 
 const FULL_HISTORY_CBS_NAMES = new Set([
@@ -44,6 +64,15 @@ const PREVIOUS_CHAT_LOG_CBS_NAME = 'previouschatlog'
 export function classifyChatParserHistory(
     input: ChatParserHistoryClassificationInput,
 ): ChatParserHistoryClassification {
+    const { requirements, ...classification } = buildHistoryPlan(input, false)
+    return classification
+}
+
+export function planChatParserHistory(input: ChatParserHistoryClassificationInput): CbsHistoryPlan {
+    return buildHistoryPlan(input, true)
+}
+
+function buildHistoryPlan(input: ChatParserHistoryClassificationInput, precise: boolean): CbsHistoryPlan {
     const reasons = new Set<ChatParserHistoryReason>(input.unsafeDependencies ?? [])
     const absoluteMessageIndices = new Set<number>()
     const texts = collectParserInputText(input.source)
@@ -54,6 +83,7 @@ export function classifyChatParserHistory(
         ]),
     )
     const followedIndirections = new Set<string>()
+    const requirements = new Set<CbsHistoryRequirement>()
 
     for (const text of texts) {
         classifyText(
@@ -63,6 +93,8 @@ export function classifyChatParserHistory(
             true,
             indirections,
             followedIndirections,
+            requirements,
+            precise,
         )
     }
 
@@ -70,6 +102,7 @@ export function classifyChatParserHistory(
         requiresFullHistory: reasons.size > 0,
         absoluteMessageIndices: [...absoluteMessageIndices].sort((a, b) => a - b),
         reasons: [...reasons],
+        requirements: [...requirements],
     }
 }
 
@@ -98,10 +131,18 @@ function classifyText(
     decodeStyles: boolean,
     indirections: ReadonlyMap<string, unknown>,
     followedIndirections: Set<string>,
+    requirements: Set<CbsHistoryRequirement>,
+    precise: boolean,
 ): void {
+    if (/@@repeat_back|<repeat_back(?:>|:)/.test(text)) reasons.add('repeat-back')
     for (const expression of extractCbsExpressions(text)) {
         const parsed = parseCbsExpression(expression)
-        if (FULL_HISTORY_CBS_NAMES.has(parsed.name)) {
+        const requirement = HISTORY_REQUIREMENTS[parsed.name]
+        if (requirement) requirements.add(requirement)
+        if (hasDynamicCbsName(expression) || parsed.name === 'call' || parsed.name.startsWith('#each')) {
+            reasons.add('opaque-cbs')
+        }
+        if (FULL_HISTORY_CBS_NAMES.has(parsed.name) && (!precise || !requirement)) {
             reasons.add('full-history-cbs')
             continue
         }
@@ -125,6 +166,8 @@ function classifyText(
                 true,
                 indirections,
                 followedIndirections,
+                requirements,
+                precise,
             )
         }
     }
@@ -145,6 +188,8 @@ function classifyText(
                 false,
                 indirections,
                 followedIndirections,
+                requirements,
+                precise,
             )
         }
     }
@@ -157,6 +202,7 @@ function classifyText(
 function extractCbsExpressions(text: string): string[] {
     const starts: number[] = []
     const expressions: string[] = []
+    let pureDepth = 0
     for (let index = 0; index < text.length - 1; index += 1) {
         if (text[index] === '{' && text[index + 1] === '{') {
             starts.push(index + 2)
@@ -164,7 +210,15 @@ function extractCbsExpressions(text: string): string[] {
             continue
         }
         if (text[index] !== '}' || text[index + 1] !== '}' || starts.length === 0) continue
-        expressions.push(text.slice(starts.pop(), index))
+        const expression = text.slice(starts.pop(), index)
+        if (!pureDepth || expression.startsWith('call::')) expressions.push(expression)
+        if (starts.length === 0) {
+            if (pureDepth) {
+                if ((expression.startsWith('#') || expression.startsWith(':')) && expression !== ':else') pureDepth++
+                else if (expression.startsWith('/') && !expression.startsWith('//')) pureDepth--
+            } else if (expression === '#pure' || expression === '#pure_display' || expression === '#puredisplay'
+                || expression.startsWith('#escape') || expression.startsWith('#func ')) pureDepth = 1
+        }
         index += 1
     }
     return expressions
@@ -190,6 +244,17 @@ function parseCbsExpression(expression: string): Readonly<{
             : argumentText.slice(0, nextSeparator)
         ).trim(),
     }
+}
+
+function hasDynamicCbsName(expression: string): boolean {
+    const colonIndex = expression.indexOf(':')
+    const rawName = colonIndex === -1 ? expression : expression.slice(0, colonIndex)
+    if (!rawName.includes('{{')) return false
+    // Blocks and `? ` arithmetic dispatch on their leading keyword, so a nested
+    // condition or operand cannot select another macro. Other names drop
+    // whitespace before lookup and stay dynamic.
+    if (rawName.startsWith('#') || rawName.startsWith('? ')) return /^\S*\{\{/.test(rawName)
+    return true
 }
 
 function normalizeCbsName(name: string): string {
@@ -224,4 +289,40 @@ function collectParserInputText(
         collectParserInputText(child, seen, output)
     }
     return output
+}
+
+export function createLiveChatParserIndirections(
+    database: Database,
+    selectedCharacter: character,
+    conversation: Chat,
+    personaPrompt: string,
+): Readonly<Record<string, unknown>> {
+    const character = selectedCharacter
+    let authorNote = conversation.note ?? ''
+    if (!authorNote) {
+        for (const item of database.promptTemplate ?? []) {
+            if (item.type !== 'authornote' || !item.defaultText) continue
+            authorNote = item.defaultText
+            break
+        }
+    }
+    return {
+        personality: character?.personality ?? '',
+        charpersona: character?.personality ?? '',
+        description: character?.desc ?? '',
+        chardesc: character?.desc ?? '',
+        scenario: character?.scenario ?? '',
+        exampledialogue: character?.exampleMessage ?? '',
+        examplemessage: character?.exampleMessage ?? '',
+        persona: personaPrompt,
+        userpersona: personaPrompt,
+        mainprompt: database.mainPrompt ?? '',
+        systemprompt: database.mainPrompt ?? '',
+        jb: database.jailbreak ?? '',
+        jailbreak: database.jailbreak ?? '',
+        globalnote: database.globalNote ?? '',
+        systemnote: database.globalNote ?? '',
+        ujb: database.globalNote ?? '',
+        authornote: authorNote,
+    }
 }

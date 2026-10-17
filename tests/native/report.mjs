@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 const expectedCases = {
+    'asset-benchmark': ['asset-bytes-aliases-and-inlays'],
+    'asset-benchmark-small': ['small-asset-bytes-aliases'],
     contract: ['delta-lease-pagination-large-commit'],
     'read-contract': ['contract-restart-without-reseed'],
     write: ['commit', 'readback', 'stale-rejected'],

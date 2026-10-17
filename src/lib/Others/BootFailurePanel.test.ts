@@ -86,6 +86,15 @@ describe('BootFailurePanel', () => {
         expect(document.body.textContent).toContain(boot.storeOpen)
         expect(document.body.textContent).not.toContain(boot.dataFolder)
         expect(f.roots).not.toHaveBeenCalled()
+        const report = document.querySelector('code')!.textContent!
+        expect(report).toContain('RisuNest Version:')
+        expect(report).toContain('Device:')
+        expect(report).toContain('User-Agent:')
+        expect(report).toContain('persistent-database')
+        const writeText = vi.fn(async () => {})
+        Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+        ;[...document.querySelectorAll('button')].find(button => button.textContent?.trim() === boot.copyDetails)!.click()
+        await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith(report))
     })
 
     it('names the export button in the message for a store from another version', async () => {

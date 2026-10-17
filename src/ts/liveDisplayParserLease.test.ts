@@ -65,6 +65,18 @@ test('holds a history lease until explicitly released and releases once', async 
     expect(f.release).toHaveBeenCalledTimes(1)
 })
 
+test('routes known full-history displays through the shared lease before sparse preparation', async () => {
+    const f = fixture()
+    const prepare = vi.fn(async () => { throw new Error('Full history must use the shared lease') })
+    const acquire = createLiveDisplayParserLeaseAcquirer({ runtime: () => f.runtime as never,
+        classify: (source) => ({ source }), prepare })
+    const lease = await acquire({ source: '{{history}}', character: null, signal: new AbortController().signal })
+    expect(prepare).not.toHaveBeenCalled()
+    expect(f.runtime.acquireCompleteConversation).toHaveBeenCalledOnce()
+    lease!.release()
+    expect(f.release).toHaveBeenCalledOnce()
+})
+
 test.each(['abort', 'navigate'])('releases a late history lease after %s', async (action) => {
     const f = fixture()
     let resolve!: () => void

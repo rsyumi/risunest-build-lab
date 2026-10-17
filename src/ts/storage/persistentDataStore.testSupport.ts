@@ -9,6 +9,7 @@ type MemberKind<T> = {
 
 // Every lease member, so a new member fails `pnpm check` here instead of in each fake.
 const leaseMembers = {
+    messageMetadataReadMode: 'optional',
     revision: 'value',
     readRoot: 'method',
     queryPresets: 'method',
@@ -35,6 +36,7 @@ const leaseMembers = {
 
 // Every store member, for the same reason.
 const storeMembers = {
+    messageMetadataReadMode: 'optional',
     lwwBindingState: 'optional',
     lwwReadOutbox: 'optional',
     lwwCommitReplacement: 'optional',

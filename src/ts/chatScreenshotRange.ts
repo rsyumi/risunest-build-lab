@@ -3,9 +3,10 @@ import { CONVERSATION_RANGE_MAX_LIMIT, type DataRevision } from './storage/persi
 import type { simpleCharacterArgument } from './parser/parser.svelte'
 import type { ProcessScriptCaptureContext } from './process/scripts'
 import {
-    classifyChatParserHistory,
-    extendChatParserHistoryBounds,
+    planChatParserHistory, createLiveChatParserIndirections,
 } from './chatParserHistory'
+import { prepareCbsHistory } from './prepareCbsHistory'
+import type { CbsHistoryAccess } from './cbsHistoryAccess'
 import rfdc from 'rfdc'
 
 const cloneScreenshotData = rfdc()
@@ -78,6 +79,7 @@ export interface ChatScreenshotRenderContext {
     selectionStart?: number
     historyStartIndex?: number
     firstParserMessageIndex?: number
+    preparedDisplayText?: Record<number, { source: string; text: string }>
     settings: ChatScreenshotRenderSettings
 }
 
@@ -222,6 +224,7 @@ export async function createChatScreenshotJobFromDialogSnapshot(
     start: number,
     end: number,
     signal?: AbortSignal,
+    parseFirstPass?: typeof import('./parser/parser.svelte').risuChatParser,
 ): Promise<ChatScreenshotJob> {
     assertScreenshotReaderMatches(snapshot, reader)
     const validation = validateScreenshotRange(snapshot.totalTurns, start, end)
@@ -237,40 +240,87 @@ export async function createChatScreenshotJobFromDialogSnapshot(
     const renderContext = cloneScreenshotData(
         snapshot.renderContext,
     ) as ChatScreenshotRenderContext
-    const historyBounds = await deriveParserHistoryBoundsFromReader(
-        reader,
-        selectedMessages,
-        selectionStartIndex,
-        selectionEndExclusive,
-        renderContext,
-        signal,
-    )
-    const historyMessages = historyBounds.start === selectionStartIndex
-        ? []
-        : await readScreenshotRange(
-            reader,
-            historyBounds.start,
-            selectionStartIndex,
-            signal,
-        )
-    const trailingMessages = historyBounds.end === selectionEndExclusive
-        ? []
-        : await readScreenshotRange(
-            reader,
-            selectionEndExclusive,
-            historyBounds.end,
-            signal,
-        )
-    const parserMessages = [...historyMessages, ...selectedMessages, ...trailingMessages]
-    const selectedOffset = selectionStartIndex - historyBounds.start
+    const parser = renderContext.parserContext
+    const indirections = createLiveChatParserIndirections(parser.database, parser.character,
+        parser.character.chats[parser.character.chatPage], parser.personaPrompt)
+    const planFor = (source: unknown) => planChatParserHistory({ source: [source,
+        renderContext.settings.guiHTML, renderContext.assetStyle], indirections })
+    let plan = planFor(selectedMessages)
+    let historyAccess: CbsHistoryAccess | undefined
+    const prepare = () => prepareCbsHistory({
+        characterId: snapshot.characterId, conversationId: snapshot.chatId,
+        totalMessages: snapshot.totalTurns, chatID: selectionStartIndex,
+        chatIDs: selectedMessages.map((_, index) => selectionStartIndex + index), plan, signal,
+        reader: {
+            revision: reader.revision,
+            readResidentMessage: (index) => selectedMessages[index - selectionStartIndex] ?? historyAccess?.peek(index),
+            readConversationWindow: async (query) => {
+                const startIndex = query.startIndex!
+                const endIndex = startIndex + query.limit!
+                return { revision: reader.revision, value: {
+                    characterId: snapshot.characterId, conversationId: snapshot.chatId,
+                    startIndex, endIndex, totalMessages: snapshot.totalTurns,
+                    hasMoreBefore: startIndex > 0, hasMoreAfter: endIndex < snapshot.totalTurns,
+                    messages: await readScreenshotRange(reader, startIndex, endIndex, signal),
+                } }
+            },
+        },
+    })
+    historyAccess = await prepare()
+    const preparedDisplayText: NonNullable<ChatScreenshotRenderContext['preparedDisplayText']> = {}
+    if (parseFirstPass && !plan.requiresFullHistory && selectedMessages.some((message) => /\{\{|<(?:char|user|bot)>/i.test(message.data))) {
+        for (const [offset, message] of selectedMessages.entries()) {
+            const chatID = selectionStartIndex + offset
+            const context = renderContext.parserContext
+            const text = parseFirstPass(message.data, {
+                ...context, db: context.database, chara: context.character, chatID, historyAccess,
+                role: message.role, rmVar: true, visualize: true,
+                cbsConditions: { firstmsg: false, chatRole: message.role },
+            })
+            historyAccess.assertComplete()
+            preparedDisplayText[chatID] = { source: message.data, text }
+        }
+        plan = planFor([selectedMessages, preparedDisplayText])
+        historyAccess = await prepare()
+        if (!plan.requiresFullHistory) {
+            // A row returned by the second CBS pass may supply encoded style CBS.
+            plan = planFor([selectedMessages, preparedDisplayText, [...historyAccess.preparedMessages()]])
+            historyAccess = await prepare()
+        }
+        renderContext.preparedDisplayText = preparedDisplayText
+    }
+    const parserMessages = plan.requiresFullHistory ? [...historyAccess.all()] : selectedMessages
+    const historyStart = plan.requiresFullHistory ? 0 : selectionStartIndex
+    const selectedOffset = selectionStartIndex - historyStart
     const parserCharacter = renderContext.parserContext.character
     parserCharacter.chats[parserCharacter.chatPage].message = parserMessages
     renderContext.parserContext.database.characters[renderContext.parserContext.selectedCharID] = parserCharacter
     await hydrateScreenshotSpeakerCharacters(reader, parserMessages, renderContext, signal)
-    renderContext.parserContext.historyOffset = historyBounds.start
+    renderContext.parserContext.historyOffset = historyStart
+    renderContext.parserContext.historyAccess = historyAccess
+    const preparedRows = new Map(historyAccess.preparedRows())
+    renderContext.parserContext.prepareHistory = async (source, chatID, complete) => {
+        const access = await prepareCbsHistory({
+            characterId: snapshot.characterId, conversationId: snapshot.chatId, totalMessages: snapshot.totalTurns, chatID,
+            plan: complete ? { ...planFor(source), requiresFullHistory: true } : planFor(source), signal,
+            reader: {
+                revision: reader.revision,
+                readResidentMessage: (index) => selectedMessages[index - selectionStartIndex] ?? preparedRows.get(index),
+                readConversationWindow: async (query) => {
+                    const startIndex = query.startIndex!, endIndex = startIndex + query.limit!
+                    return { revision: reader.revision, value: { characterId: snapshot.characterId, conversationId: snapshot.chatId,
+                        startIndex, endIndex, totalMessages: snapshot.totalTurns,
+                        hasMoreBefore: startIndex > 0, hasMoreAfter: endIndex < snapshot.totalTurns,
+                        messages: await readScreenshotRange(reader, startIndex, endIndex, signal) } }
+                },
+            },
+        })
+        for (const [index, message] of access.preparedRows()) preparedRows.set(index, message)
+        return access
+    }
     renderContext.totalTurns = snapshot.totalTurns
     renderContext.selectionStart = validation.start
-    renderContext.historyStartIndex = historyBounds.start
+    renderContext.historyStartIndex = historyStart
     renderContext.firstParserMessageIndex = selectedOffset
     return deepFreeze({
         characterId: snapshot.characterId,
@@ -311,7 +361,6 @@ async function hydrateScreenshotSpeakerCharacters(
     }
 }
 
-const SCREENSHOT_HISTORY_SCAN_BATCH_SIZE = 128
 
 function assertScreenshotNotAborted(signal?: AbortSignal): void {
     if (signal?.aborted) {
@@ -354,50 +403,4 @@ async function readScreenshotRange(
         cursor += limit
     }
     return messages
-}
-
-async function deriveParserHistoryBoundsFromReader(
-    reader: ChatScreenshotRangeReader,
-    selectedMessages: Message[],
-    selectionStartIndex: number,
-    selectionEndExclusive: number,
-    renderContext: ChatScreenshotRenderContext,
-    signal?: AbortSignal,
-) {
-    let start = selectionStartIndex
-    let end = selectionEndExclusive
-    const classification = classifyChatParserHistory({
-        source: [selectedMessages, renderContext],
-    })
-    const classifiedBounds = extendChatParserHistoryBounds(classification, {
-        start,
-        end,
-        totalMessages: reader.totalTurns,
-    })
-    start = classifiedBounds.start
-    end = classifiedBounds.end
-
-    if (classification.requiresFullHistory) return { start, end }
-
-    if (start === 0 || selectionStartIndex === 0) return { start, end }
-
-    const pendingRoles = new Set(selectedMessages.map((message) => message.role))
-    pendingRoles.add('char')
-    let remainingPreviousUsers = 2
-    let cursor = selectionStartIndex
-    while (cursor > 0 && (pendingRoles.size > 0 || remainingPreviousUsers > 0)) {
-        const batchStart = Math.max(0, cursor - SCREENSHOT_HISTORY_SCAN_BATCH_SIZE)
-        const page = await readScreenshotRange(reader, batchStart, cursor, signal)
-        for (let offset = page.length - 1; offset >= 0; offset -= 1) {
-            const role = page[offset].role
-            const absoluteIndex = batchStart + offset
-            if (pendingRoles.delete(role)) start = Math.min(start, absoluteIndex)
-            if (role === 'user' && remainingPreviousUsers > 0) {
-                remainingPreviousUsers -= 1
-                start = Math.min(start, absoluteIndex)
-            }
-        }
-        cursor = batchStart
-    }
-    return { start, end }
 }

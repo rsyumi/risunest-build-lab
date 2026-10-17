@@ -1,10 +1,13 @@
 import { runContractScenarios, verifyContractReadback } from './contractScenarios'
 import { endsByNativeExit, runNativeExitPhase, verifySessionEndReadback } from './lifecycleScenarios'
 import { invoke } from '@tauri-apps/api/core'
+import { Buffer } from 'buffer'
 import { SqlitePersistentDataStore } from '../../src/ts/storage/sqlitePersistentDataStore'
 import { RevisionConflictError } from '../../src/ts/storage/persistentDataStore'
 import { stableSelectionRoot } from '../../src/ts/storage/persistentSelectionBoundary'
 import type { Database } from '../../src/ts/storage/database.svelte'
+
+globalThis.Buffer = Buffer
 
 const fixture = {
     username: '', botPresets: [], botPresetsId: 0, pluginCustomStorage: {},
@@ -27,6 +30,7 @@ const blockedRequests: string[] = []
 window.addEventListener('securitypolicyviolation', event => blockedRequests.push(event.violatedDirective))
 const phase = await invoke<{ runId: string; phase: string }>('boundary_phase')
 const cases: string[] = []
+let measurements: unknown
 try {
     const store = new SqlitePersistentDataStore()
     await store.open()
@@ -35,7 +39,11 @@ try {
         await runNativeExitPhase(phase, store, fixture)
         await new Promise<never>(() => {})
     }
-    if (phase.phase === 'contract') {
+    if (phase.phase === 'asset-benchmark' || phase.phase === 'asset-benchmark-small') {
+        const { runNativeAssetMeasurements } = await import('../../benchmarks/native-assets/suite')
+        measurements = await runNativeAssetMeasurements(store, phase.phase === 'asset-benchmark-small')
+        cases.push(phase.phase === 'asset-benchmark-small' ? 'small-asset-bytes-aliases' : 'asset-bytes-aliases-and-inlays')
+    } else if (phase.phase === 'contract') {
         await runContractScenarios(store, fixture, async () => {
             const reopened = new SqlitePersistentDataStore()
             await reopened.open()
@@ -88,7 +96,7 @@ try {
         }
     }
     if (blockedRequests.length) throw new Error(`Unexpected blocked resources: ${blockedRequests.join(', ')}`)
-    await invoke('boundary_finish', { report: { ...phase, cases, success: true } })
+    await invoke('boundary_finish', { report: { ...phase, cases, success: true, ...(measurements ? { measurements } : {}) } })
 } catch (error) {
     await invoke('boundary_finish', { report: { ...phase, cases, success: false, error: String(error) } })
 }

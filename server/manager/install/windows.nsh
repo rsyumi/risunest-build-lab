@@ -479,6 +479,15 @@ Var SyncPreviousInstall
   StrCmp $2 "keep-data" sync_resume_data_kept sync_uninstall_done
   sync_resume_data_kept:
   ${If} $DeleteAppDataCheckboxState = 1
+    System::Call 'kernel32::GetFileAttributesW(w "$R9") i.r0 ?e'
+    Pop $1
+    ${If} $0 == -1
+      ${If} $1 == 2
+      ${OrIf} $1 == 3
+        Goto sync_uninstall_done
+      ${EndIf}
+      Goto sync_retry_invalid
+    ${EndIf}
     DetailPrint "$(SyncResumeDataKept)"
     IfSilent +2
       MessageBox MB_OK|MB_ICONINFORMATION "$(SyncResumeDataKept)"

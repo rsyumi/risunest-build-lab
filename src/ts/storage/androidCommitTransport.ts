@@ -2,6 +2,7 @@ import {
     ANDROID_BINARY_CHUNK_BYTES,
     binaryCommitSender,
     getAndroidBinaryCommitBridge,
+    withAndroidByteChannel,
     type AndroidBinaryCommitBridge,
 } from './androidBinaryCommitBridge'
 
@@ -24,6 +25,15 @@ export async function sendAndroidCommit<T = { revision: number }>(
 ): Promise<T> {
     if (!bytes.length || bytes.length > MAX_ANDROID_COMMIT_BYTES)
         throw new Error('Invalid Android persistence payload size')
+    return withAndroidByteChannel(() => sendOwnedAndroidCommit<T>(bytes, invoke, bridge, finish))
+}
+
+async function sendOwnedAndroidCommit<T>(
+    bytes: Uint8Array,
+    invoke: Invoke,
+    bridge: AndroidBinaryCommitBridge | null | undefined,
+    finish: string,
+): Promise<T> {
     const id = crypto.randomUUID()
     const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
     const sender = bridge ? binaryCommitSender(bridge, id) : undefined
@@ -67,8 +77,11 @@ export async function sendAndroidCommit<T = { revision: number }>(
         // An error after finish may have committed. Never fall back or replay here.
         return await invoke<T>(finish, { id })
     } finally {
-        sender?.close()
-        // Client-owned ID also cleans up an open whose response was lost.
-        await invoke('pds_commit_android_cancel', { id }).catch(() => undefined)
+        try {
+            // Client-owned ID also cleans up an open whose response was lost.
+            await invoke('pds_commit_android_cancel', { id }).catch(() => undefined)
+        } finally {
+            sender?.close()
+        }
     }
 }

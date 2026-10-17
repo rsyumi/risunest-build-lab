@@ -26,8 +26,7 @@
     import Help from "./Help.svelte";
     import { getChatBranches } from "src/ts/gui/branches";
     import { translateStackTrace } from "../../ts/sourcemap";
-    import { getDetailedOSLabel, getFallbackOSLabel, getRisuEnvironmentLabel } from "src/ts/platform";
-    import versionData from "../../../version.json";
+    import { diagnosticInfo, formatErrorDetails } from "src/ts/diagnostics";
     import { isExpectedHubMessage } from "src/ts/storage/officialAccountMessage";
     import { RISUNEST_PRIVACY_URL, RISUNEST_TERMS_URL, RISU_SERVICE_PRIVACY_URL, RISU_SERVICE_TERMS_URL } from "src/ts/legal";
 
@@ -46,31 +45,11 @@
     let translatedStackTrace = $state('');
     let stackTraceTranslationFailed = $state(false);
     let isTranslating = $state(false);
-    let osLabel = $state(getFallbackOSLabel());
     const displayedStackTrace = $derived(translatedStackTrace || $alertStore.stackTrace || '');
-    const risuVersion = versionData.version;
-    const risuEnvironment = getRisuEnvironmentLabel();
-    const userAgent = typeof navigator === "undefined" ? "Unknown" : navigator.userAgent || "Unknown";
-    const stackTraceCodeBlock = $derived.by(() => {
-        const lines = [
-            `RisuNest version: ${risuVersion}`,
-            `OS: ${osLabel}`,
-            `User-Agent: ${userAgent}`,
-            `RisuNest environment: ${risuEnvironment}`
-        ]
-
-        if (stackTraceTranslationFailed) {
-            lines.push(language.stackTraceTranslationFailed)
-        } else if (isTranslating) {
-            lines.push(language.translating)
-        }
-
-        if (displayedStackTrace) {
-            lines.push('', displayedStackTrace)
-        }
-
-        return lines.join('\n')
-    });
+    const stackTraceCodeBlock = $derived(formatErrorDetails(
+        $diagnosticInfo, $alertStore.msg, displayedStackTrace,
+        stackTraceTranslationFailed ? language.stackTraceTranslationFailed : isTranslating ? language.translating : '',
+    ));
 
     let btn
     let input = $state('')
@@ -97,10 +76,6 @@
         hljs.registerLanguage('json', json)
     }
 
-    $effect(() => {
-        void loadDetailedOSLabel();
-    });
-
     function highlightJson(code: string): string {
         try {
             return hljs.highlight(code, { language: 'json' }).value
@@ -125,14 +100,6 @@
         setTimeout(() => {
             if (copiedKey === key) copiedKey = null
         }, 1500)
-    }
-
-    async function loadDetailedOSLabel() {
-        try {
-            osLabel = await getDetailedOSLabel();
-        } catch (error) {
-            console.warn("Failed to load detailed OS information:", error);
-        }
     }
 
     $effect.pre(() => {
@@ -261,7 +228,7 @@
                 <h2 class="text-green-700 mt-0 mb-2 w-40 max-w-full">Input</h2>
             {/if}
             {#if $alertStore.type === 'markdown'}
-                <div class="overflow-y-auto">
+                <div class="overflow-y-auto" class:wrapped-code={$alertStore.wrapCode}>
                     <span class="text-gray-300 chattext prose chattext2" class:prose-invert={$ColorSchemeTypeStore}>
                         <DeferredMarkdown data={$alertStore.msg} />
                     </span>
@@ -306,7 +273,7 @@
                     <span class="text-gray-500 text-sm">{$alertStore.submsg}</span>
                 {/if}
 
-                {#if $alertStore.type === 'error' && $alertStore.stackTrace}
+                {#if $alertStore.type === 'error'}
                     <div class="mt-4">
                         <Button styled="outlined" size="sm" onclick={() => showDetails = !showDetails}>
                             {showDetails ? language.hideErrorDetails : language.showErrorDetails}
@@ -1115,6 +1082,12 @@
     .vis{
         opacity: 1 !important;
         --tw-bg-opacity: 1 !important;
+    }
+
+    .wrapped-code :global(pre),
+    .wrapped-code :global(code) {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
     }
 
     .stack-trace-wrap {

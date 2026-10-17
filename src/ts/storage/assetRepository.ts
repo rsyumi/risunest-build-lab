@@ -11,6 +11,7 @@ import {
 import { validImageDimensions } from './imageGeometry'
 import {
     hashPayloadBytes,
+    PayloadSizeMismatchError,
     type ImmutablePayloadCas,
     type PreparedImmutablePayload,
 } from './payloadCas'
@@ -117,30 +118,31 @@ function createTypedAssetRepositoryReader(
                 throw new TypeError('Asset alias does not match its requested identity')
             }
             if (alias.objectHash !== null) {
+                const mismatch = (error: unknown): never => {
+                    if (error instanceof PayloadSizeMismatchError) {
+                        throw new Error(`Asset alias size mismatch for ${key}`)
+                    }
+                    throw error
+                }
                 if (range) {
-                    const objectSize = await cas.statObject(alias.objectHash)
-                    if (objectSize !== null) {
-                        if (objectSize !== alias.size) {
-                            throw new Error(`Asset alias size mismatch for ${key}`)
+                    const data = await cas.readObjectRange(alias.objectHash, range, alias.size)
+                        .catch(mismatch)
+                    if (data !== null) {
+                        const expectedSize = Math.max(
+                            0,
+                            Math.min(range.endExclusive, alias.size)
+                            - Math.min(range.start, alias.size),
+                        )
+                        if (data.byteLength !== expectedSize) {
+                            throw new Error(`Asset alias range size mismatch for ${key}`)
                         }
-                        const data = await cas.readObjectRange(alias.objectHash, range)
-                        if (data !== null) {
-                            const expectedSize = Math.max(
-                                0,
-                                Math.min(range.endExclusive, alias.size)
-                                - Math.min(range.start, alias.size),
-                            )
-                            if (data.byteLength !== expectedSize) {
-                                throw new Error(`Asset alias range size mismatch for ${key}`)
-                            }
-                            return {
-                                revision: versioned.revision,
-                                value: { alias, data, source: 'cas' },
-                            }
+                        return {
+                            revision: versioned.revision,
+                            value: { alias, data, source: 'cas' },
                         }
                     }
                 } else {
-                    const data = await cas.readObject(alias.objectHash)
+                    const data = await cas.readObject(alias.objectHash, alias.size).catch(mismatch)
                     if (data !== null) {
                         if (data.byteLength !== alias.size) {
                             throw new Error(`Asset alias size mismatch for ${key}`)
@@ -154,6 +156,12 @@ function createTypedAssetRepositoryReader(
             }
             if (alias.objectHash !== null && options.remote) {
                 const data = await options.remote.readObject(alias.objectHash, range)
+                    .catch((error: unknown) => {
+                        if (error instanceof PayloadSizeMismatchError) {
+                            throw new Error(`Remote asset identity mismatch for ${key}`)
+                        }
+                        throw error
+                    })
                 if (data !== null) {
                     const expectedSize = range
                         ? Math.max(

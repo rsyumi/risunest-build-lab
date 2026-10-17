@@ -94,9 +94,26 @@ $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 try {
     $tempDirectory = Join-Path $tempRoot ($tempPrefix + [Guid]::NewGuid().ToString('N'))
     [void] [IO.Directory]::CreateDirectory($tempDirectory)
-    [System.IO.Compression.ZipFile]::ExtractToDirectory($resolvedApkPath, $tempDirectory)
-
     $arm64LibraryDirectory = Join-Path $tempDirectory 'lib/arm64-v8a'
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($resolvedApkPath)
+    try {
+        foreach ($entry in $archive.Entries) {
+            if ($entry.FullName -cnotmatch '^lib/arm64-v8a/[^/\\]+\.so$') {
+                continue
+            }
+
+            [void] [IO.Directory]::CreateDirectory($arm64LibraryDirectory)
+            $libraryPath = [IO.Path]::GetFullPath((Join-Path $arm64LibraryDirectory $entry.Name))
+            if ([IO.Path]::GetDirectoryName($libraryPath) -cne $arm64LibraryDirectory) {
+                throw "Refusing to extract unexpected native library path: $($entry.FullName)"
+            }
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $libraryPath, $false)
+        }
+    }
+    finally {
+        $archive.Dispose()
+    }
+
     if (-not [IO.Directory]::Exists($arm64LibraryDirectory)) {
         throw "APK contains no lib/arm64-v8a directory: $resolvedApkPath"
     }

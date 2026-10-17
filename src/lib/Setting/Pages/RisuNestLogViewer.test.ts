@@ -5,6 +5,15 @@ import { mount, tick, unmount } from 'svelte'
 import { consoleLog } from 'src/ts/consoleLog'
 import { createLocalDeviceMarkers } from 'src/ts/storage/deviceMarkers'
 import { getDeviceSettings, loadDeviceSettings, updateDeviceSettings } from 'src/ts/storage/deviceSettings'
+import versionData from '../../../../version.json'
+import { appVer } from 'src/ts/appVersion'
+
+const testUA = vi.hoisted(() => {
+    const value = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+    Object.defineProperty(navigator, 'userAgent', { configurable: true, value })
+    return value
+})
+const header = `RisuNest ${versionData.version} (RisuAI ${appVer}) | OS: Windows NT 10.0 | Device: Unknown | UA: ${testUA}\n\n`
 
 // One handler per native_log_* command; each receives the arguments the product sent with that command.
 const commands = vi.hoisted(() => ({
@@ -30,6 +39,7 @@ describe('RisuNestLogViewer', () => {
     let target: HTMLDivElement
     let mounted: ReturnType<typeof mount> | undefined
     let dialogs: string[]
+    let wrappedDialogs: boolean[]
     let unsubscribeAlerts: () => void
 
     beforeEach(() => {
@@ -40,9 +50,11 @@ describe('RisuNestLogViewer', () => {
         commands.native_log_file_path.mockReset()
         commands.native_log_set_file_enabled.mockReset()
         dialogs = []
+        wrappedDialogs = []
         unsubscribeAlerts = alertStore.subscribe(dialog => {
             if (dialog.type !== 'markdown') return
             dialogs.push(dialog.msg)
+            wrappedDialogs.push(!!dialog.wrapCode)
             queueMicrotask(() => alertStore.set({ type: 'none', msg: '' }))
         })
         target = document.createElement('div')
@@ -92,8 +104,9 @@ describe('RisuNestLogViewer', () => {
         await settleAction()
 
         expect(commands.native_log_tail).toHaveBeenCalledWith({ limit: 500 })
+        expect(wrappedDialogs).toEqual([true])
         expect(dialogs).toContain(
-            '~~~~\n[1970-01-01T00:00:01.000Z] [error] newer\n[1970-01-01T00:00:00.000Z] [warn] older\n~~~~',
+            '~~~~\n' + header + '[1970-01-01T00:00:01.000Z] [error] newer\n[1970-01-01T00:00:00.000Z] [warn] older\n~~~~',
         )
     })
 
@@ -107,7 +120,7 @@ describe('RisuNestLogViewer', () => {
         await settleAction()
 
         expect(dialogs).toContain(
-            '~~~~~~\n[1970-01-01T00:00:00.000Z] [error] <b>raw</b> ~~~~~ "quoted"\n~~~~~~',
+            '~~~~~~\n' + header + '[1970-01-01T00:00:00.000Z] [error] <b>raw</b> ~~~~~ "quoted"\n~~~~~~',
         )
     })
 
@@ -118,6 +131,9 @@ describe('RisuNestLogViewer', () => {
         target.querySelector<HTMLButtonElement>('[data-view-log]')!.click()
         await settleAction()
         expect(dialogs).toContain(strings.logEmpty)
+        target.querySelector<HTMLButtonElement>('[data-copy-log]')!.click()
+        await settleAction()
+        expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith(strings.logEmpty)
     })
 
     it('views, copies and clears console logs with the existing dialog and clipboard behavior', async () => {
@@ -128,7 +144,7 @@ describe('RisuNestLogViewer', () => {
         expect(target.textContent).not.toContain('plugin output')
         target.querySelector<HTMLButtonElement>('[data-view-console-log]')!.click()
         await settleAction()
-        const text = '[1970-01-01T00:00:02.000Z] [info] [App] startup\n[1970-01-01T00:00:01.000Z] [warn] [synthetic-plugin] plugin output ~~~~~'
+        const text = header + '[1970-01-01T00:00:02.000Z] [info] [App] startup\n[1970-01-01T00:00:01.000Z] [warn] [synthetic-plugin] plugin output ~~~~~'
         expect(dialogs.at(-1)).toBe('~~~~~~\n' + text + '\n~~~~~~')
         target.querySelector<HTMLButtonElement>('[data-copy-console-log]')!.click()
         await settleAction()
@@ -151,7 +167,7 @@ describe('RisuNestLogViewer', () => {
         consoleLog.append('log', 'App', 'fresh', 0)
         target.querySelector<HTMLButtonElement>('[data-copy-console-log]')!.click()
         await settleAction()
-        expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith('[1970-01-01T00:00:00.000Z] [log] [App] fresh')
+        expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith(header + '[1970-01-01T00:00:00.000Z] [log] [App] fresh')
         let rejectCopy!: (error: Error) => void
         vi.mocked(navigator.clipboard.writeText).mockImplementationOnce(() => new Promise<void>((_, reject) => { rejectCopy = reject }))
         Object.defineProperty(document, 'execCommand', { configurable: true, value: vi.fn(() => true) })
@@ -183,7 +199,7 @@ describe('RisuNestLogViewer', () => {
         await settleAction()
 
         expect(writeText).toHaveBeenCalledWith(
-            '[1970-01-01T00:00:01.000Z] [error] post-mount failure',
+            header + '[1970-01-01T00:00:01.000Z] [error] post-mount failure',
         )
         expect(document.querySelector('textarea')).toBeNull()
         expect(execCommand).toHaveBeenCalledWith('copy')
@@ -206,7 +222,7 @@ describe('RisuNestLogViewer', () => {
         await settleAction()
 
         expect(dialogs).toHaveLength(1)
-        expect(dialogs).toContain('~~~~\n[1970-01-01T00:00:02.000Z] [error] newest\n~~~~')
+        expect(dialogs).toContain('~~~~\n' + header + '[1970-01-01T00:00:02.000Z] [error] newest\n~~~~')
     })
 
     it('ignores a stale copy result when a newer copy finishes first', async () => {
@@ -227,7 +243,7 @@ describe('RisuNestLogViewer', () => {
         await settleAction()
 
         expect(writeText).toHaveBeenCalledOnce()
-        expect(writeText).toHaveBeenCalledWith('[1970-01-01T00:00:02.000Z] [error] newest')
+        expect(writeText).toHaveBeenCalledWith(header + '[1970-01-01T00:00:02.000Z] [error] newest')
     })
 
     it('serializes clipboard writes so a late fallback cannot overwrite the newest copy', async () => {
@@ -271,7 +287,7 @@ describe('RisuNestLogViewer', () => {
         await vi.waitFor(() => expect(writeText).toHaveBeenCalledTimes(2))
         await settleAction()
 
-        expect(clipboardText).toBe('[1970-01-01T00:00:02.000Z] [error] newest')
+        expect(clipboardText).toBe(header + '[1970-01-01T00:00:02.000Z] [error] newest')
     })
 
     it('synchronizes file logging with native state and device settings', async () => {

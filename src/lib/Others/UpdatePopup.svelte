@@ -1,5 +1,6 @@
 <script lang="ts">
     import { onMount, untrack } from 'svelte'
+    import ErrorDetails from './ErrorDetails.svelte'
     import SettingButton from 'src/lib/Setting/RisuNest/SettingButton.svelte'
     import SettingProgress from 'src/lib/Setting/RisuNest/SettingProgress.svelte'
     import { language } from 'src/lang'
@@ -77,6 +78,7 @@
                 <p>{text.notConfigured}</p>
             {:else if $appUpdateState.phase === 'error'}
                 <p class="text-danger-400" role="alert">{text.checkFailed}: {$appUpdateState.error}</p>
+                <ErrorDetails message={`${text.checkFailed}: ${$appUpdateState.error}`} />
             {:else if $appUpdateState.update}
                 {#if $appUpdateState.update.format === 'ipa'}<p class="rounded-md border border-darkborderc bg-bgcolor p-2 text-sm">{text.iosResign}</p>{/if}
                 <div class="flex flex-col gap-2 text-sm leading-relaxed">

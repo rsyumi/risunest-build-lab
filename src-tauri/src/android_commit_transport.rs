@@ -55,11 +55,8 @@ impl Pool {
         {
             return Err(invalid("invalid Android commit size or ID"));
         }
-        if self.finishing.is_some() {
+        if self.finishing.is_some() || self.transfer.is_some() {
             return Err(StoreError::CommitBusy);
-        }
-        if self.transfer.is_some() {
-            return Err(invalid("Android commit already active"));
         }
         let mut bytes = Vec::new();
         bytes
@@ -157,6 +154,11 @@ pub extern "system" fn Java_io_github_rsyumi_risunest_AndroidCommitNative_append
         }
         // Bounded owned packet; no Java pointer survives this call.
         let bytes = env.convert_byte_array(&packet).ok()?;
+        let id = std::str::from_utf8(&bytes[..36]).ok()?;
+        let offset = u32::from_le_bytes(bytes[36..40].try_into().ok()?) as u64;
+        if let Some(result) = crate::asset_byte_transport::append_android(id, offset, &bytes[40..]) {
+            return result.ok().map(|offset| offset as usize);
+        }
         native_state().lock().ok()?.append_packet(&bytes).ok()
     })();
     result.map(|offset| offset as i32).unwrap_or(-1)
@@ -417,7 +419,7 @@ mod tests {
         assert!(pool.open("bad".into(), 1, false).is_err());
         let token = id();
         pool.open(token.clone(), 6, false).unwrap();
-        assert!(pool.open(id(), 1, false).is_err());
+        assert!(matches!(pool.open(id(), 1, false), Err(StoreError::CommitBusy)));
         for (key, offset, chunk) in [
             ("stale", 0, "a"),
             (&*token, 1, "a"),

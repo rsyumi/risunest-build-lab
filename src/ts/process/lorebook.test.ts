@@ -264,6 +264,9 @@ describe('loadLoreBookV3Prompt characterization', () => {
             [{ role: 'user', data: 'alpha' }],
         )
         const conversation = DBState.db.characters[0].chats[0]
+        // A live session owns an identified conversation of the selected character.
+        DBState.db.characters[0].chaId = 'character-test'
+        conversation.id = 'conversation-test'
         const session = new ActiveConversationSession({
             characterId: 'character-test',
             conversationId: 'conversation-test',

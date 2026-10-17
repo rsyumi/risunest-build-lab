@@ -103,14 +103,20 @@ pub(super) fn prepare(
         retained_metadata.insert("pocketRisu".to_owned(), Value::Object(value));
     }
     let mut decoded = metadata_for(id, ext, None, metadata, cancellation)?;
-    if decoded.inlay_type != "signature" && media_type(&decoded.ext).is_none() {
+    // A default metadata extension does not replace the raw payload filename.
+    let filename_mime = if decoded.ext == "bin" && decoded.inlay_type != "signature" {
+        media_type(&normalize_extension(ext)).map(|(_, mime)| mime)
+    } else { None };
+    if decoded.inlay_type != "signature" && media_type(&decoded.ext).is_none() && filename_mime.is_none() {
         let mut prefix = Vec::new();
         CancellationReader::new(open_staged(entry)?, cancellation).take(32).read_to_end(&mut prefix).map_err(|error| super::cancellation_io(error, cancellation))?;
         let Some(ext) = image_extension(&prefix) else { return Ok(None); };
         decoded.ext = ext.into();
         decoded.inlay_type = "image".into();
     }
-    finish_alias(id, &entry.sha256, entry.byte_length, decoded, retained_metadata).map(Some)
+    let mut alias = finish_alias(id, &entry.sha256, entry.byte_length, decoded, retained_metadata)?;
+    if let Some(mime) = filename_mime { alias.mime = mime.into(); }
+    Ok(Some(alias))
 }
 
 fn metadata_for(id: &str, ext: &str, own: Option<&Map<String, Value>>, index: &MetadataIndex<'_>, cancellation: &dyn CancellationProbe) -> Result<Metadata, LocalBackupError> {

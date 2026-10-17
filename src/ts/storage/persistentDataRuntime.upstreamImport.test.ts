@@ -1,4 +1,4 @@
-import {beforeEach,describe,expect,it,vi} from 'vitest'
+import {beforeEach,describe,expect,it,onTestFinished,vi} from 'vitest'
 vi.mock('../platform',async()=>(await import('../platform.testSupport')).platformModule({runtime:'tauri',os:'windows'}))
 const plugins=vi.hoisted(()=>({fencePluginExecutionForAuthorityReplacement:vi.fn(async()=>{}),invalidatePluginCachesAfterAuthorityReplacement:vi.fn(async()=>{}),restartPluginsAfterAuthorityReplacement:vi.fn(async()=>{})}))
 const binding=vi.hoisted(()=>({bound:true,state:{targetAuthority:'9007199254740993'},fence:vi.fn(async()=>{}),assertAuthority:vi.fn(async()=>{}),resume:vi.fn(async()=>{}),release:vi.fn(()=>{})}))
@@ -377,8 +377,27 @@ describe('native upstream job activation recovery with the real runtime',()=>{
         expect(invoke.mock.calls.filter(([command])=>command==='native_file_job_cancel')).toHaveLength(1)
         await expect(h.runtime.retryCommittedWorkingSetRefresh()).resolves.toBeNull()
     })
-    it.each(['observer','finalize-response','status-response','late','inaccessible','restart','resume'] as const)('reconciles before strict adoption and resumes once: %s',async failure=>{
+    it.each((['observer','finalize-response','status-response','late','inaccessible','restart','resume'] as const)
+        .flatMap(failure=>(['wait','load-once','disabled'] as const).map(policy=>({failure,policy}))))('reconciles before strict adoption and resumes once: $failure/$policy',async ({failure,policy})=>{
         const h=await createHarness()
+        const registry=await vi.importActual<typeof import('./sync/bindingRegistry')>('./sync/bindingRegistry')
+        const target={kind:'server' as const,connectionId:'synthetic-native-recovery'}
+        const state={target,targetAuthority:'1',selectionEpoch:'1',libraryId:'synthetic',progress:null}
+        bindingBoundary.invoke.mockImplementation(async command=>{if(command==='pds_lww_binding_state')return state;throw new Error(command)})
+        bindingBoundary.prepare.mockImplementation(registry.prepareBoundLibraryReplacement)
+        let active=true,delay=true,starts=0
+        const unsupported=async():Promise<never>=>{throw new Error('Unexpected binding switch')}
+        const transport={inspectTarget:unsupported,pullAvailableState:unsupported,replaceFromTarget:unsupported,publishInitialSharedState:unsupported,
+            fenceOldJobs:async()=>{active=false},resumeBinding:async()=>{await binding.resume();active=true},
+            receiveAvailableChanges:async()=>{if(!active)throw new Error('Sync binding changed')},
+        }
+        const unregister=registry.registerSyncBindingTransport(target,transport)
+        const gate=createPluginStartupGate({enabled:()=>true,delay:()=>delay,replacementPending:()=>registry.isSyncBindingReplacementPending(),
+            context:async()=>({identity:'synthetic',bound:true,receive:transport.receiveAvailableChanges,assertCurrent:async()=>{}}),
+            start:async()=>{if(await gate.ensure()){expect(h.database.username).toBe('Native staged import');starts++}},
+        })
+        const stop=subscribeSyncBindingChanges(()=>{if(gate.isWaiting())gate.retry()})
+        onTestFinished(()=>{stop();unregister()})
         const incoming={...makeDatabase(),username:'Native staged import'}
         const result={revision:2,sourceBytes:16,sourceSha256:'a'.repeat(64),characterCount:1,presetCount:0,warningCodes:[]}
         let submitted=false
@@ -391,6 +410,7 @@ describe('native upstream job activation recovery with the real runtime',()=>{
             expect(()=>h.runtime.markPersistentDataDirty(1)).toThrow()
             expect(events).toContain('cursor-2')
             await expect(h.runtime.commitPersistentUnitIntent('plugin-initial-setter',[{type:'set',key:JSON.stringify(['root','username']),value:'Stale plugin setter'}])).rejects.toThrow()
+            expect(await gate.ensure()).toBe(false)
             if(failure==='restart'&&plugins.restartPluginsAfterAuthorityReplacement.mock.calls.length===1)throw new Error('fresh restart failed')
             events.push('restart')
         })
@@ -427,6 +447,11 @@ describe('native upstream job activation recovery with the real runtime',()=>{
             {isTauri:()=>true,invoke,wait:async()=>{}})).rejects.toThrow()
         expect(()=>h.runtime.markPersistentDataDirty(1)).toThrow()
         expect(binding.resume).not.toHaveBeenCalled()
+        expect(registry.isSyncBindingReplacementPending()).toBe(true)
+        if(policy==='load-once')gate.loadOnce()
+        if(policy==='disabled')delay=false
+        expect(await gate.ensure()).toBe(false)
+        expect(starts).toBe(0)
         expect(invoke.mock.calls.filter(([command])=>command==='native_file_job_cancel')).toHaveLength(0)
         const projections=h.replaceDatabase.mock.calls.length
         if(failure==='late'||failure==='inaccessible'){
@@ -435,7 +460,9 @@ describe('native upstream job activation recovery with the real runtime',()=>{
             expect(plugins.restartPluginsAfterAuthorityReplacement).not.toHaveBeenCalled()
             expect(binding.resume).not.toHaveBeenCalled()
             expect(()=>h.runtime.markPersistentDataDirty(1)).toThrow()
-            if(failure==='inaccessible') return
+            expect(registry.isSyncBindingReplacementPending()).toBe(true)
+            expect(starts).toBe(0)
+            unavailable=false
             h.nativeCommit(incoming);finished=true
         }
         if(failure==='restart'||failure==='resume'){
@@ -446,6 +473,8 @@ describe('native upstream job activation recovery with the real runtime',()=>{
         await expect(h.runtime.retryCommittedWorkingSetRefresh()).resolves.toEqual({kind:'committed',revision:2,projection:'applied'})
         expect(h.database.username).toBe(incoming.username)
         expect(h.runtime.pendingWorkingSetRefreshRevision).toBeNull()
+        expect(registry.isSyncBindingReplacementPending()).toBe(false)
+        await vi.waitFor(()=>expect(starts).toBe(1))
         expect(plugins.restartPluginsAfterAuthorityReplacement).toHaveBeenCalledTimes(failure==='restart'?2:1)
         expect(binding.resume).toHaveBeenCalledTimes(failure==='resume'?2:1)
         expect(followup).toHaveBeenCalledExactlyOnceWith(true)

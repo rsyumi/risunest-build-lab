@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { diagnosticInfo, formatErrorDetails } from 'src/ts/diagnostics'
     import { onMount, untrack } from 'svelte'
     import {
         ArrowRight,
@@ -139,6 +140,7 @@
         ),
     )
     const jobShown = $derived(job.open && !job.compact)
+    const jobDetails = $derived(formatErrorDetails($diagnosticInfo, job.terminal?.details || job.terminal?.reason || job.terminal?.summary || ''))
     const jobRecoveryRequired = $derived($nativeFileOperationOutcome?.error?.recoveryRequired === true)
     const bodyRetryAvailable = $derived($nativeFileOperationOutcome?.status?.kind === 'restore-portable-backup'
         && $nativeFileOperationOutcome.status.restoreAdoptionConfirmed === true
@@ -316,7 +318,7 @@
     }
 
     async function copyJobDetails(): Promise<void> {
-        const details = job.terminal?.details
+        const details = job.terminal ? jobDetails : ''
         if (!details) return
         try {
             await navigator.clipboard.writeText(details)
@@ -707,7 +709,7 @@
                                 </li>{/each}
                         </ul>
                     {/if}
-                    {#if job.terminal?.details}
+                    {#if job.terminal && (job.terminal.details || job.terminal.state === 'failed')}
                         <div class="details">
                             <button
                                 class="btn ghost"
@@ -738,7 +740,7 @@
                                         {#if jobDetailsCopied}<Check
                                             />{:else}<Copy />{/if}
                                     </button>
-                                    <pre>{job.terminal.details}</pre>
+                                    <pre>{jobDetails}</pre>
                                 </div>
                             {/if}
                         </div>

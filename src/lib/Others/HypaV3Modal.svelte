@@ -254,7 +254,7 @@
     } catch (error) {
       console.error('Re-summarize Failed:', error);
       bulkResummaryState = null;
-      await alertNormalWait(`Re-summarize Failed: ${error.message || error}`);
+      await alertNormalWait(`Re-summarize Failed: ${error.message || error}`, 'error');
     }
   }
 
@@ -318,7 +318,7 @@
     } catch (error) {
       console.error('Re-summarize Retry Failed:', error);
       bulkResummaryState = null;
-      await alertNormalWait(`Re-summarize Retry Failed: ${error.message || error}`);
+      await alertNormalWait(`Re-summarize Retry Failed: ${error.message || error}`, 'error');
     }
   }
 
@@ -726,7 +726,8 @@
                         language.hypaV3Modal.convertErrorMessage.replace(
                           "{0}",
                           conversionResult.error
-                        )
+                        ),
+                        'error'
                       );
                     }
                   }}

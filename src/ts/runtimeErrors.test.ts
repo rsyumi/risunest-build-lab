@@ -23,6 +23,14 @@ function reject(target: Window, reason: unknown) {
 }
 
 describe('runtime error handling', () => {
+    it('records bundle coordinates for load failures without copying URLs or stack payloads', () => {
+        const h = harness()
+        const error = new TypeError('Load failed')
+        error.stack = 'fetch@https://synthetic.invalid/assets/index-123.js:10:22\nhttps://private.invalid/request?secret=example\n@tauri://localhost/assets/chat-456.js:30:40'
+        reject(h.target, error)
+        expect(h.recordError).toHaveBeenCalledWith('Unhandled rejection: TypeError: Load failed at=index-123.js:10:22,chat-456.js:30:40')
+        expect(h.showError).toHaveBeenCalledWith(error)
+    })
     it('records and presents an error event without an Error object', () => {
         const h = harness()
         expect(() => h.target.dispatchEvent(new ErrorEvent('error', {
