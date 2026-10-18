@@ -57,4 +57,4 @@ for argument in "${link_args[@]}"; do
     if [[ -n "$CARGO_ENCODED_RUSTFLAGS" ]]; then CARGO_ENCODED_RUSTFLAGS+=$'\x1f'; fi
     CARGO_ENCODED_RUSTFLAGS+="-Clink-arg=$argument"
 done
-cargo test --manifest-path src-tauri/Cargo.toml --release --locked --target aarch64-apple-ios-sim --lib "$@"
+cargo test --manifest-path src-tauri/Cargo.toml --release --locked --target aarch64-apple-ios-sim --config 'profile.release.package.risunest.opt-level=1' --lib "$@"
