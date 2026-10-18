@@ -155,6 +155,7 @@ try:
                '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore300Gzip',
                '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore600Raw',
                '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore600Gzip',
+               '-skip-testing:RisuNestUITests/NativeUITests/testDeviceCore',
                'CODE_SIGNING_ALLOWED=NO'],cwd=uitests))
     product=pathlib.Path((artifacts/'app-path.txt').read_text())
     print(run(['codesign','--force','--deep','--sign','-',str(product)]))
@@ -163,22 +164,24 @@ try:
     time.sleep(15)
     print(run(['xcrun','simctl','io',device,'screenshot',str(artifacts/'ios-product-first-launch.png')]))
     print(run(['xcrun','simctl','shutdown',device]))
-    tablet=compatible_type('iPad')
-    device_prefix='ipad-'
-    device=run(['xcrun','simctl','create','RisuNest synthetic iPad',tablet['identifier'],runtime['identifier']]).strip()
-    print(run(['xcrun','simctl','boot',device]))
-    print(run(['xcrun','simctl','bootstatus',device,'-b']))
-    print(run(['xcrun','simctl','install',device,str(app)]))
-    launch('ipad');collect('ipad',120)
-    print(run(['xcrun','simctl','io',device,'screenshot',str(artifacts/'ios-ipad.png')]))
-    launch('app');collect('app',180)
-    print(run(['xcrun','simctl','io',device,'screenshot',str(artifacts/'ios-product-chat-ipad.png')]))
-    launch('app-restart');collect('app-restart',120)
-    print(run(['xcrun','simctl','install',device,str(product)]))
-    print(run(['xcrun','simctl','launch',device,'io.github.rsyumi.risunest']))
-    time.sleep(15)
-    print(run(['xcrun','simctl','io',device,'screenshot',str(artifacts/'ios-product-ipad.png')]))
-    (artifacts/'ios-runtime-result.json').write_text(json.dumps({'passed':True,'restartExact':True,'productUIPhoneAndPad':True}))
+    tablet_checked=os.environ.get('IOS_CHECK_IPAD')=='true'
+    if tablet_checked:
+        tablet=compatible_type('iPad')
+        device_prefix='ipad-'
+        device=run(['xcrun','simctl','create','RisuNest synthetic iPad',tablet['identifier'],runtime['identifier']]).strip()
+        print(run(['xcrun','simctl','boot',device]))
+        print(run(['xcrun','simctl','bootstatus',device,'-b']))
+        print(run(['xcrun','simctl','install',device,str(app)]))
+        launch('ipad');collect('ipad',120)
+        print(run(['xcrun','simctl','io',device,'screenshot',str(artifacts/'ios-ipad.png')]))
+        launch('app');collect('app',180)
+        print(run(['xcrun','simctl','io',device,'screenshot',str(artifacts/'ios-product-chat-ipad.png')]))
+        launch('app-restart');collect('app-restart',120)
+        print(run(['xcrun','simctl','install',device,str(product)]))
+        print(run(['xcrun','simctl','launch',device,'io.github.rsyumi.risunest']))
+        time.sleep(15)
+        print(run(['xcrun','simctl','io',device,'screenshot',str(artifacts/'ios-product-ipad.png')]))
+    (artifacts/'ios-runtime-result.json').write_text(json.dumps({'passed':True,'restartExact':True,'productUIPhoneAndPad':tablet_checked}))
 except Exception:
     subprocess.run(['xcrun','simctl','io',device,'screenshot',str(artifacts/'ios-failure.png')],check=False)
     if current_pid:

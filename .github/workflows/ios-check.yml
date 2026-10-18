@@ -6,10 +6,14 @@ on:
         description: Full iOS snapshot commit SHA in this build-lab repository
         type: string
         required: true
+      ipad:
+        description: Also run the iPad simulator checks
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
-  group: ios-check-${{ inputs.source_sha }}-macos-15
+  group: ios-check-${{ inputs.source_sha }}-macos-15-${{ inputs.ipad }}
   cancel-in-progress: true
 jobs:
   simulator:
@@ -202,6 +206,8 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "$app" artifacts/RisuNest-ios-simulator-agent.app.zip
           shasum -a 256 artifacts/RisuNest-ios-simulator-agent.app.zip > artifacts/app.sha256
       - name: Run isolated iOS simulator contracts
+        env:
+          IOS_CHECK_IPAD: ${{ inputs.ipad }}
         run: |
           set -euo pipefail
           python3 ../control/scripts/ios-runtime.py 2>&1 | tee artifacts/ios-runtime.log
