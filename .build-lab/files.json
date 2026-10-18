@@ -12369,8 +12369,8 @@
     {
       "path": "src/ts/nativeWebviewStartup.ts",
       "mode": "100644",
-      "bytes": 901,
-      "sha256": "3e96abf9cf2edb72d4ba5335d2937a68c7ee5c732da5b78a174bdca071c336d3"
+      "bytes": 997,
+      "sha256": "deee74f9e057fc613e2ff68e0abc47a3e77eb45a73f273f2c43752efc4471393"
     },
     {
       "path": "src/ts/network/boundedFetchPreview.test.ts",
