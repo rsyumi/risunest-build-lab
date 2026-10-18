@@ -3472,7 +3472,7 @@
       "path": "scripts/ios-native-tests.sh",
       "mode": "100644",
       "bytes": 3384,
-      "sha256": "d5351290e822a6fc1e508696a98639a466e64e658574c2ebe50c4e1129934310"
+      "sha256": "f4f4234152c793aba5191b93cdb3d793a156748337c623a28acbfa4fa48a6746"
     },
     {
       "path": "scripts/linux-native-tests.sh",
