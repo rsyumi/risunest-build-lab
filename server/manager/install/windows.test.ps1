@@ -595,7 +595,10 @@ FunctionEnd
 
                 # Archive updates retain the installed uninstaller. Build that frozen script,
                 # then apply the archive file set without replacing uninstall.exe.
-                $frozenCases = @(@{ Version = $releasedVersion; Directory = $released; Ref = "sync-v$releasedVersion" })
+                # Frozen removal contracts start at 1.0.4, the first release whose uninstaller runs
+                # `installer remove-files`. A same-version 1.0.4 rehearsal starts from an earlier release.
+                $frozenCases = @()
+                if ([version]$releasedVersion -ge [version]'1.0.4') { $frozenCases += @{ Version = $releasedVersion; Directory = $released; Ref = "sync-v$releasedVersion" } }
                 if ($releasedVersion -ne '1.0.4') {
                     if (!$LegacyReleasedBundle) { throw 'The fixed Sync 1.0.4 compatibility archive is required alongside the previous release.' }
                     $legacy = Join-Path $testRoot 'legacy-1.0.4'

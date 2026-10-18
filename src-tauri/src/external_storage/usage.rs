@@ -66,10 +66,11 @@ pub(super) fn direct_objects<'a>(
 pub(crate) fn summarize(root: &Path, connection_id: &str) -> Result<StorageUsage> {
     let store = ConnectionStore::open(root)?;
     let connection = store.read(connection_id)?;
+    let lww_repository_id = super::lww_segment::format_repository_id(&connection.provider_repository_id);
     let mut receipts = super::lww_residency::usage_receipts(root, &connection)?;
     for (directory, repository_id) in [
-        (root.join("external-storage").join("package-cache").join(connection_id), &connection.provider_repository_id),
-        (super::runtime::connection_directory(root, connection_id).join("package-cache"), &connection.descriptor.repository_id),
+        (root.join("external-storage").join("package-cache").join(connection_id), lww_repository_id.as_ref()),
+        (super::runtime::connection_directory(root, connection_id).join("package-cache"), connection.descriptor.repository_id.as_str()),
     ] {
         receipts.extend(super::package_cache::cached_remote_objects(
             &directory, repository_id, &connection.descriptor_locator.connection_identity,
@@ -284,15 +285,21 @@ mod tests {
     #[test]
     fn usage_includes_existing_sync_backup_and_residency_files_without_retransferring() {
         use super::super::{lww_residency, package_cache::PackageCache, runtime};
+        for repository_id in super::super::lww_tests::repository_id_cases() {
         let root = tempfile::tempdir().unwrap();
         saved(root.path(), "connection");
-        let store = ConnectionStore::open(root.path()).unwrap();
-        let stored = store.read("connection").unwrap();
-        let repository = fake::repository();
+        let mut store = ConnectionStore::open(root.path()).unwrap();
+        let mut stored = store.remove("connection").unwrap();
+        stored.provider_repository_id = repository_id.clone();
+        store.insert(&stored).unwrap();
+        let mut repository = fake::repository();
+        repository.repository_id = repository_id;
+        let mut sync_repository = fake::repository();
+        sync_repository.repository_id = super::super::lww_segment::format_repository_id(&repository.repository_id).into_owned();
         let sync_cache = PackageCache::open(&root.path().join("external-storage/package-cache/connection")).unwrap();
         let backup_cache = PackageCache::open(&runtime::connection_directory(root.path(), "connection").join("package-cache")).unwrap();
-        let mut objects = (0..64).map(|index| sized_object(&repository, &format!("pack-{index}"), ObjectRole::Pack, 16 * 1024 * 1024)).collect::<Vec<_>>();
-        let catalog = object(&repository, "asset-catalog", ObjectRole::Catalog);
+        let mut objects = (0..64).map(|index| sized_object(&sync_repository, &format!("pack-{index}"), ObjectRole::Pack, 16 * 1024 * 1024)).collect::<Vec<_>>();
+        let catalog = object(&sync_repository, "asset-catalog", ObjectRole::Catalog);
         objects.push(catalog.clone());
         sync_cache.put_objects(&repository, &objects).unwrap();
         let mut format_repository = fake::repository();
@@ -306,7 +313,7 @@ mod tests {
         let foreign = object(&format_repository, "foreign", ObjectRole::Catalog);
         backup_cache.put_object(&repository, &foreign).unwrap();
 
-        let registry_pack = sized_object(&repository, "registry-pack", ObjectRole::Pack, 1024);
+        let registry_pack = sized_object(&sync_repository, "registry-pack", ObjectRole::Pack, 1024);
         let source = lww_residency::PackedSource {
             hash: "11".repeat(32), byte_length: 1, library_id: stored.descriptor.repository_id.clone(),
             connection_id: stored.id.clone(), connection_root: root.path().into(), protected_snapshot: "segment".into(),
@@ -348,6 +355,7 @@ mod tests {
         assert_eq!(totals(root.path(), "connection"), (74, expected_bytes - objects[0].receipt.byte_length));
         store.observe_usage("connection", &repository, &[objects[0].receipt.clone()], None).unwrap();
         assert_eq!(totals(root.path(), "connection"), (75, expected_bytes));
+        }
     }
 
     #[test]

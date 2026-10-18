@@ -292,6 +292,7 @@ impl ExternalLwwEngine {
         use super::packaging::{EntryPlan,AssetCatalogSource};
         use crate::asset_repository::job_pins::{DurableCasJob,CasJobKind,CasObjectRole};
         if conservative {return Ok((roots,None))}
+        let format_repository_id=segment::format_repository_id(&self.repository.repository_id);
         roots.sort_by(|a,b|a.header.object_id.cmp(&b.header.object_id));
         roots.dedup_by(|a,b|a.header.object_id==b.header.object_id);
         let mut plans=BTreeMap::<String,EntryPlan>::new();let mut sources=BTreeMap::new();
@@ -315,7 +316,7 @@ impl ExternalLwwEngine {
                 let selected=packs.iter().filter(|(id,_)|ids.contains(id.as_str())).map(|(_,pack)|pack.clone()).collect::<Vec<_>>();
                 let plan=EntryPlan{kind:entry.kind,key:entry.key,content_sha256:hash.clone(),byte_length:entry.byte_length,
                     chunks:entry.chunks,packs:selected};
-                plan.validate(&self.repository.repository_id,&self.repository)?;
+                plan.validate(&format_repository_id,&self.repository)?;
                 if let Some(old)=plans.get(&hash) {
                     if old.byte_length!=plan.byte_length {return Err(segment::corrupt())}continue;
                 }
@@ -453,8 +454,9 @@ impl ExternalLwwEngine {
         let bytes=read_bytes(self.provider.as_ref(),&self.repository,&receipt.locator,cancel).await?;
         let (advertised,_)=wire::read_public_header(&mut Cursor::new(&bytes)).map_err(error)?;
         let ordinary=advertised.object_id.starts_with("snapshot-");
-        let repository_id=if ordinary {&self.descriptor.repository_id}else{&self.repository.repository_id};
-        if advertised.repository_id!=*repository_id
+        let lww_repository_id=segment::format_repository_id(&self.repository.repository_id);
+        let repository_id=if ordinary {self.descriptor.repository_id.as_str()}else{lww_repository_id.as_ref()};
+        if advertised.repository_id!=repository_id
             || (ordinary && !matches!(advertised.role,wire::ObjectRole::SyncState|wire::ObjectRole::BackupBundle))
             || (!ordinary && advertised.role!=wire::ObjectRole::SyncState) {return Err(segment::corrupt())}
         let key=derive_key(&self.root_key,repository_id,"metadata").map_err(error)?;
@@ -468,8 +470,8 @@ impl ExternalLwwEngine {
         }
         let document=Checkpoint::decode(&plaintext)?;
         for body in document.standalone_bodies.values() {body.locator.as_ref().ok_or_else(segment::corrupt)?.validate_for(&self.repository)?;}
-        if header.repository_id!=self.repository.repository_id || header.role!=wire::ObjectRole::SyncState
-            || header.object_id!=document.snapshot_id || document.repository_id!=self.repository.repository_id || document.library_id!=self.library
+        if header.repository_id!=repository_id || header.role!=wire::ObjectRole::SyncState
+            || header.object_id!=document.snapshot_id || document.repository_id!=repository_id || document.library_id!=self.library
             || receipt.byte_length!=bytes.len() as u64 || !receipt.complete { return Err(segment::corrupt()); }
         Ok(Some((RemoteObject { repository_id:header.repository_id,object_id:header.object_id,role:ObjectRole::Snapshot,receipt:receipt.clone(),ciphertext_sha256:segment::digest(&bytes),plaintext_length:plaintext.len() as u64,plaintext_sha256:segment::digest(&plaintext) },document)))
     }
@@ -586,7 +588,7 @@ impl ExternalLwwEngine {
         let limits=super::packaging::PackageLimits::from_capabilities(capabilities)?;
         let (asset_catalogs,mut pins)=self.compact_asset_catalogs(std::mem::take(&mut state.asset_catalogs),&live,conservative,directory,limits,&mut journal,cancel,protection).await?;
         let standalone_bodies=state.standalone.into_iter().filter(|(hash,_)|conservative || live.contains(hash)).collect();
-        let metadata=super::packaging::SnapshotMetadata { snapshot_id:job_id.into(),repository_id:self.repository.repository_id.clone(),library_id:self.library.clone(),author_device_id:writer.into(),created_at_ms:self.admitted_upper()?,logical_revision:0,parent_snapshot_id:None,content_fingerprint:fingerprint,
+        let metadata=super::packaging::SnapshotMetadata { snapshot_id:job_id.into(),repository_id:segment::format_repository_id(&self.repository.repository_id).into_owned(),library_id:self.library.clone(),author_device_id:writer.into(),created_at_ms:self.admitted_upper()?,logical_revision:0,parent_snapshot_id:None,content_fingerprint:fingerprint,
             purpose:super::packaging::SnapshotPurpose::LwwCheckpoint { covered_prefixes:state.catalog.coverage.clone(),state_identity:state.catalog.identity()?,asset_catalogs,standalone_bodies } };
         let captured=CapturedSnapshot{id:job_id.into(),identity:identity.clone(),catalog:capture,projected_records:count,shared:true};
         let completed=super::packaging::package_and_upload_protected(captured,Vec::new(),directory,&directory.join("cache"),metadata,&self.root_key,limits,None,&mut journal,self.provider.as_ref(),&self.repository,&self.provider.preparation_progress(),cancel,protection).await?;

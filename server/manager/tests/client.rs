@@ -1,7 +1,11 @@
 use risunest_sync_manager::client::Client;
 use risunest_sync_manager::lifecycle;
-use risunest_sync_server::{management::Management, store::Store};
+use risunest_sync_server::{
+    management::Management,
+    store::{Device, ObjectIdentity, Store},
+};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::{fs, sync::Arc};
 
 static MANAGEMENT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -54,19 +58,69 @@ async fn client_reconnects_without_replaying_issuance_and_rejects_stale_edits() 
     );
     manager.close().await;
     assert!(client.status().await.is_err());
-    let restarted = Management::start(store, "127.0.0.1:4320".parse().unwrap())
+    let restarted = Management::start(store.clone(), "127.0.0.1:4320".parse().unwrap())
         .await
         .unwrap();
     let refreshed = client.status().await.unwrap();
     assert_ne!(refreshed["revision"], current["revision"]);
     assert_eq!(client.mutate("devices",json!({"revision":current["revision"],"name":"다른 기기","requestId":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".to_owned()})).await.unwrap_err(),"management-stale-state");
+    for path in [
+        "../../shutdown",
+        "devices//forget",
+        "devices/../forget",
+        "devices/synthetic/other/forget",
+        "devices/synthetic/forget/extra",
+        "devices/synthetic/delete",
+    ] {
+        assert_eq!(
+            client.mutate(path, json!({})).await.unwrap_err(),
+            "invalid-management-action"
+        );
+    }
+    let device = Device {
+        id: refreshed["devices"][0]["id"].as_str().unwrap().to_owned(),
+    };
+    let body = b"synthetic retained object";
+    let hash = hex::encode(Sha256::digest(body));
+    store.put_object(&device, &hash, body).unwrap();
+    store
+        .retain_objects(
+            &device,
+            &store.head().unwrap().epoch,
+            &[ObjectIdentity { hash, size: None }],
+        )
+        .unwrap();
+    let forget_path = format!("devices/{}/forget", device.id);
+    let before = client.status().await.unwrap();
+    assert_eq!(before["devices"][0]["retained"], 1);
     assert_eq!(
         client
-            .mutate("../../shutdown", json!({}))
+            .mutate(&forget_path, json!({"revision":before["revision"]}))
             .await
             .unwrap_err(),
-        "invalid-management-action"
+        "revoked-device-required"
     );
+    let active = client.status().await.unwrap();
+    assert_eq!(active["devices"][0]["retained"], 1);
+    let revoked = client
+        .mutate(
+            &format!("devices/{}/revoke", device.id),
+            json!({"revision":active["revision"]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revoked["devices"][0]["revoked"], true);
+    assert_eq!(revoked["devices"][0]["retained"], 1);
+    let released = client
+        .mutate(&forget_path, json!({"revision":revoked["revision"]}))
+        .await
+        .unwrap();
+    assert_eq!(released["devices"][0]["retained"], 0);
+    let repeated = client
+        .mutate(&forget_path, json!({"revision":released["revision"]}))
+        .await
+        .unwrap();
+    assert_eq!(repeated["devices"][0]["retained"], 0);
     restarted.close().await;
 }
 

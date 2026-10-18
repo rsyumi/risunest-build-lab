@@ -80,6 +80,8 @@ mod test_process;
 mod windows_appearance;
 #[cfg(windows)]
 mod windows_webview;
+mod webview_navigation;
+mod webview_navigation_policy;
 
 use risunest_network_log::reqwest::RequestBuilderExt;
 use base64::{engine::general_purpose, Engine as _};
@@ -337,6 +339,7 @@ fn builder_with_main_window(
     let mut builder = tauri::Builder::default()
         .manage(native_startup_state)
         .plugin(tauri_plugin_opener::init())
+        .plugin(webview_navigation::init())
         .append_invoke_initialization_script(ipc_read_guard_script());
     #[cfg(not(target_os = "android"))]
     {

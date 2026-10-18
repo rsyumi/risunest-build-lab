@@ -19,8 +19,8 @@ fn set(store: &mut PersistentStore, key: &[&str], value: Value) {
 }
 // One body fits the segment and one exceeds the segment body bound, so both
 // control carriages are exercised.
-fn large_fixture() -> (CycleFixture, Value, Value) {
-    let mut f = CycleFixture::new();
+fn large_fixture(repository_id: &str) -> (CycleFixture, Value, Value) {
+    let mut f = CycleFixture::with_repository_id(repository_id);
     let segment = json!("s".repeat(2 * 1024 * 1024));
     let catalog = json!("c".repeat(super::lww_segment::SMALL_BODY_BYTES + 1));
     set(&mut f.a, &["root", "additionalPrompt"], segment.clone());
@@ -36,30 +36,34 @@ fn assert_received(store: &PersistentStore, segment: &Value, catalog: &Value) {
 
 #[test]
 fn large_units_publish_and_receive_through_segments_and_data_catalogs() {
-    run(async {
-        let (mut f, segment, catalog) = large_fixture();
-        f.publish_a().await;
-        assert!(f.receive_b().await > 0);
-        assert_received(&f.b, &segment, &catalog);
-    });
+    for repository_id in super::lww_tests::representative_repository_ids() {
+        run(async {
+            let (mut f, segment, catalog) = large_fixture(&repository_id);
+            f.publish_a().await;
+            assert!(f.receive_b().await > 0);
+            assert_received(&f.b, &segment, &catalog);
+        });
+    }
 }
 
 #[test]
 fn compaction_captures_large_unit_bodies_before_segments_retire() {
-    run(async {
-        let (mut f, segment, catalog) = large_fixture();
-        f.publish_a().await;
-        let job = tempfile::tempdir().unwrap();
-        let writer = f.a.lww_clock_state().unwrap().writer_id;
-        f.sender.compact_published(&mut f.a, job.path(), "00000000-0000-4000-8000-000000000099",
-            &writer, &super::fake::capabilities(true), &Cancellation::default(), None)
-            .await.unwrap();
-        for object in f.sender.listing(&Cancellation::default()).await.unwrap() {
-            f.provider.delete_object(&f.sender.repository, &object.locator, &Cancellation::default()).await.unwrap();
-        }
-        assert!(f.receive_b().await > 0);
-        assert_received(&f.b, &segment, &catalog);
-    });
+    for repository_id in super::lww_tests::representative_repository_ids() {
+        run(async {
+            let (mut f, segment, catalog) = large_fixture(&repository_id);
+            f.publish_a().await;
+            let job = tempfile::tempdir().unwrap();
+            let writer = f.a.lww_clock_state().unwrap().writer_id;
+            f.sender.compact_published(&mut f.a, job.path(), "00000000-0000-4000-8000-000000000099",
+                &writer, &super::fake::capabilities(true), &Cancellation::default(), None)
+                .await.unwrap();
+            for object in f.sender.listing(&Cancellation::default()).await.unwrap() {
+                f.provider.delete_object(&f.sender.repository, &object.locator, &Cancellation::default()).await.unwrap();
+            }
+            assert!(f.receive_b().await > 0);
+            assert_received(&f.b, &segment, &catalog);
+        });
+    }
 }
 
 // Captures the source as a device backup bundle, uploads it, and activates it

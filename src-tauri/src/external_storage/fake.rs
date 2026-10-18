@@ -78,6 +78,7 @@ pub(crate) enum DeleteFault {
 
 #[derive(Default)]
 pub(super) struct FakeState {
+    pub(super) repository_id: Option<String>,
     pub(super) objects: BTreeMap<String, (Vec<u8>, u64)>,
     pub(super) next_version: u64,
     pub(super) lose_response: bool,
@@ -381,7 +382,9 @@ impl Provider for FakeProvider {
             c.check()?;
             let mut capabilities = capabilities(self.cas);
             capabilities.max_stored_bytes = Some(self.object_limit);
-            Ok((repository(), capabilities))
+            let mut repository = repository();
+            if let Some(id) = &self.state.lock().unwrap().repository_id { repository.repository_id = id.clone(); }
+            Ok((repository, capabilities))
         })
     }
     fn read_object<'a>(
