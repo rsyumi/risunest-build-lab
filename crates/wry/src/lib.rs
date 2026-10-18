@@ -1300,7 +1300,8 @@ impl<'a> WebViewBuilder<'a> {
     self
   }
 
-  /// Set a navigation handler to decide if incoming url is allowed to navigate.
+  /// Set a navigation handler for the main frame. Child frames keep their own navigation.
+  /// On Linux this runs when the response arrives, before the new document is committed.
   ///
   /// The closure take a `String` parameter as url and returns a `bool` to determine whether the navigation should happen.
   /// `true` allows to navigate and `false` does not.

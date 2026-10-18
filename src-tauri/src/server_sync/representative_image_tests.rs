@@ -229,6 +229,10 @@ fn an_unreachable_server_still_fails_the_icon_pass() {
     add(&mut store, character("unreachable", &main.key));
     drop(core);
     drop(server);
+    // A parallel test's fixture can bind the freed port and answer, so point the binding at a port nothing serves.
+    let mut stored = store.server_stored_config().unwrap().unwrap();
+    stored.endpoint = "http://127.0.0.1:1".into();
+    store.server_save_config(&stored).unwrap();
     let error = hydrate(&store).expect_err("a held icon the server cannot send is still an error");
     assert_eq!(error.code, "server-unreachable");
     assert!(PayloadCas::new(store.repository_root()).unwrap().stat_object(main.object_hash.as_ref().unwrap()).unwrap().is_none());

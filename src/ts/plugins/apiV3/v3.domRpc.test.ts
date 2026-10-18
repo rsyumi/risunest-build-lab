@@ -22,6 +22,7 @@ import { additionalMessageButtons } from '../messageButtons.svelte'
 import { chatViewEvents } from '../chatViewHost.svelte'
 import { beginGenerationEndRun, noteGenerationStarted, type GenerationEndStatus } from '../../process/generationEnd'
 import { language } from 'src/lang'
+import { downloadFile } from 'src/ts/globalApi.svelte'
 import { get } from 'svelte/store'
 import { configurePluginStartup, pluginStartupGate } from '../pluginStartupGate'
 import { registerSyncBindingTransport } from '../../storage/sync/bindingRegistry'
@@ -66,9 +67,7 @@ vi.mock('src/ts/stores.svelte', async () => (await import('./v3Host.testSupport'
 }))
 vi.mock('src/ts/alert', async () => (await import('./v3Host.testSupport')).alertModule({ alertConfirm: mocks.confirm }))
 vi.mock('src/ts/util', async () => (await import('./v3Host.testSupport')).utilModule())
-vi.mock('src/ts/globalApi.svelte', () => ({
-    checkCharOrder: vi.fn(), forageStorage: {}, getFetchLogs: vi.fn(),
-}))
+vi.mock('src/ts/globalApi.svelte', async () => (await import('./v3Host.testSupport')).globalApiModule())
 vi.mock('src/ts/gui/colorscheme', async () => (await import('./v3Host.testSupport')).colorschemeModule())
 vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule(() => ({ runtime: mocks.native ? 'tauri' : 'web', os: 'windows' })))
 vi.mock('src/ts/process/mcp/pluginmcp', async () => (await import('./v3Host.testSupport')).pluginMcpModule())
@@ -236,6 +235,22 @@ async function gatedRestoreFixture() {
 }
 
 describe('Plugin v3 real iframe DOM/RPC bridge', () => {
+    it('routes unchanged plugin anchors to the native file save boundary', async () => {
+        const saved: { name: string; bytes: number[] }[] = []
+        vi.mocked(downloadFile).mockImplementationOnce(async (name, data) => {
+            saved.push({ name, bytes: [...new Uint8Array(data as Uint8Array)] })
+            return true
+        })
+        mocks.native = true
+        await startFixture('native-download', `
+            const a = document.createElement('a');
+            a.href = 'data:application/octet-stream;base64,AP8NCg==';
+            a.download = 'plugin.risup';
+            a.click();
+        `)
+        await vi.waitFor(() => expect(saved).toEqual([{ name: 'plugin.risup', bytes: [0, 255, 13, 10] }]))
+    })
+
     beforeEach(() => {
         vi.clearAllMocks()
         mocks.native = false

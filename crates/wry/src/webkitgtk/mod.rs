@@ -37,9 +37,10 @@ use std::{
 use webkit2gtk::WebInspectorExt;
 use webkit2gtk::{
   AutoplayPolicy, CookieManagerExt, GeolocationPermissionRequest, InputMethodContextExt, LoadEvent,
-  NavigationPolicyDecision, NavigationPolicyDecisionExt, NetworkProxyMode, NetworkProxySettings,
+  NetworkProxyMode, NetworkProxySettings,
   NotificationPermissionRequest, PermissionRequestExt, PointerLockPermissionRequest,
-  PolicyDecisionType, PrintOperationExt, SettingsExt, URIRequest, URIRequestExt,
+  PolicyDecisionType, PrintOperationExt, ResponsePolicyDecision, ResponsePolicyDecisionExt, SettingsExt,
+  URIRequest, URIRequestExt,
   UserContentInjectedFrames, UserContentManager, UserContentManagerExt, UserMediaPermissionRequest,
   UserMediaPermissionRequestExt, UserScript, UserScriptInjectionTime,
   WebContextExt as Webkit2gtkWeContextExt, WebView, WebViewExt, WebsiteDataManagerExt,
@@ -47,7 +48,7 @@ use webkit2gtk::{
 };
 use webkit2gtk_sys::{
   webkit_get_major_version, webkit_get_micro_version, webkit_get_minor_version,
-  webkit_policy_decision_ignore, webkit_policy_decision_use,
+  webkit_policy_decision_ignore,
 };
 #[cfg(feature = "x11")]
 use x11_dl::xlib::*;
@@ -550,34 +551,22 @@ impl InnerWebView {
       });
     }
 
-    // Navigation handler
+    // GTK exposes the target frame at the response stage, before committing the document.
     if let Some(navigation_handler) = attributes.navigation_handler.take() {
       webview.connect_decide_policy(move |_webview, policy_decision, policy_type| {
-        let handler = match policy_type {
-          PolicyDecisionType::NavigationAction => &navigation_handler,
-          _ => return false,
-        };
-
-        if let Some(policy) = policy_decision.dynamic_cast_ref::<NavigationPolicyDecision>() {
-          if let Some(nav_action) = policy.navigation_action() {
-            if let Some(uri_req) = nav_action.request() {
-              if let Some(uri) = uri_req.uri() {
-                let allow = handler(uri.to_string());
-                let pointer = policy_decision.as_ptr();
-                unsafe {
-                  if allow {
-                    webkit_policy_decision_use(pointer)
-                  } else {
-                    webkit_policy_decision_ignore(pointer)
-                  }
-                }
-
+        if policy_type != PolicyDecisionType::Response {
+          return false;
+        }
+        if let Some(policy) = policy_decision.dynamic_cast_ref::<ResponsePolicyDecision>() {
+          if policy.is_main_frame_main_resource() {
+            if let Some(uri) = policy.request().and_then(|request| request.uri()) {
+              if !navigation_handler(uri.to_string()) {
+                unsafe { webkit_policy_decision_ignore(policy_decision.as_ptr()) };
                 return true;
               }
             }
           }
         }
-
         false
       });
     }

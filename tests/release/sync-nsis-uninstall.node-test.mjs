@@ -61,8 +61,8 @@ $fixture = New-Item -ItemType Directory (Join-Path $directory 'legacy')
 $LegacyReleasedBundle = Join-Path $directory 'legacy.zip'
 Compress-Archive -Path (Join-Path $fixture '*') -DestinationPath $LegacyReleasedBundle
 $result = @()
-foreach ($releasedVersion in @('1.0.4', '1.0.5')) {
-  $nextVersion = if ($releasedVersion -eq '1.0.4') { '1.0.5' } else { '1.0.6' }
+foreach ($releasedVersion in @('1.0.3', '1.0.4', '1.0.5')) {
+  $nextVersion = "1.0.$([int]$releasedVersion.Split('.')[2] + 1)"
   $testRoot = New-Item -ItemType Directory (Join-Path $directory $releasedVersion)
 ${selection}
   $result += ,@($frozenCases | ForEach-Object { @{ version=$_.Version; source=$_.Ref; directory=$_.Directory.ToString() } })
@@ -71,7 +71,8 @@ ConvertTo-Json -Depth 8 -InputObject $result
 `);
     const result = spawnSync('powershell.exe', ['-NoProfile', '-File', script], { encoding: 'utf8', timeout: 30000, windowsHide: true });
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-    const [legacyPrevious, resumablePrevious] = JSON.parse(result.stdout);
+    const [sameVersionRehearsal, legacyPrevious, resumablePrevious] = JSON.parse(result.stdout);
+    assert.deepEqual(sameVersionRehearsal.map(item => [item.version, item.source]), [['1.0.4', 'sync-v1.0.4'], ['1.0.4', null]]);
     assert.deepEqual(legacyPrevious.map(item => [item.version, item.source]), [['1.0.4', 'sync-v1.0.4'], ['1.0.5', null]]);
     assert.deepEqual(resumablePrevious.map(item => [item.version, item.source]), [['1.0.5', 'sync-v1.0.5'], ['1.0.4', 'sync-v1.0.4'], ['1.0.6', null]]);
     assert.equal(resumablePrevious[0].directory, 'previous-bundle');

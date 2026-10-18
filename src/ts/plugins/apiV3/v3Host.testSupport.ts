@@ -118,6 +118,16 @@ export function utilModule(overrides: Overrides<typeof import('src/ts/util')> = 
     return { ...module, ...overrides }
 }
 
+export function globalApiModule(overrides: Overrides<typeof import('src/ts/globalApi.svelte')> = {}) {
+    const module = {
+        checkCharOrder: vi.fn(),
+        forageStorage: {} as typeof import('src/ts/globalApi.svelte').forageStorage,
+        getFetchLogs: vi.fn(),
+        downloadFile: vi.fn(async () => true),
+    } satisfies Partial<typeof import('src/ts/globalApi.svelte')>
+    return { ...module, ...overrides }
+}
+
 export function colorschemeModule() {
     return {
         changeColorScheme: vi.fn(), updateColorScheme: vi.fn(), updateTextThemeAndCSS: vi.fn(),
