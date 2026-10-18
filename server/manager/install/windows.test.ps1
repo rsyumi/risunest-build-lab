@@ -11,6 +11,19 @@ $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $testRoot = Join-Path $tempRoot ("risunest-nsis-guard-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $testRoot | Out-Null
 
+function Copy-ArchiveFile([string]$source, [string]$destination, [int]$timeoutMilliseconds = 30000, [int]$pollMilliseconds = 50) {
+    $elapsed = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        try {
+            Copy-Item -LiteralPath $source -Destination $destination -Force -ErrorAction Stop
+            return
+        } catch [IO.IOException] {
+            if (($_.Exception.HResult -band 0xffff) -ne 32 -or $elapsed.ElapsedMilliseconds -ge $timeoutMilliseconds) { throw }
+            Start-Sleep -Milliseconds $pollMilliseconds
+        }
+    }
+}
+
 try {
     $fakeSource = @'
 use std::{env, fs::OpenOptions, io::Write};
@@ -660,7 +673,7 @@ FunctionEnd
                         $frozenHash = (Get-FileHash $frozenUninstaller).Hash
                         $instanceName = (Get-Content (Join-Path $data 'risunest-sync-instance.json') -Raw | ConvertFrom-Json).instance
                         $instanceRecord = Join-Path $local ".risunest-sync-instances/$instanceName.json"
-                        foreach ($file in Get-ChildItem $next -File) { Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $syncInstall $file.Name) -Force }
+                        foreach ($file in Get-ChildItem $next -File) { Copy-ArchiveFile $file.FullName (Join-Path $syncInstall $file.Name) }
                         if ((Get-FileHash $frozenUninstaller).Hash -ne $frozenHash) { throw 'Archive application replaced the frozen uninstaller.' }
                         # A final-file lock leaves the released entry points available for retry.
                         $heldMarker = [IO.File]::Open($oldManager, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
@@ -686,8 +699,8 @@ FunctionEnd
                 }
             } finally {
                 if (Test-Path $oldManager) {
-                    & $oldManager --data-dir $data --server $server uninstall lock-held | Out-Null
-                    & $oldManager --data-dir $data --server $server installer forget-removal | Out-Null
+                    & $ManagerBinary --data-dir $data --server $server uninstall lock-held | Out-Null
+                    & $ManagerBinary --data-dir $data --server $server installer forget-removal | Out-Null
                 }
                 $env:LOCALAPPDATA = $priorLocal
                 $env:APPDATA = $priorRoaming

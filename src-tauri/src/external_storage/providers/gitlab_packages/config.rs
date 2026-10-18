@@ -87,6 +87,7 @@ pub(super) fn collection_roles(collection: Collection) -> &'static [ObjectRole] 
     match collection {
         Collection::Segments => &[ObjectRole::Segment],
         Collection::Snapshots => &[ObjectRole::SyncState, ObjectRole::BackupBundle],
+        Collection::Checkpoints => &[ObjectRole::Snapshot],
         Collection::BackupPoints => &[ObjectRole::BackupPoint],
         Collection::InventoryPages => &[ObjectRole::InventoryPage],
         Collection::Descriptors => &[ObjectRole::Descriptor],

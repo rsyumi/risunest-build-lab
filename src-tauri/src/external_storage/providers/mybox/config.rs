@@ -55,6 +55,7 @@ pub(super) fn collection_folder(collection: Collection) -> &'static str {
     match collection {
         Collection::Segments => "segments",
         Collection::Snapshots => SNAPSHOTS,
+        Collection::Checkpoints => role_folder(ObjectRole::Snapshot),
         Collection::BackupPoints => BACKUPS,
         Collection::InventoryPages => INVENTORY,
         Collection::Descriptors => DESCRIPTORS,

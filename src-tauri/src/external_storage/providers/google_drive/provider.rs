@@ -91,7 +91,7 @@ fn role_token(role: ObjectRole) -> &'static str {
 fn collection_role(collection: Collection) -> ObjectRole {
     match collection {
         Collection::Segments => ObjectRole::Segment,
-        Collection::Snapshots => ObjectRole::Snapshot,
+        Collection::Snapshots | Collection::Checkpoints => ObjectRole::Snapshot,
         Collection::BackupPoints => ObjectRole::BackupPoint,
         Collection::InventoryPages => ObjectRole::InventoryPage,
         Collection::Descriptors => ObjectRole::Descriptor,
@@ -1506,8 +1506,10 @@ impl Provider for GoogleDrive {
                 }
                 parameters.push(("pageToken", cursor));
             }
+            // Sync checkpoints keep the `snapshot` role tag beside the states
+            // and bundles, so the tag splits the folder into two listings.
             let query = if collection == Collection::Snapshots {
-                format!("'{}' in parents and trashed = false and (appProperties has {{ key='{ROLE_KEY}' and value='state' }} or appProperties has {{ key='{ROLE_KEY}' and value='snapshot' }} or appProperties has {{ key='{ROLE_KEY}' and value='bundle' }})", context.settings.folder_id)
+                format!("'{}' in parents and trashed = false and (appProperties has {{ key='{ROLE_KEY}' and value='state' }} or appProperties has {{ key='{ROLE_KEY}' and value='bundle' }})", context.settings.folder_id)
             } else { self.role_query(&context.settings, role_token(role)) };
             let url = self.list_url(&context.settings, &query, &parameters)?;
             let page: FileList = self

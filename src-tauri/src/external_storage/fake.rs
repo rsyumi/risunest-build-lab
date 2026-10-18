@@ -689,10 +689,12 @@ impl Provider for FakeProvider {
                 return page;
             }
             // A published state and a backup bundle share the snapshot listing,
-            // which is what every adapter answers.
+            // and a sync checkpoint stored beside them has its own, which is
+            // what every adapter answers.
             let roles: &[ObjectRole] = match collection {
                 Collection::Segments => &[ObjectRole::Segment],
-                Collection::Snapshots => &[ObjectRole::Snapshot, ObjectRole::SyncState, ObjectRole::BackupBundle],
+                Collection::Snapshots => &[ObjectRole::SyncState, ObjectRole::BackupBundle],
+                Collection::Checkpoints => &[ObjectRole::Snapshot],
                 Collection::BackupPoints => &[ObjectRole::BackupPoint],
                 Collection::InventoryPages => &[ObjectRole::InventoryPage],
                 Collection::Descriptors => &[ObjectRole::Descriptor],

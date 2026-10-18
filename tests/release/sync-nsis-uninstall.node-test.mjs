@@ -42,6 +42,75 @@ SectionEnd
 });
 import { readFileSync, mkdirSync, copyFileSync, symlinkSync, unlinkSync } from 'node:fs';
 
+test('released archive application waits only for a transient sharing violation', { skip: process.platform !== 'win32' }, () => {
+  const directory = mkdtempSync(join(tmpdir(), 'risunest-archive-copy-'));
+  try {
+    const script = join(directory, 'copy.ps1');
+    writeFileSync(script, String.raw`
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path (Get-Location) 'server/manager/install/windows.test.ps1'), [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw 'The installer harness could not be parsed.' }
+$helper = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Copy-ArchiveFile' }, $true)
+if (!$helper) { throw 'The archive copy helper is missing.' }
+Invoke-Expression $helper.Extent.Text
+$copyStep = $ast.Find({ param($node) $node -is [Management.Automation.Language.ForEachStatementAst] -and $node.Condition.Extent.Text -eq 'Get-ChildItem $next -File' -and $node.Body.Extent.Text -match '\bCopy-(ArchiveFile|Item)\b' }, $true)
+if (!$copyStep) { throw 'The archive application step is missing.' }
+$script:attempts = 0
+$script:sharingFailures = 0
+$script:releaseOnFailure = $false
+function Copy-Item {
+  param([string]$LiteralPath, [string]$Destination, [switch]$Force, [string]$ErrorAction)
+  $script:attempts++
+  try { Microsoft.PowerShell.Management\Copy-Item @PSBoundParameters }
+  catch {
+    if ($_.Exception -is [IO.IOException] -and ($_.Exception.HResult -band 0xffff) -eq 32) {
+      $script:sharingFailures++
+      if ($script:releaseOnFailure) { $script:held.Dispose() }
+    }
+    throw
+  }
+}
+$next = New-Item -ItemType Directory (Join-Path $PSScriptRoot 'next')
+$syncInstall = New-Item -ItemType Directory (Join-Path $PSScriptRoot 'installed')
+$source = Join-Path $next 'server.bin'
+$destination = Join-Path $syncInstall 'server.bin'
+[IO.File]::WriteAllText($source, 'replacement')
+[IO.File]::WriteAllText($destination, 'original')
+$script:held = [IO.File]::Open($destination, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+$script:releaseOnFailure = $true
+try { Invoke-Expression $copyStep.Extent.Text }
+finally { $script:held.Dispose() }
+$replaced = [IO.File]::ReadAllText($destination)
+$successAttempts = $script:attempts
+$script:releaseOnFailure = $false
+$script:held = [IO.File]::Open($destination, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+$before = $script:attempts
+$timeoutCode = $null
+try { Copy-ArchiveFile $source $destination -timeoutMilliseconds 0 }
+catch { $timeoutCode = $_.Exception.HResult -band 0xffff }
+finally { $script:held.Dispose() }
+$timeoutAttempts = $script:attempts - $before
+$before = $script:attempts
+$missingFailed = $false
+try { Copy-ArchiveFile (Join-Path $PSScriptRoot 'missing.bin') $destination }
+catch { $missingFailed = $true }
+@{
+  replaced=$replaced; successAttempts=$successAttempts; sharingFailures=$script:sharingFailures
+  timeoutCode=$timeoutCode; timeoutAttempts=$timeoutAttempts
+  missingFailed=$missingFailed; missingAttempts=($script:attempts - $before)
+} | ConvertTo-Json -Compress
+`);
+    const result = spawnSync('pwsh', ['-NoProfile', '-File', script], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      replaced: 'replacement', successAttempts: 2, sharingFailures: 2,
+      timeoutCode: 32, timeoutAttempts: 1, missingFailed: true, missingAttempts: 1,
+    });
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('released uninstall validation selects exact previous sources and keeps the legacy baseline', { skip: process.platform !== 'win32' }, () => {
   const directory = mkdtempSync(join(tmpdir(), 'risunest-frozen-selection-'));
   try {

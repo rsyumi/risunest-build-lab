@@ -830,20 +830,26 @@ impl RepositoryView for ConnectedRepositoryView<'_> {
     }
     fn snapshots<'a>(&'a self, cancel: &'a Cancellation) -> ProviderFuture<'a, Vec<ObjectReceipt>> {
         Box::pin(async move {
+            // Checkpoints are listed apart from the snapshots they are stored
+            // beside, and a cleanup still has to see every one of them.
             let mut listed = Vec::new();
-            let mut cursor: Option<String> = None;
             let mut tracker = PageTracker::default();
-            loop {
-                let page = leases::control_request(cancel, self.connected.provider.list_objects(
-                    &self.connected.handle, Collection::Snapshots, cursor.as_deref(), 100, cancel,
-                )).await?;
-                tracker.accept(&self.connected.handle, &page.objects, page.next_cursor.as_deref())?;
-                listed.extend(page.objects);
-                match page.next_cursor {
-                    Some(next) => cursor = Some(next),
-                    None => return Ok(listed),
+            for collection in [Collection::Snapshots, Collection::Checkpoints] {
+                tracker.next_listing();
+                let mut cursor: Option<String> = None;
+                loop {
+                    let page = leases::control_request(cancel, self.connected.provider.list_objects(
+                        &self.connected.handle, collection, cursor.as_deref(), 100, cancel,
+                    )).await?;
+                    tracker.accept(&self.connected.handle, &page.objects, page.next_cursor.as_deref())?;
+                    listed.extend(page.objects);
+                    match page.next_cursor {
+                        Some(next) => cursor = Some(next),
+                        None => break,
+                    }
                 }
             }
+            Ok(listed)
         })
     }
     fn job_roots(&self) -> Result<JobRoots> { job_roots_of(&self.unfinished, &self.connected.handle) }
@@ -995,7 +1001,7 @@ impl RepositoryView for LwwRepositoryView<'_> {
             let metadata=std::fs::symlink_metadata(self.documents.scratch).map_err(|_|ProviderError::new(ErrorKind::Transient))?;
             if !metadata.is_dir() || crate::trust_boundary::is_link_like(&metadata) {return Err(ProviderError::new(ErrorKind::Corrupt))}
             let mut checkpoints=Vec::new();
-            for receipt in self.engine.snapshot_receipts(cancel).await? {
+            for receipt in self.engine.checkpoint_receipts(cancel).await? {
                 if let Some(found)=self.checkpoint_document(&receipt).await? {checkpoints.push(found);}
             }
             let retained=super::lww_checkpoint::retained(&checkpoints.iter().map(|(_,doc)|doc.clone()).collect::<Vec<_>>())?;
@@ -1283,7 +1289,8 @@ pub(super) mod tests {
                 f.b.lww_apply_receive(&ApplyReceive{header:request.header.clone(),generating:vec![]}).unwrap();
                 f.b.lww_finish_receive(&request.header).unwrap();
             }
-            assert_eq!((f.provider.read_attempts(&first_checkpoint),f.provider.read_attempts(&ordinary)),(before.0+1,before.1+1));
+            assert_eq!((f.provider.read_attempts(&first_checkpoint),f.provider.read_attempts(&ordinary)),(before.0+1,before.1),
+                "a receive reads the checkpoint once and never the backup stored beside it");
 
             let (read,listed)=reads(&f);
             assert!(f.receiver.receive_requests_cached(&mut f.b,DecimalU64(0),&summaries,&cancel).await.unwrap().is_empty());
@@ -1501,7 +1508,7 @@ pub(super) mod tests {
         });
     }
 
-    fn fixture_connection(f:&super::super::lww_tests::CycleFixture)->ConnectedRepository {
+    pub(crate) fn fixture_connection(f:&super::super::lww_tests::CycleFixture)->ConnectedRepository {
         use super::super::contract::{ConnectionConfig,RemoteLocator};
         ConnectedRepository {
             stored:super::super::connection_store::StoredConnection {
@@ -2003,6 +2010,30 @@ pub(super) mod tests {
                 unfinished: Vec::new(),
                 cache_root: empty_cache.path(),
             };
+
+            // Both listings of the snapshots folder may hand out one cursor, but
+            // never one object.
+            let page = |object: &str, next: Option<&str>| Ok(super::super::contract::ObjectPage {
+                objects: vec![ObjectReceipt {
+                    locator: super::super::contract::RemoteLocator {
+                        connection_identity: connected.handle.connection_identity.clone(),
+                        collection: Some("snapshots".into()),
+                        object: format!("snapshots/{object}"),
+                    },
+                    byte_length: 1, version: None, checksum: None, complete: true,
+                }],
+                next_cursor: next.map(Into::into),
+            });
+            for (collection, object) in [(Collection::Snapshots, "snapshot-a"), (Collection::Checkpoints, "checkpoint-a")] {
+                provider.script_page(collection, page(object, Some("next")));
+                provider.script_page(collection, Ok(super::super::contract::ObjectPage { objects: Vec::new(), next_cursor: None }));
+            }
+            let listed = view.snapshots(&Cancellation::default()).await.unwrap();
+            assert_eq!(listed.iter().map(|object| object.locator.object.as_str()).collect::<Vec<_>>(),
+                ["snapshots/snapshot-a", "snapshots/checkpoint-a"]);
+            provider.script_page(Collection::Snapshots, page("snapshot-a", None));
+            provider.script_page(Collection::Checkpoints, page("snapshot-a", None));
+            assert_eq!(view.snapshots(&Cancellation::default()).await.unwrap_err().kind, ErrorKind::Corrupt);
 
             tokio::time::pause();
             provider.delay_metadata(Duration::from_secs(90));

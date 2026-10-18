@@ -2063,16 +2063,21 @@ fn segment_and_snapshot_listing_keep_every_physical_variant() {
         let first = crate::external_storage::contract::segment_object_id("00000000-0000-4000-8000-000000000001", 1, &"a".repeat(64)).unwrap();
         let second = first.replace(&"a".repeat(64), &"b".repeat(64));
         let snapshot = "00000000-0000-4000-8000-000000000002";
+        let published = "snapshot-00000000-0000-4000-8000-000000000003";
         let test = dependencies();
         let server = WireServer::start(vec![one_descriptor(), reply(200, &[], listing("segments", &[&first, &second], None)),
-            reply(200, &[], listing("snapshots", &[snapshot], None))]);
+            reply(200, &[], listing("snapshots", &[snapshot, published], None)),
+            reply(200, &[], listing("snapshots", &[snapshot, published], None))]);
         let (provider, handle) = opened(&test, "r2", &server).await;
         let cancel = Cancellation::default();
         let page = provider.list_objects(&handle, Collection::Segments, None, 10, &cancel).await.unwrap();
         assert_eq!(page.objects.len(), 2);
         assert_ne!(page.objects[0].locator, page.objects[1].locator);
+        let names = |page: crate::external_storage::contract::ObjectPage| page.objects.into_iter().map(|object| object.locator.object).collect::<Vec<_>>();
         let page = provider.list_objects(&handle, Collection::Snapshots, None, 10, &cancel).await.unwrap();
-        assert_eq!(page.objects[0].locator.object, format!("snapshots/{snapshot}"));
+        assert_eq!(names(page), [format!("snapshots/{published}")]);
+        let page = provider.list_objects(&handle, Collection::Checkpoints, None, 10, &cancel).await.unwrap();
+        assert_eq!(names(page), [format!("snapshots/{snapshot}")]);
     });
 }
 

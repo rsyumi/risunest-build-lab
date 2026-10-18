@@ -1088,7 +1088,7 @@ fn a_lost_head_response_records_exactly_one_write() {
 fn listings_page_by_name_with_a_cursor_and_reject_limits_outside_the_range() {
     runtime().block_on(async {
         let folder = format!("{}/snapshots", encoded_root());
-        let names = ["snap-a", "snap-b", "snap-c"];
+        let names = ["snapshot-a", "snapshot-b", "snapshot-c", "00000000-0000-4000-8000-000000000001"];
         let page = || {
             let mut responses = vec![collection_response(&format!("{folder}/"))];
             responses.extend(names.iter().enumerate().map(|(index, name)| {
@@ -1101,7 +1101,7 @@ fn listings_page_by_name_with_a_cursor_and_reject_limits_outside_the_range() {
             responses.push(collection_response(&format!("{folder}/nested/")));
             multistatus_reply(&responses)
         };
-        let harness = Harness::start(vec![established_root(), page()]);
+        let harness = Harness::start(vec![established_root(), page(), page()]);
         let repository = harness.opened().await;
 
         let first = harness
@@ -1116,7 +1116,7 @@ fn listings_page_by_name_with_a_cursor_and_reject_limits_outside_the_range() {
             .await
             .unwrap();
         assert_eq!(first.objects.len(), 2);
-        assert_eq!(first.objects[0].locator.object, "snapshots/snap-a");
+        assert_eq!(first.objects[0].locator.object, "snapshots/snapshot-a");
         assert_eq!(
             first.objects[0].locator.collection.as_deref(),
             Some("snapshots")
@@ -1127,6 +1127,21 @@ fn listings_page_by_name_with_a_cursor_and_reject_limits_outside_the_range() {
         assert!(first.next_cursor.is_some());
         assert_eq!(harness.line(1), format!("PROPFIND {folder}/ HTTP/1.1"));
         assert_eq!(harness.header(1, "depth").as_deref(), Some("1"));
+        assert_eq!(
+            harness
+                .provider
+                .list_objects(
+                    &repository,
+                    Collection::Checkpoints,
+                    first.next_cursor.as_deref(),
+                    2,
+                    &Cancellation::default(),
+                )
+                .await
+                .unwrap_err()
+                .kind,
+            ErrorKind::Corrupt
+        );
 
         let second = harness
             .provider
@@ -1140,8 +1155,27 @@ fn listings_page_by_name_with_a_cursor_and_reject_limits_outside_the_range() {
             .await
             .unwrap();
         assert_eq!(second.objects.len(), 1);
-        assert_eq!(second.objects[0].locator.object, "snapshots/snap-c");
+        assert_eq!(second.objects[0].locator.object, "snapshots/snapshot-c");
         assert_eq!(second.next_cursor, None);
+
+        let checkpoints = harness
+            .provider
+            .list_objects(
+                &repository,
+                Collection::Checkpoints,
+                None,
+                2,
+                &Cancellation::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(checkpoints.objects.len(), 1);
+        assert_eq!(
+            checkpoints.objects[0].locator.object,
+            "snapshots/00000000-0000-4000-8000-000000000001"
+        );
+        assert_eq!(checkpoints.objects[0].byte_length, 40);
+        assert_eq!(checkpoints.next_cursor, None);
 
         for limit in [0u16, 1001] {
             assert_eq!(
@@ -1160,7 +1194,7 @@ fn listings_page_by_name_with_a_cursor_and_reject_limits_outside_the_range() {
                 ErrorKind::Unsupported
             );
         }
-        assert_eq!(harness.count(), 2);
+        assert_eq!(harness.count(), 3);
     });
 }
 
@@ -1456,7 +1490,7 @@ fn listing_resumes_after_expiry_and_on_a_new_provider() {
     runtime().block_on(async {
         let folder = format!("{}/snapshots", encoded_root());
         let listing = || folder_listing("snapshots", (0..75).rev().map(|index|
-            object_response(&format!("{folder}/item-{index:03}"), 1, None)).collect());
+            object_response(&format!("{folder}/snapshot-{index:03}"), 1, None)).collect());
         let harness = Harness::start(vec![established_root(), listing(), listing(), established_root(), listing()]);
         let repository = harness.opened().await;
         let cancel = Cancellation::default();
@@ -1467,12 +1501,12 @@ fn listing_resumes_after_expiry_and_on_a_new_provider() {
             .await.unwrap_err().kind, ErrorKind::Corrupt);
         harness.test.clock.set(NOW_MS + 6 * 60 * 1000);
         let second = harness.provider.list_objects(&repository, Collection::Snapshots, Some(cursor), 30, &cancel).await.unwrap();
-        assert_eq!(second.objects[0].locator.object, "snapshots/item-030");
+        assert_eq!(second.objects[0].locator.object, "snapshots/snapshot-030");
         let fresh = create(harness.test.dependencies.clone()).unwrap();
         let (reopened, _) = fresh.open_repository(&harness.config(), &harness.secret(), OpenMode::Existing, &cancel).await.unwrap();
         let third = fresh.list_objects(&reopened, Collection::Snapshots, second.next_cursor.as_deref(), 30, &cancel).await.unwrap();
         assert_eq!(third.objects.len(), 15);
-        assert_eq!(third.objects[0].locator.object, "snapshots/item-060");
+        assert_eq!(third.objects[0].locator.object, "snapshots/snapshot-060");
         assert!(third.next_cursor.is_none());
         assert_eq!(harness.count(), 5);
     });
