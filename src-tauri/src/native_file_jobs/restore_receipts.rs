@@ -66,10 +66,12 @@ fn reconcile_matching(store: &PersistentStore, registry: &JobRegistry, job_id: O
         if registry.hidden_restore_receipts.lock().map_err(|error| StoreError::Store { message: error.to_string() })?.contains(&receipt.job_id) { continue; }
         if job_id.is_some_and(|id| id != receipt.job_id) { continue; }
         let existing = registry.lookup(&receipt.job_id).map_err(|message| StoreError::Store { message })?;
-        if existing.as_ref().is_some_and(|job| !job.status().state.is_terminal()) { continue; }
+        if existing.as_ref().is_some_and(|job| {
+            let status = job.status();
+            !status.state.is_terminal() || matches!(status.state, JobState::Succeeded | JobState::Cancelled)
+        }) { continue; }
         let outcome = store.lww_file_restore_receipt(&receipt.staging_id, &receipt.staging_id, &receipt.authority);
         let revision = outcome.as_ref().ok().copied().flatten();
-        if outcome.is_ok() && existing.as_ref().is_some_and(|job| job.status().state == JobState::Succeeded) { continue; }
         if outcome.is_ok() && revision.is_none() && existing.is_some() { continue; }
         let kind = if receipt.archive { JobKind::RestoreLegacyLocalBackup } else { JobKind::RestoreBlockRisuSave };
         let job = match existing {
@@ -175,6 +177,27 @@ mod tests {
             assert_eq!(status.result.as_ref().unwrap().warning_codes, vec!["skipped-backup-data:2"]);
             assert_eq!(store.revision().unwrap(), 1);
         }
+        let mut rows = read(&store).unwrap();
+        let authority = rows[0].authority.clone();
+        rows[0].authority = "999".into();
+        store.device_store().unwrap().write_setting(KEY, &serde_json::to_value(&rows).unwrap()).unwrap();
+        let job = registry.lookup(&id).unwrap().unwrap();
+        let succeeded = job.status();
+        for state in [JobState::Succeeded, JobState::Cancelled] {
+            let mut status = succeeded.clone();
+            status.state = state;
+            if state != JobState::Succeeded {
+                status.activation_revision = None;
+                status.activation_authority = None;
+                status.result = None;
+                status.error = Some(JobFailure { code: "cancelled".into(), message: "Confirmed before activation".into(), item_kind: None });
+            }
+            *job.status.lock().unwrap() = status.clone();
+            reconcile(&store, &registry).unwrap();
+            assert_eq!(serde_json::to_value(job.status()).unwrap(), serde_json::to_value(status).unwrap(), "Confirmed {state:?} changed after receipt lookup failure");
+        }
+        rows[0].authority = authority;
+        store.device_store().unwrap().write_setting(KEY, &serde_json::to_value(rows).unwrap()).unwrap();
         forget(&store, &registry, &id).unwrap();
         let restarted = JobRegistry::default();
         reconcile(&store, &restarted).unwrap();
@@ -198,6 +221,13 @@ mod tests {
         assert_eq!(status.activation_revision, None);
         assert!(status.result.is_none());
         assert_eq!(store.revision().unwrap(), 1);
+        let job = registry.lookup(&id).unwrap().unwrap();
+        let mut failed = status;
+        failed.state = JobState::Failed;
+        failed.error = Some(JobFailure { code: "store-error".into(), message: "Confirmed no activation".into(), item_kind: None });
+        *job.status.lock().unwrap() = failed.clone();
+        reconcile_job(&store, &registry, &id).unwrap();
+        assert_eq!(serde_json::to_value(job.status()).unwrap(), serde_json::to_value(failed).unwrap());
     }
 
     #[test]
@@ -242,9 +272,10 @@ mod tests {
         let connection = rusqlite::Connection::open(directory.path().join("persistent").join(crate::persistent_store::DATABASE_FILE)).unwrap();
         connection.execute_batch("CREATE TRIGGER reject_restore BEFORE UPDATE ON generations BEGIN SELECT RAISE(ABORT,'synthetic disk failure'); END;").unwrap();
         assert!(store.replace_commit(&stage, Some(0)).is_err());
+        let unresolved_registry = JobRegistry::default();
+        reconcile_job(&store, &unresolved_registry, &id).unwrap();
+        assert_eq!(unresolved_registry.status(&id).unwrap().error.unwrap().code, "activation-outcome-unresolved");
         let registry = JobRegistry::default();
-        reconcile_job(&store, &registry, &id).unwrap();
-        assert_eq!(registry.status(&id).unwrap().error.unwrap().code, "activation-outcome-unresolved");
         let failed = registry.create(JobKind::RestoreBlockRisuSave).unwrap();
         let temporary_id = failed.id();
         failed.status.lock().unwrap().job_id = id.clone();
@@ -252,13 +283,21 @@ mod tests {
         registry.jobs.lock().unwrap().insert(id.clone(), failed.clone());
         failed.finish_failure("store-error", "Synthetic accepted commit failure").unwrap();
         reconcile_job(&store, &registry, &id).unwrap();
-        assert_eq!(registry.status(&id).unwrap().state, JobState::Failed);
+        let unresolved = registry.status(&id).unwrap();
+        assert_eq!(unresolved.state, JobState::Failed);
+        assert_eq!(unresolved.error.unwrap().code, "activation-outcome-unresolved");
+        assert!(unresolved.result.is_none());
+        assert_eq!(unresolved.activation_revision, None);
         assert_eq!(store.revision().unwrap(), 0);
         connection.execute_batch("DROP TRIGGER reject_restore").unwrap();
         drop(connection);
         drop(store);
         let store = PersistentStore::open(directory.path()).unwrap();
+        reconcile_job(&store, &unresolved_registry, &id).unwrap();
+        assert_eq!(unresolved_registry.status(&id).unwrap().state, JobState::Succeeded);
+        assert_eq!(unresolved_registry.status(&id).unwrap().activation_revision, Some(1));
         reconcile_job(&store, &registry, &id).unwrap();
+        assert_eq!(registry.status(&id).unwrap().state, JobState::Succeeded);
         assert_eq!(registry.status(&id).unwrap().activation_revision, Some(1));
         assert_eq!(store.revision().unwrap(), 1);
         reconcile_job(&store, &registry, &id).unwrap();

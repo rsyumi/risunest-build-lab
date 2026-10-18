@@ -17,6 +17,18 @@ use std::{
 pub(crate) const SEGMENT_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const SMALL_BODY_BYTES: usize = 4 * 1024 * 1024;
 
+pub(crate) fn format_repository_id(provider_id: &str) -> std::borrow::Cow<'_, str> {
+    // Keep existing repositories' key contexts unchanged. Provider identities
+    // longer than the format's limit have never produced valid envelopes.
+    if provider_id.len() <= 128 {
+        return std::borrow::Cow::Borrowed(provider_id);
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"risunest.external-lww-repository/v1\0");
+    hash.update(provider_id.as_bytes());
+    std::borrow::Cow::Owned(format!("lww-{}", hex::encode(hash.finalize())))
+}
+
 pub(crate) fn corrupt() -> ProviderError {
     ProviderError::new(ErrorKind::Corrupt)
 }

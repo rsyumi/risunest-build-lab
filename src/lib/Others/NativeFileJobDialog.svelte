@@ -1,6 +1,7 @@
 <script lang="ts">
     import { CheckIcon, CopyIcon, LoaderCircleIcon, XIcon } from '@lucide/svelte'
     import { language } from 'src/lang'
+    import { diagnosticInfo, formatErrorDetails } from 'src/ts/diagnostics'
     import SettingButton from 'src/lib/Setting/RisuNest/SettingButton.svelte'
     import SettingProgress from 'src/lib/Setting/RisuNest/SettingProgress.svelte'
     import { buildNativeFileJobDialogModel, failureReason } from 'src/ts/gui/nativeFileJobDialogModel'
@@ -24,6 +25,7 @@
     let copied = $state(false)
 
     const model = $derived(buildNativeFileJobDialogModel($nativeFileOperation, $nativeFileOperationOutcome, now))
+    const detailsText = $derived(formatErrorDetails($diagnosticInfo, model.terminal?.details || model.terminal?.reason || model.terminal?.summary || ''))
     // Backup restores belong to the onboarding panel while it is up; content
     // imports stay here because the onboarding has no screen for them.
     const embedded = $derived($nativeFileJobHost === 'onboarding' && !model.compact)
@@ -55,7 +57,7 @@
     })
 
     async function copyDetails(): Promise<void> {
-        const details = model.terminal?.details
+        const details = model.terminal ? detailsText : ''
         if (!details) return
         try {
             await navigator.clipboard.writeText(details)
@@ -159,7 +161,7 @@
                 </ul>
             {/if}
 
-            {#if model.terminal?.details}
+            {#if model.terminal && (model.terminal.details || model.terminal.state === 'failed')}
                 <div class="flex flex-col items-start gap-2">
                     <SettingButton variant="secondary" onclick={() => { showDetails = !showDetails }}>
                         {showDetails ? copy.errorDetailsHide : copy.errorDetails}
@@ -178,7 +180,7 @@
                                     <CopyIcon size={14} />
                                 {/if}
                             </button>
-                            <pre class="max-h-48 overflow-auto rounded-md border border-darkborderc bg-bgcolor p-2 pr-8 text-xs whitespace-pre-wrap break-all text-textcolor2">{model.terminal.details}</pre>
+                            <pre class="max-h-48 overflow-auto rounded-md border border-darkborderc bg-bgcolor p-2 pr-8 text-xs whitespace-pre-wrap break-all text-textcolor2">{detailsText}</pre>
                         </div>
                     {/if}
                 </div>

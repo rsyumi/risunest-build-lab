@@ -8,9 +8,12 @@ import {
     type ChatParserHistoryProjectionReader,
 } from './chatParserHistoryProjection'
 import {
-    classifyChatParserHistory,
+    planChatParserHistory,
     type ChatParserUnsafeHistoryDependency,
 } from './chatParserHistory'
+import { captureResidentCbsHistory, prepareCbsHistory } from './prepareCbsHistory'
+import { CbsHistoryDependencies, hasCbsHistoryChanges } from './cbsHistoryAccess'
+import { forkChatParserContext } from './chatParserContextSeed.svelte'
 import type { ConversationViewportRow } from './conversationViewportSource'
 import type { CurrentChatMessageTarget } from './chatMessageUi'
 import type { ProcessScriptCaptureContext } from './process/scripts'
@@ -39,21 +42,26 @@ export function collectLiveChatParserUnsafeDependencies(input: {
     if (plan.entries.some((entry) => (
         entry.actions.includes('inject') || entry.replacement.startsWith('@@inject')
     ))) dependencies.push('inject')
+    if (plan.entries.some((entry) => entry.actions.includes('repeat_back') || entry.replacement.startsWith('@@repeat_back'))) dependencies.push('repeat-back')
     return dependencies
 }
 
 export interface LiveChatParserProjectionRequest {
+    readonly dependencies?: CbsHistoryDependencies
     readonly row: ConversationViewportRow
     readonly totalMessages: number
     readonly signal?: AbortSignal
     readonly isCurrent?: () => boolean
+    readonly onStale?: () => void
 }
 
 export interface LiveChatParserConversationStartRequest {
+    readonly dependencies?: CbsHistoryDependencies
     readonly greeting: string
     readonly totalMessages: number
     readonly signal?: AbortSignal
     readonly isCurrent?: () => boolean
+    readonly onStale?: () => void
 }
 
 export type BoundedLiveChatParserProjection = BoundedChatParserHistoryProjection
@@ -79,7 +87,7 @@ export interface LiveChatParserProjectionResolver {
     resolve(input: LiveChatParserProjectionRequest): Promise<LiveChatParserProjection>
     acquireConversationStart?(
         input: LiveChatParserConversationStartRequest,
-    ): Promise<{ release(): void } | null>
+    ): Promise<{ projection?: BoundedLiveChatParserProjection; release(): void } | null>
 }
 
 type LiveParserRuntime = Pick<
@@ -131,16 +139,66 @@ export function createSelectedConversationLiveParserProjectionResolver(
             const target = dependencies.runtime.captureSelectedConversationTarget()
             if (!target) throw new ChatParserHistoryProjectionStaleError()
             const current = captureExactCurrent(dependencies, target)
-            const classification = classifyChatParserHistory({
+            const classification = planChatParserHistory({
                 source: [input.greeting, dependencies.parserSource(current)],
                 indirections: dependencies.parserIndirections?.(current),
                 unsafeDependencies: dependencies.unsafeDependencies(current),
             })
-            if (
-                !classification.requiresFullHistory &&
-                classification.absoluteMessageIndices.length === 0
-            )
-                return null
+            if (!classification.requiresFullHistory) {
+                const context = forkChatParserContext(dependencies.createBoundedContextSeed(current))
+                const authority = dependencies.runtime.captureSelectedConversationAuthority()
+                const source = dependencies.runtime.getActiveConversationViewportSource?.()
+                const version = source?.snapshot().version
+                const historyVersion = source?.snapshot().historyVersion
+                const historyDependencies = input.dependencies ?? new CbsHistoryDependencies()
+                const historyChanged = () => !!source && hasCbsHistoryChanges(source.snapshot(), historyVersion, historyDependencies)
+                const assertCurrent = () => {
+                    assertConversationStartCurrent(input)
+                    captureExactCurrent(dependencies, target)
+                    if (source?.snapshot().version !== version || historyChanged()) throw new ChatParserHistoryProjectionStaleError()
+                }
+                const historyAccess = authority ? await prepareCbsHistory({
+                    dependencies: historyDependencies,
+                    characterId: target.characterId, conversationId: target.conversationId,
+                    totalMessages: input.totalMessages, chatID: -1, plan: classification,
+                    signal: input.signal, assertCurrent,
+                    reader: { revision: target.storeRevision,
+                        readResidentMessage: (index) => source?.snapshot().rowAt(index)?.message,
+                        readConversationWindow: (query) => dependencies.runtime.store.readConversationWindow(query) },
+                }) : captureResidentCbsHistory(current.conversation.message, classification, -1, historyDependencies)
+                assertCurrent()
+                context.parserContext.historyAccess = historyAccess
+                context.parserContext.prepareHistory = async (text, chatID, complete) => {
+                    try {
+                        assertCurrent()
+                        const plan = planChatParserHistory({ source: text,
+                            indirections: dependencies.parserIndirections?.(current),
+                            unsafeDependencies: complete ? ['regex-reparse'] : [] })
+                        return authority ? await prepareCbsHistory({
+                            dependencies: historyDependencies,
+                            characterId: target.characterId, conversationId: target.conversationId,
+                            totalMessages: input.totalMessages, chatID, plan, signal: input.signal, assertCurrent,
+                            reader: { revision: target.storeRevision,
+                                readResidentMessage: (index) => source?.snapshot().rowAt(index)?.message,
+                                readConversationWindow: (query) => dependencies.runtime.store.readConversationWindow(query) },
+                        }) : captureResidentCbsHistory(current.conversation.message, plan, chatID, historyDependencies)
+                    } catch (error) {
+                        // A later pass can depend on a row that changed before it was read,
+                        // which greeting refreshes skipped, so the greeting has to prepare again.
+                        // Notify after this parse call stack, which may be inside a derived.
+                        const requested = () => !input.signal?.aborted && input.isCurrent?.() !== false
+                        if (requested() && historyChanged()) queueMicrotask(() => {
+                            if (requested()) input.onStale?.()
+                        })
+                        throw error
+                    }
+                }
+                return { projection: {
+                    kind: 'bounded', characterId: target.characterId, conversationId: target.conversationId,
+                    revision: target.storeRevision, totalMessages: input.totalMessages,
+                    chatID: -1, projectedChatID: -1, historyOffset: 0, messages: [], context,
+                }, release() {} }
+            }
 
             // A greeting is not a persisted message row, including in an empty
             // conversation. Its live scripts still need the same owned history
@@ -171,6 +229,8 @@ export function createSelectedConversationLiveParserProjectionResolver(
             }
         },
         async resolve(input): Promise<LiveChatParserProjection> {
+            input = { ...input, dependencies: input.dependencies ?? new CbsHistoryDependencies() }
+            input.dependencies!.range(input.row.absoluteIndex, input.row.absoluteIndex + 1)
             assertRequestCurrent(input)
             const target = dependencies.runtime.captureSelectedConversationTarget()
             if (!target) throw new ChatParserHistoryProjectionStaleError()
@@ -191,6 +251,7 @@ export function createSelectedConversationLiveParserProjectionResolver(
             let resident = captureResidentParserRows(dependencies, target, input)
             try {
                 const projection = await createChatParserHistoryProjection({
+                    dependencies: input.dependencies,
                     characterId: authority.characterId,
                     conversationId: authority.conversationId,
                     revision: authority.storeRevision,
@@ -203,10 +264,15 @@ export function createSelectedConversationLiveParserProjectionResolver(
                     contextSeed: dependencies.createBoundedContextSeed(current),
                     reader: {
                         revision: authority.storeRevision,
+                        readRoleWindow: dependencies.runtime.store.messageMetadataReadMode === 'projected'
+                            && authority.sessionVersion === authority.persistedSessionVersion
+                            ? (query) => dependencies.runtime.store.readConversationMessageMetadataWindow!(query) : undefined,
                         readResidentMessage: resident ? (index) => resident?.readMessage(index) : undefined,
-                        readConversationWindow: (query) => (
-                            dependencies.runtime.store.readConversationWindow(query)
-                        ),
+                        readConversationWindow: async (query) => {
+                            const result = await dependencies.runtime.store.readConversationWindow(query)
+                            return result ? { ...result, value: { ...result.value, totalMessages: input.totalMessages,
+                                hasMoreAfter: result.value.endIndex < input.totalMessages } } : null
+                        },
                     },
                     signal: input.signal,
                     isCurrent: () => requestMatchesSelection(dependencies, target, input)
@@ -239,6 +305,22 @@ export function createSelectedConversationLiveParserProjectionResolver(
                     projection.messages[projection.projectedChatID],
                     input.row.message,
                 )) throw new ChatParserHistoryProjectionStaleError()
+                const historyChanged = resident?.historyChanged
+                const prepareHistory = projection.context.parserContext.prepareHistory
+                if (historyChanged && prepareHistory) projection.context.parserContext.prepareHistory = async (text, chatID, complete) => {
+                    try {
+                        return await prepareHistory(text, chatID, complete)
+                    } catch (error) {
+                        // A later pass can depend on a row that changed after the resident
+                        // rows were captured, which row refreshes skipped, so the row has to
+                        // prepare again. The owner's own check also fails when its baseline
+                        // predates the edit, so only cancellation stops the notification.
+                        // Being past an await, this already runs outside the parse call
+                        // stack, which may be inside a derived.
+                        if (!input.signal?.aborted && historyChanged()) input.onStale?.()
+                        throw error
+                    }
+                }
                 return projection
             } finally {
                 resident?.release()
@@ -254,11 +336,12 @@ function captureResidentParserRows(
 ): {
     readMessage: NonNullable<ChatParserHistoryProjectionReader['readResidentMessage']>
     isCurrent(): boolean
+    historyChanged(): boolean
     release(): void
 } | null {
     const source = dependencies.runtime.getActiveConversationViewportSource?.()
     const authority = dependencies.runtime.captureSelectedConversationAuthority()
-    if (!source || !authority || authority.sessionVersion !== authority.persistedSessionVersion) return null
+    if (!source || !authority) return null
     const snapshot = source.snapshot()
     const currentRow = snapshot.rowAt(input.row.absoluteIndex)
     if (
@@ -277,26 +360,28 @@ function captureResidentParserRows(
             && currentAuthority?.characterId === authority.characterId
             && currentAuthority?.conversationId === authority.conversationId
             && currentAuthority?.sessionToken === authority.sessionToken
-            && currentAuthority?.sessionVersion === authority.sessionVersion
-            && currentAuthority?.persistedSessionVersion === authority.persistedSessionVersion
+            && (currentAuthority?.sessionVersion === authority.sessionVersion || currentSnapshot?.historyVersion !== snapshot.historyVersion)
             && currentAuthority?.storeRevision === authority.storeRevision
-            && currentAuthority?.totalMessages === authority.totalMessages
             && currentSource === source
             && currentSnapshot?.sourceToken === snapshot.sourceToken
             && currentSnapshot?.version === snapshot.version
             && currentSnapshot?.storeRevision === snapshot.storeRevision
-            && currentSnapshot?.totalMessages === snapshot.totalMessages
+            && !hasCbsHistoryChanges(currentSnapshot, snapshot.historyVersion, input.dependencies!)
     }
     const pin = source.acquireRangePin(
         Math.max(0, input.row.absoluteIndex - dependencies.maxProjectionMessages + 1),
         Math.min(input.totalMessages, input.row.absoluteIndex + dependencies.maxProjectionMessages),
         'viewport',
     )
+    const rows = source.captureResidentRows
+        ? new Map(source.captureResidentRows().map((row) => [row.absoluteIndex, row])) : undefined
     return {
         isCurrent,
+        historyChanged: () => dependencies.runtime.getActiveConversationViewportSource?.() === source
+            && hasCbsHistoryChanges(source.snapshot(), snapshot.historyVersion, input.dependencies!),
         readMessage: (index) => {
             if (!isCurrent()) throw new ChatParserHistoryProjectionStaleError()
-            const row = snapshot.rowAt(index)
+            const row = rows ? rows.get(index) : snapshot.rowAt(index)
             if (
                 !row || row.absoluteIndex !== index || row.key !== snapshot.keyAt(index)
                 || row.sourceVersion !== snapshot.version

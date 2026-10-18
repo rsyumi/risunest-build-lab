@@ -24,6 +24,7 @@ export function createMutationGatedPersistentDataStore(
     gate: StorageMutationGate,
 ): PersistentDataStore {
     const gated = {
+        messageMetadataReadMode: store.messageMetadataReadMode,
         open: () => store.open(),
         lwwBindingState: store.lwwBindingState ? () => store.lwwBindingState!() : undefined,
         lwwReadOutbox: store.lwwReadOutbox ? (request) => store.lwwReadOutbox!(request) : undefined,

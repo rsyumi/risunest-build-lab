@@ -2,11 +2,10 @@ import { DBState, selectedCharID } from 'src/ts/stores.svelte';
 import { get } from 'svelte/store';
 import { sendChat } from '../index.svelte';
 import { reserveGeneration } from '../generationState';
-import { downloadFile } from 'src/ts/globalApi.svelte';
-import { isTauri } from "src/ts/platform"
 import { HypaProcesser } from '../memory/hypamemory';
 import { BufferToText as BufferToText, selectMultipleFile } from 'src/ts/util';
 import { InlayInputTooLargeError, postInlayAsset } from './inlays';
+import { openPoSaveTarget, type PoSaveTarget } from './poSaveTarget';
 import { alertError } from 'src/ts/alert';
 import { language } from 'src/lang';
 import {
@@ -31,6 +30,7 @@ async function sendPofile(arg:sendFileArg){
     const reservation = reserveGeneration()
     if (!reservation) return
     let completeLease: CompleteConversationLease | null = null
+    let saveTarget: PoSaveTarget | null = null
     try {
     const target = captureSelectedConversationTarget()
     if (target) completeLease = await acquireCompleteConversation('po-multisend', target)
@@ -72,6 +72,8 @@ async function sendPofile(arg:sendFileArg){
         mutationTarget = refreshedTarget
         return true
     }
+    saveTarget = await openPoSaveTarget('translated.po')
+    if (!saveTarget) return
     const lines = arg.file.split('\n')
     for(let i=0;i<lines.length;i++){
         console.log(i)
@@ -106,9 +108,7 @@ async function sendPofile(arg:sendFileArg){
             note = ''
             speaker = ''
             msgId = ''
-            if(isTauri){
-                await downloadFile('translated.po', result)
-            }
+            await saveTarget.checkpoint(result)
             continue
         }
         if(line.startsWith('#. Note =')){
@@ -153,10 +153,11 @@ async function sendPofile(arg:sendFileArg){
         }
 
     }
-    await downloadFile('translated.po', result)
+    await saveTarget.finish(result)
     } finally {
         completeLease?.release()
         reservation.release()
+        await saveTarget?.close()
     }
 }
 

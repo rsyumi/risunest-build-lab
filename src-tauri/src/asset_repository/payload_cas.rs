@@ -79,6 +79,128 @@ struct VerifiedExistingObject {
     identity: ExactFileIdentity,
 }
 
+pub(crate) struct OwnedPayloadUpload {
+    #[cfg(test)]
+    observation: super::body_io::OwnedReceiveObservation,
+    file: File,
+    staging: StagingFile,
+    repository_root: PathBuf,
+    identity: ExactFileIdentity,
+    hasher: Sha256,
+    byte_size: u64,
+    directory_entries_synced: bool,
+    lease: UploadLease,
+}
+
+struct UploadLease { file: File, path: PathBuf }
+static UPLOAD_LIFECYCLE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+impl UploadLease {
+    fn acquire(file: File, path: PathBuf) -> io::Result<Self> {
+        let lease = Self { file, path };
+        fs2::FileExt::try_lock_exclusive(&lease.file)?;
+        // A different process may have swept the marker between create and lock. The caller
+        // has just checked the folders above it, so only the marker itself is checked here.
+        if is_link_like(&fs::symlink_metadata(&lease.path)?) {
+            return invalid_owned_path(&lease.path, "linked path component is forbidden");
+        }
+        if exact_file_identity(&lease.file)? != exact_file_identity(&File::open(&lease.path)?)? {
+            return exact_object_changed();
+        }
+        Ok(lease)
+    }
+}
+
+/// One part of an object read at the length its reader expects. A missing
+/// object and a different length are answers the reader acts on, not I/O errors.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ObjectPart {
+    Missing,
+    SizeMismatch,
+    Bytes(Vec<u8>),
+}
+
+impl Drop for UploadLease {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+impl OwnedPayloadUpload {
+    pub(crate) fn byte_size(&self) -> u64 { self.byte_size }
+
+    #[cfg(test)]
+    pub(crate) fn path(&self) -> &Path { &self.staging.path }
+
+    /// Body bytes go only through the held handle, which a changed path cannot redirect.
+    /// `finish` checks the path again before it publishes the file by that path.
+    fn ensure_unchanged(&self) -> io::Result<()> {
+        if exact_file_identity(&self.file)? != self.identity { return exact_object_changed(); }
+        Ok(())
+    }
+
+    pub(crate) fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
+        #[cfg(test)]
+        let _scope = self.observation.enter();
+        self.ensure_unchanged()?;
+        let written = self.file.write_all(bytes);
+        #[cfg(test)]
+        super::body_io::staging_write_result(&written, bytes.len());
+        written?;
+        self.hasher.update(bytes);
+        #[cfg(test)]
+        {
+            crate::persistent_store::hash_work::update("cas_stage", bytes.len());
+            super::body_io::body_sha_update("owned", "cas_stage", bytes.len());
+        }
+        self.byte_size = self.byte_size.checked_add(bytes.len() as u64)
+            .ok_or_else(|| io::Error::other("payload size overflow"))?;
+        self.identity = exact_file_identity(&self.file)?;
+        if self.identity.byte_size() != self.byte_size { return exact_object_changed(); }
+        Ok(())
+    }
+
+    pub(crate) fn finish(self, cas: &PayloadCas) -> io::Result<PreparedPayload> {
+        #[cfg(test)]
+        let _scope = self.observation.enter();
+        if self.repository_root != cas.repository_root { return Err(io::Error::other("CAS upload repository changed")); }
+        cas.ensure_repository_root()?;
+        self.ensure_unchanged()?;
+        let Self {
+            #[cfg(test)]
+            mut observation,
+            mut file, mut staging, identity, hasher, byte_size, mut directory_entries_synced, lease: _lease, ..
+        } = self;
+        let content_hash = hex::encode(hasher.finalize());
+        #[cfg(test)]
+        observation.verified(&content_hash);
+        let physical_key = object_physical_key(&content_hash);
+        let existing = cas.existing_object_path_in_checked_root(&content_hash)?;
+        if let Some(existing) = cas.verify_destination(existing, &content_hash, byte_size, &|| false)? {
+            if !cas.existing_verification_matches(&cas.repository_root.join(&physical_key), &existing)? {
+                return exact_object_changed();
+            }
+            directory_entries_synced &= sync_directory(&cas.repository_root.join(&physical_key).parent().unwrap())?;
+            drop(file);
+            directory_entries_synced &= staging.remove_and_sync()?;
+            return Ok(PreparedPayload { content_hash, byte_size, physical_key, deduplicated: true, directory_entries_synced });
+        }
+        file.flush()?;
+        file.sync_all()?;
+        if exact_file_identity(&file)? != identity { return exact_object_changed(); }
+        drop(file);
+        let verified_file = cas.open_exact_owned_file(&staging.path)?;
+        if exact_file_identity(&verified_file)? != identity { return exact_object_changed(); }
+        directory_entries_synced &= sync_directory(&staging.parent)?;
+        cas.publish_staged(StagedPayload {
+            #[cfg(test)]
+            body_identity: super::body_io::OwnedIdentity::new(&content_hash),
+            verified_file, staging, repository_root: cas.repository_root.clone(), identity,
+            content_hash, byte_size, directory_entries_synced, move_on_publish: false, verified_existing: None,
+        })
+    }
+}
+
 #[cfg(test)]
 impl StagedPayload {
     pub(super) fn transfer_observation_to(&mut self, owner: std::thread::ThreadId) {
@@ -182,6 +304,75 @@ impl PayloadCas {
         let staging_directory =
             self.ensure_directory(&assets_directory, "staging", &mut directory_entries_synced)?;
         tempfile::NamedTempFile::new_in(staging_directory)
+    }
+
+    pub(crate) fn begin_owned_upload(&self) -> io::Result<OwnedPayloadUpload> {
+        let _lifecycle = UPLOAD_LIFECYCLE.lock().map_err(|_| io::Error::other("upload lifecycle poisoned"))?;
+        #[cfg(test)]
+        let observation = super::body_io::OwnedReceiveObservation::new();
+        #[cfg(test)]
+        let _scope = observation.enter();
+        self.ensure_repository_root()?;
+        let mut directory_entries_synced = true;
+        let assets = self.ensure_directory(&self.repository_root, "assets", &mut directory_entries_synced)?;
+        let staging_directory = self.ensure_directory(&assets, "staging", &mut directory_entries_synced)?;
+        let directory = self.ensure_directory(&staging_directory, "uploads", &mut directory_entries_synced)?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let lease_path = directory.join(format!("{id}.lock"));
+        let lease_file = OpenOptions::new().read(true).write(true).create_new(true).open(&lease_path)?;
+        let lease = UploadLease::acquire(lease_file, lease_path)?;
+        let path = directory.join(format!("{id}.tmp"));
+        let (file, staging) = create_staging_file(&path, &directory)?;
+        // Confirm that the body was created inside the repository before any byte is written.
+        self.ensure_canonical_confinement(&path)?;
+        let identity = exact_file_identity(&file)?;
+        #[cfg(test)]
+        {
+            crate::persistent_store::hash_work::begin("cas_stage");
+            super::body_io::body_sha_begin("owned", "cas_stage");
+        }
+        Ok(OwnedPayloadUpload {
+            #[cfg(test)]
+            observation,
+            file, staging, repository_root: self.repository_root.clone(), identity,
+            hasher: Sha256::new(), byte_size: 0, directory_entries_synced, lease,
+        })
+    }
+
+    pub(crate) fn sweep_abandoned_uploads(&self) -> io::Result<usize> {
+        let _lifecycle = UPLOAD_LIFECYCLE.lock().map_err(|_| io::Error::other("upload lifecycle poisoned"))?;
+        self.ensure_repository_root()?;
+        let directory = self.repository_root.join("assets/staging/uploads");
+        match fs::symlink_metadata(&directory) {
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(error),
+            Ok(metadata) => ensure_real_directory(&directory, &metadata)?,
+        }
+        reject_link_components(&directory)?;
+        let mut removed = 0;
+        // This directory contains only upload bodies and their ownership locks.
+        for entry in fs::read_dir(&directory)?.take(256) {
+            let entry = entry?;
+            let path = entry.path();
+            if !matches!(path.extension().and_then(|s| s.to_str()), Some("tmp" | "lock")) { continue; }
+            let Some(id) = path.file_stem().and_then(|s| s.to_str()).filter(|s| uuid::Uuid::parse_str(s).is_ok()) else { continue; };
+            let lock_path = directory.join(format!("{id}.lock"));
+            let body_path = directory.join(format!("{id}.tmp"));
+            if fs::symlink_metadata(&lock_path).is_ok_and(|meta| is_link_like(&meta)) { continue; }
+            let lock = match OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&lock_path) {
+                Ok(file) => file,
+                Err(_) => continue,
+            };
+            if fs2::FileExt::try_lock_exclusive(&lock).is_err() { continue; }
+            if let Ok(metadata) = fs::symlink_metadata(&body_path) {
+                if !metadata.is_file() || is_link_like(&metadata) { continue; }
+                fs::remove_file(&body_path)?;
+                removed += 1;
+            }
+            fs::remove_file(&lock_path)?;
+        }
+        if removed > 0 { sync_directory(&directory)?; }
+        Ok(removed)
     }
 
     pub fn prepare_reader(&self, reader: &mut impl Read) -> Result<PreparedPayload, io::Error> {
@@ -867,39 +1058,38 @@ impl PayloadCas {
         Ok(Some(body?))
     }
 
-    pub fn read_object_range(
+    /// Reads `[start, end_exclusive)` of an object that must be `expected_size`
+    /// bytes long. The file is opened and closed within the call, and the bytes
+    /// are never truncated or padded.
+    pub(crate) fn read_object_part(
         &self,
         content_hash: &str,
         start: u64,
         end_exclusive: u64,
-    ) -> io::Result<Option<Vec<u8>>> {
-        #[cfg(test)]
-        let _body_scope = super::body_io::object_scope(content_hash);
-        if end_exclusive < start {
-            return Err(io::Error::new(
-                ErrorKind::InvalidInput,
-                "payload range bounds must be in ascending order",
-            ));
+        expected_size: u64,
+    ) -> io::Result<ObjectPart> {
+        if end_exclusive < start || end_exclusive > expected_size {
+            return Err(io::Error::new(ErrorKind::InvalidInput, "invalid CAS read range"));
         }
-        let Some(path) = self.existing_object_path(content_hash)? else {
-            return Ok(None);
+        let length = usize::try_from(end_exclusive - start)
+            .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "CAS read part is too large"))?;
+        let Some(path) = self.existing_object_path(content_hash)? else { return Ok(ObjectPart::Missing); };
+        let file = match self.open_exact_owned_file(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(ObjectPart::Missing),
+            Err(error) => return Err(error),
         };
-        let file = File::open(path);
-        #[cfg(test)]
-        super::body_io::open_result("managed", &file);
-        let mut file = file?;
         let size = file.metadata()?.len();
-        let bounded_start = start.min(size);
-        let bounded_end = end_exclusive.min(size);
-        let length = usize::try_from(bounded_end - bounded_start)
-            .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "payload range is too large"))?;
-        file.seek(SeekFrom::Start(bounded_start))?;
-        let mut data = vec![0; length];
-        let read = file.read_exact(&mut data);
         #[cfg(test)]
-        super::body_io::read_exact_result("managed", &read, data.len());
-        read?;
-        Ok(Some(data))
+        let file = super::body_io::TrackedBodyFile::new(file, content_hash);
+        let mut file = file;
+        if size != expected_size {
+            return Ok(ObjectPart::SizeMismatch);
+        }
+        file.seek(SeekFrom::Start(start))?;
+        let mut bytes = vec![0; length];
+        file.read_exact(&mut bytes)?;
+        Ok(ObjectPart::Bytes(bytes))
     }
 
     pub fn open_object(&self, content_hash: &str) -> io::Result<Option<File>> {
@@ -1113,6 +1303,11 @@ impl PayloadCas {
         super::body_io::presence_query();
         validate_content_hash(content_hash)?;
         self.ensure_repository_root()?;
+        self.existing_object_path_in_checked_root(content_hash)
+    }
+
+    /// `existing_object_path` for a valid hash, after the caller has just checked the repository root.
+    fn existing_object_path_in_checked_root(&self, content_hash: &str) -> io::Result<Option<PathBuf>> {
         let assets_directory = self.repository_root.join("assets");
         if !self.existing_owned_directory(&assets_directory)? {
             return Ok(None);
@@ -1266,7 +1461,12 @@ impl PayloadCas {
     }
 
     fn verify_import_destination(&self, hash: &str, size: u64, cancelled: &dyn Fn() -> bool) -> io::Result<Option<VerifiedExistingObject>> {
-        let Some(path) = self.existing_object_path(hash)? else { return Ok(None); };
+        let path = self.existing_object_path(hash)?;
+        self.verify_destination(path, hash, size, cancelled)
+    }
+
+    fn verify_destination(&self, path: Option<PathBuf>, hash: &str, size: u64, cancelled: &dyn Fn() -> bool) -> io::Result<Option<VerifiedExistingObject>> {
+        let Some(path) = path else { return Ok(None); };
         match self.verify_existing_object_checked(&path, hash, size, &object_physical_key(hash), cancelled) {
             Ok(verified) => Ok(Some(verified)),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
@@ -1380,7 +1580,11 @@ impl PayloadCasReadScan {
 }
 
 fn create_staging_file(path: &Path, parent: &Path) -> io::Result<(File, StagingFile)> {
-    let file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(windows)]
+    options.share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE);
+    let file = options.open(path)?;
     let staging = StagingFile {
         path: path.to_path_buf(),
         parent: parent.to_path_buf(),
@@ -1609,9 +1813,101 @@ pub(crate) fn exact_file_identity(file: &File) -> io::Result<ExactFileIdentity> 
 
 #[cfg(test)]
 mod tests {
-    use super::{create_staging_file, ExactObjectUnlink, PayloadCas};
+    use super::{create_staging_file, ExactObjectUnlink, ObjectPart, PayloadCas};
     use sha2::Digest;
     use std::io::Cursor;
+
+    #[test]
+    fn owned_upload_publishes_its_received_file_and_rejects_corrupt_duplicates() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let bytes: Vec<u8> = (0..super::COPY_BUFFER_BYTES + 257).map(|i| (i % 256) as u8).collect();
+        let mut upload = cas.begin_owned_upload().unwrap();
+        let path = upload.path().to_owned();
+        upload.append(&bytes[..super::COPY_BUFFER_BYTES]).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), super::COPY_BUFFER_BYTES as u64);
+        assert_eq!(cas.sweep_abandoned_uploads().unwrap(), 0);
+        assert!(path.exists());
+        upload.append(&bytes[super::COPY_BUFFER_BYTES..]).unwrap();
+        let received_identity = upload.identity;
+        let prepared = upload.finish(&cas).unwrap();
+        assert_eq!(prepared.content_hash, hex::encode(sha2::Sha256::digest(&bytes)));
+        let object = directory.path().join(&prepared.physical_key);
+        assert_eq!(std::fs::read(&object).unwrap(), bytes);
+        assert!(!path.exists());
+        let published_identity = super::exact_file_identity(&std::fs::File::open(&object).unwrap()).unwrap();
+        #[cfg(windows)]
+        {
+            assert_eq!(received_identity.file_index, published_identity.file_index);
+            assert_eq!(received_identity.attributes, published_identity.attributes);
+            assert_eq!(published_identity.attributes & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_TEMPORARY, 0);
+        }
+        #[cfg(unix)]
+        assert_eq!(received_identity.inode, published_identity.inode);
+        let mut duplicate = cas.begin_owned_upload().unwrap();
+        duplicate.append(&bytes).unwrap();
+        assert!(duplicate.finish(&cas).unwrap().deduplicated);
+        std::fs::write(&object, b"corrupt").unwrap();
+        let mut duplicate = cas.begin_owned_upload().unwrap();
+        duplicate.append(&bytes).unwrap();
+        assert!(duplicate.finish(&cas).is_err());
+        assert_eq!(std::fs::read(&object).unwrap(), b"corrupt");
+    }
+
+    #[test]
+    fn owned_upload_cleanup_skips_live_files_and_reclaims_abandoned_bodies() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let live = cas.begin_owned_upload().unwrap();
+        let mut abandoned = cas.begin_owned_upload().unwrap();
+        abandoned.append(b"unfinished synthetic upload").unwrap();
+        let path = abandoned.path().to_owned();
+        // Model process exit after receiving bytes, with no destructor cleanup.
+        abandoned.staging.owned = false;
+        drop(abandoned);
+        assert!(path.exists());
+        assert_eq!(cas.sweep_abandoned_uploads().unwrap(), 1);
+        assert!(!path.exists());
+        assert!(live.path().exists());
+        let live_path = live.path().to_owned();
+        drop(live);
+        assert!(!live_path.exists());
+
+        let marker = directory.path().join("assets/staging/uploads").join(format!("{}.lock", uuid::Uuid::new_v4()));
+        let before_lock = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&marker).unwrap();
+        cas.sweep_abandoned_uploads().unwrap();
+        assert!(!marker.exists());
+        assert!(super::UploadLease::acquire(before_lock, marker).is_err(), "an unlinked lease must never start receiving a body");
+    }
+
+    #[test]
+    fn owned_upload_checks_file_identity_before_each_append_and_finish() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        for finish in [false, true] {
+            let mut upload = cas.begin_owned_upload().unwrap();
+            upload.append(b"original").unwrap();
+            let changed = std::fs::write(upload.path(), b"changed");
+            #[cfg(windows)]
+            assert!(changed.is_err(), "other write handles must be refused");
+            #[cfg(not(windows))]
+            {
+                changed.unwrap();
+                if finish { assert!(upload.finish(&cas).is_err()); }
+                else { assert!(upload.append(b"next").is_err()); }
+            }
+            #[cfg(windows)]
+            if finish { upload.finish(&cas).unwrap(); }
+        }
+        let mut upload = cas.begin_owned_upload().unwrap();
+        upload.append(b"received").unwrap();
+        std::fs::rename(upload.path(), directory.path().join("moved")).unwrap();
+        std::fs::write(upload.path(), b"impostor").unwrap();
+        assert!(upload.finish(&cas).is_err());
+        for bytes in [&b"received"[..], b"impostor"] {
+            assert!(cas.stat_object(&hex::encode(sha2::Sha256::digest(bytes))).unwrap().is_none());
+        }
+    }
 
     #[test]
     fn staged_copy_allows_repository_work_and_stays_invisible_until_publication() {
@@ -1667,7 +1963,8 @@ mod tests {
                 barrier.wait();
                 let _guard = crate::asset_repository::coordinator::lock_repository_mutation().unwrap();
                 let expected = b"synthetic available media";
-                assert_eq!(cas.read_object_range(&hash, 0, expected.len() as u64).unwrap().unwrap(), expected);
+                let size = expected.len() as u64;
+                assert_eq!(cas.read_object_part(&hash, 0, size, size).unwrap(), ObjectPart::Bytes(expected.to_vec()));
                 done.send(()).unwrap();
             })
         }).collect();
@@ -2256,6 +2553,57 @@ mod body_io_tests {
     use std::collections::BTreeMap;
     use crate::asset_repository::body_io::{register_object_purpose, reset_body_io, take_body_io, BodyPurpose, BodyWork};
 
+    #[test]
+    fn received_upload_counts_one_staging_write_and_one_incremental_hash() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let bytes = vec![43; COPY_BUFFER_BYTES * 2 + 1];
+        let hash = hex::encode(Sha256::digest(&bytes));
+        reset_body_io();
+        crate::persistent_store::hash_work::reset_hash_work();
+        register_object_purpose(&hash, BodyPurpose::Asset);
+        let mut upload = cas.begin_owned_upload().unwrap();
+        for chunk in bytes.chunks(COPY_BUFFER_BYTES) { upload.append(chunk).unwrap(); }
+        let prepared = upload.finish(&cas).unwrap();
+        let work = take_body_io();
+        let native = crate::persistent_store::hash_work::take_hash_work();
+        assert!(work.complete());
+        assert_eq!(prepared.content_hash, hash);
+        let owned = &work.objects[&hash].owned_work;
+        assert_eq!(owned.staging_written_bytes, bytes.len() as u64);
+        assert_eq!(owned.body_sha["cas_stage"].bytes, bytes.len() as u64);
+        assert_eq!(owned.body_sha["cas_stage"].calls, 1);
+        assert_eq!(owned.body_sha["cas_stage"].bytes, native.domains["cas_stage"].bytes);
+        assert_eq!(owned.publications, 1);
+        assert_eq!(work.unattributed_owned, BodyWork::default());
+    }
+
+    #[test]
+    fn a_part_read_checks_the_expected_size_reads_only_its_bytes_and_closes_the_file() {
+        let bytes: Vec<u8> = (0..53).collect();
+        let (directory, cas, prepared) = fixture(&bytes);
+        let hash = &prepared.content_hash;
+        reset_body_io();
+        register_object_purpose(hash, BodyPurpose::Asset);
+        assert_eq!(cas.read_object_part(hash, 1, 50, 53).unwrap(), ObjectPart::Bytes(bytes[1..50].to_vec()));
+        assert_eq!(cas.read_object_part(hash, 53, 53, 53).unwrap(), ObjectPart::Bytes(Vec::new()));
+        assert_eq!(cas.read_object_part(hash, 0, 10, 100).unwrap(), ObjectPart::SizeMismatch);
+        assert_eq!(cas.read_object_part(hash, 0, 10, 52).unwrap(), ObjectPart::SizeMismatch);
+        let work = take_body_io();
+        assert!(work.complete());
+        let managed = &work.objects[hash].work;
+        assert_eq!(managed.opens, 4);
+        assert_eq!(managed.read_bytes, 49);
+        assert_eq!(managed.outstanding_readers, 0);
+        assert!(managed.body_sha.is_empty());
+
+        let empty = cas.prepare_bytes(&[]).unwrap();
+        assert_eq!(cas.read_object_part(&empty.content_hash, 0, 0, 0).unwrap(), ObjectPart::Bytes(Vec::new()));
+        std::fs::remove_file(directory.path().join(&prepared.physical_key)).unwrap();
+        assert_eq!(cas.read_object_part(hash, 0, 0, 53).unwrap(), ObjectPart::Missing);
+        assert_eq!(cas.read_object_part(&"c".repeat(64), 0, 1, 1).unwrap(), ObjectPart::Missing);
+    }
+
     fn fixture(bytes: &[u8]) -> (tempfile::TempDir, PayloadCas, PreparedPayload) {
         let directory = tempfile::tempdir().unwrap();
         let cas = PayloadCas::new(directory.path()).unwrap();
@@ -2605,7 +2953,7 @@ mod body_io_tests {
         reset_body_io();
         register_object_purpose(&prepared.content_hash, BodyPurpose::Asset);
         assert_eq!(cas.read_object(&prepared.content_hash).unwrap().unwrap(), body);
-        assert_eq!(cas.read_object_range(&prepared.content_hash, 2, 7).unwrap().unwrap(), &body[2..7]);
+        assert_eq!(cas.read_object_part(&prepared.content_hash, 2, 7, body.len() as u64).unwrap(), ObjectPart::Bytes(body[2..7].to_vec()));
         let work = take_body_io();
         assert_eq!(work.domains["managed"], BodyWork {
             open_attempts: 2, opens: 2, read_operations: 2, read_bytes: body.len() as u64 + 5,
@@ -2624,7 +2972,8 @@ mod body_io_tests {
         reset_body_io();
         register_object_purpose(&"a".repeat(64), BodyPurpose::Asset);
         assert!(cas.open_exact_owned_file(&missing).is_err());
-        assert!(cas.read_object_range(&"a".repeat(64), 3, 2).is_err());
+        assert!(cas.read_object_part(&"a".repeat(64), 3, 2, 10).is_err());
+        assert!(cas.read_object_part(&"a".repeat(64), 0, 11, 10).is_err());
         let work = take_body_io();
         assert_eq!(work.domains["managed"], BodyWork { open_attempts: 1, failed_opens: 1, ..Default::default() });
         assert_eq!(work.presence_queries, 0);

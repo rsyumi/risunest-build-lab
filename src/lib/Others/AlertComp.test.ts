@@ -41,6 +41,8 @@ vi.mock('./Help.svelte', async () => (await import('./AlertComp.testSupport')).c
 import { language } from 'src/lang'
 import { alertGenerationInfoStore } from '../../ts/alert'
 import AlertComp from './AlertComp.svelte'
+import versionData from '../../../version.json'
+import { appVer } from 'src/ts/appVersion'
 
 function deferred<T>() {
     let resolve!: (value: T) => void
@@ -65,6 +67,26 @@ function branch(preview: string, x = 0) {
 
 describe('AlertComp branch view', () => {
     let mounted: ReturnType<typeof mount> | undefined
+
+    it('shows and copies diagnostics for an error without a stack', async () => {
+        const writeText = vi.fn(async () => {})
+        Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+        alertStore.set({ type: 'error', msg: 'Synthetic string failure' })
+        const target = document.createElement('div')
+        document.body.append(target)
+        mounted = mount(AlertComp, { target })
+        await tick()
+        ;[...target.querySelectorAll('button')].find(button => button.textContent?.includes(language.showErrorDetails))!.click()
+        await tick()
+        const report = target.querySelector('pre.stack-trace')!.textContent!
+        expect(report).toContain(`RisuNest Version: ${versionData.version} (RisuAI ${appVer})`)
+        expect(report).toContain('OS: Windows')
+        expect(report).toContain('Device:')
+        expect(report).toContain('User-Agent:')
+        expect(report).toContain('\n\nSynthetic string failure')
+        target.querySelector<HTMLButtonElement>('.stack-trace-copy')!.click()
+        await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith(report))
+    })
 
     afterEach(async () => {
         alertStore.set({ type: 'none', msg: '' })

@@ -76,6 +76,10 @@ describe('plugin API declarations', () => {
         expect(undeclared.sort()).toEqual(undeclaredUpstreamMethods)
     })
 
+    it('exposes the upstream parser promise and selected-character error through the public host', async () => {
+        await expect(host.parseRisuChat('{{char}}')).rejects.toThrow('No character selected')
+    })
+
     it('exposes the private RisuNest methods to the guest', () => {
         expect(Object.keys(host).filter((name) => name.startsWith('risunest')).sort()).toEqual([
             'risunestCallHostTool',

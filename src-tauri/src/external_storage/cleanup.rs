@@ -888,6 +888,7 @@ type ListedCheckpoint=Option<(RemoteObject,super::lww_checkpoint::Checkpoint)>;
 /// Rechecks only list again. A changed receipt is read again.
 pub(crate) struct LwwRepositoryView<'a> {
     pub engine:&'a super::lww_engine::ExternalLwwEngine,
+    lww_repository_id:std::borrow::Cow<'a,str>,
     pub base:ConnectedRepositoryView<'a>,
     pub documents:ConnectedDocuments<'a>,
     store:&'a std::sync::Mutex<crate::persistent_store::PersistentStore>,
@@ -903,7 +904,8 @@ fn receipt_key(receipt:&ObjectReceipt)->Result<String> {
 impl<'a> LwwRepositoryView<'a> {
     pub(crate) fn new(engine:&'a super::lww_engine::ExternalLwwEngine,store:&'a std::sync::Mutex<crate::persistent_store::PersistentStore>,
         base:ConnectedRepositoryView<'a>,documents:ConnectedDocuments<'a>)->Self {
-        Self{engine,base,documents,store,native_bodies:Default::default(),known:Default::default(),checkpoints:Default::default(),
+        Self{engine,lww_repository_id:super::lww_segment::format_repository_id(&engine.repository.repository_id),
+            base,documents,store,native_bodies:Default::default(),known:Default::default(),checkpoints:Default::default(),
             segments:Default::default(),coverage:Default::default()}
     }
     fn store(&self)->Result<std::sync::MutexGuard<'_,crate::persistent_store::PersistentStore>> {
@@ -1032,10 +1034,10 @@ impl RepositoryView for LwwRepositoryView<'_> {
     fn known_objects(&self)->Result<Vec<RemoteObject>> {
         let mut known=self.base.known_objects()?;known.extend(self.known.lock().map_err(|_|ProviderError::new(ErrorKind::Transient))?.clone());Ok(known)
     }
-    fn inventory<'a>(&'a self,cancel:&'a Cancellation)->ProviderFuture<'a,InventorySurvey> {Box::pin(self.base.read_inventory_in_scope(cancel,Some(&self.engine.repository.repository_id)))}
+    fn inventory<'a>(&'a self,cancel:&'a Cancellation)->ProviderFuture<'a,InventorySurvey> {Box::pin(self.base.read_inventory_in_scope(cancel,Some(&self.lww_repository_id)))}
     fn delete_inventory_page<'a>(&'a self,expected:&'a risunest_external_storage_format::snapshot::StoredObject,cancel:&'a Cancellation)->ProviderFuture<'a,control::RemoteInventoryPageDeleteOutcome> {
-        if expected.header.repository_id==self.engine.repository.repository_id {
-            Box::pin(control::delete_authenticated_inventory_page_for_repository(self.base.connected,expected,&self.engine.repository.repository_id,cancel))
+        if expected.header.repository_id==self.lww_repository_id {
+            Box::pin(control::delete_authenticated_inventory_page_for_repository(self.base.connected,expected,&self.lww_repository_id,cancel))
         } else {self.base.delete_inventory_page(expected,cancel)}
     }
     fn prepare_removals(&self,objects:&[RemoteObject])->Result<()> {self.base.prepare_removals(objects)}
@@ -1053,7 +1055,8 @@ impl RepositoryView for LwwRepositoryView<'_> {
 }
 impl DocumentSource for LwwRepositoryView<'_> {
     fn format_repository_id(&self,object:&RemoteObject)->Option<&str> {
-        (object.repository_id==self.engine.repository.repository_id).then_some(self.engine.repository.repository_id.as_str())
+        if object.repository_id==self.engine.repository.repository_id {Some(&self.engine.repository.repository_id)}
+        else {(object.repository_id==self.lww_repository_id).then_some(self.lww_repository_id.as_ref())}
     }
     fn native_body(&self,object:&RemoteObject)->Result<bool> {
         if object.role!=ObjectRole::Pack {return Ok(false)}
@@ -1085,16 +1088,16 @@ impl DocumentSource for LwwRepositoryView<'_> {
         })
     }
     fn catalog<'a>(&'a self,object:&'a RemoteObject)->ProviderFuture<'a,Vec<RemoteObject>> {
-        if object.repository_id==self.engine.repository.repository_id {
-            Box::pin(control::read_catalog_children_for_repository(self.base.connected,object,&self.engine.repository.repository_id,self.documents.cancel))
+        if object.repository_id==self.lww_repository_id {
+            Box::pin(control::read_catalog_children_for_repository(self.base.connected,object,&self.lww_repository_id,self.documents.cancel))
         } else {self.documents.catalog(object)}
     }
     fn metadata<'a>(&'a self,object:&'a RemoteObject)->ProviderFuture<'a,Option<ObjectReceipt>> {
         Box::pin(async move {
             if let Some(current)=self.verified(object)? {return Ok(Some(current))}
             if object.role!=ObjectRole::Segment && !self.native_body(object)? {
-                return if object.repository_id==self.engine.repository.repository_id {
-                    self.documents.metadata_for_repository(object,&self.engine.repository.repository_id).await
+                return if object.repository_id==self.lww_repository_id {
+                    self.documents.metadata_for_repository(object,&self.lww_repository_id).await
                 } else {self.documents.metadata(object).await};
             }
             stored_metadata(self.engine.provider.as_ref(),&self.engine.repository,object,self.documents.cancel).await
@@ -1104,8 +1107,8 @@ impl DocumentSource for LwwRepositoryView<'_> {
         Box::pin(async move {
             if let Some(current)=self.verified(object)? {return Ok(Some(current))}
             if object.role!=ObjectRole::Segment && !self.native_body(object)? {
-                return if object.repository_id==self.engine.repository.repository_id {
-                    self.documents.probe_for_repository(object,&self.engine.repository.repository_id).await
+                return if object.repository_id==self.lww_repository_id {
+                    self.documents.probe_for_repository(object,&self.lww_repository_id).await
                 } else {self.documents.probe(object).await};
             }
             let intent=ObjectIntent{repository_id:self.engine.repository.repository_id.clone(),job_id:"cleanup-probe".into(),object_id:object.object_id.clone(),
@@ -1209,6 +1212,7 @@ pub(super) mod tests {
     async fn ordinary_backup(f:&super::super::lww_tests::CycleFixture,directory:&Path,cancel:&Cancellation)
         ->(ConnectedRepository,String,packaging::CompletedSnapshot) {
         use super::super::contract::{ConnectionConfig,RemoteLocator};
+        let mut handle=fake::repository();handle.repository_id=f.sender.repository.repository_id.clone();
         let connected=ConnectedRepository {
             stored:super::super::connection_store::StoredConnection {
                 id:"sender".into(),config:ConnectionConfig{provider:"synthetic".into(),profile:None,
@@ -1216,7 +1220,7 @@ pub(super) mod tests {
                 descriptor:f.sender.descriptor.clone(),descriptor_locator:RemoteLocator{connection_identity:f.sender.repository.connection_identity.clone(),collection:None,object:"descriptor".into()},
                 provider_repository_id:f.sender.repository.repository_id.clone(),credential_ref:"credential".into(),root_key_ref:"key".into(),recovery_key_ref:"recovery".into(),
                 retention_policy:None,transfer_concurrency:None,labels:Default::default(),capabilities:f.sender.capabilities.clone(),created_at_ms:1,verified_at_ms:1,last_sync_at_ms:None,last_backup_at_ms:None,
-            },provider:f.provider.clone(),handle:fake::repository(),
+            },provider:f.provider.clone(),handle,
             dependencies:fake::loopback_dependencies(fake::MemoryVault::default(),1).dependencies,root_key:zeroize::Zeroizing::new([7;32]),
         };
         let cache=directory.join("cache");
@@ -1311,9 +1315,10 @@ pub(super) mod tests {
 
     #[test]
     fn lww_gc_retires_native_body_before_its_signed_discovery_parent() {
+        for repository_id in super::super::lww_tests::representative_repository_ids() {
         runtime().block_on(async {
             use super::super::{lww_tests::{CycleFixture,small_asset},fake};
-            let mut f=CycleFixture::new();let cancel=Cancellation::default();
+            let mut f=CycleFixture::with_repository_id(&repository_id);let cancel=Cancellation::default();
             small_asset(&mut f.a,"obsolete-large",&vec![31;5*1024*1024]);
             let mut small=Vec::new();
             for n in 0..4 {small.push(small_asset(&mut f.a,&format!("small-{n}"),format!("synthetic retained pack entry {n}").as_bytes()));}
@@ -1346,7 +1351,7 @@ pub(super) mod tests {
                 now_ms:1000,unfinished:vec![],cache_root:&cache},ConnectedDocuments{connected:&connected,cancel:&cancel,scratch:&scratch});
             let observed=view.roots(&cancel).await.unwrap();let listed=view.snapshots(&cancel).await.unwrap();let known=view.known_objects().unwrap();
             let inventory=view.inventory(&cancel).await.unwrap();
-            assert!(inventory.pages.iter().any(|page|page.reference.repository_id==f.sender.repository.repository_id));
+            assert!(inventory.pages.iter().any(|page|page.reference.repository_id==checkpoint.reference.repository_id));
             assert!(inventory.pages.iter().any(|page|page.reference.repository_id==connected.stored.descriptor.repository_id));
             assert!(inventory.objects.iter().any(|object|object.object_id==id && object.role==ObjectRole::Snapshot));
             assert_eq!(backup.reference.role,ObjectRole::BackupBundle);
@@ -1387,7 +1392,10 @@ pub(super) mod tests {
             assert!(!f.provider.holds(&old_pack),"finite aged GC retires the saved equal-coverage pack");
             let mut receiver_connection=ConnectedRepository{stored:connected.stored.clone(),provider:connected.provider.clone(),handle:fake::repository(),
                 dependencies:fake::loopback_dependencies(fake::MemoryVault::default(),1).dependencies,root_key:zeroize::Zeroizing::new(*connected.root_key)};
+            receiver_connection.handle.repository_id=repository_id.clone();
             receiver_connection.stored.id="receiver".into();
+            let usage=super::super::lww_residency::usage_receipts(f.directory_b.path(),&receiver_connection.stored).unwrap();
+            assert!(usage.iter().any(|receipt|receipt.locator.object==saved.packs[0].locator.object));
             super::super::connection_store::ConnectionStore::open(f.directory_b.path()).unwrap().insert(&receiver_connection.stored).unwrap();
             let _resolver=super::super::lww_residency::install_test_source_connection(f.directory_b.path(),Arc::new(receiver_connection)).unwrap();
             let catalog_id=&current.asset_catalogs[0].header.object_id;
@@ -1423,6 +1431,7 @@ pub(super) mod tests {
             assert_eq!(refreshed.protected_snapshot,id);assert_ne!(refreshed.packs[0].header.object_id,old_pack);
             assert_eq!(received,refreshed.packs.iter().map(|pack|pack.ciphertext_length).sum::<u64>());
         });
+        }
     }
     fn validate_generic_body(object:&RemoteObject,repository:&RepositoryHandle)->Result<()> {object.stored(repository).map(|_|())}
 

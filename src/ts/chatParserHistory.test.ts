@@ -2,11 +2,31 @@ import { Buffer } from 'buffer'
 import { describe, expect, it } from 'vitest'
 import {
     classifyChatParserHistory,
+    planChatParserHistory,
     extendChatParserHistoryBounds,
     type ChatParserUnsafeHistoryDependency,
 } from './chatParserHistory'
 
 describe('chat parser history classification', () => {
+    it.each([
+        '{{#if 1}}HP{{/if}}', '{{#when::1::is::1}}HP{{/when}}',
+        '{{#pure}}HP{{/pure}}', '{{#escape}}HP{{/escape}}',
+        '{{#pure}}{{history}}{{/pure}}', '{{#escape}}{{history}}{{/escape}}',
+        '{{#if 1}}{{previouschatlog::7}}{{/if}}',
+        '{{#if {{getvar::hp}}}}HP{{/if}}', '{{#if {{? {{getvar::hp}}>0}}}}HP{{/if}}',
+        '{{#if {{equal::{{getvar::x}}::1}}}}HP{{/if}}', '{{#when {{getvar::x}}}}HP{{/when}}',
+        '{{#if_pure {{getvar::x}}}}HP{{/if_pure}}', 'HP {{? {{getvar::hp}}+1}}',
+    ])('keeps statically visible blocks bounded: %s', (source) => {
+        expect(classifyChatParserHistory({ source }).requiresFullHistory).toBe(false)
+        expect(planChatParserHistory({ source }).requiresFullHistory).toBe(false)
+    })
+
+    it.each([
+        '{{#each {{array::a::b}} as item}}x{{/each}}', '{{call::f}}', '{{{{getvar::m}}}}',
+        '{{last message{{getvar::empty}}}}', '{{#{{getvar::block}} 1}}x{{/if}}', '{{?{{getvar::x}}}}',
+    ])('keeps text-splicing expressions opaque: %s', (source) => {
+        expect(planChatParserHistory({ source }).reasons).toContain('opaque-cbs')
+    })
     it.each([
         '{{user-history}}',
         '{{CHAR_HISTORY}}',

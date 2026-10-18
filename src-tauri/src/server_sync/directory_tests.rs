@@ -186,6 +186,44 @@ fn directory() -> risunest_sync_connect::Directory {
     }
 }
 #[test]
+fn registry_retry_admission_increases_to_a_cap_and_is_scoped_to_the_record() {
+    let mut retries = DirectoryRetries::default();
+    let mut now = Instant::now();
+    for delay in [30, 60, 120, 240, 300, 300] {
+        assert!(retries.admit("record-a", now));
+        assert!(!retries.admit("record-a", now));
+        now += Duration::from_secs(delay);
+        assert!(!retries.admit("record-a", now - Duration::from_millis(1)));
+    }
+    assert!(retries.admit("record-b", now));
+    retries.0.remove("record-a");
+    assert!(retries.admit("record-a", now));
+    assert!(retries.admit("record-a", now + Duration::from_secs(30)));
+}
+
+#[test]
+fn offline_clients_share_registry_admission() {
+    let registry = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let mut directory = directory();
+    directory.base_url = format!("http://{}", registry.server_addr());
+    let mut config = tests::config("http://127.0.0.1:1");
+    config.directory = Some(directory);
+    let first = ServerClient::new(config.clone()).unwrap();
+    let task = std::thread::spawn(move || first.resolve_identity());
+    let request = registry.recv_timeout(Duration::from_secs(5)).unwrap().expect("registry lookup");
+    request.respond(tiny_http::Response::empty(503)).unwrap();
+    assert_eq!(task.join().unwrap().unwrap_err().code, "directory-response-error");
+    // A new client is what another transport lane or the next scheduled attempt creates.
+    let second = ServerClient::new(config.clone()).unwrap();
+    assert_eq!(second.resolve_identity().unwrap_err().code, "server-unreachable");
+    assert!(registry.try_recv().unwrap().is_none());
+    reset_directory_retry(&config);
+    let task = std::thread::spawn(move || second.resolve_identity());
+    let request = registry.recv_timeout(Duration::from_secs(5)).unwrap().expect("lookup after recovery reset");
+    request.respond(tiny_http::Response::empty(503)).unwrap();
+    assert_eq!(task.join().unwrap().unwrap_err().code, "directory-response-error");
+}
+#[test]
 fn native_directory_recovery_accepts_http_after_verifying_identity() {
     for device in ["device", "wrong-device"] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

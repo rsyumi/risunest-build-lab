@@ -11,6 +11,16 @@ mkdirSync(sources, { recursive: true })
 mkdirSync(tests, { recursive: true })
 const source = join(sources, 'PortableSourceCustody.swift')
 copyFileSync(new URL('../crates/tauri-plugin-ios-native/ios/Sources/PortableSourceCustody.swift', import.meta.url), source)
+// Entered dispatch groups retain themselves, so dropping a Source need not trap.
+// Observe the real group's pending work before the isolated test copy releases it.
+const sourceClass = 'private final class Source {'
+const sourceContents = readFileSync(source, 'utf8')
+assert.equal(sourceContents.split(sourceClass).length, 2)
+writeFileSync(source, sourceContents.replace(sourceClass, `${sourceClass}
+        deinit {
+            precondition(cleanupFinished.wait(timeout: .now()) == .success,
+                         "Portable source dropped with unfinished cleanup")
+        }`))
 copyFileSync(new URL('../crates/tauri-plugin-ios-native/ios/Tests/PortableSourceCustodyTests.swift', import.meta.url), join(tests, 'PortableSourceCustodyTests.swift'))
 const fileState = join(sources, 'NativeFileState.swift')
 copyFileSync(new URL('../crates/tauri-plugin-ios-native/ios/Sources/NativeFileState.swift', import.meta.url), fileState)
@@ -26,17 +36,17 @@ let package = Package(
     ]
 )
 `)
-function run(filter, fails = false, dispatchTrap = false) {
+function run(filter, fails = false, cleanupInvariant = false) {
     const result = spawnSync('swift', ['test', '--package-path', root, '--filter', filter], {
         encoding: 'utf8', timeout: 300_000, maxBuffer: 8 * 1024 * 1024,
     })
     const output = (result.stdout ?? '') + (result.stderr ?? '')
     process.stdout.write(output)
     assert.ifError(result.error)
-    if (dispatchTrap) {
-        assert.notEqual(result.status, 0, 'Entered cleanup group was silently dropped')
+    if (cleanupInvariant) {
+        assert.notEqual(result.status, 0, 'Pending source cleanup was not detected')
         assert.match(output, /testOwnerRetiredBeforeInstallationFailsWithoutAnEnteredCleanupGroup.*started/)
-        assert.match(output, /Exited with unexpected signal code (4|5)/)
+        assert.match(output, /Portable source dropped with unfinished cleanup/)
         return
     }
     assert.match(output, /Executed [1-9]\d* tests?, with \d+ failures?/)

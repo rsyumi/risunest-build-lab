@@ -157,6 +157,24 @@ test('retains the last stylesheet on a failed refresh and recovers on a script v
         await vi.waitFor(() => expect(host.textContent).toContain('recovered'))
         expect(host.querySelector('style')?.textContent).toContain('blue')
         expect(host.querySelector('[role="alert"]')).toBeNull()
+
+        // A render that finds stale history prepares again instead of failing.
+        error.mockClear()
+        const acquired = state.acquire.mock.calls.length
+        state.parse
+            .mockImplementationOnce(async () => {
+                await Promise.resolve()
+                state.acquire.mock.lastCall![0].onStale()
+                throw new Error('Synthetic stale history')
+            })
+            .mockResolvedValue(
+                '<style>.panel { color: green }</style><div>prepared again</div>',
+            )
+        ScriptDisplayRefreshPointer.update((value) => value + 1)
+        await vi.waitFor(() => expect(host.textContent).toContain('prepared again'))
+        expect(state.acquire).toHaveBeenCalledTimes(acquired + 2)
+        expect(host.querySelector('[role="alert"]')).toBeNull()
+        expect(error).not.toHaveBeenCalled()
     } finally {
         error.mockRestore()
     }

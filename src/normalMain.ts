@@ -13,7 +13,9 @@ import { yieldToUi } from "./ts/ui/yieldToUi";
 import { decideBoot } from "./ts/storage/recoveryMode.svelte";
 import { recoveryStart } from "./ts/stores.svelte";
 import { changeLanguage } from "./lang";
+import { installNativeWebviewHandling } from "./ts/nativeWebviewStartup";
 
+installNativeWebviewHandling();
 preLoadCheck();
 const app = mount(App, {
   target: document.getElementById("app"),

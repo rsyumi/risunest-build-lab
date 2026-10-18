@@ -9,7 +9,11 @@ const BENIGN_ERROR_MESSAGES = new Set([
 function describeError(error: unknown): string {
     if (typeof error === 'string') return error.slice(0, MAX_ERROR_CHARS)
     if (error instanceof Error) {
-        return `${error.name.slice(0, 100)}: ${error.message.slice(0, MAX_ERROR_CHARS)}`
+        // Keep shipped bundle locations without logging request URLs or arbitrary stack contents.
+        const locations = [...(error.stack?.slice(0, 16_384).matchAll(/\/assets\/([A-Za-z0-9_.-]+\.js:\d+:\d+)/g) ?? [])]
+            .slice(0, 3).map(match => match[1])
+        const at = locations.length ? ` at=${locations.join(',')}` : ''
+        return `${error.name.slice(0, 100)}: ${error.message.slice(0, 1500)}${at}`
             .slice(0, MAX_ERROR_CHARS)
     }
     return 'Unhandled non-Error value'

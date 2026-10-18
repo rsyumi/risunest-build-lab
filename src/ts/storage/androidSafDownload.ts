@@ -5,6 +5,7 @@ import {
     bindAndroidSafDestinationSource,
     withAndroidSafDestination,
     type AndroidSafDestinationRequest,
+    type AndroidSafDestinationReservation,
     type AndroidSafDestinationResult,
 } from './androidSafBridge'
 
@@ -34,12 +35,29 @@ export async function downloadThroughAndroidSaf(
     data: Uint8Array,
     dependencies: AndroidSafDownloadDependencies = productionDependencies,
 ): Promise<boolean> {
-    let reservation
-    try { reservation = await dependencies.reserve(name, 'download') }
+    const reservation = await reserveAndroidSafDownload(name, dependencies)
+    return reservation ? publishAndroidSafDownload(reservation, name, data, dependencies) : false
+}
+
+/** Opens the Android picker for a download written later. Resolves null when the picker is cancelled. */
+export async function reserveAndroidSafDownload(
+    name: string,
+    dependencies: AndroidSafDownloadDependencies = productionDependencies,
+): Promise<AndroidSafDestinationReservation | null> {
+    try { return await dependencies.reserve(name, 'download') }
     catch (error) {
-        if ((error as {name?: string})?.name === 'AbortError') return false
+        if ((error as {name?: string})?.name === 'AbortError') return null
         throw error
     }
+}
+
+/** Writes a download to a reserved destination and releases the reservation. */
+export async function publishAndroidSafDownload(
+    reservation: AndroidSafDestinationReservation,
+    name: string,
+    data: Uint8Array,
+    dependencies: AndroidSafDownloadDependencies = productionDependencies,
+): Promise<boolean> {
     let path: string | undefined
     try {
         return await withAndroidSafDestination(reservation, async () => {

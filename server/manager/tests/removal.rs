@@ -121,9 +121,18 @@ mod windows {
 
     #[test]
     fn released_and_resumed_commands_honor_ownership_and_removal_artifact_contracts() {
-        for (delete_data, resumed) in [false, true].into_iter().flat_map(|delete| {
-            [None, Some(false), Some(true)].map(move |resumed| (delete, resumed))
-        }) {
+        for (delete_data, resumed, already_deleted) in
+            [false, true].into_iter().flat_map(|delete| {
+                [None, Some(false), Some(true)]
+                    .into_iter()
+                    .flat_map(move |resumed| {
+                        [false, true]
+                            .into_iter()
+                            .filter(move |deleted| !deleted || resumed.is_some())
+                            .map(move |deleted| (delete, resumed, deleted))
+                    })
+            })
+        {
             let temp = tempfile::tempdir().unwrap();
             let base = temp.path().canonicalize().unwrap();
             let local = base.join("local");
@@ -171,6 +180,9 @@ mod windows {
                 if delete_data { "delete" } else { "preserve" },
             ]);
             if let Some(forgotten) = resumed {
+                if already_deleted {
+                    invoke(&["installer", "delete-data"]);
+                }
                 invoke(&["installer", "remove-files-resumable", "normal"]);
                 if forgotten {
                     invoke(&["installer", "forget-removal-resumable"]);
@@ -182,7 +194,7 @@ mod windows {
                 ]);
                 assert_eq!(
                     String::from_utf8_lossy(&output.stdout).trim(),
-                    if forgotten && delete_data {
+                    if forgotten && delete_data && !already_deleted {
                         "keep-data"
                     } else {
                         "complete"
@@ -212,7 +224,7 @@ mod windows {
             assert!(!install.exists());
             assert_eq!(
                 root.join("metadata.sqlite").exists(),
-                !delete_data || resumed == Some(true)
+                !already_deleted && (!delete_data || resumed == Some(true))
             );
             let instance = risunest_sync_manager::platform::instance_name(&root);
             assert!(!local

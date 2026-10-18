@@ -39,6 +39,8 @@ describe('sync exit dialog', () => {
             expect(element.querySelector('[role="dialog"]')?.textContent).toContain(reason)
             expect(element.querySelector('#sync-exit-title')?.textContent).toBe(text.exitDrain.syncFailedTitle)
             expect(element.querySelector('#sync-exit-detail')?.textContent?.trim()).toBe(`${text.exitDrain.blocked} (${reason})`)
+            expect(element.querySelector('details pre')?.textContent).toContain('RisuNest Version:')
+            expect(element.querySelector('details pre')?.textContent).toContain(reason)
             const buttons = [...element.querySelectorAll('button')].map((b) => b.textContent?.trim())
             expect(buttons).toContain(text.exitDrain.retrySync)
             expect(buttons).toContain(text.exitDrain.cancelExit)

@@ -19,6 +19,7 @@
         conditions?: MarkdownConditions
         signal?: AbortSignal
         preservePendingContent?: boolean
+        scriptContext?: Parameters<typeof ParseMarkdown>[5]['scriptContext']
     }
 
     let {
@@ -29,6 +30,7 @@
         conditions = {},
         signal,
         preservePendingContent = false,
+        scriptContext,
     }: Props = $props()
     let root = $state<HTMLElement>()
     let displayedHtml = $state('')
@@ -55,6 +57,7 @@
             promise: ParseMarkdown(data, character, mode, chatID, conditions, {
                 deferredInlays: registry,
                 signal: controller.signal,
+                scriptContext,
             }),
         }
     }

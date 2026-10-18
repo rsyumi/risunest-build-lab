@@ -20,6 +20,7 @@ import type {
 import { validateConversationWindowQuery } from './storage/persistentDataStore'
 import { replaceArrayRange } from './arrayRange'
 import { yieldToMainThread } from './ui/yieldToUi'
+import type { CbsHistoryChange } from './cbsHistoryAccess'
 
 declare const conversationViewportKeyBrand: unique symbol
 
@@ -35,6 +36,8 @@ export interface ConversationViewportRow {
 }
 
 export interface ConversationViewportSnapshot {
+    readonly historyVersion?: number
+    historyChangesSince?(version: number): readonly CbsHistoryChange[] | null
     readonly sourceToken: string
     /** Render-input revision; display-owned variable writes do not advance it. */
     readonly version: number
@@ -65,6 +68,7 @@ export interface ConversationViewportPin {
 
 export interface ConversationViewportSource {
     snapshot(): ConversationViewportSnapshot
+    captureResidentRows?(): readonly ConversationViewportRow[]
     ensureRange(input: ConversationViewportRangeRequest): Promise<void>
     findLatestMessagePair?(signal: AbortSignal): Promise<number[]>
     acquireRangePin(
@@ -174,6 +178,10 @@ implements ConversationViewportSource {
             indexOfKey: (key) => keyIndices.get(key) ?? -1,
             rowAt: (absoluteIndex) => rows.get(absoluteIndex),
         }
+    }
+
+    captureResidentRows(): readonly ConversationViewportRow[] {
+        return [...this.rows.values()]
     }
 
     findLatestMessagePair(signal: AbortSignal): Promise<number[]> {
@@ -423,6 +431,8 @@ implements ConversationViewportSource {
     private readonly pins = new Map<number, PersistentRangePinState>()
     private rows = new Map<number, PersistentCachedRow>()
     private optimisticRows = new Set<number>()
+    private historyVersion = 0
+    private readonly historyChanges: (CbsHistoryChange & { version: number })[] = []
     private currentRevision: DataRevision
     private persistedTotalMessages: number
     private totalMessages: number
@@ -455,16 +465,27 @@ implements ConversationViewportSource {
 
     snapshot(): ConversationViewportSnapshot {
         const epoch = this.epoch
+        const historyVersion = this.historyVersion
         const totalMessages = this.disposed ? 0 : this.totalMessages
         return {
             sourceToken: this.sourceToken,
             version: epoch,
+            historyVersion,
+            historyChangesSince: (version) => {
+                if (version < this.historyVersion - this.historyChanges.length) return null
+                return this.historyChanges.filter((change) => change.version > version && change.version <= historyVersion)
+            },
             storeRevision: this.currentRevision,
             totalMessages,
             keyAt: (absoluteIndex) => this.keyAt(epoch, totalMessages, absoluteIndex),
             indexOfKey: (key) => this.indexOfKey(epoch, totalMessages, key),
             rowAt: (absoluteIndex) => this.rowAt(epoch, absoluteIndex),
         }
+    }
+
+    captureResidentRows(): readonly ConversationViewportRow[] {
+        this.assertUsable()
+        return [...this.rows.values()].map(({ row }) => row)
     }
 
     findLatestMessagePair(signal: AbortSignal): Promise<number[]> {
@@ -620,6 +641,7 @@ implements ConversationViewportSource {
             // count only at the end of the conversation.
             || (messages.length !== deleteCount && startIndex + deleteCount !== this.totalMessages)
         ) throw new RangeError('Optimistic conversation range is unsupported')
+        this.recordHistoryChange(startIndex, startIndex + Math.max(deleteCount, messages.length), deleteCount !== messages.length)
         this.latestPair = null
         const previousRows = new Map(this.rows)
         const previousOptimisticRows = new Set(this.optimisticRows)
@@ -652,11 +674,19 @@ implements ConversationViewportSource {
             if (restored || this.disposed) return
             restored = true
             this.latestPair = null
+            const restoredEnd = Math.max(this.totalMessages, previousTotalMessages)
+            const countChanged = this.totalMessages !== previousTotalMessages
             this.rows = previousRows
             this.optimisticRows = previousOptimisticRows
             this.totalMessages = previousTotalMessages
+            this.recordHistoryChange(0, restoredEnd, countChanged)
             this.notifyListeners()
         }
+    }
+
+    private recordHistoryChange(start: number, end: number, countChanged: boolean): void {
+        this.historyChanges.push({ version: ++this.historyVersion, start, end, countChanged })
+        if (this.historyChanges.length > 64) this.historyChanges.shift()
     }
 
     advanceRevision(revision: DataRevision, totalMessages: number): void {

@@ -2785,6 +2785,15 @@ fn retained_drive_session_reports_only_confirmed_offsets_and_verifies_completion
             else { panic!("expected verified completion"); };
         assert_eq!(receipt.checksum.unwrap().value, intent.sha256);
         assert_eq!(receipt.locator.object, "fixed-session");
+        let requests = server.requests.lock().unwrap();
+        let probes: Vec<_> = requests.iter().filter(|request| request.headers.starts_with("PUT ")).collect();
+        assert!(!probes.is_empty());
+        for request in probes {
+            let headers = request.headers.to_ascii_lowercase();
+            assert!(headers.lines().any(|line| line == "content-length: 0"), "empty upload status requests require an explicit length");
+            assert!(headers.lines().any(|line| line == "content-range: bytes */4096"));
+            assert!(request.body.is_empty());
+        }
     });
 }
 

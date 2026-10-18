@@ -2,6 +2,8 @@ import { recordNativeLogError } from '../../nativeLog'
 import { isTauri } from '../../platform'
 import { consoleLog, installConsoleCapture, isConsoleLogLevel } from '../../consoleLog'
 import { attachPluginReadProvenance, collectPluginReadProvenance, type PluginReadProvenance } from '../pluginReadBaselines'
+import { type PluginDownloadHandler } from './pluginDownload'
+import { installWebviewBridge } from '../../webviewDownload'
 
 type MsgType =
     | 'CALL_ROOT'
@@ -167,45 +169,48 @@ await (async function() {
                     if (select === 'conversation') return result.characters[0].chats[0];
                     return result;
                 }
-                const chunk = next.value;
-                if (chunk?.type === 'provenance') {
-                    attachReadProvenance(result, chunk.entries);
-                    continue;
-                }
-                if (!chunk || typeof chunk.key !== 'string') {
-                    throw new Error('Invalid iframe object stream chunk');
-                }
-                if (chunk.type === 'set') {
-                    Object.defineProperty(result, chunk.key, {
-                        value: chunk.value, enumerable: true, configurable: true, writable: true
-                    });
-                } else if (chunk.type === 'arrayStart') {
-                    Object.defineProperty(result, chunk.key, {
-                        value: [], enumerable: true, configurable: true, writable: true
-                    });
-                } else if (chunk.type === 'arrayPush') {
-                    if (!Array.isArray(result[chunk.key])) throw new Error('Invalid iframe array chunk');
-                    result[chunk.key].push(chunk.value);
-                } else if (chunk.type === 'characterStart') {
-                    result.characters.push({ ...chunk.value, chats: [] });
-                } else if (chunk.type === 'conversationStart') {
-                    result.characters.at(-1).chats.push({ ...chunk.value, message: [] });
-                } else if (chunk.type === 'message') {
-                    result.characters.at(-1).chats.at(-1).message.push(chunk.value);
-                } else if (chunk.type === 'recordStart') {
-                    Object.defineProperty(result, chunk.key, {
-                        value: {}, enumerable: true, configurable: true, writable: true
-                    });
-                } else if (chunk.type === 'recordSet') {
-                    const record = result[chunk.key];
-                    if (!record || Object.getPrototypeOf(record) !== Object.prototype || typeof chunk.entryKey !== 'string') {
-                        throw new Error('Invalid iframe record chunk');
+                const chunks = next.value?.type === 'batch' ? next.value.chunks : [next.value];
+                if (!Array.isArray(chunks)) throw new Error('Invalid iframe object stream batch');
+                for (const chunk of chunks) {
+                    if (chunk?.type === 'provenance') {
+                        attachReadProvenance(result, chunk.entries);
+                        continue;
                     }
-                    Object.defineProperty(record, chunk.entryKey, {
-                        value: chunk.value, enumerable: true, configurable: true, writable: true
-                    });
-                } else {
-                    throw new Error('Unknown iframe object stream chunk');
+                    if (!chunk || typeof chunk.key !== 'string') {
+                        throw new Error('Invalid iframe object stream chunk');
+                    }
+                    if (chunk.type === 'set') {
+                        Object.defineProperty(result, chunk.key, {
+                            value: chunk.value, enumerable: true, configurable: true, writable: true
+                        });
+                    } else if (chunk.type === 'arrayStart') {
+                        Object.defineProperty(result, chunk.key, {
+                            value: [], enumerable: true, configurable: true, writable: true
+                        });
+                    } else if (chunk.type === 'arrayPush') {
+                        if (!Array.isArray(result[chunk.key])) throw new Error('Invalid iframe array chunk');
+                        result[chunk.key].push(chunk.value);
+                    } else if (chunk.type === 'characterStart') {
+                        result.characters.push({ ...chunk.value, chats: [] });
+                    } else if (chunk.type === 'conversationStart') {
+                        result.characters.at(-1).chats.push({ ...chunk.value, message: [] });
+                    } else if (chunk.type === 'message') {
+                        result.characters.at(-1).chats.at(-1).message.push(chunk.value);
+                    } else if (chunk.type === 'recordStart') {
+                        Object.defineProperty(result, chunk.key, {
+                            value: {}, enumerable: true, configurable: true, writable: true
+                        });
+                    } else if (chunk.type === 'recordSet') {
+                        const record = result[chunk.key];
+                        if (!record || Object.getPrototypeOf(record) !== Object.prototype || typeof chunk.entryKey !== 'string') {
+                            throw new Error('Invalid iframe record chunk');
+                        }
+                        Object.defineProperty(record, chunk.entryKey, {
+                            value: chunk.value, enumerable: true, configurable: true, writable: true
+                        });
+                    } else {
+                        throw new Error('Unknown iframe object stream chunk');
+                    }
                 }
             }
         } catch (error) {
@@ -662,7 +667,7 @@ export class SandboxHost {
     private activeStreamCleanups = new Set<() => void>();
     private unreadStreamCleanups = new Set<() => void>();
 
-    constructor(apiFactory: any) {
+    constructor(apiFactory: any, private download?: PluginDownloadHandler) {
         this.apiFactory = apiFactory;
     }
 
@@ -1170,6 +1175,14 @@ export class SandboxHost {
 
                     const args = this.deserializeArgs(data.args || [], usedAbortIds);
                     const signalKey = data.type === 'CALL_ROOT' ? requestSignalKeys.get(String(data.method)) : undefined;
+                    let downloadSignal: AbortSignal | undefined;
+                    if (data.type === 'CALL_ROOT' && data.method === '_downloadFile' && this.download) {
+                        const id = crypto.randomUUID();
+                        const controller = new AbortController();
+                        this.abortControllers.set(id, controller);
+                        usedAbortIds.push(id);
+                        downloadSignal = controller.signal;
+                    }
                     if (signalKey && !args[1]?.[signalKey]) {
                         const id = crypto.randomUUID();
                         const controller = new AbortController();
@@ -1184,9 +1197,13 @@ export class SandboxHost {
 
 
                     if (data.type === 'CALL_ROOT') {
-                        const fn = this.apiFactory[data.method!];
-                        if (typeof fn !== 'function') throw new Error(`API method ${data.method} not found`);
-                        result = await fn(...args);
+                        if (downloadSignal) {
+                            result = await this.download!(args[0], args[1], downloadSignal);
+                        } else {
+                            const fn = this.apiFactory[data.method!];
+                            if (typeof fn !== 'function') throw new Error(`API method ${data.method} not found`);
+                            result = await fn(...args);
+                        }
                     } else {
                         const instance = this.instanceRegistry.get(data.id!);
                         if (!instance) throw new Error("Instance not found or released");
@@ -1328,6 +1345,7 @@ export class SandboxHost {
             window.addEventListener('unhandledrejection', event => reportPluginError(event.reason));
             (async () => {
                 ${GUEST_BRIDGE_SCRIPT}
+                ${this.download ? `(${installWebviewBridge.toString()})((name, source) => window.risuai._downloadFile(name, source), reportPluginError);` : ''}
                     
                 const settled = () => {
                     flushConsole();

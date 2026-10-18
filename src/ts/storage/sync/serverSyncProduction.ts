@@ -12,7 +12,9 @@ import { fencePluginExecutionForAuthorityReplacement, invalidatePluginCachesAfte
 import { registerSyncBindingTransport, resumeCurrentSyncBinding } from './bindingRegistry'
 import type { SyncBindingTransport, BindingContext, BindingOutcome, SyncBindingOptions, StagedSyncTarget } from './bindingFlow'
 import { createNativeSyncBindingBridge, replaceNativeSyncBinding, replaceNativeSyncBindingAsNewDevice } from './bindingNative'
-import { createServerSyncScheduler, integrityCodes, serverSyncErrorCode } from './serverSyncScheduler'
+import { createServerSyncScheduler, integrityCodes, isServerSyncUnavailable, serverSyncErrorCode } from './serverSyncScheduler'
+import { alertError } from '../../alert'
+import { language } from 'src/lang'
 import { subscribeLocalPersistentRevision } from '../persistentRevisionEvents'
 import { SERVER_SYNC_DEVICE_CHANGED_EVENT, SERVER_SYNC_REMOTE_HINT_EVENT } from './serverSyncNativeSignals'
 import { listen } from '@tauri-apps/api/event'
@@ -67,7 +69,14 @@ type PendingBinding = { endpoint: string; libraryId: string; epoch: string; serv
 let bindingIncomplete = false
 let persistedBinding: BindingContext['state'] | undefined
 let context: BindingContext | undefined
+let activationPending: BindingContext | undefined
+let activating: Promise<void> | undefined
 let error = ''
+let serverUnavailable = false
+const recordFailure = (value: unknown) => {
+    error = serverSyncErrorCode(value) || 'server-unreachable'
+    serverUnavailable = isServerSyncUnavailable(value)
+}
 let foreground = false
 let heldForCommittedRestore = false
 let replacing = false
@@ -82,7 +91,21 @@ let schedulerAuthority: string | undefined
 // A connection that asked to keep assets on the server, until its binding to that library is active.
 let requestedRemoteAssets: { libraryId: string } | undefined
 const listeners = new Set<(value: ReturnType<typeof snapshot>) => void>()
-const changed = () => { for (const listener of listeners) listener(snapshot()) }
+let offlineNoticePending = false
+let offlineNoticeClaimed = false
+const changed = () => {
+    for (const listener of listeners) listener(snapshot())
+    if (offlineNoticePending || offlineNoticeClaimed || !isTauri || document.visibilityState === 'hidden'
+        || binding || (!context && persistedBinding?.target.kind !== 'server')
+        || getDatabase().risunestSyncStatusUi === false
+        || !error || !serverUnavailable) return
+    offlineNoticePending = true
+    // Native state survives a WebView reload, including iOS content-process recovery.
+    void invoke<boolean>('server_sync_claim_offline_notice').then(claimed => {
+        offlineNoticeClaimed = true
+        if (claimed) alertError(language.risuNest.serverSync.offlineNotice)
+    }).catch(() => {}).finally(() => { offlineNoticePending = false })
+}
 // One attempt runs from the first sync step until sending, receiving, asset downloads and binding
 // have all stopped. Native counts are read only while a view watches it.
 let attempt: ServerSyncAttempt | undefined
@@ -195,6 +218,20 @@ const checkContext = (captured: BindingContext) => {
     captured.signal.throwIfAborted()
     if (captured !== context) throw new Error('Sync binding changed')
 }
+async function ensureActivated(captured: BindingContext): Promise<void> {
+    checkContext(captured)
+    if (activationPending !== captured) return
+    if (!activating) {
+        activating = during('applying', async () => {
+            await invoke('server_sync_lww_activate', { request: header() })
+            checkContext(captured)
+            if (remoteAssetsRequested(captured)) await keepAssetsRemote(captured)
+            activationPending = undefined
+        }).finally(() => { activating = undefined })
+    }
+    await activating
+    checkContext(captured)
+}
 const receivedBodyReferences = (changes: LwwRemoteChange[]) => changes.some(change => {
     const key: string[] = JSON.parse(change.key)
     if (change.value.kind === 'inline') return key[0] === 'asset' || key[0] === 'inlay'
@@ -210,7 +247,7 @@ const receivedRepresentativeReferences = (changes: LwwRemoteChange[]) => changes
         || key[0] === 'order' && key[1] === 'characters'
 })
 function continueHydration(): void {
-    if ((!hydrationPending && !representativesPending) || !foreground || !context || context.signal.aborted || scheduler.isBlocked() || isLibraryFileOperationReserved()) return
+    if ((!hydrationPending && !representativesPending) || !foreground || !context || context.signal.aborted || scheduler.isBlocked() || scheduler.isWaiting() || isLibraryFileOperationReserved()) return
     if (hydrating) { hydrationAgain = true; return }
     const captured = context
     const representativesOnly = !hydrationPending
@@ -218,7 +255,7 @@ function continueHydration(): void {
     representativesPending = false
     hydrationAgain = false
     const iconPriority = readRepresentativeImagePriority()
-    hydrating = during('assets', () => invoke('server_sync_lww_hydrate', { request: header(), selectedCharacterId: selectedCharacterId(), ...(iconPriority ? { iconPriority } : {}), ...(representativesOnly ? { representativesOnly: true } : {}) }), !representativesOnly).then(() => {
+    hydrating = during('assets', async () => { await ensureActivated(captured); return invoke('server_sync_lww_hydrate', { request: header(), selectedCharacterId: selectedCharacterId(), ...(iconPriority ? { iconPriority } : {}), ...(representativesOnly ? { representativesOnly: true } : {}) }) }, !representativesOnly).then(() => {
         if (captured === context && !captured.signal.aborted && hydrationError && error === hydrationError) { error = ''; hydrationError = '' }
     }).catch(value => {
         attemptFailed = true
@@ -226,7 +263,8 @@ function continueHydration(): void {
         if (representativesOnly) representativesPending = true
         else hydrationPending = true
         if (serverSyncErrorCode(value) !== 'cancelled' && foreground && !scheduler.isBlocked()) {
-            hydrationError = serverSyncErrorCode(value) || 'server-unreachable'; error = hydrationError
+            recordFailure(value); hydrationError = error
+            if (isServerSyncUnavailable(value)) scheduler.reportFailure(value)
         }
     }).finally(() => {
         hydrating = undefined
@@ -273,10 +311,11 @@ const transientTransportFailure = (value: unknown) => {
 const settingsResolvedFailure = (value: unknown) => ['unauthorized', 'invalid-device-token', 'server-epoch-changed', 'device-credential-unavailable'].includes(serverSyncErrorCode(value))
 async function resumeCurrentServerBinding(state: BindingContext['state']): Promise<void> {
     try { await resumeCurrentSyncBinding(state.target) }
-    catch (value) { error = serverSyncErrorCode(failures(value)[0]) || 'server-unreachable'; await controller.ensureStatus(); throw value }
+    catch (value) { recordFailure(failures(value)[0]); await controller.ensureStatus(); throw value }
 }
 /** Sends queued pages until none remain; without `drain` it stops when the app leaves the foreground. */
 async function pushAvailable(captured: BindingContext, drain = false): Promise<void> {
+    await ensureActivated(captured)
     for (;;) {
         captured.signal.throwIfAborted()
         if (captured !== context) throw new Error('Sync binding changed')
@@ -295,6 +334,7 @@ const scheduler = createServerSyncScheduler({
     pull: (completeAvailable = false) => attempted(async () => {
         const captured = context
         if (!captured) throw new Error('Sync binding is unavailable')
+        await ensureActivated(captured)
         let receivedBodies = false
         let receiveFrontier: string | undefined
         for (;;) {
@@ -327,10 +367,11 @@ const scheduler = createServerSyncScheduler({
             await pushAvailable(captured, true)
         })
     }),
-    connect: operationId => context ? invoke('server_sync_notify_start', { request: header(), operationId }) : Promise.resolve(),
+    connect: async operationId => { if (context) { await ensureActivated(context); await invoke('server_sync_notify_start', { request: header(), operationId }) } },
     disconnect: async () => { await invoke('server_sync_notify_stop'); await invoke('server_sync_cancel') },
-    failed(value) { error = serverSyncErrorCode(value) || 'server-unreachable'; changed() },
-    recovered() { if (error && error !== hydrationError) { error = ''; changed() } },
+    failed(value) { recordFailure(value); changed() },
+    recovered() { if (error && error !== hydrationError) { error = ''; changed() }; continueHydration() },
+    retrying: continueHydration,
     activity() { settleAttempt(); changed() },
 })
 // Native code accepts the remote policy only once the server is active, and it must hold before the
@@ -355,9 +396,9 @@ const transport: SyncBindingTransport = {
     reportStopped(value) {
         if (connectionAttempt?.dismissed) return
         const code = serverSyncErrorCode(failures(value)[0])
-        if (code !== 'cancelled') { error = code || 'server-unreachable'; changed() }
+        if (code !== 'cancelled') { recordFailure(failures(value)[0]); changed() }
     },
-    async fenceOldJobs(c) { foreground = false; context = undefined; persistedBinding = undefined; await scheduler.fence(); await hydrating; await invoke('server_sync_lww_fence', { newDevice: c.mode === 'new-device' || c.mode === 'fresh-writer' }); hydrationPending = false; representativesPending = false; hydrationAgain = false },
+    async fenceOldJobs(c) { foreground = false; context = undefined; persistedBinding = undefined; await scheduler.fence(); await hydrating; activationPending = undefined; await invoke('server_sync_lww_fence', { newDevice: c.mode === 'new-device' || c.mode === 'fresh-writer' }); hydrationPending = false; representativesPending = false; hydrationAgain = false },
     async receiveAvailableChanges(c) { c.signal.throwIfAborted(); if (!context || context.state.targetAuthority !== c.state.targetAuthority || context.state.selectionEpoch !== c.state.selectionEpoch) throw new Error('Sync binding changed'); await receiveAvailableServerChanges(); c.signal.throwIfAborted() },
     async publishInitialSharedState(c) {
         context = c
@@ -368,8 +409,14 @@ const transport: SyncBindingTransport = {
     async resumeBinding(c) {
         try {
             heldForCommittedRestore = c.holdAutomaticSync === true; context = c; adoptSchedulerAuthority(c)
-            await during('applying', () => invoke('server_sync_lww_activate', { request: header() })); checkContext(c)
-            if (remoteAssetsRequested(c)) await keepAssetsRemote(c)
+            activationPending = c
+            try { await ensureActivated(c) }
+            catch (value) {
+                if (binding || c.holdAutomaticSync || !isServerSyncUnavailable(value)) throw value
+                checkContext(c)
+                attemptFailed = true
+                scheduler.reportFailure(value)
+            }
             persistedBinding = c.state; hydrationPending = true
             if (!c.holdAutomaticSync) { await updateForeground(document.visibilityState !== 'hidden'); scheduler.remoteHint() }
         } catch (value) { attemptFailed = true; throw value }
@@ -404,7 +451,7 @@ async function bindServer(options: SyncBindingOptions = {}): Promise<BindingOutc
         const statusKnown = await controller.ensureStatus().then(() => true, () => false)
         const bound = bindingIncomplete || persistedBinding?.target.kind === 'server' || context && !context.signal.aborted
         if (currentAttempt.dismissed && statusKnown && !bound) { error = ''; hydrationError = ''; changed() }
-        else if (code !== 'cancelled') { error = code || 'server-unreachable'; changed() }
+        else if (code !== 'cancelled') { recordFailure(failures(value)[0]); changed() }
         throw value
     }
     finally {
@@ -446,7 +493,14 @@ export async function retryServerSync(): Promise<void> {
     if (!context || context.signal.aborted || context.state.targetAuthority !== current.targetAuthority || context.state.selectionEpoch !== current.selectionEpoch || context.state.libraryId !== current.libraryId || context.state.target.kind !== 'server' || context.state.target.connectionId !== current.target.connectionId) {
         await resumeCurrentServerBinding(current)
     }
-    foreground = false; await scheduler.fence(); await hydrating; await retryNativeClock(); await scheduler.retry(); await updateForeground(document.visibilityState !== 'hidden'); changed()
+    foreground = false
+    try {
+        await scheduler.fence()
+        await hydrating
+        if (context) await ensureActivated(context)
+        await retryNativeClock(); await scheduler.retry()
+    } catch (value) { scheduler.reportFailure(value); throw value }
+    finally { await updateForeground(document.visibilityState !== 'hidden'); changed() }
 }
 /** With `resumeBound` false, the server transport is registered for settings but a bound server stays stopped. */
 export async function installServerSyncProduction({ resumeBound = true }: { resumeBound?: boolean } = {}): Promise<void> {
@@ -490,7 +544,7 @@ export async function installServerSyncProduction({ resumeBound = true }: { resu
     }))
     disposers.push(() => { clearTimeout(priorityTimer); priorityTimer = undefined })
     disposers.push(await listen<{ connected: boolean }>('risu-server-sync-notification', event => scheduler.socket(event.payload.connected)))
-    const visibility = () => { void updateForeground(document.visibilityState !== 'hidden').catch(value => { if (serverSyncErrorCode(value) === 'cancelled') return; error = serverSyncErrorCode(value) || 'server-unreachable'; changed() }) }
+    const visibility = () => { void updateForeground(document.visibilityState !== 'hidden').catch(value => { if (serverSyncErrorCode(value) === 'cancelled') return; recordFailure(value); changed() }) }
     document.addEventListener('visibilitychange', visibility)
     disposers.push(() => document.removeEventListener('visibilitychange', visibility))
     disposeServer = () => { scheduler.dispose(); for (const dispose of disposers) dispose(); context = undefined; persistedBinding = undefined; foreground = false; hydrationPending = false; representativesPending = false; clearTimeout(representativesTimer); representativesTimer = undefined; hydrationAgain = false; attempt = undefined; clearFinished(); watchSamples() }
@@ -566,6 +620,7 @@ export function createServerSyncExitDrainAdapter(id = 'server', _fence?: Retaina
             foreground = false; if (hydrating) hydrationPending = true
             await scheduler.fence()
             await hydrating
+            if (context) await ensureActivated(context)
             await invoke('server_sync_lww_drain', { request: header(), generating: generatingConversations.snapshot() })
             signal.throwIfAborted()
             return { kind: 'complete' }

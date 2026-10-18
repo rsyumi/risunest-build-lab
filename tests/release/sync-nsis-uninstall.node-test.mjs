@@ -42,6 +42,114 @@ SectionEnd
 });
 import { readFileSync, mkdirSync, copyFileSync, symlinkSync, unlinkSync } from 'node:fs';
 
+test('released archive application waits only for a transient sharing violation', { skip: process.platform !== 'win32' }, () => {
+  const directory = mkdtempSync(join(tmpdir(), 'risunest-archive-copy-'));
+  try {
+    const script = join(directory, 'copy.ps1');
+    writeFileSync(script, String.raw`
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path (Get-Location) 'server/manager/install/windows.test.ps1'), [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw 'The installer harness could not be parsed.' }
+$helper = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Copy-ArchiveFile' }, $true)
+if (!$helper) { throw 'The archive copy helper is missing.' }
+Invoke-Expression $helper.Extent.Text
+$copyStep = $ast.Find({ param($node) $node -is [Management.Automation.Language.ForEachStatementAst] -and $node.Condition.Extent.Text -eq 'Get-ChildItem $next -File' -and $node.Body.Extent.Text -match '\bCopy-(ArchiveFile|Item)\b' }, $true)
+if (!$copyStep) { throw 'The archive application step is missing.' }
+$script:attempts = 0
+$script:sharingFailures = 0
+$script:releaseOnFailure = $false
+function Copy-Item {
+  param([string]$LiteralPath, [string]$Destination, [switch]$Force, [string]$ErrorAction)
+  $script:attempts++
+  try { Microsoft.PowerShell.Management\Copy-Item @PSBoundParameters }
+  catch {
+    if ($_.Exception -is [IO.IOException] -and ($_.Exception.HResult -band 0xffff) -eq 32) {
+      $script:sharingFailures++
+      if ($script:releaseOnFailure) { $script:held.Dispose() }
+    }
+    throw
+  }
+}
+$next = New-Item -ItemType Directory (Join-Path $PSScriptRoot 'next')
+$syncInstall = New-Item -ItemType Directory (Join-Path $PSScriptRoot 'installed')
+$source = Join-Path $next 'server.bin'
+$destination = Join-Path $syncInstall 'server.bin'
+[IO.File]::WriteAllText($source, 'replacement')
+[IO.File]::WriteAllText($destination, 'original')
+$script:held = [IO.File]::Open($destination, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+$script:releaseOnFailure = $true
+try { Invoke-Expression $copyStep.Extent.Text }
+finally { $script:held.Dispose() }
+$replaced = [IO.File]::ReadAllText($destination)
+$successAttempts = $script:attempts
+$script:releaseOnFailure = $false
+$script:held = [IO.File]::Open($destination, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+$before = $script:attempts
+$timeoutCode = $null
+try { Copy-ArchiveFile $source $destination -timeoutMilliseconds 0 }
+catch { $timeoutCode = $_.Exception.HResult -band 0xffff }
+finally { $script:held.Dispose() }
+$timeoutAttempts = $script:attempts - $before
+$before = $script:attempts
+$missingFailed = $false
+try { Copy-ArchiveFile (Join-Path $PSScriptRoot 'missing.bin') $destination }
+catch { $missingFailed = $true }
+@{
+  replaced=$replaced; successAttempts=$successAttempts; sharingFailures=$script:sharingFailures
+  timeoutCode=$timeoutCode; timeoutAttempts=$timeoutAttempts
+  missingFailed=$missingFailed; missingAttempts=($script:attempts - $before)
+} | ConvertTo-Json -Compress
+`);
+    const result = spawnSync('pwsh', ['-NoProfile', '-File', script], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      replaced: 'replacement', successAttempts: 2, sharingFailures: 2,
+      timeoutCode: 32, timeoutAttempts: 1, missingFailed: true, missingAttempts: 1,
+    });
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('released uninstall validation selects exact previous sources and keeps the legacy baseline', { skip: process.platform !== 'win32' }, () => {
+  const directory = mkdtempSync(join(tmpdir(), 'risunest-frozen-selection-'));
+  try {
+    const source = readFileSync('server/manager/install/windows.test.ps1', 'utf8');
+    const start = source.indexOf('                $frozenCases =');
+    const end = source.indexOf('                foreach ($frozenCase in $frozenCases)', start);
+    assert.ok(start >= 0 && end > start, 'frozen source selection must precede fixture execution');
+    const selection = source.slice(start, end);
+    const script = join(directory, 'select.ps1');
+    writeFileSync(script, `
+$ErrorActionPreference = 'Stop'
+$directory = $PSScriptRoot
+$released = 'previous-bundle'
+$next = 'current-bundle'
+$fixture = New-Item -ItemType Directory (Join-Path $directory 'legacy')
+'{"version":"1.0.4"}' | Set-Content (Join-Path $fixture 'risunest-sync-bundle.json')
+$LegacyReleasedBundle = Join-Path $directory 'legacy.zip'
+Compress-Archive -Path (Join-Path $fixture '*') -DestinationPath $LegacyReleasedBundle
+$result = @()
+foreach ($releasedVersion in @('1.0.3', '1.0.4', '1.0.5')) {
+  $nextVersion = "1.0.$([int]$releasedVersion.Split('.')[2] + 1)"
+  $testRoot = New-Item -ItemType Directory (Join-Path $directory $releasedVersion)
+${selection}
+  $result += ,@($frozenCases | ForEach-Object { @{ version=$_.Version; source=$_.Ref; directory=$_.Directory.ToString() } })
+}
+ConvertTo-Json -Depth 8 -InputObject $result
+`);
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-File', script], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const [sameVersionRehearsal, legacyPrevious, resumablePrevious] = JSON.parse(result.stdout);
+    assert.deepEqual(sameVersionRehearsal.map(item => [item.version, item.source]), [['1.0.4', 'sync-v1.0.4'], ['1.0.4', null]]);
+    assert.deepEqual(legacyPrevious.map(item => [item.version, item.source]), [['1.0.4', 'sync-v1.0.4'], ['1.0.5', null]]);
+    assert.deepEqual(resumablePrevious.map(item => [item.version, item.source]), [['1.0.5', 'sync-v1.0.5'], ['1.0.4', 'sync-v1.0.4'], ['1.0.6', null]]);
+    assert.equal(resumablePrevious[0].directory, 'previous-bundle');
+    assert.equal(resumablePrevious[2].directory, 'current-bundle');
+    assert.equal(existsSync(join(resumablePrevious[1].directory, 'risunest-sync-bundle.json')), true);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 const q = value => value.replaceAll('$', '$$').replaceAll('"', '$\\"');
 function buildManagerStub(directory) {
   const stubSource = join(directory, 'manager.rs');
@@ -329,8 +437,8 @@ SectionEnd
       assert.equal(existsSync(retry), false, `${boundary}: retry artifacts removed`);
       assert.equal(existsSync(join(location, 'local/RisuNestSyncData')), true, `${boundary}: preserved data`);
     }
-    for (const boundary of ['pending', 'forgotten', 'complete']) {
-      const location = join(directory, `delete-resume-${boundary}`);
+    for (const [boundary, deleted] of ['pending', 'forgotten', 'complete'].flatMap(boundary => [false, true].map(deleted => [boundary, deleted]))) {
+      const location = join(directory, `delete-resume-${boundary}-${deleted}`);
       const data = join(location, 'custom data 경로');
       mkdirSync(data, { recursive: true });
       writeFileSync(join(data, 'synthetic'), 'fixture');
@@ -343,10 +451,12 @@ SectionEnd
       writeFileSync(join(retry, 'receipt.json'), '{}');
       rmSync(join(location, 'risunest-sync-manager.exe'));
       if (boundary === 'complete') writeFileSync(join(retry, 'complete'), 'true');
+      if (deleted) rmSync(data, { recursive: true });
       const result = spawnSync(join(location, 'uninstall.exe'), ['/S', '/DELETEAPPDATA', `_?=${location}`], { timeout: 30000, windowsHide: true });
       assert.equal(result.status, 0, boundary);
-      assert.equal(existsSync(data), boundary !== 'pending', boundary);
-      if (boundary !== 'pending') {
+      assert.equal(existsSync(data), !deleted && boundary !== 'pending', boundary);
+      assert.equal(existsSync(join(location, 'data-kept')), !deleted && boundary !== 'pending');
+      if (!deleted && boundary !== 'pending') {
         const message = readFileSync(join(location, 'data-kept'), 'utf16le');
         assert.ok(message === `Server data could not be deleted. Data folder: ${data}` || message === `서버 데이터를 삭제하지 못했습니다. 데이터 폴더: ${data}`, message);
       }

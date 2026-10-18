@@ -408,6 +408,31 @@ fn pairs_early_sidecars_and_infers_missing_metadata() {
     assert_eq!(payloads.asset_aliases[0].name, "original");
     assert_eq!(payloads.asset_aliases[0].ext, "webp");
     assert_eq!(payloads.asset_aliases[1].mime, "audio/mpeg");
+    for metadata_kind in ["inlay_sidecar", "inlay_info"] {
+        for (metadata, expected_ext) in [
+            (br#"{}"#.as_slice(), "bin"),
+            (br#"{"ext":" "}"#.as_slice(), "bin"),
+            (br#"{"ext":42}"#.as_slice(), "bin"),
+            (br#"{"ext":"bin"}"#.as_slice(), "bin"),
+        ] {
+            let payloads = plan([
+                archive_entry(&format!("{metadata_kind}/movie"), metadata),
+                archive_entry("inlay/movie.MP4", b"synthetic video bytes"),
+            ].concat(), &NeverCancelled).unwrap();
+            assert_eq!(payloads.asset_aliases.len(), 1, "Known raw filename must remain readable");
+            let alias = &payloads.asset_aliases[0];
+            assert_eq!(alias.ext, expected_ext);
+            assert_eq!(alias.mime, "video/mp4");
+            assert_eq!(alias.name, "movie");
+            assert_eq!(alias.inlay_type.as_deref(), Some("image"));
+            assert_eq!(alias.size, 21);
+        }
+        let unknown = plan([
+            archive_entry(&format!("{metadata_kind}/movie"), br#"{"ext":"unknown"}"#),
+            archive_entry("inlay/movie.mp4", b"unsupported bytes"),
+        ].concat(), &NeverCancelled).unwrap();
+        assert!(unknown.asset_aliases.is_empty());
+    }
 }
 
 #[test]

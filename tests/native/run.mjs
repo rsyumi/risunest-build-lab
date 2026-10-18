@@ -1,11 +1,21 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { mkdirSync, existsSync, readFileSync, writeFileSync, rmSync, lstatSync } from 'node:fs'
 import { resolve, join, dirname, basename, isAbsolute } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { verifyReport } from './report.mjs'
 
 const root = resolve(import.meta.dirname, '../..')
+const smallAssets = process.argv.includes('--asset-benchmark-small')
+const assetBenchmark = smallAssets || process.argv.includes('--asset-benchmark')
+const debug = process.argv.includes('--debug')
+const reuseBuild = process.argv.includes('--reuse-build')
+const binaryInput = process.argv.find(arg => arg.startsWith('--binary='))?.slice(9)
+if (binaryInput && (!assetBenchmark || !reuseBuild)) throw new Error('An explicit benchmark binary requires --reuse-build')
+const repetitions = Number(process.argv.find(arg => arg.startsWith('--runs='))?.slice(7) ?? 1)
+if ((!assetBenchmark && (reuseBuild || repetitions !== 1)) || !Number.isSafeInteger(repetitions) || repetitions < 1 || repetitions > 10) {
+    throw new Error('Build reuse and repeated runs require an asset benchmark with 1 to 10 runs')
+}
 const require = createRequire(import.meta.url)
 function command(file, args, env = process.env) {
     return new Promise((accept, reject) => {
@@ -19,13 +29,17 @@ if (commonResult.status !== 0) throw new Error('Cannot locate shared Cargo targe
 const target = resolve(commonResult.stdout.trim(), '../src-tauri/target')
 if (process.env.CARGO_TARGET_DIR && resolve(process.env.CARGO_TARGET_DIR) !== target) throw new Error('Incompatible shared Cargo target')
 const env = { ...process.env, CARGO_TARGET_DIR: target, TAURI_CONFIG: JSON.stringify({ build: { frontendDist: [join(root, '.tmp/test-results/native/dist')] } }) }
-await command(process.execPath, [join(dirname(require.resolve('vite/package.json')), 'bin/vite.js'), 'build', '--mode', 'agent', '--config', 'tests/native/vite.config.ts'])
-await command('cargo', ['build', '--release', '--locked', '--manifest-path', 'tests/native/native/Cargo.toml'], env)
-const phaseGroups = [['write', 'read'], ['abort', 'read-abort'], ['contract', 'read-contract']]
+if (!reuseBuild) {
+    await command(process.execPath, [join(dirname(require.resolve('vite/package.json')), 'bin/vite.js'), 'build', '--mode', 'agent', '--config', 'tests/native/vite.config.ts'])
+    await command('cargo', ['build', ...(debug ? [] : ['--release']), '--locked', '--manifest-path', 'tests/native/native/Cargo.toml'], env)
+}
+const executable = binaryInput ? resolve(binaryInput) : join(target, debug ? 'debug' : 'release', `risunest-persistence-boundary${process.platform === 'win32' ? '.exe' : ''}`)
+const binaryHash = createHash('sha256').update(readFileSync(executable)).digest('hex')
+const phaseGroups = assetBenchmark ? [[smallAssets ? 'asset-benchmark-small' : 'asset-benchmark']] : [['write', 'read'], ['abort', 'read-abort'], ['contract', 'read-contract']]
 // The repeated-close escape exists where closing the window quits; SIGTERM asks only Linux to save.
-if (process.platform === 'win32' || process.platform === 'linux') phaseGroups.push(['close-escape'])
-if (process.platform === 'linux') phaseGroups.push(['session-end', 'read-session-end'], ['session-end-unanswered'])
-for (const phases of phaseGroups) {
+if (!assetBenchmark && (process.platform === 'win32' || process.platform === 'linux')) phaseGroups.push(['close-escape'])
+if (!assetBenchmark && process.platform === 'linux') phaseGroups.push(['session-end', 'read-session-end'], ['session-end-unanswered'])
+for (const phases of Array.from({ length: repetitions }, () => phaseGroups).flat()) {
     // Linux registers the identifier as a D-Bus name, whose elements cannot start with a digit.
     const runId = `a${randomUUID().replaceAll('-', '').slice(1)}`
     const identifier = `io.github.rsyumi.risunest.boundary.${runId}`
@@ -45,7 +59,6 @@ for (const phases of phaseGroups) {
     }
     const output = join(root, '.tmp/test-results/native', runId)
     mkdirSync(output, { recursive: true })
-    const executable = join(target, 'release', `risunest-persistence-boundary${process.platform === 'win32' ? '.exe' : ''}`)
     try {
         for (const phase of phases) {
             const reportPath = join(output, `${phase}.json`)
@@ -64,7 +77,7 @@ for (const phases of phaseGroups) {
                     timedOut = true
                     if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true })
                     else process.kill(-child.pid, 'SIGKILL')
-                }, 90_000)
+                }, assetBenchmark ? 300_000 : 90_000)
                 child.on('error', error => { clearTimeout(timeout); clearInterval(terminate); reject(error) })
                 child.on('close', code => {
                     clearTimeout(timeout)
@@ -72,8 +85,11 @@ for (const phases of phaseGroups) {
                     timedOut ? reject(new Error(`Native ${phase} timed out`)) : accept(code)
                 })
             })
-            verifyReport(JSON.parse(readFileSync(reportPath, 'utf8')), runId, phase, status)
+            const report = JSON.parse(readFileSync(reportPath, 'utf8'))
+            verifyReport(report, runId, phase, status)
+            if (assetBenchmark) writeFileSync(reportPath, JSON.stringify({ ...report, binaryHash, buildMode: debug ? 'debug' : 'release', reusedBuild: reuseBuild }, null, 2))
             console.log(`Native persistence ${phase}: passed (${process.platform})`)
+            if (assetBenchmark) console.log(`Asset measurement report: ${reportPath}`)
         }
     } finally {
         for (const [directory, name] of ownedProfiles) {

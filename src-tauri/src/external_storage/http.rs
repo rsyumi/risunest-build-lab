@@ -177,7 +177,8 @@ impl HttpTransport for NativeHttpTransport {
                             reader.take(length), 64 * 1024,
                         )));
                 }
-                (None, None | Some(0)) => {}
+                (None, Some(0)) => { builder = builder.header(reqwest::header::CONTENT_LENGTH, 0); }
+                (None, None) => {}
                 _ => return Err(ProviderError::new(ErrorKind::Corrupt)),
             }
             let response = tokio::select! {

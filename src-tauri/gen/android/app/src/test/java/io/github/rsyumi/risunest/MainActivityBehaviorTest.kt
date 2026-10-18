@@ -17,6 +17,16 @@ import org.junit.rules.TemporaryFolder
 
 class MainActivityBehaviorTest {
   @Test
+  fun `download fallback sends only external web URLs to a browser`() {
+    for (url in listOf("https://example.com/file.zip", "http://example.com/file?download=1")) {
+      assertEquals(url, externalDownloadUrl(url))
+    }
+    for (url in listOf("blob:null/file", "data:text/plain,test", "file:///secret", "intent://host", "http://tauri.localhost/file", "http://user@example.com/", "http:///missing-host")) {
+      assertEquals(null, externalDownloadUrl(url))
+    }
+  }
+
+  @Test
   fun `repeated back requests cannot replace a pending exit decision`() {
     val gate = ExitFlushGate()
     assertEquals(true, gate.begin("first"))

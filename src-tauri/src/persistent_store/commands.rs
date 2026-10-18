@@ -75,6 +75,8 @@ struct RendererGate {
 struct RendererGateState {
     maintenance_active: bool,
     operations: usize,
+    /// Advances whenever renderer maintenance starts.
+    epoch: u64,
 }
 
 /// Covers the entire native side effect, including work outside the SQLite lock.
@@ -171,8 +173,29 @@ impl PersistentStoreState {
             .ok_or_else(renderer_gate_error)
     }
 
+    /// The maintenance epoch a command records when it is dispatched, before it
+    /// waits for a blocking thread.
+    pub(crate) fn renderer_dispatch_epoch(&self) -> StoreResult<u64> {
+        self.renderer_gate
+            .state
+            .lock()
+            .map(|state| state.epoch)
+            .map_err(|_| renderer_gate_error())
+    }
+
+    /// Admits an operation dispatched at `epoch` only if no renderer maintenance
+    /// or reset has started since, so a request queued before it never runs after it.
+    pub(crate) fn admit_renderer_operation_dispatched_at(&self, epoch: u64) -> StoreResult<RendererOperationGuard> {
+        self.try_admit_renderer_operation_at(Some(epoch))?
+            .ok_or_else(renderer_gate_error)
+    }
+
     /// Admits an operation unless device maintenance holds the gate.
     fn try_admit_renderer_operation(&self) -> StoreResult<Option<RendererOperationGuard>> {
+        self.try_admit_renderer_operation_at(None)
+    }
+
+    fn try_admit_renderer_operation_at(&self, dispatched: Option<u64>) -> StoreResult<Option<RendererOperationGuard>> {
         let mut state = self
             .renderer_gate
             .state
@@ -180,7 +203,7 @@ impl PersistentStoreState {
             .map_err(|error| StoreError::Store {
                 message: format!("persistent renderer admission mutex poisoned: {error}"),
             })?;
-        if state.maintenance_active {
+        if state.maintenance_active || dispatched.is_some_and(|epoch| epoch != state.epoch) {
             return Ok(None);
         }
         state.operations += 1;
@@ -213,6 +236,7 @@ impl PersistentStoreState {
         let mut state = self.renderer_gate.state.lock().map_err(|_| renderer_gate_error())?;
         if state.maintenance_active { return Err(renderer_gate_error()); }
         state.maintenance_active = true;
+        state.epoch += 1;
         let maintenance = DeviceMaintenanceGuard { gate: Arc::clone(&self.renderer_gate) };
         while state.operations != 0 {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -263,6 +287,9 @@ impl PersistentStoreState {
             .map_err(|error| StoreError::Store {
                 message: format!("persistent renderer admission mutex poisoned: {error}"),
             })?;
+        // Advanced even when maintenance is already active, so a page reset
+        // then still refuses what the outgoing document dispatched.
+        state.epoch += 1;
         if state.maintenance_active {
             return Ok(None);
         }
@@ -2225,6 +2252,34 @@ mod tests {
         let maintenance = state.acquire_cleanup_maintenance(std::time::Duration::from_secs(1)).unwrap();
         assert!(state.admit_renderer_operation().is_err());
         drop(maintenance);
+        assert!(state.admit_renderer_operation().is_ok());
+    }
+
+    #[test]
+    fn an_operation_dispatched_before_maintenance_or_a_reset_is_refused_after_it() {
+        let state = PersistentStoreState::default();
+        let dispatched = state.renderer_dispatch_epoch().unwrap();
+        assert!(state.admit_renderer_operation_dispatched_at(dispatched).is_ok());
+
+        drop(state.acquire_raw_capture().unwrap());
+        assert!(state.admit_renderer_operation_dispatched_at(dispatched).is_err());
+        let after_capture = state.renderer_dispatch_epoch().unwrap();
+        assert!(state.admit_renderer_operation_dispatched_at(after_capture).is_ok());
+
+        drop(state.acquire_cleanup_maintenance(std::time::Duration::from_secs(1)).unwrap());
+        assert!(state.admit_renderer_operation_dispatched_at(after_capture).is_err());
+
+        let before_reset = state.renderer_dispatch_epoch().unwrap();
+        state.reset_renderer_session().unwrap();
+        assert!(state.admit_renderer_operation_dispatched_at(before_reset).is_err());
+
+        let maintenance = state.acquire_raw_capture().unwrap();
+        let during = state.renderer_dispatch_epoch().unwrap();
+        assert!(state.admit_renderer_operation_dispatched_at(during).is_err());
+        state.reset_renderer_session().unwrap();
+        drop(maintenance);
+        assert!(state.admit_renderer_operation_dispatched_at(during).is_err());
+        assert!(state.admit_renderer_operation_dispatched_at(state.renderer_dispatch_epoch().unwrap()).is_ok());
         assert!(state.admit_renderer_operation().is_ok());
     }
 

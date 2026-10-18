@@ -18,7 +18,7 @@ vi.mock('./storage/database.svelte', () => ({ getDatabase: vi.fn(() => ({})) }))
 vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 
 import { alertStore } from './stores.svelte'
-import { alertClear, alertConfirm, alertError, alertSelect, alertToast, alertTOS, alertWait, doingAlert, waitAlert } from './alert'
+import { alertClear, alertConfirm, alertError, alertNormalWait, alertSelect, alertToast, alertTOS, alertWait, doingAlert, waitAlert } from './alert'
 
 async function answer(msg: string) {
     await vi.advanceTimersByTimeAsync(0)
@@ -66,6 +66,14 @@ describe('alerts on the queue', () => {
         await answer('no')
         await expect(question).resolves.toBe(false)
         expect(get(alertStore)).toMatchObject({ type: 'error', msg: 'synthetic failure' })
+        await answer('')
+        let closed = false
+        const error = alertNormalWait('synthetic awaited failure', 'error').then(() => { closed = true })
+        expect(get(alertStore)).toMatchObject({ type: 'error', msg: 'synthetic awaited failure' })
+        expect(closed).toBe(false)
+        await answer('')
+        await error
+        expect(closed).toBe(true)
     })
 
     it('leaves a dialog in place when a finished task clears its loading overlay', async () => {

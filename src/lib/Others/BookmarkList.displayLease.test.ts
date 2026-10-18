@@ -52,6 +52,8 @@ vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({
     captureSelectedConversationTarget: () => state.selection,
     getActiveConversationSession: () => null,
     getPersistentDataRuntime: () => ({
+        getActiveConversationViewportSource: () => null,
+        captureSelectedConversationAuthority: () => ({ totalMessages: 1, storeRevision: state.selection.storeRevision }),
         subscribeActiveConversationViewportSource: (listener: () => void) => {
             state.selectionListeners.add(listener)
             listener()
@@ -72,6 +74,7 @@ vi.mock('src/ts/util', () => ({
     getUserName: () => 'Synthetic user',
     getUserIcon: () => '',
     getPersonaPrompt: () => '',
+    parseKeyValue: () => [],
 }))
 vi.mock('src/ts/process/modules', () => ({
     getModules: () => [],

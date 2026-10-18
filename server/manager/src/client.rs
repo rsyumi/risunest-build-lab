@@ -172,7 +172,10 @@ impl Client {
         .contains(&path)
             || path
                 .strip_prefix("devices/")
-                .and_then(|s| s.strip_suffix("/revoke"))
+                .and_then(|s| {
+                    s.strip_suffix("/revoke")
+                        .or_else(|| s.strip_suffix("/forget"))
+                })
                 .is_some_and(|id| {
                     !id.is_empty()
                         && id.len() <= 128

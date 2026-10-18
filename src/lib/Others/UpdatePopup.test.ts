@@ -36,6 +36,23 @@ it('shows the current-version result without an error or install action', async 
 })
 
 describe('staged Linux update exit', () => {
+    it('shows and copies device information with update errors', async () => {
+        const writeText = vi.fn(async () => {})
+        Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+        appUpdateState.set({ ...initialAppUpdateState, phase: 'error', popupVisible: true, error: 'synthetic update failure' })
+        target = document.createElement('div')
+        document.body.append(target)
+        component = mount(UpdatePopup, { target })
+        await tick()
+        target.querySelector('summary')!.click()
+        await tick()
+        const report = target.querySelector('pre')!.textContent!
+        expect(report).toContain('RisuNest Version:')
+        expect(report).toContain('Device:')
+        expect(report).toContain('synthetic update failure')
+        target.querySelector<HTMLButtonElement>(`button[aria-label="${languageEnglish.copy}"]`)!.click()
+        await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith(report))
+    })
     it('uses the close coordinator and preserves a cancelled decision', async () => {
         let closeHandler!: (event: { preventDefault(): void }) => void | Promise<void>
         const destroy = vi.fn(async () => {})

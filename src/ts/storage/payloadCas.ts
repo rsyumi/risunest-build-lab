@@ -25,12 +25,22 @@ export interface PreparedImmutablePayload {
     deduplicated: boolean
 }
 
+/** A stored object whose size differs from the size its reader expected. */
+export class PayloadSizeMismatchError extends Error {
+    constructor() {
+        super('Stored payload size differs from its expected size')
+        this.name = 'PayloadSizeMismatchError'
+    }
+}
+
 export interface ImmutablePayloadCas {
     prepare(data: Uint8Array): Promise<PreparedImmutablePayload>
-    readObject(contentHash: string): Promise<Uint8Array | null>
+    /** Throws `PayloadSizeMismatchError` when a stored object is not `expectedSize` bytes. */
+    readObject(contentHash: string, expectedSize?: number): Promise<Uint8Array | null>
     readObjectRange(
         contentHash: string,
         range: BlobReadRange,
+        expectedSize?: number,
     ): Promise<Uint8Array | null>
     statObject(contentHash: string): Promise<number | null>
 }
@@ -82,12 +92,21 @@ export function createImmutablePayloadCas(backend: ImmutablePayloadBackend): Imm
                 deduplicated: !created,
             }
         },
-        async readObject(contentHash) {
-            return backend.read(objectPhysicalKey(contentHash))
+        async readObject(contentHash, expectedSize) {
+            const data = await backend.read(objectPhysicalKey(contentHash))
+            if (data !== null && expectedSize !== undefined && data.byteLength !== expectedSize) {
+                throw new PayloadSizeMismatchError()
+            }
+            return data
         },
-        async readObjectRange(contentHash, range) {
+        async readObjectRange(contentHash, range, expectedSize) {
             validateBlobReadRange(range)
             const physicalKey = objectPhysicalKey(contentHash)
+            if (expectedSize !== undefined) {
+                const size = await backend.stat(physicalKey)
+                if (size === null) return null
+                if (size !== expectedSize) throw new PayloadSizeMismatchError()
+            }
             if (backend.readRange) return backend.readRange(physicalKey, range)
             const data = await backend.read(physicalKey)
             return data?.slice(range.start, range.endExclusive) ?? null

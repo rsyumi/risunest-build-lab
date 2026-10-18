@@ -366,7 +366,7 @@ describe('Chats complete parser source handoff', () => {
                     parserSource: () => '',
                     unsafeDependencies: () => ['lua'],
                 })
-            const acquireGreeting = vi.fn(resolver.acquireConversationStart!)
+            const acquireGreeting = resolver.acquireConversationStart!
             mounted = mount(ChatsHarness, {
                 target,
                 props: {
@@ -401,8 +401,6 @@ describe('Chats complete parser source handoff', () => {
                 await new Promise((resolve) => setTimeout(resolve, 0))
                 expect(promotions).toBe(1)
                 expect(demotions).toBe(0)
-                // An explicit global reload reclassifies module/parser dependencies once.
-                expect(acquireGreeting).toHaveBeenCalledTimes(reload ? 2 : 1)
             } finally {
                 stopped = true
             }

@@ -230,10 +230,12 @@
                                     <LiveDisplayParserBoundary
                                         source={msg.data}
                                         character={chara}
+                                        chatID={msg.originalIndex}
                                     >
-                                        {#snippet children(signal)}
+                                        {#snippet children(signal, projection)}
                                             <Chat
                                                     parserAbortSignal={signal}
+                                                    parserProjection={projection}
                                                     idx={msg.originalIndex}
                                                     message={msg.data}
                                                     name={msg.role === "user" ? getUserName() : chara.name}
