@@ -1,0 +1,72 @@
+name: WebView navigation check
+run-name: WebView navigation / ${{ inputs.source_sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full macOS snapshot commit SHA
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  apple:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/source/src-tauri/target
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      SNAPSHOT_SHA: ${{ inputs.source_sha }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    steps:
+      - name: Validate input
+        working-directory: ${{ github.workspace }}
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Verify snapshot
+        run: |
+          test "$(git rev-parse HEAD)" = "$SNAPSHOT_SHA"
+          node ../control/scripts/verify-snapshot.mjs . macos
+          mkdir -p artifacts
+          cp .build-lab/source.json artifacts/source.json
+          rustc -Vv
+          xcodebuild -version
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source/tests/native/webview-navigation -> ../../../src-tauri/target
+          key: webview-navigation-macos-15
+      - name: Check WKWebView frame navigation
+        run: |
+          set -euo pipefail
+          cargo run --manifest-path tests/native/webview-navigation/Cargo.toml --locked 2>&1 | tee artifacts/macos-navigation.log
+      - name: Compile iOS engine
+        run: |
+          set -euo pipefail
+          cargo check --manifest-path crates/wry/Cargo.toml --locked --lib --target aarch64-apple-ios-sim 2>&1 | tee artifacts/ios-engine.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: webview-navigation
+          path: source/artifacts
+          retention-days: 7
