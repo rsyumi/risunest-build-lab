@@ -111,12 +111,12 @@ jobs:
           export TMPDIR="$(cd "$contract_tmp" && pwd -P)"
           printf 'rust_test_tmpdir=%s\n' "$TMPDIR" >> artifacts/environment.txt
           if [[ "$CHECK_SCOPE" == cleanup ]]; then
-            cargo test --manifest-path src-tauri/Cargo.toml --release --locked --lib app_cleanup:: -- --test-threads=1 2>&1 | tee artifacts/cleanup-contracts.log
-            cargo test --manifest-path src-tauri/Cargo.toml --release --locked --lib cleanup_webview:: -- --test-threads=1 2>&1 | tee artifacts/webview-cleanup-contracts.log
+            cargo test --manifest-path src-tauri/Cargo.toml --release --locked --config profile.release.package.risunest.opt-level=0 --lib app_cleanup:: -- --test-threads=1 2>&1 | tee artifacts/cleanup-contracts.log
+            cargo test --manifest-path src-tauri/Cargo.toml --release --locked --config profile.release.package.risunest.opt-level=0 --lib cleanup_webview:: -- --test-threads=1 2>&1 | tee artifacts/webview-cleanup-contracts.log
             exit 0
           fi
-          cargo test --manifest-path src-tauri/Cargo.toml --release --locked --lib -- --test-threads=1 2>&1 | tee artifacts/rust-contracts.log
-          cargo test --manifest-path src-tauri/Cargo.toml --release --locked --test ios_native_contracts -- --test-threads=1 2>&1 | tee artifacts/ios-native-contracts.log
+          cargo test --manifest-path src-tauri/Cargo.toml --release --locked --config profile.release.package.risunest.opt-level=0 --lib -- --test-threads=1 2>&1 | tee artifacts/rust-contracts.log
+          cargo test --manifest-path src-tauri/Cargo.toml --release --locked --config profile.release.package.risunest.opt-level=0 --test ios_native_contracts -- --test-threads=1 2>&1 | tee artifacts/ios-native-contracts.log
           cargo test --manifest-path src-tauri/Cargo.toml --package tauri-plugin-window-state --release --locked --lib -- --test-threads=1 2>&1 | tee artifacts/window-state-contracts.log
           cargo test --manifest-path crates/wry/Cargo.toml --package wry --release --locked --lib -- --test-threads=1 2>&1 | tee artifacts/wry-contracts.log
           cargo test --manifest-path src-tauri/Cargo.toml --package tauri-plugin-updater --release --locked --lib -- --test-threads=1 2>&1 | tee artifacts/updater-contracts.log
