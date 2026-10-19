@@ -135,7 +135,7 @@ export async function consumeBoundedNativeMediaOutput<T>(
         if (envelope.sourceKept === true) {
             if (
                 source === undefined
-                || cleanupId !== null
+                || (envelope.outputId !== null && envelope.outputId !== undefined)
                 || (envelope.data !== null && envelope.data !== undefined)
                 || outputSize !== source.byteLength
             ) {

@@ -59,6 +59,23 @@ struct Session {
     working_root: PathBuf,
 }
 
+impl Session {
+    /// Closes the reader before the lease goes back, and returns the folder the result belongs
+    /// in. The reader's read transaction is not one the lease counts, so a release made while it
+    /// is open runs the truncate checkpoint against it and waits out the store's busy timeout
+    /// under the store mutex.
+    fn close(self, state: &PersistentStoreState, operation_guard: &RendererOperationGuard) -> PathBuf {
+        let Session {
+            reader,
+            lease,
+            working_root,
+        } = self;
+        drop(reader);
+        release(state, operation_guard, &lease);
+        working_root
+    }
+}
+
 fn open_session(
     state: &PersistentStoreState,
     operation_guard: &RendererOperationGuard,
@@ -130,9 +147,9 @@ fn quick_scan(
     let probe = health.begin();
     let session = open_session(state, &operation_guard, None)?;
     let outcome = scan_quick(&session, &probe);
-    release(state, &operation_guard, &session.lease);
+    let working_root = session.close(state, &operation_guard);
     let result = outcome?;
-    persist(&session.working_root, &result)?;
+    persist(&working_root, &result)?;
     Ok(result)
 }
 
@@ -175,9 +192,9 @@ fn deep_scan(
         Some(carried) => scan_deep_page(&session, carried, &probe),
         None => scan_deep_first(&session, &probe),
     };
-    release(state, &operation_guard, &session.lease);
+    let working_root = session.close(state, &operation_guard);
     let result = outcome?;
-    persist(&session.working_root, &result)?;
+    persist(&working_root, &result)?;
     Ok(result)
 }
 

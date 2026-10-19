@@ -1021,15 +1021,19 @@ pub(super) fn archive_character_with_limit(
             CancellationAwareIo::new(staging.as_file_mut(), is_cancelled),
             Compression::default(),
         );
+        // serde_json writes token by token and the encoder deflates on every write. into_inner
+        // drains the buffer without a sync flush, so the archive bytes and hashes stay the same.
+        let mut buffered = io::BufWriter::with_capacity(64 * 1024, &mut encoder);
         let metadata = write_payload_to(
             connection,
             &generation,
             character_id,
-            &mut encoder,
+            &mut buffered,
             is_cancelled,
             false,
             max_decoded_bytes,
         )?;
+        buffered.into_inner().map_err(|error| StoreError::from(error.into_error()))?;
         encoder.finish()?;
         metadata
     };
@@ -1046,7 +1050,7 @@ pub(super) fn archive_character_with_limit(
         now_ms,
     )?;
     let shared_object_hash=if let Some(incoming)=context.and_then(|c|c.incoming){super::lww::archive_metadata(connection,&incoming.value)?.object_hash}else{
-        let mut shared=cas.create_ipc_staging_file()?;let mut encoder=GzEncoder::new(CancellationAwareIo::new(shared.as_file_mut(),is_cancelled),Compression::default());write_payload_to(connection,&generation,character_id,&mut encoder,is_cancelled,true,max_decoded_bytes)?;encoder.finish()?;shared.as_file_mut().seek(SeekFrom::Start(0))?;let object=cas.prepare_reader(&mut CancellationAwareIo::new(shared.as_file_mut(),is_cancelled))?;
+        let mut shared=cas.create_ipc_staging_file()?;let mut encoder=GzEncoder::new(CancellationAwareIo::new(shared.as_file_mut(),is_cancelled),Compression::default());let mut buffered=io::BufWriter::with_capacity(64*1024,&mut encoder);write_payload_to(connection,&generation,character_id,&mut buffered,is_cancelled,true,max_decoded_bytes)?;buffered.into_inner().map_err(|error|StoreError::from(error.into_error()))?;encoder.finish()?;shared.as_file_mut().seek(SeekFrom::Start(0))?;let object=cas.prepare_reader(&mut CancellationAwareIo::new(shared.as_file_mut(),is_cancelled))?;
         super::AssetObjectCatalog::new(connection).register(&[super::asset_object_catalog::AssetObjectRegistration{object_hash:object.content_hash.clone(),byte_size:object.byte_size}],now_ms)?;object.content_hash
     };
     let archived = ArchivedObject {

@@ -31,10 +31,18 @@ if (process.env.CARGO_TARGET_DIR && resolve(process.env.CARGO_TARGET_DIR) !== ta
 const env = { ...process.env, CARGO_TARGET_DIR: target, TAURI_CONFIG: JSON.stringify({ build: { frontendDist: [join(root, '.tmp/test-results/native/dist')] } }) }
 if (!reuseBuild) {
     await command(process.execPath, [join(dirname(require.resolve('vite/package.json')), 'bin/vite.js'), 'build', '--mode', 'agent', '--config', 'tests/native/vite.config.ts'])
-    await command('cargo', ['build', ...(debug ? [] : ['--release']), '--locked', '--manifest-path', 'tests/native/native/Cargo.toml'], env)
+    // Contract runs compile the app crate unoptimized; its dependencies and measured builds keep the release optimization.
+    const contractProfile = assetBenchmark || debug ? [] : ['--config', 'profile.release.package.risunest.opt-level=0']
+    await command('cargo', ['build', ...(debug ? [] : ['--release']), ...contractProfile, '--locked', '--manifest-path', 'tests/native/native/Cargo.toml'], env)
 }
 const executable = binaryInput ? resolve(binaryInput) : join(target, debug ? 'debug' : 'release', `risunest-persistence-boundary${process.platform === 'win32' ? '.exe' : ''}`)
 const binaryHash = createHash('sha256').update(readFileSync(executable)).digest('hex')
+// A contract run leaves its unoptimized binary at the same path, so a reused measurement build must still be the last one built.
+const measuredBuild = `${executable}.asset-benchmark`
+if (assetBenchmark && !binaryInput) {
+    if (!reuseBuild) writeFileSync(measuredBuild, binaryHash)
+    else if (!existsSync(measuredBuild) || readFileSync(measuredBuild, 'utf8') !== binaryHash) throw new Error('Rebuild the asset benchmark; this binary was not built for it')
+}
 const phaseGroups = assetBenchmark ? [[smallAssets ? 'asset-benchmark-small' : 'asset-benchmark']] : [['write', 'read'], ['abort', 'read-abort'], ['contract', 'read-contract']]
 // The repeated-close escape exists where closing the window quits; SIGTERM asks only Linux to save.
 if (!assetBenchmark && (process.platform === 'win32' || process.platform === 'linux')) phaseGroups.push(['close-escape'])

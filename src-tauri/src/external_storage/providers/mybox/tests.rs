@@ -1325,6 +1325,42 @@ fn deleting_resolves_the_resource_id_and_refuses_the_head_and_descriptor_folders
 }
 
 #[test]
+fn a_deletion_answered_404_lists_the_folder_again_for_the_next_lookup() {
+    runtime().block_on(async {
+        let mut replies = open_replies(1_000, 10_000, 0);
+        replies.push(json(
+            200,
+            &listing(&[resource("pack-1.bin", "file-p", "file", 8)], None),
+        ));
+        replies.push(json(404, "{}"));
+        // Another device removed the cached resource and stored the name again.
+        replies.push(json(
+            200,
+            &listing(&[resource("pack-1.bin", "file-q", "file", 9)], None),
+        ));
+        let api = WireServer::start(replies);
+        let test = fixture();
+        let provider = super::create(test.dependencies.clone()).unwrap();
+        let cancel = Cancellation::default();
+        let (repository, _) = open(&provider, &api, OpenMode::Existing, &cancel)
+            .await
+            .unwrap();
+        let locator = config::locator(&repository.connection_identity, config::PACKS, "pack-1.bin");
+
+        provider
+            .delete_object(&repository, &locator, &cancel)
+            .await
+            .unwrap();
+        let found = provider
+            .lookup_metadata(&repository, &object_intent("pack-1", ObjectRole::Pack, &[1; 8]), None, &cancel)
+            .await
+            .unwrap()
+            .expect("the name stored again is found");
+        assert_eq!(found.byte_length, 9);
+    });
+}
+
+#[test]
 fn partial_listing_positives_are_read_without_enumerating_the_folder() {
     runtime().block_on(async {
         let mut replies = open_replies(1024, 4096, 0);
