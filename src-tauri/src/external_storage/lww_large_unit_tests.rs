@@ -154,7 +154,7 @@ fn restore_original_backup(populate: impl FnOnce(&mut PersistentStore)) -> (temp
             super::leases::Admission::Admitted(owner)=>owner,_=>panic!("backup lease must be admitted"),
         };
         let view=super::cleanup::ConnectedRepositoryView {connected:&connected,writer_id:"collector",policy:super::connection::RetentionPolicy::DEFAULT,
-            now_ms:super::runtime::now_ms(),unfinished:vec![],cache_root:&cache};
+            now_ms:super::runtime::now_ms(),unfinished:vec![],cache_root:&cache,reads:Default::default()};
         let documents=super::cleanup::ConnectedDocuments {connected:&connected,cancel:&cancel,scratch:destination.path()};
         let request=super::cleanup::CleanupRequest {job_id:"cleanup-during-backup",cleanup_supported:true,limits:super::cleanup::CleanupLimits::default(),connection_time:&|_|Ok(true)};
         assert_eq!(super::cleanup::run(&context,&request,&view,&documents,&cancel).await.unwrap().stop_reason,super::cleanup::StopReason::Lease);

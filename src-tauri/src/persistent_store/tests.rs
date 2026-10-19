@@ -162,6 +162,8 @@ mod schema_tests;
 mod snapshot_lease_tests;
 #[path = "tests/storage_stats_tests.rs"]
 mod storage_stats_tests;
+#[path = "tests/stored_conversation_read_tests.rs"]
+mod stored_conversation_read_tests;
 #[path = "tests/vault_boundary_tests.rs"]
 mod vault_boundary_tests;
 #[path = "tests/working_set_tests.rs"]

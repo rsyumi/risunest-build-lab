@@ -281,7 +281,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let stopping = store.clone();
             let (stream_stop, stream_stopped) = tokio::sync::watch::channel(false);
             let result = axum::serve(
-                listener,
+                http::listener(listener),
                 http::router_with_shutdown(store, workload, stream_stopped),
             )
             .with_graceful_shutdown(async move {

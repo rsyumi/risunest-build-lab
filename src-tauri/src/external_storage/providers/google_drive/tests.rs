@@ -1598,6 +1598,15 @@ fn listing_accepts_false_and_absent_incomplete_search_with_a_cursor() {
                 ]
             }),
         ));
+        replies.push(json_reply(
+            200,
+            json!({
+                "files": [
+                    { "id": "checkpoint-1", "size": "9", "version": "1",
+                      "appProperties": { "risunestRole": "snapshot", "risunestObjectId": "c1" } }
+                ]
+            }),
+        ));
         let server = WireServer::start(replies);
         let (transport, test) = deps_with_inspection(stored_secret(NOW_MS + 3_600_000));
         let cancel = Cancellation::default();
@@ -1643,17 +1652,30 @@ fn listing_accepts_false_and_absent_incomplete_search_with_a_cursor() {
                 .provider_verified
         );
         assert_eq!(second.next_cursor, None);
+        let checkpoints = provider
+            .list_objects(&repository, Collection::Checkpoints, None, 1, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(checkpoints.objects[0].locator.object, "checkpoint-1");
+        assert_eq!(
+            checkpoints.objects[0].locator.collection.as_deref(),
+            Some("snapshots")
+        );
         let lines = request_lines(&server);
-        assert_eq!(lines.len(), 5);
+        assert_eq!(lines.len(), 6);
         assert!(lines[3].contains("pageSize=1"));
         assert!(lines[3].contains("value%3D%27state%27"));
+        assert!(lines[3].contains("value%3D%27bundle%27"));
+        assert!(!lines[3].contains("value%3D%27snapshot%27"));
         assert!(lines[4].contains("pageToken=page-2"));
+        assert!(lines[5].contains("value%3D%27snapshot%27"));
+        assert!(!lines[5].contains("value%3D%27state%27"));
         assert!(server.requests.lock().unwrap()[4]
             .headers
             .to_lowercase()
             .contains("authorization: bearer synthetic-access"));
         let requests = transport.requests.lock().unwrap();
-        assert_eq!(requests.len(), 5);
+        assert_eq!(requests.len(), 6);
         let second_page = &requests[4];
         assert_eq!(
             second_page.authorization.as_deref(),
@@ -2579,7 +2601,7 @@ fn distinct_drive_hash_variants_stop_reconciliation_and_both_remain_listable() {
         assert_eq!(page.objects.len(), 2);
         assert_eq!(page.objects[0].locator.object, format!("file-a/{first}"));
         assert_eq!(page.objects[1].locator.object, format!("file-b/{second}"));
-        let page = provider.list_objects(&repository, Collection::Snapshots, None, 10, &cancel).await.unwrap();
+        let page = provider.list_objects(&repository, Collection::Checkpoints, None, 10, &cancel).await.unwrap();
         assert_eq!(page.objects[0].locator.object, "snapshot-file");
         assert!(request_lines(&server).iter().all(|line| line.starts_with("GET ")));
     });

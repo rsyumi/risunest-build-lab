@@ -81,6 +81,17 @@ pub fn router(store: Arc<Store>) -> Router {
     router_with_workload(store, Workload::new())
 }
 
+/// Accepts connections with Nagle's algorithm off, so the last segment of a
+/// reply is not held until the client acknowledges the ones before it.
+pub fn listener(
+    listener: tokio::net::TcpListener,
+) -> impl axum::serve::Listener<Io = tokio::net::TcpStream, Addr = std::net::SocketAddr> {
+    use axum::serve::ListenerExt;
+    listener.tap_io(|tcp| {
+        let _ = tcp.set_nodelay(true);
+    })
+}
+
 pub fn router_with_workload(store: Arc<Store>, workload: Workload) -> Router {
     router_with_shutdown(
         store,
@@ -1229,6 +1240,17 @@ mod tests {
     use futures_util::StreamExt;
     use std::sync::Arc;
     use tokio::sync::Semaphore;
+
+    #[tokio::test]
+    async fn accepted_connections_send_without_waiting_for_acknowledgements() {
+        use axum::serve::Listener;
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = tcp.local_addr().unwrap();
+        let mut listener = super::listener(tcp);
+        let _client = tokio::net::TcpStream::connect(address).await.unwrap();
+        let (accepted, _) = listener.accept().await;
+        assert!(accepted.nodelay().unwrap());
+    }
 
     #[tokio::test]
     async fn exhausted_body_releases_its_guard_before_the_stream_is_dropped() {

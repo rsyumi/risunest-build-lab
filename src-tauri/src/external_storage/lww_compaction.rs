@@ -230,7 +230,7 @@ impl ExternalLwwEngine {
             (cache.revision,cache.classified.clone())
         };
         let mut classified=BTreeMap::new();let mut output=Vec::new();
-        for receipt in self.snapshot_receipts(cancel).await? {
+        for receipt in self.checkpoint_receipts(cancel).await? {
             receipt.locator.validate_for(&self.repository)?;
             let key=receipt_key(&receipt);
             // An incomplete receipt is never answered from the cache, so it is refused.
@@ -433,15 +433,15 @@ impl ExternalLwwEngine {
     /// Every published checkpoint, each read once.
     pub(crate) async fn checkpoints(&self,cancel:&Cancellation) -> Result<Vec<(RemoteObject,Checkpoint)>> {
         let mut output=Vec::new();
-        for receipt in self.snapshot_receipts(cancel).await? {
+        for receipt in self.checkpoint_receipts(cancel).await? {
             if let Some(found)=self.classified_checkpoint(&receipt,cancel).await? {output.push(found);}
         }
         Ok(output)
     }
-    pub(crate) async fn snapshot_receipts(&self,cancel:&Cancellation) -> Result<Vec<ObjectReceipt>> {
+    pub(crate) async fn checkpoint_receipts(&self,cancel:&Cancellation) -> Result<Vec<ObjectReceipt>> {
         let mut output=Vec::new(); let mut cursor=None; let mut visited=BTreeSet::new();
         loop {
-            let page=self.provider.list_objects(&self.repository,Collection::Snapshots,cursor.as_deref(),super::lww_engine::LISTING_PAGE,cancel).await?;
+            let page=self.provider.list_objects(&self.repository,Collection::Checkpoints,cursor.as_deref(),super::lww_engine::LISTING_PAGE,cancel).await?;
             output.extend(page.objects);
             match page.next_cursor { Some(next) => { if !visited.insert(next.clone()) { return Err(segment::corrupt()); } cursor=Some(next); }, None=>break }
         }
@@ -453,27 +453,21 @@ impl ExternalLwwEngine {
         receipt.locator.validate_for(&self.repository)?;
         let bytes=read_bytes(self.provider.as_ref(),&self.repository,&receipt.locator,cancel).await?;
         let (advertised,_)=wire::read_public_header(&mut Cursor::new(&bytes)).map_err(error)?;
-        let ordinary=advertised.object_id.starts_with("snapshot-");
-        let lww_repository_id=segment::format_repository_id(&self.repository.repository_id);
-        let repository_id=if ordinary {self.descriptor.repository_id.as_str()}else{lww_repository_id.as_ref()};
+        if !advertised.object_id.starts_with("snapshot-") {
+            let (reference,document)=lww_checkpoint::open(&bytes,receipt,&self.repository,&self.root_key)?;
+            if document.library_id!=self.library {return Err(segment::corrupt());}
+            return Ok(Some((reference,document)));
+        }
+        let repository_id=self.descriptor.repository_id.as_str();
         if advertised.repository_id!=repository_id
-            || (ordinary && !matches!(advertised.role,wire::ObjectRole::SyncState|wire::ObjectRole::BackupBundle))
-            || (!ordinary && advertised.role!=wire::ObjectRole::SyncState) {return Err(segment::corrupt())}
+            || !matches!(advertised.role,wire::ObjectRole::SyncState|wire::ObjectRole::BackupBundle) {return Err(segment::corrupt())}
         let key=derive_key(&self.root_key,repository_id,"metadata").map_err(error)?;
         let mut plaintext=Vec::new();
         let header=wire::open_envelope(&mut Cursor::new(&bytes),&mut plaintext,&key,wire::MAX_METADATA_BYTES as u64).map_err(error)?;
         if header!=advertised || receipt.byte_length!=bytes.len() as u64 || !receipt.complete {return Err(segment::corrupt());}
-        if ordinary {
-            let backup=super::control::SnapshotView::read(&plaintext,header.role,repository_id)?;
-            if header.object_id!=format!("snapshot-{}",backup.snapshot_id) {return Err(segment::corrupt());}
-            return Ok(None);
-        }
-        let document=Checkpoint::decode(&plaintext)?;
-        for body in document.standalone_bodies.values() {body.locator.as_ref().ok_or_else(segment::corrupt)?.validate_for(&self.repository)?;}
-        if header.repository_id!=repository_id || header.role!=wire::ObjectRole::SyncState
-            || header.object_id!=document.snapshot_id || document.repository_id!=repository_id || document.library_id!=self.library
-            || receipt.byte_length!=bytes.len() as u64 || !receipt.complete { return Err(segment::corrupt()); }
-        Ok(Some((RemoteObject { repository_id:header.repository_id,object_id:header.object_id,role:ObjectRole::Snapshot,receipt:receipt.clone(),ciphertext_sha256:segment::digest(&bytes),plaintext_length:plaintext.len() as u64,plaintext_sha256:segment::digest(&plaintext) },document)))
+        let backup=super::control::SnapshotView::read(&plaintext,header.role,repository_id)?;
+        if header.object_id!=format!("snapshot-{}",backup.snapshot_id) {return Err(segment::corrupt());}
+        Ok(None)
     }
     /// The published state from the retained checkpoints and the segments
     /// above their coverage. Covered segments are never read: their versions

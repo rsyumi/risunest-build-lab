@@ -1293,6 +1293,7 @@ pub(crate) async fn run_connected_cleanup(
         now_ms: started,
         unfinished,
         cache_root: &cache_root,
+        reads: Default::default(),
     };
     let documents = super::cleanup::ConnectedDocuments { connected, cancel, scratch: &scratch };
     let connection_time = |not_before| {

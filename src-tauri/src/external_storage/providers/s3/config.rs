@@ -116,6 +116,7 @@ pub(crate) fn collection_folder(collection: Collection) -> &'static str {
     match collection {
         Collection::Segments => "segments",
         Collection::Snapshots => role_folder(ObjectRole::SyncState),
+        Collection::Checkpoints => role_folder(ObjectRole::Snapshot),
         Collection::BackupPoints => role_folder(ObjectRole::BackupPoint),
         Collection::InventoryPages => role_folder(ObjectRole::InventoryPage),
         Collection::Descriptors => role_folder(ObjectRole::Descriptor),

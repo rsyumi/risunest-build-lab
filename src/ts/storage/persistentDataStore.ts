@@ -635,6 +635,8 @@ export interface PersistentDataStore {
     lwwDrainDeferred?(request: LwwApplyReceive): Promise<LwwApplyResult>
     open(): Promise<void>
     readRoot(): Promise<Versioned<PersistentRoot>>
+    /** The current revision alone; read it through `readCurrentRevision`. */
+    readRevision?(): Promise<DataRevision>
     queryPresets(): Promise<PresetCatalog>
     readPreset(id: string): Promise<Versioned<botPreset> | null>
     queryCharacters(input: CharacterQuery): Promise<CharacterPage>
@@ -696,4 +698,11 @@ export interface PersistentDataStore {
     ): Promise<{ revision: DataRevision }>
     materializeDatabase(revision?: DataRevision): Promise<Database>
     acquireRevision(revision: DataRevision): Promise<PersistentRevisionLease>
+}
+
+/** The store's current revision, without reading the root where the store can answer alone. */
+export function readCurrentRevision(
+    store: Pick<PersistentDataStore, 'readRoot' | 'readRevision'>,
+): Promise<DataRevision> {
+    return store.readRevision ? store.readRevision() : store.readRoot().then((root) => root.revision)
 }

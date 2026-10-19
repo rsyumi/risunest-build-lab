@@ -1,4 +1,4 @@
-import { MAX_NATIVE_REQUEST_BYTES, PayloadTooLargeError, prepareNativePersistenceValue, UnsaveableValueError, utf8ByteLength, type PayloadTooLargeKind } from './nativePersistenceValue'
+import { MAX_NATIVE_REQUEST_BYTES, PayloadTooLargeError, prepareNativePersistenceValue, utf8ByteLength, type PayloadTooLargeKind } from './nativePersistenceValue'
 import { invoke } from '@tauri-apps/api/core'
 import { platform } from '@tauri-apps/plugin-os'
 import type { AssetAlias, WorkingSetCommit } from './persistentDataStore'
@@ -248,52 +248,14 @@ export class NativeCommitTransport {
     }
 }
 
-let encoder: Worker | undefined
-let encoderIdle: ReturnType<typeof setTimeout> | undefined
 export async function encodeNativeCommit(input: CommitEnvelope): Promise<Uint8Array> {
     const json = JSON.stringify(prepareNativePersistenceValue(input))
     const byteLength = utf8ByteLength(json)
     if (byteLength > MAX_NATIVE_REQUEST_BYTES) throw new PayloadTooLargeError('commit', byteLength)
-    const pages: Uint8Array[] = []
-    for (let offset = 0; offset < json.length;) {
-        let end = Math.min(offset + 256 * 1024, json.length)
-        if (end < json.length && json.charCodeAt(end - 1) >= 0xd800 && json.charCodeAt(end - 1) <= 0xdbff) end--
-        pages.push(textEncoder.encode(json.slice(offset, end)))
-        offset = end
-    }
-    if (encoderIdle) clearTimeout(encoderIdle)
-    encoder ??= new Worker(new URL('./nativeCommitEncoder.worker.ts', import.meta.url), {
-        type: 'module',
-    })
-    const worker = encoder
-    return new Promise((resolve, reject) => {
-        const cleanup = () => {
-            worker.onmessage = null
-            worker.onerror = null
-            encoderIdle = setTimeout(() => {
-                worker.terminate()
-                if (encoder === worker) encoder = undefined
-            }, 30_000)
-        }
-        worker.onmessage = ({ data }: MessageEvent<{ bytes?: Uint8Array; error?: string; code?: string; area?: string; reason?: string; recordId?: string }>) => {
-            cleanup()
-            if (data.bytes) resolve(data.bytes)
-            else if (data.code === 'unsaveable-value') reject(new UnsaveableValueError(data.area ?? 'persistent data', data.reason ?? 'unsupported value', data.recordId))
-            else reject(new Error(data.error ?? 'Persistence encoding failed'))
-        }
-        worker.onerror = () => {
-            cleanup()
-            worker.terminate()
-            encoder = undefined
-            reject(new Error('Persistence encoder failed'))
-        }
-        try {
-            worker.postMessage({ pages, byteLength }, pages.map((page) => page.buffer as ArrayBuffer))
-        } catch (error) {
-            cleanup()
-            reject(error)
-        }
-    })
+    // The JSON is built on this thread, so one exact-size encode is the only copy needed.
+    const bytes = new Uint8Array(byteLength)
+    if (textEncoder.encodeInto(json, bytes).written !== byteLength) throw new Error('Invalid persistence encoding')
+    return bytes
 }
 
 export const nativeCommitTransport = new NativeCommitTransport({

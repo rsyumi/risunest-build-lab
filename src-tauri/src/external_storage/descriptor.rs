@@ -196,6 +196,7 @@ pub(crate) async fn resume_existing(
     let mut descriptors = Vec::new();
     for collection in [
         Collection::Snapshots,
+        Collection::Checkpoints,
         Collection::BackupPoints,
         Collection::InventoryPages,
         Collection::Leases,
@@ -365,7 +366,7 @@ mod tests {
     fn resume_rejects_published_objects_duplicate_descriptors_and_unsafe_pages() {
         use crate::external_storage::contract::{ObjectPage, ObjectReceipt};
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            for role in [ObjectRole::SyncState, ObjectRole::BackupBundle, ObjectRole::BackupPoint, ObjectRole::Lease] {
+            for role in [ObjectRole::SyncState, ObjectRole::BackupBundle, ObjectRole::Snapshot, ObjectRole::BackupPoint, ObjectRole::Lease] {
                 let root = tempfile::tempdir().unwrap();
                 let provider = fake::FakeProvider::new(true);
                 provider.seed("foreign", role, vec![1]);

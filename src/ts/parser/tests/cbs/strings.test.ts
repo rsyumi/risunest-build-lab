@@ -66,6 +66,13 @@ const validCBSArgPropLong = validCBSArgProp.filter((s) => s.length > 1)
 
 const quickParse = (op: string, ...args: (string | number)[]) => risuChatParser(cbs(op, ...args.map(String)))
 
+test('parses very long plain text around a macro', () => {
+  const text = 'a'.repeat(12_000_000)
+  const result = risuChatParser(`${text}{{? 1+1}}`)
+  expect(result.length).toBe(text.length + 1)
+  expect(result.slice(-2)).toBe('a2')
+})
+
 test('startswith, endswith, contains', () => {
   expect(quickParse('startswith', 'Hello World', 'Hello')).toBe('1')
   expect(quickParse('endswith', 'Hello World', 'World')).toBe('1')

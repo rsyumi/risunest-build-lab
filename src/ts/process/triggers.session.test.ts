@@ -563,6 +563,31 @@ test('does not clone conversation history when no trigger exists', async () => {
     expect(historyReads).toBe(0)
 })
 
+test('does not copy the character when no trigger runs in this mode', async () => {
+    const { chat, char, session } = fixture()
+    let descriptionReads = 0
+    Object.defineProperty(char, 'desc', {
+        configurable: true,
+        enumerable: true,
+        get: () => {
+            descriptionReads += 1
+            return 'description'
+        },
+    })
+    runtime.session = session
+    DBState.db = {
+        characters: [char],
+        templateDefaultVariables: '',
+    } as never
+
+    await runTrigger(char, 'output', { chat })
+    await runTrigger(char, 'manual', { chat, manualName: 'missing' })
+    expect(descriptionReads).toBe(0)
+
+    await runTrigger(char, 'manual', { chat, manualName: 'ordered' })
+    expect(chat.message.map((message) => message.data)).toEqual(['', 'one', 'tail'])
+})
+
 test('reuses a supplied operation chat across recursive triggers without cloning it', async () => {
     const { chat, char, session } = fixture()
     char.triggerscript = [

@@ -19,6 +19,7 @@ const commands = new Set([
     'pds_commit',
     'pds_replace_commit',
     'pds_read_root',
+    'pds_read_revision',
     'pds_query_characters',
     'pds_snapshot_create',
     'pds_snapshot_list',

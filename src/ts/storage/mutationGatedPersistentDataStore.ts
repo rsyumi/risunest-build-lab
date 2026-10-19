@@ -35,6 +35,7 @@ export function createMutationGatedPersistentDataStore(
         lwwDrainDeferred: store.lwwDrainDeferred ? (request) => gate.runWrite(() => store.lwwDrainDeferred!(request)) : undefined,
 
         readRoot: () => store.readRoot(),
+        readRevision: store.readRevision ? () => store.readRevision!() : undefined,
         queryPresets: () => store.queryPresets(),
         readPreset: (id: string) => store.readPreset(id),
         queryCharacters: (input: CharacterQuery): Promise<CharacterPage> =>

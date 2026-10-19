@@ -1440,6 +1440,45 @@ test('Lua history and chat variables stay bound to the captured character', asyn
   scriptingSelectionState.index = 0
 })
 
+test('Lua reads the selected character without visiting the rest of the library', async () => {
+  const visited: number[] = []
+  const library = ['first', 'second', 'selected'].map((name) => ({
+    type: 'character',
+    chaId: `lua-library-${name}`,
+    name,
+    chatPage: 0,
+    chats: [{ id: `lua-library-chat-${name}`, message: [], scriptstate: {} }],
+    alternateGreetings: [],
+    defaultVariables: '',
+  }))
+  const characters = new Proxy(library, {
+    get(target, property, receiver) {
+      if (typeof property === 'string' && /^\d+$/.test(property)) visited.push(Number(property))
+      return Reflect.get(target, property, receiver)
+    },
+  })
+  const database = { characters, templateDefaultVariables: '' }
+  scriptingSelectionState.index = 2
+  DBState.db = database as never
+  vi.mocked(getDatabase).mockReturnValue(database as never)
+  try {
+    const result = await runScripted(`
+      function phase1_selected_lookup(id)
+        return getName(id)
+      end
+    `, {
+      char: library[2] as never,
+      chat: library[2].chats[0] as never,
+      mode: 'phase1_selected_lookup',
+    })
+
+    expect(result.res).toBe('selected')
+    expect(new Set(visited)).toEqual(new Set([2]))
+  } finally {
+    scriptingSelectionState.index = 0
+  }
+})
+
 test('records absolute and negative chat reads plus recent and length semantics', async () => {
   const result = await runScripted(`
     listenEdit('editInput', function(id, value, meta)

@@ -573,10 +573,10 @@ fn preserves_formats_and_broken_bytes_this_device_cannot_re_encode() {
     )
     .unwrap();
 
-    assert_eq!(stored_avif.data, avif);
+    assert_eq!(stored_avif.data, &avif[..]);
     assert_eq!(stored_avif.metadata.mime, "image/avif");
     assert_eq!(stored_avif.metadata.ext, "avif");
-    assert_eq!(stored_broken.data, broken);
+    assert_eq!(stored_broken.data, &broken[..]);
     // Nothing in the bytes says what this is, so the file name decides.
     assert_eq!(stored_broken.metadata.mime, "image/png");
     assert_eq!(stored_broken.metadata.ext, "png");
@@ -634,7 +634,7 @@ fn configurable_inlay_encoding_preserves_original_and_skipped_webp_bytes() {
         .unwrap();
         assert_eq!(result.metadata.mime, expected_mime);
         assert_eq!(result.metadata.ext, expected_ext);
-        assert_eq!(result.data.as_slice() == source.as_slice(), expected_bytes);
+        assert_eq!(result.data[..] == source[..], expected_bytes);
     }
     let png_result = encode_inlay_image(
         "png",
@@ -704,7 +704,7 @@ fn configured_webp_quality_is_forwarded_instead_of_using_the_default() {
         let expected = webp::Encoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height())
             .encode(quality)
             .to_vec();
-        assert_eq!(encoded.as_slice(), expected.as_slice());
+        assert_eq!(encoded[..], expected[..]);
         let decoded = image::load_from_memory_with_format(encoded, ImageFormat::WebP).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (32, 24));
     }

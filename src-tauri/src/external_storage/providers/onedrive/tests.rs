@@ -1437,8 +1437,8 @@ fn listing_pages_with_a_skip_token_and_bounds_the_limit() {
                 200,
                 &format!(
                     "{{\"value\":[{},{},{{\"id\":\"f\",\"name\":\"stray\",\"folder\":{{}}}},{{\"id\":\"b\",\"name\":\"bad:name\",\"size\":1,\"file\":{{}}}}],\"@odata.nextLink\":\"{endpoint}/drives/drive-1/items/{ROOT_ITEM}:/snapshots:/children?$top=2&$skiptoken=PAGE2\"}}",
-                    file_item("snap-a", 10, "etag-a"),
-                    format!("{},{}", file_item("snap-b", 20, "etag-b"), file_item(".DS_Store", 0, "noise"))
+                    file_item("snapshot-a", 10, "etag-a"),
+                    format!("{},{}", file_item("snapshot-b", 20, "etag-b"), file_item(".DS_Store", 0, "noise"))
                 ),
             ),
             exchange(200, &format!("{{\"value\":[{}]}}", file_item("snap-c", 30, "etag-c"))),
@@ -1471,7 +1471,7 @@ fn listing_pages_with_a_skip_token_and_bounds_the_limit() {
             .unwrap();
         // Folders and names this adapter could not have written are skipped.
         assert_eq!(page.objects.len(), 2);
-        assert_eq!(page.objects[0].locator.object, "snapshots/snap-a");
+        assert_eq!(page.objects[0].locator.object, "snapshots/snapshot-a");
         assert_eq!(page.objects[0].byte_length, 10);
         assert_eq!(
             page.objects[1].version,
@@ -2167,9 +2167,10 @@ fn segment_and_snapshot_listings_use_the_uniform_names() {
     runtime().block_on(async {
         let segment = crate::external_storage::contract::segment_object_id("00000000-0000-4000-8000-000000000001", 1, &"a".repeat(64)).unwrap();
         let snapshot = "00000000-0000-4000-8000-000000000002";
+        let published = "snapshot-00000000-0000-4000-8000-000000000003";
+        let folder = || json(200, &children_page(&[file_item(published, 8, "etag"), file_item(snapshot, 8, "etag")]));
         let mut replies = existing_open();
-        replies.extend([json(200, &children_page(&[file_item(&segment, 8, "etag")])),
-            json(200, &children_page(&[file_item(snapshot, 8, "etag")]))]);
+        replies.extend([json(200, &children_page(&[file_item(&segment, 8, "etag")])), folder(), folder()]);
         let server = WireServer::start(replies);
         let harness = harness(NOW_MS);
         let provider = create(harness.dependencies.clone()).unwrap();
@@ -2177,8 +2178,11 @@ fn segment_and_snapshot_listings_use_the_uniform_names() {
         let (repository, _) = open(&provider, &config_for(&server, "personal"), OpenMode::Existing, &cancel).await.unwrap();
         let page = provider.list_objects(&repository, Collection::Segments, None, 10, &cancel).await.unwrap();
         assert_eq!(page.objects[0].locator.object, format!("segments/{segment}"));
+        let names = |page: crate::external_storage::contract::ObjectPage| page.objects.into_iter().map(|object| object.locator.object).collect::<Vec<_>>();
         let page = provider.list_objects(&repository, Collection::Snapshots, None, 10, &cancel).await.unwrap();
-        assert_eq!(page.objects[0].locator.object, format!("snapshots/{snapshot}"));
+        assert_eq!(names(page), [format!("snapshots/{published}")]);
+        let page = provider.list_objects(&repository, Collection::Checkpoints, None, 10, &cancel).await.unwrap();
+        assert_eq!(names(page), [format!("snapshots/{snapshot}")]);
         assert_eq!(config::object_path(ObjectRole::Segment, &segment).unwrap(), format!("segments/{segment}"));
         assert_eq!(config::object_path(ObjectRole::Snapshot, snapshot).unwrap(), format!("snapshots/{snapshot}"));
     });

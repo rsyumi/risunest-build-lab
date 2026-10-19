@@ -433,6 +433,7 @@ interface NativeEncodedInlayImage {
     data?: unknown
     outputId?: unknown
     outputSize?: unknown
+    sourceKept?: unknown
     metadata: InlayBlobMetadata
 }
 
@@ -483,6 +484,7 @@ export function createNativeNewInlayImageEncoder(
                     }
                     return metadata
                 },
+                data,
             )
             if (encoded.metadata.size !== encoded.data.byteLength) {
                 throw new TypeError('Native Inlay encoder size does not match its bytes')

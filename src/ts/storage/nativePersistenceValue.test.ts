@@ -12,6 +12,28 @@ describe('native persistence Unicode contract', () => {
         })
         diagnostic.mockRestore()
     })
+    it('does not scan well-formed text for replacements', () => {
+        const replace = vi.spyOn(String.prototype, 'replace')
+        try {
+            const input = { '키': ['hello 😀', 'é'], nested: { text: '한글' } }
+            expect(prepareNativePersistenceValue(input)).toEqual(input)
+            expect(replace).not.toHaveBeenCalled()
+        } finally {
+            replace.mockRestore()
+        }
+    })
+    it('still replaces malformed surrogates where the runtime lacks isWellFormed', () => {
+        const native = Object.getOwnPropertyDescriptor(String.prototype, 'isWellFormed')
+        const diagnostic = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        delete (String.prototype as { isWellFormed?: unknown }).isWellFormed
+        try {
+            expect(prepareNativePersistenceValue({ '\ud800': ['\udc00', 'é', '😀'] }))
+                .toEqual({ '�': ['�', 'é', '😀'] })
+        } finally {
+            if (native) Object.defineProperty(String.prototype, 'isWellFormed', native)
+            diagnostic.mockRestore()
+        }
+    })
     it('rejects replacement key collisions before publishing any value', () => {
         expect(() => prepareNativePersistenceValue({ '\ud800': 1, '\ufffd': 2 }))
             .toThrow('Unicode replacement would merge object keys')

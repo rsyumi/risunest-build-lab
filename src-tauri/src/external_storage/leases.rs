@@ -273,6 +273,11 @@ impl PageTracker {
         }
         Ok(())
     }
+    /// Starts another listing of the same folder. Its cursors may repeat the
+    /// previous listing's, but its objects still may not.
+    pub(crate) fn next_listing(&mut self) {
+        self.cursors.clear();
+    }
 }
 
 pub(crate) struct LeaseContext<'a> {

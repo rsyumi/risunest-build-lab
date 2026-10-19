@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import DOMPurify from 'dompurify'
 import { writable } from 'svelte/store'
-import { parseMarkdownSafe } from '../parser.svelte'
+import { ParseMarkdown, parseMarkdownSafe } from '../parser.svelte'
 
 vi.unmock('katex')
 vi.mock('../../platform', async () => (await import('../../platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
@@ -57,5 +57,15 @@ describe('safe Markdown with the real KaTeX renderer', () => {
         expect(body.textContent).toContain('label')
         expect(body.querySelector('script, a, [href], [style], [class]')).toBeNull()
         expect(body.textContent).not.toContain('untrusted')
+    })
+
+    it('keeps dollar sequences literal inside fenced code', async () => {
+        for (const fence of ['bash', 'unknown-language']) {
+            const body = new DOMParser().parseFromString(
+                await ParseMarkdown(`\`\`\`${fence}\necho $$ $& $' done\n\`\`\``, null, 'normal'),
+                'text/html',
+            ).body
+            expect(body.querySelector('pre code')?.textContent).toBe("echo $$ $& $' done\n")
+        }
     })
 })

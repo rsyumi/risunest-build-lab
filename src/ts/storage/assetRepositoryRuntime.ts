@@ -14,7 +14,7 @@ import {
     type RemoteAssetReader,
 } from './assetRepository'
 import { hashPayloadBytes, type ImmutablePayloadCas } from './payloadCas'
-import { RevisionConflictError, type PersistentDataStore, type AssetAlias } from './persistentDataStore'
+import { readCurrentRevision, RevisionConflictError, type PersistentDataStore, type AssetAlias } from './persistentDataStore'
 import type { PersistentStorageAuthority } from './persistentStorageAuthority'
 
 export function createNativeAssetBlobStore(input: {
@@ -95,9 +95,9 @@ export function createCoordinatorOwnedAssetBlobStore(
         let operationFailure: { error: unknown } | null = null
         await runtime.runStorageOnlyMutation((expectedRevision) =>
             authority.gate.runKeyedWrite(key, async () => {
-                const before = await authority.rawStore.readRoot()
-                if (before.revision !== expectedRevision) {
-                    throw new RevisionConflictError(expectedRevision, before.revision)
+                const before = await readCurrentRevision(authority.rawStore)
+                if (before !== expectedRevision) {
+                    throw new RevisionConflictError(expectedRevision, before)
                 }
                 if (
                     expectedAuthorityEpoch !== undefined
@@ -113,7 +113,7 @@ export function createCoordinatorOwnedAssetBlobStore(
                     operationFailure = { error }
                 }
                 try {
-                    return (await authority.rawStore.readRoot()).revision
+                    return await readCurrentRevision(authority.rawStore)
                 } catch (error) {
                     if (!operationFailure) throw error
                     throw new AggregateError(

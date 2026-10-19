@@ -120,18 +120,29 @@ pub(super) fn remember_completed_snapshot(
 }
 
 pub(super) fn wrap(root: &Path, connection_id: &str, provider: std::sync::Arc<dyn Provider>) -> std::sync::Arc<dyn Provider> {
-    std::sync::Arc::new(ObservedProvider { provider, root: root.to_owned(), connection_id: connection_id.to_owned() })
+    std::sync::Arc::new(ObservedProvider {
+        provider, root: root.to_owned(), connection_id: connection_id.to_owned(), store: std::sync::Mutex::new(None),
+    })
 }
 
 struct ObservedProvider {
     provider: std::sync::Arc<dyn Provider>,
     root: std::path::PathBuf,
     connection_id: String,
+    /// Opened on the first observation and kept for the provider's lifetime;
+    /// a failed observation drops it so the next one opens the store again.
+    store: std::sync::Mutex<Option<ConnectionStore>>,
 }
 impl ObservedProvider {
     fn observe(&self, repository: &RepositoryHandle, receipts: &[ObjectReceipt], removed: Option<&RemoteLocator>) {
-        let result = ConnectionStore::open(&self.root)
-            .and_then(|store| store.observe_usage(&self.connection_id, repository, receipts, removed));
+        let mut store = self.store.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let result = (|| {
+            if store.is_none() { *store = Some(ConnectionStore::open(&self.root)?); }
+            store.as_ref().ok_or_else(|| ProviderError::new(ErrorKind::Transient))?
+                .observe_usage(&self.connection_id, repository, receipts, removed)
+        })();
+        if result.is_err() { *store = None; }
+        drop(store);
         if let Err(error) = result {
             // A display cache failure must not change the outcome of a remote write.
             crate::nlog!("warn", "External storage usage observation: {}", error);
@@ -468,6 +479,31 @@ mod tests {
             let requests = raw.request_count();
             summarize(root.path(), "connection").unwrap();
             assert_eq!(raw.request_count(), requests);
+        });
+    }
+
+    #[test]
+    fn a_wrapped_provider_opens_its_usage_store_once_and_again_after_a_failure() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            saved(root.path(), "connection");
+            let raw = std::sync::Arc::new(fake::FakeProvider::new(true));
+            let provider = wrap(root.path(), "connection", raw.clone());
+            let repository = fake::repository();
+            let cancel = Cancellation::default();
+            for index in 0..4 { raw.seed(&format!("segment-{index}"), ObjectRole::Segment, vec![1; 10]); }
+            let opened = super::super::connection_store::opens(root.path());
+            for _ in 0..6 { provider.list_objects(&repository, Collection::Segments, None, 100, &cancel).await.unwrap(); }
+            assert_eq!(super::super::connection_store::opens(root.path()) - opened, 1);
+            let mut store = ConnectionStore::open(root.path()).unwrap();
+            let stored = store.remove("connection").unwrap();
+            provider.list_objects(&repository, Collection::Segments, None, 100, &cancel).await.unwrap();
+            store.insert(&stored).unwrap();
+            let opened = super::super::connection_store::opens(root.path());
+            raw.seed("segment-4", ObjectRole::Segment, vec![1; 10]);
+            provider.list_objects(&repository, Collection::Segments, None, 100, &cancel).await.unwrap();
+            assert_eq!(super::super::connection_store::opens(root.path()) - opened, 1);
+            assert_eq!(totals(root.path(), "connection").0, 5);
         });
     }
 
