@@ -165,6 +165,7 @@
                 : parserProjection?.projectedChatID ?? idx,
             chara: parserChara() as unknown as TranslateHTMLContext['chara'],
             cbsConditions: getCbsCondition(),
+            ...(captureContext ? {} : { liveProjection: true as const }),
         }
     }
 

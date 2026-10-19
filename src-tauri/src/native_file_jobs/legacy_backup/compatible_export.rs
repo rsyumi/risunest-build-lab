@@ -457,7 +457,9 @@ fn write_database(
     let root = projector.project("DataBase", &root)?;
     let mut file = File::create(path).map_err(io_job_error)?;
     file.write_all(COMPRESSED_MAGIC).map_err(io_job_error)?;
-    let mut writer = DecodedSizeWriter { inner: GzEncoder::new(file, Compression::default()), bytes: 0, limit: max_decoded_bytes };
+    // MessagePack values arrive token by token; the buffer spares the encoder one deflate call each.
+    let encoder = io::BufWriter::with_capacity(64 * 1024, GzEncoder::new(file, Compression::default()));
+    let mut writer = DecodedSizeWriter { inner: encoder, bytes: 0, limit: max_decoded_bytes };
     map_header(&mut writer, root.as_object().unwrap().len() as u64 + 3)?;
     write_pairs(&mut writer, &root)?;
     string(&mut writer, "characters")?;
@@ -578,7 +580,8 @@ fn write_database(
             "plugin cursor count changed",
         ));
     }
-    let file = writer.inner.finish().map_err(io_job_error)?;
+    let encoder = writer.inner.into_inner().map_err(|error| io_job_error(error.into_error()))?;
+    let file = encoder.finish().map_err(io_job_error)?;
     file.sync_all().map_err(io_job_error)?;
     if file.metadata().map_err(io_job_error)?.len() > u32::MAX as u64 {
         return Err(NativeJobError::too_large(

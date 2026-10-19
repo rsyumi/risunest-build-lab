@@ -145,6 +145,7 @@ pub(crate) struct RemoteBodies {
 pub(super) fn usage_receipts(root: &Path, connection: &StoredConnection) -> Result<Vec<ObjectReceipt>> {
     let Some(db) = database(root, false)? else { return Ok(Vec::new()); };
     let mut receipts = Vec::new();
+    let format_repository_id = segment::format_repository_id(&connection.provider_repository_id);
     let mut bodies = db.prepare("SELECT DISTINCT json_extract(source,'$.body') FROM sources
         WHERE library=?1 AND json_extract(source,'$.connectionId')=?2").map_err(local)?;
     let rows = bodies.query_map(params![connection.descriptor.repository_id, connection.id], |row| row.get::<_, String>(0)).map_err(local)?;
@@ -164,7 +165,7 @@ pub(super) fn usage_receipts(root: &Path, connection: &StoredConnection) -> Resu
         let object: StoredObject = serde_json::from_str(&row.map_err(local)?).map_err(local)?;
         object.validate().map_err(local)?;
         if object.locator.connection_identity != connection.descriptor_locator.connection_identity
-            || object.header.repository_id != connection.provider_repository_id { continue; }
+            || object.header.repository_id != format_repository_id { continue; }
         receipts.push(ObjectReceipt {
             locator: RemoteLocator { connection_identity: object.locator.connection_identity,
                 collection: object.locator.collection, object: object.locator.object },

@@ -1402,10 +1402,10 @@ describe('ChatBody deferred inlay lifecycle', () => {
             }),
             expect.any(AbortSignal),
         )
+        expect(vi.mocked(translateHTML).mock.calls[0][5]).not.toHaveProperty('liveProjection')
     })
 
-    test('passes a bounded live parser projection with absolute and projected indices', async () => {
-        parserMocks.ParseMarkdown.mockResolvedValue('<span>projected</span>')
+    function boundedLiveProjection() {
         const capture = minimalCaptureContext()
         capture.parserContext.historyOffset = 4
         capture.parserContext.character.chats[0].message = [
@@ -1433,13 +1433,17 @@ describe('ChatBody deferred inlay lifecycle', () => {
                 parserContext: capture.parserContext,
             },
         }
+        return parserProjection
+    }
 
+    test('passes a bounded live parser projection with absolute and projected indices', async () => {
+        parserMocks.ParseMarkdown.mockResolvedValue('<span>projected</span>')
         mounted = mount(ChatBodyInlayHarness, {
             target,
             props: {
                 idx: 6,
                 name: 'Projected Character',
-                parserProjection: parserProjection as any,
+                parserProjection: boundedLiveProjection() as any,
             },
         })
 
@@ -1457,6 +1461,25 @@ describe('ChatBody deferred inlay lifecycle', () => {
                 }),
             }),
         ])
+    })
+
+    test('translates a bounded live projection as a row of the live chat', async () => {
+        chatState.db = { autoTranslate: true, translatorType: 'mock', legacyTranslation: false }
+        parserMocks.ParseMarkdown.mockResolvedValue('<span>projected</span>')
+        const { translateHTML } = await import('src/ts/translator/translator')
+        vi.mocked(translateHTML).mockResolvedValue('<span>translated</span>')
+        mounted = mount(ChatBodyInlayHarness, {
+            target,
+            props: {
+                idx: 6,
+                name: 'Projected Character',
+                parserProjection: boundedLiveProjection() as any,
+                initialTranslated: true,
+            },
+        })
+
+        await vi.waitFor(() => expect(translateHTML).toHaveBeenCalled())
+        expect(vi.mocked(translateHTML).mock.calls[0][5]).toMatchObject({ liveProjection: true, projectedChatID: 2 })
     })
 
     test('does not report capture settled after a pending body is destroyed', async () => {

@@ -547,14 +547,14 @@ pub(crate) async fn produce_incomparable_native(
     let mut snapshots=ObjectPage {objects:Vec::new(),next_cursor:None};
     let mut cursor=None;let mut seen=std::collections::BTreeSet::new();
     loop {
-        let page=provider.list_objects(&engine.repository,Collection::Snapshots,cursor.as_deref(),1000,&cancel).await
+        let page=provider.list_objects(&engine.repository,Collection::Checkpoints,cursor.as_deref(),1000,&cancel).await
             .map_err(|e|format!("{e:?}"))?;
         snapshots.objects.extend(page.objects);
         match page.next_cursor {Some(next) if seen.insert(next.clone())=>cursor=Some(next),
-            Some(_)=>return Err("snapshot listing did not advance".into()),None=>break}
+            Some(_)=>return Err("checkpoint listing did not advance".into()),None=>break}
     }
     if !snapshots.objects.is_empty() {
-        return Err("incomparable producer requires a fresh actual snapshot listing".into());
+        return Err("incomparable producer requires a fresh actual checkpoint listing".into());
     }
     let mut sequences=[std::collections::BTreeMap::new(),std::collections::BTreeMap::new()];
     let mut cursor=None;let mut seen=std::collections::BTreeSet::new();
@@ -581,7 +581,7 @@ pub(crate) async fn produce_incomparable_native(
     }
     let barriers=[CompactionBarrier::new(),CompactionBarrier::new()];
     for index in 0..2 {install_compaction_barrier(jobs[index],barriers[index].clone());}
-    provider.script_page(Collection::Snapshots,Ok(snapshots.clone()));
+    provider.script_page(Collection::Checkpoints,Ok(snapshots.clone()));
     for (page,objects) in views[0].chunks(100).enumerate() {
         let more=(page+1)*100<views[0].len();
         provider.script_page(Collection::Segments,Ok(ObjectPage {objects:objects.to_vec(),next_cursor:more.then(||format!("frozen-a-{}",page+1))}));
@@ -590,7 +590,7 @@ pub(crate) async fn produce_incomparable_native(
     let first=engine.compact_published(first_store,directories[0],jobs[0],writers[0],capabilities,&cancel,None);
     let second=async {
         barriers[0].reached.notified().await;
-        provider.script_page(Collection::Snapshots,Ok(snapshots));
+        provider.script_page(Collection::Checkpoints,Ok(snapshots));
         for (page,objects) in views[1].chunks(100).enumerate() {
             let more=(page+1)*100<views[1].len();
             provider.script_page(Collection::Segments,Ok(ObjectPage {objects:objects.to_vec(),next_cursor:more.then(||format!("frozen-b-{}",page+1))}));

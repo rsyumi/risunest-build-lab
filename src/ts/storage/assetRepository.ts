@@ -16,6 +16,7 @@ import {
     type PreparedImmutablePayload,
 } from './payloadCas'
 import {
+    readCurrentRevision,
     RevisionConflictError,
     validateAssetAlias,
     validateAssetAliasIdentity,
@@ -229,7 +230,7 @@ function createTypedAssetRepositoryReader(
 }
 
 export interface CompleteAssetAliasStore extends AssetAliasCatalog,
-    Pick<PersistentDataStore, 'readRoot' | 'commitAssetAlias'> {}
+    Pick<PersistentDataStore, 'readRoot' | 'readRevision' | 'commitAssetAlias'> {}
 
 export interface AssetObjectUrlResolver {
     resolveObjectUrl(input: {
@@ -411,7 +412,7 @@ export function createCompleteTypedAssetRepository(
                     try {
                         await session?.seal()
                         for (let attempt = 0; attempt < 8; attempt++) {
-                            const { revision } = await options.store.readRoot()
+                            const revision = await readCurrentRevision(options.store)
                             if (expectedAlias) {
                                 const current = await options.store.readAssetAlias(identity)
                                 if (!current || JSON.stringify(current.value) !== JSON.stringify(expectedAlias)) {

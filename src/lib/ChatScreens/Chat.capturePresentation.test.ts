@@ -767,13 +767,14 @@ describe('Chat frozen capture presentation', () => {
         ReloadChatPointer.update((value) => ({ ...value, 3: (value[3] ?? 0) + 1 }))
         await tick()
         expect(target.querySelector('[data-chat-body-probe]')).toBe(body)
-        ;(
+        const refresh = (
             mounted as {
                 refreshMessageDisplay(
                     state: import('src/ts/chatDisplayRefresh').ChatDisplayRefresh,
                 ): void
             }
-        ).refreshMessageDisplay({
+        ).refreshMessageDisplay
+        const update = {
             message: 'Updated viewport body',
             totalMessages: 10,
             parserAbortSignal: new AbortController().signal,
@@ -787,8 +788,15 @@ describe('Chat frozen capture presentation', () => {
                 viewportSourceToken: 'updated-source',
                 captureViewportTarget: () => null,
             },
-        })
+        }
+        parserCalls.length = 0
+        refresh(update)
         await vi.waitFor(() => expect(body?.textContent).toBe('Updated viewport body'))
+        // Each explicit refresh parses the message once, also when nothing it reads changed.
+        expect(parserCalls).toHaveLength(1)
+        refresh(update)
+        await tick()
+        expect(parserCalls).toHaveLength(2)
         expect(target.querySelector('[data-chat-body-probe]')).toBe(body)
 
         expect(target.querySelector('[data-chat-id="viewport-message"]')).not.toBeNull()

@@ -66,10 +66,11 @@ pub(super) fn direct_objects<'a>(
 pub(crate) fn summarize(root: &Path, connection_id: &str) -> Result<StorageUsage> {
     let store = ConnectionStore::open(root)?;
     let connection = store.read(connection_id)?;
+    let lww_repository_id = super::lww_segment::format_repository_id(&connection.provider_repository_id);
     let mut receipts = super::lww_residency::usage_receipts(root, &connection)?;
     for (directory, repository_id) in [
-        (root.join("external-storage").join("package-cache").join(connection_id), &connection.provider_repository_id),
-        (super::runtime::connection_directory(root, connection_id).join("package-cache"), &connection.descriptor.repository_id),
+        (root.join("external-storage").join("package-cache").join(connection_id), lww_repository_id.as_ref()),
+        (super::runtime::connection_directory(root, connection_id).join("package-cache"), connection.descriptor.repository_id.as_str()),
     ] {
         receipts.extend(super::package_cache::cached_remote_objects(
             &directory, repository_id, &connection.descriptor_locator.connection_identity,
@@ -119,18 +120,29 @@ pub(super) fn remember_completed_snapshot(
 }
 
 pub(super) fn wrap(root: &Path, connection_id: &str, provider: std::sync::Arc<dyn Provider>) -> std::sync::Arc<dyn Provider> {
-    std::sync::Arc::new(ObservedProvider { provider, root: root.to_owned(), connection_id: connection_id.to_owned() })
+    std::sync::Arc::new(ObservedProvider {
+        provider, root: root.to_owned(), connection_id: connection_id.to_owned(), store: std::sync::Mutex::new(None),
+    })
 }
 
 struct ObservedProvider {
     provider: std::sync::Arc<dyn Provider>,
     root: std::path::PathBuf,
     connection_id: String,
+    /// Opened on the first observation and kept for the provider's lifetime;
+    /// a failed observation drops it so the next one opens the store again.
+    store: std::sync::Mutex<Option<ConnectionStore>>,
 }
 impl ObservedProvider {
     fn observe(&self, repository: &RepositoryHandle, receipts: &[ObjectReceipt], removed: Option<&RemoteLocator>) {
-        let result = ConnectionStore::open(&self.root)
-            .and_then(|store| store.observe_usage(&self.connection_id, repository, receipts, removed));
+        let mut store = self.store.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let result = (|| {
+            if store.is_none() { *store = Some(ConnectionStore::open(&self.root)?); }
+            store.as_ref().ok_or_else(|| ProviderError::new(ErrorKind::Transient))?
+                .observe_usage(&self.connection_id, repository, receipts, removed)
+        })();
+        if result.is_err() { *store = None; }
+        drop(store);
         if let Err(error) = result {
             // A display cache failure must not change the outcome of a remote write.
             crate::nlog!("warn", "External storage usage observation: {}", error);
@@ -284,15 +296,21 @@ mod tests {
     #[test]
     fn usage_includes_existing_sync_backup_and_residency_files_without_retransferring() {
         use super::super::{lww_residency, package_cache::PackageCache, runtime};
+        for repository_id in super::super::lww_tests::repository_id_cases() {
         let root = tempfile::tempdir().unwrap();
         saved(root.path(), "connection");
-        let store = ConnectionStore::open(root.path()).unwrap();
-        let stored = store.read("connection").unwrap();
-        let repository = fake::repository();
+        let mut store = ConnectionStore::open(root.path()).unwrap();
+        let mut stored = store.remove("connection").unwrap();
+        stored.provider_repository_id = repository_id.clone();
+        store.insert(&stored).unwrap();
+        let mut repository = fake::repository();
+        repository.repository_id = repository_id;
+        let mut sync_repository = fake::repository();
+        sync_repository.repository_id = super::super::lww_segment::format_repository_id(&repository.repository_id).into_owned();
         let sync_cache = PackageCache::open(&root.path().join("external-storage/package-cache/connection")).unwrap();
         let backup_cache = PackageCache::open(&runtime::connection_directory(root.path(), "connection").join("package-cache")).unwrap();
-        let mut objects = (0..64).map(|index| sized_object(&repository, &format!("pack-{index}"), ObjectRole::Pack, 16 * 1024 * 1024)).collect::<Vec<_>>();
-        let catalog = object(&repository, "asset-catalog", ObjectRole::Catalog);
+        let mut objects = (0..64).map(|index| sized_object(&sync_repository, &format!("pack-{index}"), ObjectRole::Pack, 16 * 1024 * 1024)).collect::<Vec<_>>();
+        let catalog = object(&sync_repository, "asset-catalog", ObjectRole::Catalog);
         objects.push(catalog.clone());
         sync_cache.put_objects(&repository, &objects).unwrap();
         let mut format_repository = fake::repository();
@@ -306,7 +324,7 @@ mod tests {
         let foreign = object(&format_repository, "foreign", ObjectRole::Catalog);
         backup_cache.put_object(&repository, &foreign).unwrap();
 
-        let registry_pack = sized_object(&repository, "registry-pack", ObjectRole::Pack, 1024);
+        let registry_pack = sized_object(&sync_repository, "registry-pack", ObjectRole::Pack, 1024);
         let source = lww_residency::PackedSource {
             hash: "11".repeat(32), byte_length: 1, library_id: stored.descriptor.repository_id.clone(),
             connection_id: stored.id.clone(), connection_root: root.path().into(), protected_snapshot: "segment".into(),
@@ -348,6 +366,7 @@ mod tests {
         assert_eq!(totals(root.path(), "connection"), (74, expected_bytes - objects[0].receipt.byte_length));
         store.observe_usage("connection", &repository, &[objects[0].receipt.clone()], None).unwrap();
         assert_eq!(totals(root.path(), "connection"), (75, expected_bytes));
+        }
     }
 
     #[test]
@@ -460,6 +479,31 @@ mod tests {
             let requests = raw.request_count();
             summarize(root.path(), "connection").unwrap();
             assert_eq!(raw.request_count(), requests);
+        });
+    }
+
+    #[test]
+    fn a_wrapped_provider_opens_its_usage_store_once_and_again_after_a_failure() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            saved(root.path(), "connection");
+            let raw = std::sync::Arc::new(fake::FakeProvider::new(true));
+            let provider = wrap(root.path(), "connection", raw.clone());
+            let repository = fake::repository();
+            let cancel = Cancellation::default();
+            for index in 0..4 { raw.seed(&format!("segment-{index}"), ObjectRole::Segment, vec![1; 10]); }
+            let opened = super::super::connection_store::opens(root.path());
+            for _ in 0..6 { provider.list_objects(&repository, Collection::Segments, None, 100, &cancel).await.unwrap(); }
+            assert_eq!(super::super::connection_store::opens(root.path()) - opened, 1);
+            let mut store = ConnectionStore::open(root.path()).unwrap();
+            let stored = store.remove("connection").unwrap();
+            provider.list_objects(&repository, Collection::Segments, None, 100, &cancel).await.unwrap();
+            store.insert(&stored).unwrap();
+            let opened = super::super::connection_store::opens(root.path());
+            raw.seed("segment-4", ObjectRole::Segment, vec![1; 10]);
+            provider.list_objects(&repository, Collection::Segments, None, 100, &cancel).await.unwrap();
+            assert_eq!(super::super::connection_store::opens(root.path()) - opened, 1);
+            assert_eq!(totals(root.path(), "connection").0, 5);
         });
     }
 

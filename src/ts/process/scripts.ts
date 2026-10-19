@@ -37,6 +37,7 @@ import {
 } from "../parser/chatVar.svelte";
 import { findActiveHistoryWindow, resolveHistoryWindowChat, toWindowIndex } from "./historyWindowIndex";
 import { recordAmbientChatVariableReads, recordChatVariableReads, DisplayReadRecord } from "./scriptVariableReads";
+import { findCharacterById } from "./scriptCharacterLookup";
 import { beginDisplayScriptRun } from "./scriptTimeoutNotice";
 import { openHistoryWindowCopy, writeHistoryWindowMessage, type HistoryWindowCopy } from "./historyWindowWrite";
 
@@ -282,7 +283,7 @@ function requireScriptConversationOwner(owner: ScriptConversationOwner): void {
     }
     if (
         owner.character &&
-        db.characters.find((character) => character.chaId === owner.selectedCharacterId) !==
+        findCharacterById(db.characters, owner.selectedCharacterId, get(selectedCharID)) !==
             owner.character &&
         !owner.session?.matchesConversation(owner.selectedCharacterId, getCurrentChat())
     ) {

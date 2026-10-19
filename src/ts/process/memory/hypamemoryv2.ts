@@ -427,14 +427,22 @@ export class HypaProcessorV2<TMetadata> {
       ? getContextProvider(this.options.model)
       : null;
 
+    // Items of one group share its text array, so its suffix is hashed once.
+    const suffixOf = new Map<string[] | undefined, string>();
+    const contextSuffix = (texts: string[] | undefined): string => {
+      let suffix = suffixOf.get(texts);
+      if (suffix === undefined) {
+        suffix = ctxProvider?.getCacheKeySuffix(texts) ?? "";
+        suffixOf.set(texts, suffix);
+      }
+      return suffix;
+    };
     const keys = await hypaCacheKeys(
       ebdTexts.map((item) => ({
         producer: "hypa-v2" as const,
         content: item.content,
         identity,
-        contextSuffix: ctxProvider
-          ? ctxProvider.getCacheKeySuffix(ctxGroups.get(item.id))
-          : "",
+        contextSuffix: contextSuffix(ctxGroups.get(item.id)),
       }))
     );
 

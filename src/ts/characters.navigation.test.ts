@@ -1055,25 +1055,10 @@ describe('chat list operations', () => {
         const pageSlack = 8 * 1024
         const { utf8ByteLength } = await import('./storage/nativePersistenceValue')
         const { encodeNativeCommit } = await import('./storage/nativeCommitTransport')
-        let encodedRequests = 0
-        class EncodingWorker {
-            onmessage: ((event: { data: { bytes: Uint8Array } }) => void) | null = null
-            onerror: (() => void) | null = null
-            terminate() {}
-            postMessage(data: { pages: Uint8Array[]; byteLength: number }, transfer: ArrayBuffer[]) {
-                expect(Object.keys(data)).toEqual(['pages', 'byteLength'])
-                expect(data.byteLength).toBeLessThan(pageBytes + pageSlack)
-                expect(data.pages.every((page) => page.byteLength <= 1024 * 1024)).toBe(true)
-                const received = structuredClone(data, { transfer })
-                expect(data.pages.every((page) => page.byteLength === 0)).toBe(true)
-                const bytes = new Uint8Array(received.byteLength)
-                let offset = 0
-                for (const page of received.pages) { bytes.set(page, offset); offset += page.byteLength }
-                encodedRequests++
-                Promise.resolve().then(() => this.onmessage?.({ data: { bytes } }))
-            }
-        }
-        vi.stubGlobal('Worker', EncodingWorker)
+        let largestRequest = 0
+        vi.stubGlobal('Worker', class {
+            constructor() { throw new Error('The commit encoder must not start a worker') }
+        })
         const initial = buildSelectedCharacter()
         const reactive = createPersistentSaveObserverHarness({ ...mocks.database } as any)
         mocks.database.characters = reactive.database.characters
@@ -1090,6 +1075,7 @@ describe('chat list operations', () => {
                 expect(input.expectedRevision).toBe(revision)
                 const encoded = await encodeNativeCommit({ commit: input, assetAliases: [] })
                 expect(JSON.parse(new TextDecoder().decode(encoded)).commit).toEqual(input)
+                largestRequest = Math.max(largestRequest, encoded.byteLength)
                 requests.push(input)
                 for (const mutation of input.conversations ?? []) {
                     if (mutation.type !== 'replace-range') continue
@@ -1155,7 +1141,7 @@ describe('chat list operations', () => {
             expect(requests.find((request) => request.addCharacter)?.addCharacter.chats).toEqual([])
             expect(largestEncoding).toBeLessThan(pageBytes + pageSlack)
             expect(requests.filter((request) => request.conversations?.some((mutation: any) => mutation.start > 0))).toHaveLength(4)
-            expect(encodedRequests).toBe(requests.length)
+            expect(largestRequest).toBeLessThan(pageBytes + pageSlack)
             expect(coordinator.hasPendingPersistenceWork).toBe(false)
         } finally {
             stringify.mockRestore()

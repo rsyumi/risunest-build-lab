@@ -1985,9 +1985,13 @@ export class HypaProcesserEx extends HypaProcesser {
         const texts = chunks.map((chunk) => chunk.text);
         await this.addText(texts);
 
+        const vectorOf = new Map<string, memoryVector>();
+        for (const vector of this.vectors) {
+            if (!vectorOf.has(vector.content)) vectorOf.set(vector.content, vector);
+        }
         const newSummaryChunkVectors: SummaryChunkVector[] = [];
         for (const chunk of chunks) {
-            const vector = this.vectors.find((v) => v.content === chunk.text);
+            const vector = vectorOf.get(chunk.text);
             if (!vector) {
                 throw new Error(
                     `Failed to create vector for summary chunk:\n${chunk.text}`
@@ -2015,13 +2019,14 @@ export class HypaProcesserEx extends HypaProcesser {
         const groupTextsOf = groups.map(group => group.map(c => c.text));
         const keysOf: string[][] = [];
         for (let i = 0; i < groups.length; i++) {
+            const contextSuffix = provider.getCacheKeySuffix(groupTextsOf[i]);
             keysOf.push(
                 await hypaCacheKeys(
                     groups[i].map(chunk => ({
                         producer: 'hypa-v3-group' as const,
                         content: chunk.text,
                         identity,
-                        contextSuffix: provider.getCacheKeySuffix(groupTextsOf[i]),
+                        contextSuffix,
                     }))
                 )
             );

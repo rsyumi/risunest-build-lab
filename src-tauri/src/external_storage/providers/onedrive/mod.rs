@@ -1373,6 +1373,7 @@ impl Provider for OneDrive {
                     continue;
                 }
                 if crate::external_storage::contract::role_member_name(collection, name) == crate::external_storage::contract::RoleMemberName::Foreign { continue; }
+                if !crate::external_storage::contract::lists_snapshot_member(collection, name) { continue; }
                 let path = format!("{folder}/{name}");
                 if config::validate_relative_path(&path).is_err() {
                     if collection == Collection::Leases { return Err(ProviderError::new(ErrorKind::Corrupt)); }

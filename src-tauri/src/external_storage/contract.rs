@@ -303,6 +303,18 @@ pub(crate) fn role_member_name(collection: Collection, name: &str) -> RoleMember
     RoleMemberName::Ambiguous
 }
 
+/// Whether a member of the snapshots folder belongs to this listing. Only
+/// published states and backup bundles carry the `snapshot-` prefix, so the
+/// name sorts the two listings; the authenticated envelope still decides what
+/// a listed object is.
+pub(crate) fn lists_snapshot_member(collection: Collection, name: &str) -> bool {
+    match collection {
+        Collection::Snapshots => name.starts_with("snapshot-"),
+        Collection::Checkpoints => !name.starts_with("snapshot-"),
+        _ => true,
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ObjectIntent {
@@ -570,7 +582,11 @@ pub(crate) struct ObjectPage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Collection {
     Segments,
+    /// Published states and backup bundles.
     Snapshots,
+    /// Sync checkpoints. They are stored beside the snapshots, under the same
+    /// folder, locator and tags, and only their listing is separate.
+    Checkpoints,
     BackupPoints,
     InventoryPages,
     Descriptors,

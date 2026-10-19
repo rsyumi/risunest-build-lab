@@ -44,8 +44,14 @@ pub fn encode(raw: &[u8]) -> Result<Option<Vec<u8>>> {
     compressor
         .set_parameter(zstd::zstd_safe::CParameter::WindowLog(WINDOW_LOG))
         .map_err(failed)?;
-    let encoded = compressor.compress(raw).map_err(failed)?;
-    Ok((encoded.len() + HEADER_MARGIN < raw.len()).then_some(encoded))
+    let mut encoded = compressor.compress(raw).map_err(failed)?;
+    if encoded.len() + HEADER_MARGIN >= raw.len() {
+        return Ok(None);
+    }
+    // The output buffer was sized for the worst case, about the raw size, and
+    // the kept body is held until it is sent.
+    encoded.shrink_to_fit();
+    Ok(Some(encoded))
 }
 
 /// Decodes one frame whose raw body is at most `limit` bytes. A kept encoding
@@ -63,7 +69,13 @@ pub fn decode(encoded: &[u8], limit: usize) -> Result<Vec<u8>> {
         .map_err(invalid)?
         .single_frame();
     decoder.window_log_max(WINDOW_LOG).map_err(invalid)?;
-    let mut raw = Vec::new();
+    // Reserving the raw size the frame names, never past the limit, spares the
+    // doubling growth of an unsized read.
+    let named = zstd::zstd_safe::get_frame_content_size(encoded)
+        .ok()
+        .flatten()
+        .map_or(0, |size| size.min(limit as u64) as usize);
+    let mut raw = Vec::with_capacity(named);
     decoder
         .by_ref()
         .take(limit as u64 + 1)
@@ -118,7 +130,22 @@ mod tests {
         let raw = text(512 * 1024);
         let encoded = encode(&raw).unwrap().unwrap();
         assert!(encoded.len() * 2 < raw.len());
-        assert_eq!(decode(&encoded, raw.len()).unwrap(), raw);
+        // Neither buffer keeps room for the worst case or for growth.
+        assert!(encoded.capacity() < encoded.len() + HEADER_MARGIN);
+        let decoded = decode(&encoded, raw.len()).unwrap();
+        assert_eq!(decoded, raw);
+        assert!(decoded.capacity() < raw.len() + raw.len() / 8);
+        // A frame that does not name its raw size decodes the same way.
+        let mut compressor = zstd::bulk::Compressor::new(LEVEL).unwrap();
+        compressor
+            .set_parameter(zstd::zstd_safe::CParameter::WindowLog(WINDOW_LOG))
+            .unwrap();
+        compressor
+            .set_parameter(zstd::zstd_safe::CParameter::ContentSizeFlag(false))
+            .unwrap();
+        let unnamed = compressor.compress(&raw).unwrap();
+        assert!(matches!(zstd::zstd_safe::get_frame_content_size(&unnamed), Ok(None)));
+        assert_eq!(decode(&unnamed, raw.len()).unwrap(), raw);
     }
 
     #[test]

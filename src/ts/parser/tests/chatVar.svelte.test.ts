@@ -1,7 +1,7 @@
 import fc from 'fast-check'
 import { writable } from 'svelte/store'
 import { beforeEach, expect, test, vi } from 'vitest'
-import { DBState } from '../../stores.svelte'
+import { DBState, selectedCharID } from '../../stores.svelte'
 import { getChatVar, getChatVarFromConversation, getGlobalChatVar, setChatVar } from '../chatVar.svelte'
 import { resetChatVariables } from './cbs/lib'
 import type { Chat, Database } from '../../storage/database.svelte'
@@ -151,4 +151,28 @@ test('reads defaults without mutating a fresh reactive conversation', () => {
   expect(Object.hasOwn(chat, 'scriptstate')).toBe(false)
   chat.scriptstate = { $mode: '0' }
   expect(readValues()).toEqual(['0', '2', 'null'])
+})
+
+test('reads the selected owner without visiting the rest of the library', () => {
+  const visited: number[] = []
+  const library = ['first', 'second', 'selected'].map((name) => ({
+    chaId: `synthetic-${name}`,
+    defaultVariables: `owner=${name}`,
+  }))
+  const characters = new Proxy(library, {
+    get(target, property, receiver) {
+      if (typeof property === 'string' && /^\d+$/.test(property)) visited.push(Number(property))
+      return Reflect.get(target, property, receiver)
+    },
+  })
+  const database = { characters, templateDefaultVariables: '' } as unknown as Database
+  const chat = { id: 'synthetic-chat' } as Chat
+  selectedCharID.set(2)
+  try {
+    expect(getChatVarFromConversation(database, 'synthetic-selected', chat, 'owner')).toBe('selected')
+    expect(visited).toEqual([2])
+    expect(getChatVarFromConversation(database, 'synthetic-first', chat, 'owner')).toBe('first')
+  } finally {
+    selectedCharID.set(0)
+  }
 })

@@ -462,6 +462,30 @@ describe('sandbox script completion', () => {
         host.terminate()
     })
 
+    it('keeps read tokens next to byte arrays without visiting each byte', async () => {
+        const registry = new PluginReadBaselines('synthetic-plugin', () => 1)
+        const value = registry.track({ characters: [{ chaId: 'a', name: 'Character', chats: [{ id: 'chat', name: 'Before', message: [] }] }] }, 'database', 'database', 1)
+        const chat = value.characters[0].chats[0]
+        const saved = vi.fn()
+        const host = new SandboxHost({
+            ...bridgeStubs(),
+            readSyntheticImage: () => ({ bytes: new Uint8Array(1024 * 1024), chat }),
+            saveSyntheticImage: saved,
+        })
+        const child = await runGuest(host, `
+            const started = performance.now();
+            const read = await risuai.readSyntheticImage();
+            await risuai.saveSyntheticImage(read.bytes, read.chat);
+            window.roundTripMs = performance.now() - started;
+        `)
+        await vi.waitFor(() => expect((child as any).roundTripMs).toBeDefined())
+        expect(saved.mock.calls[0][0]).toHaveLength(1024 * 1024)
+        const sent = vi.mocked(child.parent.postMessage).mock.calls.map(call => call[0] as any).find(message => message.method === 'saveSyntheticImage')
+        expect(sent.argProvenance).toEqual([[], [{ path: [], token: collectPluginReadProvenance(chat)[0].token }]])
+        expect((child as any).roundTripMs).toBeLessThan(100)
+        host.terminate()
+    })
+
     it('associates final streamed provenance with the selected character and nested chat', async () => {
         const registry = new PluginReadBaselines('synthetic-plugin', () => 1)
         const value = { characters: [registry.track({ chaId: 'a', name: 'Character', chats: [{ id: 'chat', name: 'Before', message: [] }] }, 'character', 'a', 1)] }

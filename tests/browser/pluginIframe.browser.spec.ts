@@ -383,6 +383,17 @@ test('main links use the opener only when replacing the main document', async ({
         document.body.append(prevented); prevented.click()
     })
     await page.getByText('Main link', { exact: true }).click()
+    await page.evaluate(() => {
+        window.addEventListener('click', event => event.preventDefault())
+        window.addEventListener('auxclick', event => event.preventDefault())
+        const a = document.createElement('a')
+        a.href = 'https://synthetic.invalid/browser-default'; document.body.append(a)
+        for (const modifier of ['ctrlKey', 'shiftKey', 'metaKey', 'altKey']) {
+            a.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, [modifier]: true }))
+        }
+        a.dispatchEvent(new MouseEvent('auxclick', { bubbles: true, cancelable: true, button: 1 }))
+        a.target = '_blank'; a.click()
+    })
     await expect.poll(() => page.evaluate(() => window.boundary.downloads.opened)).toEqual(['https://synthetic.invalid/main'])
     await expect(page).toHaveURL(original + '#same-document')
 })

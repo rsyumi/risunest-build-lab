@@ -553,6 +553,19 @@ impl InnerWebView {
 
     // GTK exposes the target frame at the response stage, before committing the document.
     if let Some(navigation_handler) = attributes.navigation_handler.take() {
+      let navigation_handler = Rc::new(navigation_handler);
+      let failed_navigation_handler = navigation_handler.clone();
+      // Main-frame failures without a response must not replace the page with an error document.
+      webview.connect_load_failed(move |_webview, _event, uri, error| {
+        // WebKit already leaves the document alone for cancellation and download handoff.
+        if error.matches(webkit2gtk::NetworkError::Cancelled)
+          || error.matches(webkit2gtk::PolicyError::FrameLoadInterruptedByPolicyChange)
+          || error.matches(webkit2gtk::PluginError::WillHandleLoad)
+        {
+          return false;
+        }
+        !failed_navigation_handler(uri.to_string())
+      });
       webview.connect_decide_policy(move |_webview, policy_decision, policy_type| {
         if policy_type != PolicyDecisionType::Response {
           return false;

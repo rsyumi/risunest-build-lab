@@ -486,11 +486,14 @@ describe('local backup persistent snapshot', () => {
         )
         const acquireRevision = store.acquireRevision.bind(store)
         let readPluginStorage: ReturnType<typeof vi.fn> | undefined
+        let readConversation: ReturnType<typeof vi.fn> | undefined
         vi.spyOn(store, 'acquireRevision').mockImplementation(async (revision) => {
             const lease = await acquireRevision(revision)
             const readPinnedPluginStorage = lease.readPluginStorage.bind(lease)
             readPluginStorage = vi.fn(readPinnedPluginStorage)
             lease.readPluginStorage = readPluginStorage
+            readConversation = vi.fn(lease.readConversation.bind(lease))
+            lease.readConversation = readConversation
             return lease
         })
         const live = structuredClone(persisted)
@@ -541,6 +544,10 @@ describe('local backup persistent snapshot', () => {
         expect(readPluginStorage).toHaveBeenCalledTimes(2)
         expect(readPluginStorage).toHaveBeenNthCalledWith(1, UNOWNED_PLUGIN_OWNER, 'zero')
         expect(readPluginStorage).toHaveBeenNthCalledWith(2, UNOWNED_PLUGIN_OWNER, 'nested')
+        // Only the database export reads conversations; the asset scan skips them.
+        const conversationReads = readConversation!.mock.calls.map(([characterId, conversationId]) => `${characterId}/${conversationId}`)
+        expect(conversationReads.length).toBeGreaterThan(0)
+        expect(conversationReads).toEqual([...new Set(conversationReads)])
         expect(materializeDatabase).not.toHaveBeenCalled()
         expect(state.runtime.capturePersistentMutationToken).toHaveBeenCalledWith(
             'partial-local-backup',

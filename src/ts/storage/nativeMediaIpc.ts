@@ -111,6 +111,7 @@ export async function consumeBoundedNativeMediaOutput<T>(
     invokeCommand: InvokeCommand,
     result: unknown,
     validateMetadata: (value: unknown) => T,
+    source?: Uint8Array,
 ): Promise<{ data: Uint8Array, metadata: T }> {
     if (typeof result !== 'object' || result === null) {
         throw new TypeError('Native Inlay encoder returned an invalid response')
@@ -119,6 +120,7 @@ export async function consumeBoundedNativeMediaOutput<T>(
         data?: unknown
         outputId?: unknown
         outputSize?: unknown
+        sourceKept?: unknown
         metadata?: unknown
     }
     const cleanupId = typeof envelope.outputId === 'string' && envelope.outputId.length > 0
@@ -130,6 +132,17 @@ export async function consumeBoundedNativeMediaOutput<T>(
             throw new RangeError('Native Inlay encoder output exceeds the maximum transfer size')
         }
         const metadata = validateMetadata(envelope.metadata)
+        if (envelope.sourceKept === true) {
+            if (
+                source === undefined
+                || cleanupId !== null
+                || (envelope.data !== null && envelope.data !== undefined)
+                || outputSize !== source.byteLength
+            ) {
+                throw new TypeError('Native Inlay encoder returned an invalid kept source')
+            }
+            return { data: source, metadata }
+        }
         if (envelope.data !== null && envelope.data !== undefined) {
             if (envelope.outputId !== null && envelope.outputId !== undefined) {
                 throw new TypeError('Native Inlay encoder returned ambiguous output')

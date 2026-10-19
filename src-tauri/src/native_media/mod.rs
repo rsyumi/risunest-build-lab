@@ -14,6 +14,7 @@ use serde::{
     Deserialize, Deserializer, Serialize,
 };
 use std::{
+    borrow::Cow,
     fs::{self, File},
     io::{Cursor, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -60,8 +61,9 @@ pub(crate) struct InlayImageMetadata {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct EncodedInlayImage {
-    data: Vec<u8>,
+pub(crate) struct EncodedInlayImage<'a> {
+    /// Borrows the input when the source is kept as it was.
+    data: Cow<'a, [u8]>,
     metadata: InlayImageMetadata,
 }
 
@@ -301,15 +303,15 @@ fn inlay_media_type(format: Option<ImageFormat>, name: &str) -> (String, String)
 
 /// Stores the input untouched. Every image this encoder cannot improve ends up
 /// here, so an attachment never fails because of its format.
-fn preserved_inlay_image(
+fn preserved_inlay_image<'a>(
     id: &str,
-    data: &[u8],
+    data: &'a [u8],
     name: &str,
     size: Option<(u32, u32)>,
-) -> EncodedInlayImage {
+) -> EncodedInlayImage<'a> {
     let (mime, ext) = inlay_media_type(image::guess_format(data).ok(), name);
     EncodedInlayImage {
-        data: data.to_vec(),
+        data: Cow::Borrowed(data),
         metadata: InlayImageMetadata {
             key: id.to_owned(),
             kind: "inlay".to_owned(),
@@ -343,13 +345,20 @@ fn frame_delay_ms(delay: Delay, source: InlayAnimation) -> u32 {
 }
 
 struct DecodedInlayAnimation {
+    /// Frames the timeline carries, already at the output canvas size.
     frames: Vec<(RgbaImage, u32)>,
+    width: u32,
+    height: u32,
     loop_count: i32,
 }
 
+/// Decodes one frame at a time and keeps only the frames the timeline can
+/// carry, already scaled to the output canvas, so the source-size frames of a
+/// scaled or thinned animation never pile up in memory.
 fn decode_inlay_animation(
     data: &[u8],
     source: InlayAnimation,
+    options: &InlayEncodeOptions,
 ) -> Result<DecodedInlayAnimation, String> {
     let (loop_count, frames) = match source {
         InlayAnimation::Gif => {
@@ -370,42 +379,34 @@ fn decode_inlay_animation(
             (decoder.loop_count(), decoder.into_frames())
         }
     };
-    let mut collected: Vec<(RgbaImage, u32)> = Vec::new();
+    let min_delay_ms = if options.animation_max_fps > 0 {
+        (1000f64 / f64::from(options.animation_max_fps)).ceil() as u32
+    } else {
+        0
+    };
+    let mut kept: Vec<(RgbaImage, u32)> = Vec::new();
+    let mut canvas: Option<(u32, u32)> = None;
+    let mut decoded_frames = 0usize;
     let mut rgba_bytes: u64 = 0;
     for frame in frames {
         let frame =
             frame.map_err(|error| format!("failed to decode Inlay animation frame: {error}"))?;
-        if collected.len() >= MAX_ANIMATION_FRAMES {
+        if decoded_frames >= MAX_ANIMATION_FRAMES {
             return Err("Inlay animation has too many frames".to_owned());
         }
+        decoded_frames += 1;
         let delay = frame_delay_ms(frame.delay(), source);
         let buffer = frame.into_buffer();
         rgba_bytes += buffer.as_raw().len() as u64;
         if rgba_bytes > MAX_ANIMATION_RGBA_BYTES {
             return Err("Inlay animation needs too much memory".to_owned());
         }
-        collected.push((buffer, delay));
-    }
-    if collected.is_empty() {
-        return Err("Inlay animation has no frames".to_owned());
-    }
-    Ok(DecodedInlayAnimation {
-        frames: collected,
-        loop_count: match loop_count {
-            LoopCount::Infinite => 0,
-            LoopCount::Finite(count) => count.get().min(i32::MAX as u32) as i32,
-        },
-    })
-}
-
-/// Drops frames the timeline cannot carry and hands their time to the frame
-/// before them, so the animation still runs for exactly as long as it did.
-fn merge_animation_frames(
-    frames: Vec<(RgbaImage, u32)>,
-    min_delay_ms: u32,
-) -> Vec<(RgbaImage, u32)> {
-    let mut kept: Vec<(RgbaImage, u32)> = Vec::with_capacity(frames.len());
-    for (buffer, delay) in frames {
+        let (width, height) = match canvas {
+            Some(canvas) => canvas,
+            None => *canvas.insert(animation_canvas(buffer.width(), buffer.height(), options)?),
+        };
+        // A frame the timeline cannot carry hands its time to the frame before
+        // it, so the animation still runs for exactly as long as it did.
         match kept.last_mut() {
             Some(previous) if delay == 0 || previous.1 < min_delay_ms => previous.1 += delay,
             _ => {
@@ -414,11 +415,27 @@ fn merge_animation_frames(
                 } else {
                     delay
                 };
+                let buffer = if buffer.width() == width && buffer.height() == height {
+                    buffer
+                } else {
+                    image::imageops::resize(&buffer, width, height, FilterType::Lanczos3)
+                };
                 kept.push((buffer, delay));
             }
         }
     }
-    kept
+    let Some((width, height)) = canvas else {
+        return Err("Inlay animation has no frames".to_owned());
+    };
+    Ok(DecodedInlayAnimation {
+        frames: kept,
+        width,
+        height,
+        loop_count: match loop_count {
+            LoopCount::Infinite => 0,
+            LoopCount::Finite(count) => count.get().min(i32::MAX as u32) as i32,
+        },
+    })
 }
 
 fn animation_canvas(
@@ -530,37 +547,20 @@ fn encode_animated_inlay_image(
     name: &str,
     options: &InlayEncodeOptions,
     source: InlayAnimation,
-) -> Result<EncodedInlayImage, String> {
-    let decoded = decode_inlay_animation(data, source)?;
-    let (source_width, source_height) = {
-        let first = &decoded.frames[0].0;
-        (first.width(), first.height())
-    };
-    let (width, height) = animation_canvas(source_width, source_height, options)?;
-    let min_delay_ms = if options.animation_max_fps > 0 {
-        (1000f64 / f64::from(options.animation_max_fps)).ceil() as u32
-    } else {
-        0
-    };
-    let frames = merge_animation_frames(decoded.frames, min_delay_ms);
-    let frames: Vec<(RgbaImage, u32)> = frames
-        .into_iter()
-        .map(|(buffer, delay)| {
-            let buffer = if buffer.width() == width && buffer.height() == height {
-                buffer
-            } else {
-                image::imageops::resize(&buffer, width, height, FilterType::Lanczos3)
-            };
-            (buffer, delay)
-        })
-        .collect();
+) -> Result<EncodedInlayImage<'static>, String> {
+    let DecodedInlayAnimation {
+        frames,
+        width,
+        height,
+        loop_count,
+    } = decode_inlay_animation(data, source, options)?;
     let encoded = if frames.len() == 1 {
         let (buffer, _) = &frames[0];
         webp::Encoder::from_rgba(buffer.as_raw(), width, height)
             .encode(f32::from(options.quality))
             .to_vec()
     } else {
-        encode_animated_webp(&frames, width, height, options.quality, decoded.loop_count)?
+        encode_animated_webp(&frames, width, height, options.quality, loop_count)?
     };
     // An animation that grows is not worth the quality it loses on the way.
     if encoded.len() >= data.len() {
@@ -579,16 +579,16 @@ fn encode_animated_inlay_image(
             height: Some(height),
             preservation_reason: None,
         },
-        data: encoded,
+        data: Cow::Owned(encoded),
     })
 }
 
-fn encode_inlay_image(
+fn encode_inlay_image<'a>(
     id: &str,
-    data: &[u8],
+    data: &'a [u8],
     name: &str,
     options: Option<InlayEncodeOptions>,
-) -> Result<EncodedInlayImage, String> {
+) -> Result<EncodedInlayImage<'a>, String> {
     if id.is_empty() || id.starts_with("assets/") {
         return Err("invalid Inlay image id".to_owned());
     }
@@ -698,7 +698,7 @@ fn encode_inlay_image(
         preservation_reason: None,
     };
     Ok(EncodedInlayImage {
-        data: encoded,
+        data: Cow::Owned(encoded),
         metadata,
     })
 }

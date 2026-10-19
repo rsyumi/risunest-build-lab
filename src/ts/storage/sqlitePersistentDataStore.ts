@@ -273,6 +273,10 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
         return invokeStore('pds_read_root', {})
     }
 
+    readRevision(): Promise<DataRevision> {
+        return invokeStore('pds_read_revision', {})
+    }
+
     queryPresets(): Promise<PresetCatalog> {
         return invokeStore('pds_query_presets', {})
     }

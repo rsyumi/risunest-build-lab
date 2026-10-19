@@ -76,6 +76,7 @@ await (async function() {
             seen.add(object);
             const token = readProvenance.get(object);
             if (token) entries.push({ path, token });
+            if (ArrayBuffer.isView(object)) return;
             for (const [key, child] of Object.entries(object)) visit(child, [...path, Array.isArray(object) ? Number(key) : key]);
         }
         visit(value, []);

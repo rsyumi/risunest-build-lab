@@ -680,7 +680,7 @@ fn backup_only_cleanup_reads_points_without_requesting_an_unsupported_head() {
         let directory = tempfile::tempdir().unwrap();
         let view = cleanup::ConnectedRepositoryView {
             connected: &connected, writer_id: "writer", policy: RetentionPolicy::DEFAULT,
-            now_ms: NOW_MS, unfinished: vec![], cache_root: directory.path(),
+            now_ms: NOW_MS, unfinished: vec![], cache_root: directory.path(), reads: Default::default(),
         };
         let roots = cleanup::RepositoryView::roots(&view, &Cancellation::default()).await.unwrap();
         assert!(roots.head.is_none());

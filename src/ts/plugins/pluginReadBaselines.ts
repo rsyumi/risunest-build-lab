@@ -40,6 +40,8 @@ export function collectPluginReadProvenance(value: unknown): PluginReadProvenanc
         seen.add(object)
         const token = provenance.get(object)
         if (token) entries.push({ path, token })
+        // Typed array elements are never objects, so enumerating them only costs time and memory.
+        if (ArrayBuffer.isView(object)) return
         for (const [key, child] of Object.entries(object)) {
             visit(child, [...path, Array.isArray(object) ? Number(key) : key])
         }

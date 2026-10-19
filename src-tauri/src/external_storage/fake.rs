@@ -78,6 +78,7 @@ pub(crate) enum DeleteFault {
 
 #[derive(Default)]
 pub(super) struct FakeState {
+    pub(super) repository_id: Option<String>,
     pub(super) objects: BTreeMap<String, (Vec<u8>, u64)>,
     pub(super) next_version: u64,
     pub(super) lose_response: bool,
@@ -381,7 +382,9 @@ impl Provider for FakeProvider {
             c.check()?;
             let mut capabilities = capabilities(self.cas);
             capabilities.max_stored_bytes = Some(self.object_limit);
-            Ok((repository(), capabilities))
+            let mut repository = repository();
+            if let Some(id) = &self.state.lock().unwrap().repository_id { repository.repository_id = id.clone(); }
+            Ok((repository, capabilities))
         })
     }
     fn read_object<'a>(
@@ -686,10 +689,12 @@ impl Provider for FakeProvider {
                 return page;
             }
             // A published state and a backup bundle share the snapshot listing,
-            // which is what every adapter answers.
+            // and a sync checkpoint stored beside them has its own, which is
+            // what every adapter answers.
             let roles: &[ObjectRole] = match collection {
                 Collection::Segments => &[ObjectRole::Segment],
-                Collection::Snapshots => &[ObjectRole::Snapshot, ObjectRole::SyncState, ObjectRole::BackupBundle],
+                Collection::Snapshots => &[ObjectRole::SyncState, ObjectRole::BackupBundle],
+                Collection::Checkpoints => &[ObjectRole::Snapshot],
                 Collection::BackupPoints => &[ObjectRole::BackupPoint],
                 Collection::InventoryPages => &[ObjectRole::InventoryPage],
                 Collection::Descriptors => &[ObjectRole::Descriptor],

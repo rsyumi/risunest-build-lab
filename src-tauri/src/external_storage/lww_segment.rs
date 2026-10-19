@@ -17,6 +17,18 @@ use std::{
 pub(crate) const SEGMENT_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const SMALL_BODY_BYTES: usize = 4 * 1024 * 1024;
 
+pub(crate) fn format_repository_id(provider_id: &str) -> std::borrow::Cow<'_, str> {
+    // Keep existing repositories' key contexts unchanged. Provider identities
+    // longer than the format's limit have never produced valid envelopes.
+    if provider_id.len() <= 128 {
+        return std::borrow::Cow::Borrowed(provider_id);
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"risunest.external-lww-repository/v1\0");
+    hash.update(provider_id.as_bytes());
+    std::borrow::Cow::Owned(format!("lww-{}", hex::encode(hash.finalize())))
+}
+
 pub(crate) fn corrupt() -> ProviderError {
     ProviderError::new(ErrorKind::Corrupt)
 }
@@ -184,13 +196,11 @@ impl Segment {
     }
     pub(crate) fn encode(&self) -> Result<Vec<u8>> {
         self.validate()?;
-        let value = serde_json::to_value(self).map_err(|_| corrupt())?;
-        risunest_sync_wire::canonical::encode(&value).map_err(|_| corrupt())
+        risunest_sync_wire::canonical::encode(self).map_err(|_| corrupt())
     }
     pub(super) fn encode_capture(&self) -> Result<Vec<u8>> {
         self.validate_inner(false)?;
-        let value = serde_json::to_value(self).map_err(|_| corrupt())?;
-        risunest_sync_wire::canonical::encode(&value).map_err(|_| corrupt())
+        risunest_sync_wire::canonical::encode(self).map_err(|_| corrupt())
     }
     pub(super) fn decode_capture(bytes: &[u8]) -> Result<Self> {
         let value: Self = risunest_sync_wire::canonical::decode(bytes, bytes.len()).map_err(|_| corrupt())?;
@@ -224,7 +234,7 @@ pub(crate) fn seal(segment: &Segment, root_key: &[u8; 32]) -> Result<(Vec<u8>, S
     let expected_length = sealed_length(plaintext.len())?;
     let hash = digest(&plaintext);
     let key = derive_key(root_key, &segment.library_id, "metadata").map_err(|_| corrupt())?;
-    let mut sealed = Vec::new();
+    let mut sealed = Vec::with_capacity(expected_length as usize);
     encrypt(
         &mut Cursor::new(&plaintext),
         &mut sealed,
@@ -250,7 +260,7 @@ pub(crate) fn open(
 ) -> Result<Segment> {
     if bytes.len() > SEGMENT_BYTES { return Err(corrupt()); }
     let key = derive_key(root_key, library, "metadata").map_err(|_| corrupt())?;
-    let mut plain = Vec::new();
+    let mut plain = Vec::with_capacity(bytes.len());
     decrypt(
         &mut Cursor::new(bytes),
         &mut plain,
