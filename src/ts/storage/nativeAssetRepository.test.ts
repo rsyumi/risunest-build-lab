@@ -21,6 +21,22 @@ import { PayloadSizeMismatchError } from './payloadCas'
 const P = NATIVE_CAS_READ_PART_BYTES
 const objectHash = '11'.repeat(32)
 
+it('returns ordered bounded native presence batches and rejects malformed size responses', async () => {
+    const hashes = Array.from({ length: 1030 }, (_, index) => index.toString(16).padStart(64, '0'))
+    const invoke = vi.fn(async (_command: string, args: unknown) => {
+        const page = (args as { contentHashes: string[] }).contentHashes
+        if (page.length > 512) throw new Error('Oversized presence request')
+        return page.map(hash => Number.parseInt(hash, 16) % 2 ? 4 : null)
+    })
+    const cas = createNativeImmutablePayloadCas(invoke)
+    const remote = createNativeRemoteAssetReader(invoke)
+    const expected = hashes.map((_hash, index) => index % 2 ? 4 : null)
+    expect(await cas.statObjects!(hashes)).toEqual(expected)
+    expect(await remote.statObjects!(hashes)).toEqual(expected)
+    invoke.mockResolvedValueOnce([])
+    await expect(cas.statObjects!([objectHash])).rejects.toThrow('response mismatch')
+})
+
 function sameBytes(actual: Uint8Array | null, expected: Uint8Array): boolean {
     return actual !== null && Buffer.from(actual).equals(Buffer.from(expected))
 }

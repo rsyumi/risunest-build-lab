@@ -89,6 +89,12 @@ const STAGE_ORDER: DialogStageId[] = [
     'restarting-app',
 ]
 
+const ACCOUNT_STAGE_ORDER: DialogStageId[] = [
+    'downloading-account-backup',
+    ...STAGE_ORDER.filter(stage => stage !== 'restarting-app' && stage !== 'copying-assets'),
+    'checking-account-assets', 'downloading-account-assets', 'finishing-account-restore', 'restarting-app',
+]
+
 const EXPORT_STAGE_ORDER: DialogStageId[] = [
     'preparing-export',
     'downloading-export',
@@ -137,6 +143,7 @@ const EXPECTED_STAGES: Record<NativeFileOperationFormat, DialogStageId[]> = {
 
 const UNCANCELLABLE_STAGES = new Set<DialogStageId>([
     'activating', 'cleaning-up', 'refreshing-app', 'reloading-plugins', 'restarting-app',
+    'finishing-account-restore',
 ])
 
 const CLOSED: NativeFileJobDialogModel = {
@@ -274,6 +281,10 @@ function titleOf(format: NativeFileOperationFormat | undefined, status?: NativeF
 function stageLabel(stage: NativeFileJobDialogStage): string {
     const copy = language.risuNest.importDialog
     switch (stage) {
+        case 'downloading-account-backup': return copy.stageDownloadingAccountBackup
+        case 'checking-account-assets': return copy.stageCheckingAccountAssets
+        case 'downloading-account-assets': return copy.stageDownloadingAccountAssets
+        case 'finishing-account-restore': return copy.stageFinishingAccountRestore
         case 'copying-source': return copy.stageCopyingSource
         case 'copying-assets': return copy.stageCopyingSource
         case 'awaiting-reselect': return copy.stageAwaitingReselect
@@ -360,9 +371,12 @@ function buildStages(
     terminalState: NativeFileOperationOutcome['state'] | null,
     exporting = false,
 ): NativeFileJobDialogStageRow[] {
-    const order = exporting ? EXPORT_STAGE_ORDER : STAGE_ORDER
+    const account = status?.kind === 'restore-official-account-snapshot'
+    const order = exporting ? EXPORT_STAGE_ORDER : account ? ACCOUNT_STAGE_ORDER : STAGE_ORDER
     const expected = exporting
         ? EXPECTED_EXPORT_STAGES
+        : account
+            ? [...EXPECTED_STAGES['library-backup'], 'checking-account-assets', 'downloading-account-assets', 'finishing-account-restore']
         : format
             ? EXPECTED_STAGES[format]
             : null
@@ -391,7 +405,7 @@ function buildStages(
             : state === 'active' || state === 'stopped'
                 ? activeStageDetail(stage, status)
                 : ''
-        rows.push({ stage, label: stageLabel(stage), state, detail })
+        rows.push({ stage, label: account && stage === 'cleaning-up' ? language.risuNest.importDialog.stageCleaningTemporary : stageLabel(stage), state, detail })
     }
     if (terminalState === 'succeeded' && current !== 'restarting-app') {
         rows.push({ stage: 'complete', label: stageLabel('complete'), state: 'done', detail: '' })
@@ -407,6 +421,29 @@ function counterValue(
     if (final !== undefined) return formatCount(final)
     if (total !== undefined) return fillTemplate(language.risuNest.importDialog.itemsOf, formatCount(running), formatCount(total))
     return running > 0 ? formatCount(running) : '–'
+}
+
+function accountAssetCounters(status?: NativeFileJobStatus, now = Date.now()): NativeFileJobDialogCounter[] {
+    if (!status?.officialAssets) return []
+    const copy = language.risuNest.importDialog
+    const counts = status.officialAssets.counts
+    const transfer = status.officialAssets.transfer
+    return [
+        { key: 'account-required', label: copy.accountAssetsRequired, value: formatCount(counts.required) },
+        { key: 'account-present', label: copy.accountAssetsPresent, value: formatCount(counts.alreadyPresent) },
+        { key: 'account-installed', label: copy.accountAssetsInstalled, value: formatCount(counts.installed) },
+        { key: 'account-missing', label: copy.accountAssetsMissing, value: formatCount(counts.missing) },
+        { key: 'account-failed', label: copy.accountAssetsFailed, value: formatCount(counts.failed) },
+        { key: 'account-not-attempted', label: copy.accountAssetsNotAttempted, value: formatCount(counts.notAttempted) },
+        ...(transfer ? [
+            { key: 'account-bytes', label: copy.accountTransferredBytes, value: formatBytes(transfer.bytes) },
+            ...(transfer.bytesPerSecond === undefined ? [] : [{ key: 'account-rate', label: copy.accountTransferRate, value: `${formatBytes(transfer.bytesPerSecond)}/s` }]),
+            ...(status.officialAssets.state !== 'running' ? [] : [
+                { key: 'account-active', label: copy.accountActiveTransfers, value: `${transfer.active}/${transfer.limit}` },
+                ...(transfer.waitingUntil && transfer.waitingUntil > now ? [{ key: 'account-wait', label: copy.accountRetryWait, value: formatElapsed(transfer.waitingUntil - now) }] : []),
+            ]),
+        ] : []),
+    ]
 }
 
 function buildCounters(
@@ -752,12 +789,12 @@ export function buildNativeFileJobDialogModel(
                     : '',
             counters: exporting
                 ? []
-                : buildCounters(
+                : [...buildCounters(
                       format,
                       counts,
                       state.status?.result,
                       false,
-                  ),
+                  ), ...accountAssetCounters(state.status, now)],
             warnings: (state.status?.warningCodes ?? []).map(warningText),
             terminal: null,
             cancelVisible: true,
@@ -766,6 +803,7 @@ export function buildNativeFileJobDialogModel(
                 ? copy.cancelling
                 : exporting
                     ? copy.cancelExport
+                    : state.status?.officialAssets ? copy.stopAccountAssets
                     : copy.cancel,
             cancelNote:
                 !cancelEnabled && !state.cancelRequested
@@ -807,6 +845,16 @@ export function buildNativeFileJobDialogModel(
             summary = copy.resultFailed
             reason = failureReason(outcome.error?.code ?? '', 'import', outcome.error?.itemKind)
         }
+        if (outcome.status?.officialAssets && outcome.status.officialAssets.state !== 'succeeded' && outcome.state !== 'succeeded') {
+            summary = outcome.state === 'cancelled' ? copy.resultAccountAssetsStopped : copy.resultAccountAssetsIncomplete
+            const assetReason = outcome.status.officialAssets.reason
+            reason = outcome.state === 'cancelled' ? ''
+                : assetReason === 'service' ? copy.reasonAccountAssetService
+                : assetReason === 'authentication' ? copy.reasonAccountAssetAuthentication
+                : assetReason === 'account-changed' ? copy.reasonAccountAssetAccountChanged
+                : assetReason === 'library-changed' ? copy.reasonAccountAssetLibraryChanged
+                : assetReason === 'local' ? copy.reasonAccountAssetLocal : ''
+        }
         if (outcome.interruption === 'background-expired') {
             summary = outcome.partialWritesPossible ? copy.resultBackgroundExpiredPartial : copy.resultBackgroundExpired
         }
@@ -838,12 +886,12 @@ export function buildNativeFileJobDialogModel(
             currentItem: '',
             counters: exporting
                 ? []
-                : buildCounters(
+                : [...buildCounters(
                       format,
                       counts,
                       outcome.result,
                       outcome.state === 'succeeded',
-                  ),
+                  ), ...accountAssetCounters(outcome.status, now)],
             warnings: warningCodes.map(warningText),
             terminal: {
                 state: outcome.state,

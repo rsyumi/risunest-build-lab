@@ -695,6 +695,11 @@ pub(crate) fn pds_read_revision(state: State<'_, PersistentStoreState>) -> Resul
 }
 
 #[tauri::command(async)]
+pub(crate) fn pds_read_library_identity(state: State<'_, PersistentStoreState>) -> Result<String, StoreError> {
+    logged("pds_read_library_identity", with_store(state, |store| super::active_generation(&store.connection)))
+}
+
+#[tauri::command(async)]
 pub(crate) fn pds_query_presets(
     state: State<'_, PersistentStoreState>,
     lease: Option<String>,
@@ -921,8 +926,14 @@ pub(crate) fn pds_commit_asset_alias(
     state: State<'_, PersistentStoreState>,
     alias: AssetAlias,
     expected_revision: i64,
+    expected_library: Option<String>,
 ) -> Result<RevisionResult, StoreError> {
     logged("pds_commit_asset_alias", with_store_mut(state, |store| {
+        if let Some(expected) = expected_library {
+            if super::active_generation(&store.connection)? != expected {
+                return Err(StoreError::Validation { message: "Official asset library changed".into() });
+            }
+        }
         store.commit_asset_alias(&alias, expected_revision)
     }))
 }
@@ -2945,6 +2956,19 @@ mod tests {
         let root = pds_read_root(app.state(), None).expect("read root");
         assert_eq!(root.revision, 1);
         assert_eq!(pds_read_revision(app.state()).expect("read revision"), root.revision);
+        let library = pds_read_library_identity(app.state()).unwrap();
+        let alias: AssetAlias = serde_json::from_value(json!({ "kind": "asset", "key": "assets/synthetic", "objectHash": null,
+            "size": 0, "mime": "", "name": "synthetic", "ext": "bin" })).unwrap();
+        pds_commit_asset_alias(app.state(), alias.clone(), 1, Some(library.clone())).unwrap();
+        assert_eq!(pds_read_library_identity(app.state()).unwrap(), library);
+        with_store_mut(app.state(), |store| {
+            let stage = store.replace_begin()?;
+            store.replace_put_root(&stage.staging_id, &json!({}))?;
+            store.replace_commit(&stage.staging_id, Some(2))
+        }).unwrap();
+        assert_ne!(pds_read_library_identity(app.state()).unwrap(), library);
+        assert!(pds_commit_asset_alias(app.state(), alias, 3, Some(library)).is_err());
+        assert_eq!(pds_read_revision(app.state()).unwrap(), 3);
     }
 
     #[test]

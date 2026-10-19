@@ -1033,7 +1033,7 @@ fn replay_safe(method: &Method, path: &str) -> bool {
                 | "uploads/frames"
                 | "objects/pins"
                 | "objects/retention/release"
-                | "acks"
+                | "ack"
         ) || (path.starts_with("uploads/") && path.ends_with("/complete"))
             || (path.starts_with("staged-changes/") && path.ends_with("/seal")))
 }
@@ -1728,6 +1728,7 @@ mod tests {
     #[test]
     fn request_timeout_replays_only_recognized_identity_bound_requests() {
         for (path, code, replay) in [
+            ("ack", "request-timeout", true),
             ("objects/missing", "request-timeout", true),
             ("objects/missing", "unknown-timeout", false),
             ("uploads", "request-timeout", false),

@@ -354,10 +354,15 @@ fn lww_status(store:&PersistentStore)->Result<LwwStatus> {
     let config=store.server_stored_config()?;let clock=store.lww_clock_state()?;
     Ok(LwwStatus{configured:config.is_some(),library_id:config.as_ref().map(|c|c.library_id.clone()),device_id:config.map(|c|c.device_id),writer_id:clock.writer_id,binding_authority:clock.binding_authority,asset_policy:store.device_store()?.asset_residency_policy()?})
 }
-fn lww_client(store:&PersistentStore)->Result<super::lww_client::LwwClient> {lww_client_cancelled(store,None)}
 fn lww_client_cancelled(store:&PersistentStore,cancelled:Option<Arc<AtomicBool>>)->Result<super::lww_client::LwwClient> {
     let stored=store.server_stored_config()?.ok_or_else(||SyncError::new("server-unconfigured",409))?;
     let mut client=super::lww_client::LwwClient::with_cancellation(store.repository_root(),stored.resolve(store.repository_root())?,cancelled)?;client.access=Some(stored);Ok(client)
+}
+pub(super) fn with_lww_client<T>(store:&mut PersistentStore,cancelled:Option<Arc<AtomicBool>>,operation:impl FnOnce(&mut super::lww_client::LwwClient,&mut PersistentStore)->Result<T>)->Result<T> {
+    let mut core=lww_client_cancelled(store,cancelled)?;
+    let result=operation(&mut core,store);
+    let persisted=super::binding::persist_resolved_endpoint(store,&core);
+    result.and_then(|value|persisted.map(|()|value))
 }
 #[tauri::command]
 pub(crate) async fn server_sync_status(app:AppHandle)->Result<LwwStatus> {
@@ -365,19 +370,19 @@ pub(crate) async fn server_sync_status(app:AppHandle)->Result<LwwStatus> {
 }
 #[tauri::command]
 pub(crate) async fn server_sync_configure(app:AppHandle,config:super::client::ServerConfig)->Result<()> {
-    logged_blocking("configure",move|| {let _permit=claim_library(&app)?;let store=job_store(&app)?;let client=super::client::ServerClient::new(config.clone())?;client.resolve_configured_identity()?;let stored=super::credentials::StoredConfig::persist(store.repository_root(),&config)?;super::lww_client::OperationLog::open(store.repository_root())?.save_config("candidate",&stored)?;Ok(())}).await
+    logged_blocking("configure",move|| {let _permit=claim_library(&app)?;let store=job_store(&app)?;super::binding::configure(&store,config)}).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_lww_push(app:AppHandle,request:crate::persistent_store::lww::Header,generating:Vec<crate::persistent_store::lww::MessageLocator>)->Result<Option<risunest_sync_wire::lww::PushReceipt>> {
-    logged_blocking("push",move|| within(&LANES.send,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"send")?;let mut store=job_store(&app)?;lww_client_cancelled(&store,Some(cancelled))?.push(&mut store,&request,&generating)})).await
+    logged_blocking("push",move|| within(&LANES.send,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"send")?;let mut store=job_store(&app)?;with_lww_client(&mut store,Some(cancelled),|core,store|core.push(store,&request,&generating))})).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_lww_pull(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<super::lww_client::ReceivePage> {
-    logged_blocking("pull",move|| within(&LANES.receive,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"receive")?;let mut store=job_store(&app)?;lww_client_cancelled(&store,Some(cancelled))?.receive_page_with_frontier(&mut store,&request)})).await
+    logged_blocking("pull",move|| within(&LANES.receive,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"receive")?;let mut store=job_store(&app)?;with_lww_client(&mut store,Some(cancelled),|core,store|core.receive_page_with_frontier(store,&request))})).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_lww_ack(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<()> {
-    logged_blocking("ack",move|| within(&LANES.receive,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"receive")?;let store=job_store(&app)?;lww_client_cancelled(&store,Some(cancelled))?.finish_receive(&store,&request)})).await
+    logged_blocking("ack",move|| within(&LANES.receive,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"receive")?;let mut store=job_store(&app)?;with_lww_client(&mut store,Some(cancelled),|core,store|core.finish_receive(store,&request))})).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_cancel(app:AppHandle,operation_id:Option<String>)->Result<()> {recorded("cancel",match operation_id {Some(id)=>app.state::<ServerSyncCommandState>().cancel_asset_operation(&id),None=>app.state::<ServerSyncCommandState>().cancel()})}
@@ -403,10 +408,10 @@ pub(crate) async fn server_sync_lww_prepare_fresh_writer(app:AppHandle,request:c
 #[tauri::command]
 pub(crate) async fn server_sync_lww_activate_new_device(app:AppHandle,request:crate::persistent_store::lww::Header,authorization_id:String,writer_id:String)->Result<()> {logged_blocking("activate-new-device",move||within(&LANES.binding,|| {super::binding::activate(&mut job_store(&app)?,&request,Some((&authorization_id,&writer_id)))})).await}
 #[tauri::command]
-pub(crate) async fn server_sync_lww_retry(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<crate::persistent_store::lww::ApplyResult> {logged_blocking("retry",move||within(&LANES.send,|| {let _permit=claim_library(&app)?;let mut store=job_store(&app)?;lww_client(&store)?.retry_unpublished(&mut store,&request)})).await}
+pub(crate) async fn server_sync_lww_retry(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<crate::persistent_store::lww::ApplyResult> {logged_blocking("retry",move||within(&LANES.send,|| {let _permit=claim_library(&app)?;let mut store=job_store(&app)?;with_lww_client(&mut store,None,|core,store|core.retry_unpublished(store,&request))})).await}
 #[tauri::command]
 pub(crate) async fn server_sync_lww_drain(app:AppHandle,request:crate::persistent_store::lww::Header,generating:Vec<crate::persistent_store::lww::MessageLocator>)->Result<()> {
-    logged_blocking("drain",move||within(&LANES.send,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"send")?;let mut store=job_store(&app)?;let core=lww_client_cancelled(&store,Some(cancelled))?;let mut next=request;while core.push(&mut store,&next,&generating)?.is_some(){next.request_id=uuid::Uuid::new_v4().to_string();}if !store.lww_read_outbox(next.binding_authority,1)?.entries.is_empty(){return Err(SyncError::new("generation-active",409));}Ok(())})).await
+    logged_blocking("drain",move||within(&LANES.send,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"send")?;let mut store=job_store(&app)?;with_lww_client(&mut store,Some(cancelled),|core,store| {let mut next=request;while core.push(store,&next,&generating)?.is_some(){next.request_id=uuid::Uuid::new_v4().to_string();}if !store.lww_read_outbox(next.binding_authority,1)?.entries.is_empty(){return Err(SyncError::new("generation-active",409));}Ok(())})})).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_lww_hydrate(app:AppHandle,request:crate::persistent_store::lww::Header,selected_character_id:Option<String>,representatives_only:Option<bool>,icon_priority:Option<crate::persistent_store::asset_residency::RepresentativeImagePriority>)->Result<()> {
@@ -446,7 +451,7 @@ async fn start_notification_job<R: tauri::Runtime>(app:AppHandle<R>,request:crat
     let start=app.state::<ServerSyncCommandState>().begin_notification()?;
     let lookup=start.cancelled.clone();
     let copy=app.clone();
-    let config=blocking(move|| {let store=job_store(&copy)?;if store.lww_binding_authority()?!=request.binding_authority {return Err(SyncError::new("binding-authority-changed",409));}let core=lww_client_cancelled(&store,Some(lookup))?;core.client.resolve_identity()?;Ok(core.client.config())}).await?;
+    let config=blocking(move|| {let mut store=job_store(&copy)?;if store.lww_binding_authority()?!=request.binding_authority {return Err(SyncError::new("binding-authority-changed",409));}with_lww_client(&mut store,Some(lookup),|core,_| {core.client.resolve_identity()?;Ok(core.client.config())})}).await?;
     let events=app.clone();
     let connection=app.clone();
     app.state::<ServerSyncCommandState>().install_notification(start,move|guard| tauri::async_runtime::spawn(async move {

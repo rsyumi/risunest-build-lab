@@ -9,8 +9,10 @@ import type { OfficialPullResult } from './officialAccountSnapshot'
 import {
     createNativeOfficialAccountFlow,
     nativeOfficialAccountKeys,
+    type NativeOfficialAccountFlowDependencies,
 } from './nativeOfficialAccountFlow'
-import { NativeFileJobActivationCommittedError, NativeFileJobActivationUnresolvedError } from '../nativeFileJobs'
+import { NativeFileJobActivationCommittedError, NativeFileJobActivationUnresolvedError, syntheticNativeFileJobStatus } from '../nativeFileJobs'
+import { emptyOfficialAccountAssetCounts } from './officialAccountAssetOutcome'
 
 function createHarness(loggedIn = false, useNativeRestore = false) {
     const events: string[] = []
@@ -44,13 +46,15 @@ function createHarness(loggedIn = false, useNativeRestore = false) {
     const flushMetadata = vi.fn(async () => { events.push('metadata:flush') })
     const clearMetadata = vi.fn(async () => { events.push('metadata:clear') })
     const resetAccountSession = vi.fn(() => events.push('session:reset'))
-    const nativeRestore = vi.fn(async (): Promise<
+    const nativeRestore = vi.fn<NonNullable<NativeOfficialAccountFlowDependencies['nativeRestore']>>(async (): Promise<
         OfficialPullResult | { kind: 'compatibility-fallback' }
     > => ({
         kind: 'activated',
         revision: 8,
     }))
-    const completeRestoreAssets = vi.fn(async () => {})
+    const completeRestoreAssets = vi.fn<NonNullable<NativeOfficialAccountFlowDependencies['completeRestoreAssets']>>(async () => ({
+        phase: 'finishing', state: 'succeeded', counts: emptyOfficialAccountAssetCounts(), failedKeys: [],
+    }))
     let pendingRestoreAccount: string | null = null
     const prepareRestoreAssets = async (accountId: string) => { pendingRestoreAccount = accountId }
     const clearRestoreAssets = vi.fn(async () => { pendingRestoreAccount = null })
@@ -230,7 +234,7 @@ describe('explicit native official account flow', () => {
         ])
     })
 
-    it('still cold-restarts after activated restore metadata persistence fails', async () => {
+    it('keeps the committed library open when metadata persistence fails', async () => {
         const harness = createHarness(true)
         harness.adapter.pull.mockImplementationOnce(async () => {
             harness.events.push('pull')
@@ -253,8 +257,8 @@ describe('explicit native official account flow', () => {
             'flush',
             'pull',
             'metadata:flush',
-            'restart',
         ])
+        expect(harness.restart).not.toHaveBeenCalled()
     })
 
     it('requires login and never turns a missing restore into a publish', async () => {
@@ -284,7 +288,7 @@ describe('explicit native official account flow', () => {
             id: 'account-1',
             token: 'legacy-token',
             data: {},
-        }, {})
+        }, expect.objectContaining({ onStatus: expect.any(Function) }))
         expect(harness.adapter.pull).not.toHaveBeenCalled()
         expect(harness.events).toEqual(['flush', 'metadata:flush', 'restart'])
     })
@@ -495,9 +499,14 @@ describe('explicit native official account flow', () => {
         const harness = createHarness(true, true)
         const controller = new AbortController()
         const options = { signal: controller.signal, onStatus: vi.fn(), onBlockingChange: vi.fn() }
-        harness.nativeRestore.mockResolvedValueOnce({ kind: 'compatibility-fallback' })
+        const status = syntheticNativeFileJobStatus({ kind: 'restore-official-account-snapshot' }, 'reading-database')
+        harness.nativeRestore.mockImplementationOnce(async (_credential, forwarded) => {
+            expect(forwarded.signal).toBe(controller.signal)
+            forwarded.onStatus?.(status)
+            return { kind: 'compatibility-fallback' }
+        })
         await harness.flow.restore(options)
-        expect(harness.nativeRestore).toHaveBeenCalledWith(expect.anything(), options)
+        expect(options.onStatus).toHaveBeenCalledWith(status)
         expect(harness.adapter.pull).toHaveBeenCalledWith(controller.signal)
         controller.abort()
         await expect(harness.flow.restore(options)).rejects.toMatchObject({ name: 'AbortError' })
@@ -510,7 +519,55 @@ describe('explicit native official account flow', () => {
         await expect(harness.flow.restore()).rejects.toBeInstanceOf(NativeFileJobActivationCommittedError)
     })
 
-    it('persists metadata and restarts even when post-activation asset recovery fails', async () => {
+    it('preserves database counters and activation identity while asset status remains independently cancellable', async () => {
+        const h = createHarness(true, true)
+        const native = syntheticNativeFileJobStatus({ kind: 'restore-official-account-snapshot', jobId: 'database-job',
+            state: 'succeeded', activationRevision: 8, activationAuthority: 'authority', warningCodes: ['synthetic-warning'],
+            result: { revision: 8, sourceBytes: 100, sourceSha256: 'a'.repeat(64), sourceFingerprintKind: 'whole-file-sha256', characterCount: 3, presetCount: 2, warningCodes: ['synthetic-warning'] },
+        }, 'reloading-plugins', { counts: { characters: 3, presets: 2 } })
+        h.nativeRestore.mockImplementationOnce(async (_credential, options) => {
+            options.onStatus?.(native)
+            return { kind: 'activated', revision: 8 }
+        })
+        h.completeRestoreAssets.mockImplementationOnce(async (_account, options) => {
+            const outcome = { phase: 'downloading' as const, state: 'cancelled' as const,
+                counts: { required: 3, alreadyPresent: 1, installed: 1, missing: 0, failed: 0, notAttempted: 1 }, failedKeys: [],
+            }
+            options.onProgress?.({ ...outcome, state: 'running' })
+            options.onProgress?.(outcome)
+            return outcome
+        })
+        const onStatus = vi.fn()
+        await expect(h.flow.restore({ onStatus })).rejects.toMatchObject({ code: 'official-assets-incomplete', committedRevision: 8 })
+        const shown = onStatus.mock.calls.at(-1)![0]
+        expect(shown).toMatchObject({ jobId: 'database-job', activationAuthority: 'authority', activationRevision: 8, state: 'running',
+            detail: { stage: 'downloading-account-assets', counts: { characters: 3, presets: 2 } },
+            officialAssets: { state: 'cancelled', counts: { installed: 1, notAttempted: 1 } },
+            result: native.result, warningCodes: native.warningCodes,
+        })
+        expect(h.restart).not.toHaveBeenCalled()
+    })
+
+    it('retries only receipt-bound assets and retains the original database result', async () => {
+        const h = createHarness(true, true)
+        h.adapter.pull.mockImplementation(async () => { throw new Error('Retry must not restore the database') })
+        h.nativeRestore.mockImplementation(async () => { throw new Error('Retry must not restore the database') })
+        const original = syntheticNativeFileJobStatus({ kind: 'restore-official-account-snapshot', jobId: 'original', activationRevision: 5, activationAuthority: 'binding' }, 'cleaning-up')
+        h.completeRestoreAssets.mockImplementationOnce(async (_account, options) => {
+            expect(options.operationId).toBe('receipt')
+            options.onRestoreStatus?.(original)
+            const outcome = { operationId: 'receipt', phase: 'finishing' as const, state: 'failed' as const,
+                counts: { ...emptyOfficialAccountAssetCounts(), required: 2, installed: 1, failed: 1 }, failedKeys: ['assets/failed'] }
+            options.onProgress?.(outcome)
+            return outcome
+        })
+        const onStatus = vi.fn()
+        await expect(h.flow.resumeAssets({ operationId: 'receipt', onStatus })).rejects.toMatchObject({ committedRevision: 5, code: 'official-assets-incomplete' })
+        expect(onStatus.mock.calls.at(-1)?.[0]).toMatchObject({ jobId: 'original', activationAuthority: 'binding', officialAssets: { operationId: 'receipt' } })
+        expect(h.restart).not.toHaveBeenCalled()
+    })
+
+    it('persists metadata without restarting when post-activation asset recovery fails', async () => {
         const harness = createHarness(true, true)
         harness.completeRestoreAssets.mockRejectedValueOnce(new Error('asset offline'))
         const blocking = vi.fn()
@@ -518,7 +575,7 @@ describe('explicit native official account flow', () => {
             committedRevision: 8, cause: new Error('asset offline'),
         })
         expect(harness.flushMetadata).toHaveBeenCalledOnce()
-        expect(harness.restart).toHaveBeenCalledOnce()
+        expect(harness.restart).not.toHaveBeenCalled()
         expect(blocking.mock.calls).toEqual([[true], [false]])
         expect(harness.clearRestoreAssets).not.toHaveBeenCalled()
     })

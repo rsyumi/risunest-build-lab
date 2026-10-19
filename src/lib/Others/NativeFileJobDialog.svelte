@@ -16,6 +16,10 @@
 
     import { retrySnapshotRestoreBodiesFromOutcome } from 'src/ts/storage/nativePersistentMaintenance'
 
+    const accountRetryAvailable = $derived(!!$nativeFileOperationOutcome?.status?.officialAssets?.operationId
+        && ['failed', 'cancelled'].includes($nativeFileOperationOutcome.status.officialAssets.state)
+        && !['account-changed', 'library-changed'].includes($nativeFileOperationOutcome.status.officialAssets.reason ?? ''))
+
     const snapshotRetryAvailable = $derived($nativeFileOperationOutcome?.status?.kind === 'snapshot-bodies'
         && ['failed', 'cancelled'].includes($nativeFileOperationOutcome.status.state))
 
@@ -197,6 +201,10 @@
                         </SettingButton>
                     {/if}
                     {#if model.closeVisible}
+                        {#if accountRetryAvailable}
+                            <SettingButton variant="secondary" onclick={() => {void import('src/ts/storage/sync/nativeOfficialAccountOperations')
+                                .then(({ retryNativeOfficialAccountAssetsFromOutcome }) => retryNativeOfficialAccountAssetsFromOutcome()).catch(() => {})}}>{language.retry}</SettingButton>
+                        {/if}
                         {#if snapshotRetryAvailable}
                             <SettingButton variant="secondary" onclick={() => {void retrySnapshotRestoreBodiesFromOutcome().catch(async error => {
                                 const { alertError } = await import('src/ts/alert')

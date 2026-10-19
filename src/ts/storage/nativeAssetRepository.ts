@@ -387,6 +387,7 @@ export function createNativeImmutablePayloadCas(
             const result = await invokeCommand('asset_cas_stat_object', { contentHash })
             return result === null ? null : safeSize(result, 'Native CAS stat')
         },
+        statObjects: hashes => statNativeObjects(invokeCommand, 'asset_cas_stat_objects', hashes),
     }
 }
 
@@ -403,6 +404,7 @@ export function createNativeRemoteAssetReader(
     budget: NativeCasReadBudget = documentReadBudget,
 ): RemoteAssetReader {
     return {
+        statObjects: hashes => statNativeObjects(invokeCommand, 'asset_remote_stat_objects', hashes),
         async statObject(contentHash) {
             objectPhysicalKey(contentHash)
             const result = await invokeCommand('asset_remote_stat_object', {
@@ -428,6 +430,18 @@ export function createNativeRemoteAssetReader(
             )
         },
     }
+}
+
+async function statNativeObjects(invokeCommand: InvokeCommand, command: string, hashes: readonly string[]): Promise<(number | null)[]> {
+    const sizes: (number | null)[] = []
+    for (let start = 0; start < hashes.length; start += 512) {
+        const contentHashes = hashes.slice(start, start + 512)
+        contentHashes.forEach(objectPhysicalKey)
+        const result = await invokeCommand(command, { contentHashes })
+        if (!Array.isArray(result) || result.length !== contentHashes.length) throw new Error('Native asset batch stat response mismatch')
+        sizes.push(...result.map(size => size === null ? null : safeSize(size, 'Native asset batch stat')))
+    }
+    return sizes
 }
 interface NativeEncodedInlayImage {
     data?: unknown

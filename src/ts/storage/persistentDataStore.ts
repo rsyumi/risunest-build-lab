@@ -637,6 +637,8 @@ export interface PersistentDataStore {
     readRoot(): Promise<Versioned<PersistentRoot>>
     /** The current revision alone; read it through `readCurrentRevision`. */
     readRevision?(): Promise<DataRevision>
+    /** Stable across ordinary writes, changed by a full library replacement. */
+    readLibraryIdentity?(): Promise<string>
     queryPresets(): Promise<PresetCatalog>
     readPreset(id: string): Promise<Versioned<botPreset> | null>
     queryCharacters(input: CharacterQuery): Promise<CharacterPage>
@@ -665,7 +667,7 @@ export interface PersistentDataStore {
     readAssetAliasesByKeys(kind: AssetAliasKind, keys: string[]): Promise<Versioned<AssetAlias[]>>
     listAssetAliases(query: AssetAliasListQuery): Promise<AssetAliasPage>
     readAssetOwnerHead(owner: AssetOwnerLocator): Promise<Versioned<AssetOwnerHead> | null>
-    commitAssetAlias(alias: AssetAlias, expectedRevision: DataRevision): Promise<{ revision: DataRevision }>
+    commitAssetAlias(alias: AssetAlias, expectedRevision: DataRevision, expectedLibrary?: string): Promise<{ revision: DataRevision }>
     deleteAssetAlias(
         identity: AssetAliasIdentity,
         expectedRevision: DataRevision,

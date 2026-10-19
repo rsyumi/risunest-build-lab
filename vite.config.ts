@@ -66,6 +66,20 @@ export default defineConfig(({command, mode}) => {
   // `.env.desktop` nor `.env.android`, so `.env.agent` has to carry what those
   // two files carry. Change them together.
   const blockRealmEndpoints = mode === 'agent'
+  const stripBuildOutput = () => strip({
+    include: '**/*.(mjs|js|svelte|ts)',
+    functions: [
+      'assert.*',
+      ...(process.env.TAURI_ENV_DEBUG === 'true' ? [] : [
+        'console.log', 'console.info', 'console.debug', 'console.trace',
+        'console.table', 'console.dir', 'console.dirxml',
+        'console.group', 'console.groupCollapsed', 'console.groupEnd',
+        'console.time', 'console.timeLog', 'console.timeEnd',
+        'console.count', 'console.countReset', 'console.profile',
+        'console.profileEnd', 'console.timeStamp',
+      ]),
+    ],
+  })
   return {
     plugins: [
       blockRealmEndpoints ? realmEndpointBlockPlugin : null,
@@ -80,10 +94,7 @@ export default defineConfig(({command, mode}) => {
       }),
       tailwindcss(),
       wasm(),
-      command === 'build' ? strip({
-        include: '**/*.(mjs|js|svelte|ts)',
-        functions: ['assert.*'],
-      }) : null
+      command === 'build' ? stripBuildOutput() : null
     ],
 
     // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
@@ -144,7 +155,8 @@ export default defineConfig(({command, mode}) => {
       ]
     },
     worker: {
-      format: 'es'
+      format: 'es',
+      plugins: () => command === 'build' ? [stripBuildOutput()] : [],
     }
 }
 });

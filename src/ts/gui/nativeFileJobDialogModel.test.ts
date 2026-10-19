@@ -23,6 +23,32 @@ import {
 
 const copy = languageEnglish.risuNest.importDialog
 
+it('orders account asset download after refresh and plugins and exposes separate outcomes while cancellable', () => {
+    const current = status({ kind: 'restore-official-account-snapshot', activationRevision: 8,
+        detail: detail('downloading-account-assets', { stageCompleted: 7, stageTotal: 10 }, { characters: 3 }),
+        officialAssets: { phase: 'downloading', state: 'running', counts: { required: 10, alreadyPresent: 2, installed: 3, missing: 1, failed: 1, notAttempted: 3 } },
+    })
+    const history: NativeFileJobStage[] = ['downloading-account-backup', 'reading-database', 'activating', 'cleaning-up', 'refreshing-app', 'reloading-plugins', 'checking-account-assets', 'downloading-account-assets']
+    const model = buildNativeFileJobDialogModel(running({ format: 'library-backup', status: current, observedStages: history }), null, 2000)
+    expect(model.cancelEnabled).toBe(true)
+    expect(model.cancelLabel).toBe(copy.stopAccountAssets)
+    expect(model.overallPercent).toBe(70)
+    expect(model.stages.find(row => row.stage === 'downloading-account-assets')).toMatchObject({ label: copy.stageDownloadingAccountAssets, state: 'active' })
+    expect(model.stages.findIndex(row => row.stage === 'reloading-plugins')).toBeLessThan(model.stages.findIndex(row => row.stage === 'downloading-account-assets'))
+    expect(model.stages.find(row => row.stage === 'cleaning-up')?.label).toBe(copy.stageCleaningTemporary)
+    expect(model.counters.filter(counter => counter.key.startsWith('account-')).map(counter => counter.value)).toEqual(['10', '2', '3', '1', '1', '3'])
+    current.officialAssets!.transfer = { bytes: 1024, bytesPerSecond: 512, active: 1, limit: 1, waitingUntil: 47000 }
+    const transferring = buildNativeFileJobDialogModel(running({ format: 'library-backup', status: current, observedStages: history }), null, 2000)
+    expect(transferring.counters.filter(counter => ['account-bytes', 'account-rate', 'account-active', 'account-wait'].includes(counter.key)).map(counter => counter.value)).toEqual(['1.0 KiB', '512 B/s', '1/1', '00:45'])
+    const failed = buildNativeFileJobDialogModel(null, outcome({ state: 'failed', status: { ...current, officialAssets: { ...current.officialAssets!, state: 'failed', reason: 'service' } }, observedStages: history }), 2000)
+    expect(failed.terminal?.reason).toBe(copy.reasonAccountAssetService)
+    const finishing = buildNativeFileJobDialogModel(running({ format: 'library-backup', status: current,
+        observedStages: [...history, 'finishing-account-restore'] }), null, 2000)
+    expect(finishing.cancelEnabled).toBe(false)
+    const stopped = buildNativeFileJobDialogModel(null, outcome({ state: 'cancelled', status: { ...current, officialAssets: { ...current.officialAssets!, state: 'cancelled' } }, observedStages: history }), 2000)
+    expect(stopped.terminal?.summary).toBe(copy.resultAccountAssetsStopped)
+})
+
 it('explains that a busy Android destination requires waiting for the current export', () => {
     expect(failureReason('destination-busy', 'export')).toBe(copy.reasonDestinationBusy)
 })

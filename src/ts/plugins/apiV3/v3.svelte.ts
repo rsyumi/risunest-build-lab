@@ -1,3 +1,4 @@
+import { userScriptConsole } from '../../userScriptConsole'
 import { pluginStartupGate } from '../pluginStartupGate'
 import { parseRisuChat } from '../parseRisuChat'
 import { createPluginDeviceKeyspace } from '../pluginDeviceKeyspace'
@@ -1399,7 +1400,7 @@ const makeRisuaiAPIV3 = (
             risunest.unregisterUIPart(id);
         },
         log: (message:string) => {
-            console.log(`[RisuAI Plugin: ${plugin.name}] ${message}`);
+            userScriptConsole.log(`[RisuAI Plugin: ${plugin.name}] ${message}`);
         },
         createMutationObserver(callback: SafeMutationCallback): SafeMutationObserver {
             const observer = new SafeMutationObserver(callback)

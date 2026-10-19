@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 const expectedCases = {
+    'official-account-benchmark': ['official-account-assets-and-ledger'],
     'asset-benchmark': ['asset-bytes-aliases-and-inlays'],
     'asset-benchmark-small': ['small-asset-bytes-aliases'],
     contract: ['delta-lease-pagination-large-commit'],

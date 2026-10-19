@@ -104,6 +104,62 @@ function createFacade(input: {
 }
 
 describe('complete AssetRepository BlobStore facade', () => {
+    it('checks batched presence with the same local, remote and missing residency without reading bodies', async () => {
+        const aliases = [assetAlias(), assetAlias({ key: 'assets/remote', objectHash: inlayHash }),
+            assetAlias({ key: 'assets/missing', objectHash: 'c'.repeat(64) }), assetAlias({ key: 'assets/no-hash', objectHash: null })]
+        const cas = createCas({
+            statObjects: async hashes => hashes.map(hash => hash === assetHash ? 4 : null),
+            statObject: async () => { throw new Error('Per-object stat is not a batch') },
+            readObject: async () => { throw new Error('Presence must not read bodies') },
+        })
+        const { facade } = createFacade({ cas, remote: {
+            statObjects: async hashes => hashes.map(hash => hash === inlayHash ? 4 : null),
+            statObject: async () => { throw new Error('Per-object remote stat is not a batch') },
+            readObject: async () => { throw new Error('Presence must not hydrate bodies') },
+        }, store: createStore({
+            readAssetAlias: async () => { throw new Error('Per-key alias read is not a batch') },
+            readAssetAliasesByKeys: async (_kind, keys) => {
+                if (keys.length > 512) throw new Error('Batch overflow')
+                return { revision: 10, value: aliases.filter(alias => keys.includes(alias.key)) }
+            },
+        }) })
+        const keys = [...aliases.map(alias => alias.key), 'assets/unregistered', ...Array.from({ length: 600 }, (_, index) => `assets/extra-${index}`)]
+        const results = await facade.statMany!(keys)
+        expect(results.slice(0, 5).map(result => result?.size ?? null)).toEqual([4, 4, null, null, null])
+        expect(results.slice(5).every(result => result === null)).toBe(true)
+        aliases[0].size = 5
+        await expect(facade.statMany!([aliases[0].key])).rejects.toThrow('size mismatch')
+    })
+
+    it('verifies downloaded content before replacing an alias without rereading the body', async () => {
+        const data = Uint8Array.of(1, 2, 3)
+        const { hashPayloadBytes } = await import('./payloadCas')
+        const hash = await hashPayloadBytes(data)
+        const original = assetAlias()
+        let current = original
+        let nativeHash = 'f'.repeat(64)
+        const outcomes: string[] = []
+        const { facade } = createFacade({
+            store: createStore({
+                readAssetAlias: async () => ({ revision: 10, value: current }),
+                commitAssetAlias: async alias => { current = alias; return { revision: 11 } },
+            }),
+            cas: createCas({ readObject: async () => { throw new Error('Unexpected verification reread') } }),
+            writeSessions: { begin: async () => ({
+                prepare: async () => ({ contentHash: nativeHash, byteSize: 3, physicalKey: 'synthetic', deduplicated: false }),
+                seal: async () => {}, release: async outcome => { outcomes.push(outcome) },
+            }) },
+        })
+        const metadata = { kind: 'asset' as const, mime: '', name: 'photo.bin', ext: 'bin' }
+        await expect(facade.putVerified!(original.key, data, metadata)).rejects.toThrow('integrity mismatch')
+        expect(current).toEqual(original)
+        expect(outcomes).toEqual(['aborted'])
+        nativeHash = hash
+        await expect(facade.putVerified!(original.key, data, metadata)).resolves.toMatchObject({ size: 3 })
+        expect(current.objectHash).toBe(hash)
+        expect(outcomes).toEqual(['aborted', 'committed'])
+    })
+
     it('resolves a remote asset without fetching its bytes and validates full byte reads', async () => {
         const { hashPayloadBytes } = await import('./payloadCas')
         const data = new Uint8Array([4, 2, 9, 8])

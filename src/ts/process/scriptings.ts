@@ -1,3 +1,4 @@
+import { userScriptConsole } from '../userScriptConsole'
 import { asBuffer } from 'src/ts/util';
 import {
     getChatVar,
@@ -581,7 +582,7 @@ export async function runScripted(code:string, arg:{
             })
 
             declareAPI('logMain', (value:string) => {
-                console.log(JSON.parse(value))
+                userScriptConsole.log(JSON.parse(value))
             })
 
             declareAPI('reloadDisplay', (id:string) => {

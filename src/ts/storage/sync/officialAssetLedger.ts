@@ -113,3 +113,133 @@ export function createAccountScopedOfficialAssetLedger(
         },
     }
 }
+
+export interface NativeOfficialAssetLedger extends OfficialAssetLedger {
+    flush(): Promise<void>
+    clearAll(): Promise<void>
+}
+
+interface CheckpointEntry {
+    key: string
+    record: LedgerRecord
+    removed: boolean
+    generation: number
+    persisted: number
+    due: number | null
+    timer?: ReturnType<typeof setTimeout>
+    pending?: Promise<void>
+    failure?: unknown
+}
+
+/** Native snapshots are serialized only at a checkpoint or an explicit settlement. */
+export async function createNativeOfficialAssetLedger(
+    settings: {
+        get(key: string): Promise<unknown | null>
+        patch(key: string, entries: Record<string, string | null>): Promise<void>
+    },
+    storageKey: string,
+    resolveAccountId: () => string | undefined,
+): Promise<NativeOfficialAssetLedger> {
+    const interval = 30_000
+    let loaded: Record<string, string> = {}
+    let loadFailure: unknown
+    try {
+        const value = await settings.get(storageKey)
+        if (value != null) {
+            if (typeof value !== 'object' || Array.isArray(value)
+                || Object.values(value).some(entry => typeof entry !== 'string')) {
+                throw new Error('Official publication ledger is unreadable')
+            }
+            loaded = value as Record<string, string>
+        }
+    } catch (error) { loadFailure = error }
+    const entries = new Map<string, CheckpointEntry>()
+    const entryFor = (key: string): CheckpointEntry => {
+        let entry = entries.get(key)
+        if (!entry) {
+            entry = { key, record: parseRecord(loaded[key] ?? null), removed: false, generation: 0, persisted: 0, due: null }
+            entries.set(key, entry)
+            delete loaded[key]
+        }
+        return entry
+    }
+    const current = () => {
+        const accountId = resolveAccountId()
+        return accountId ? entryFor(`officialPublishedAssets:${accountId}`) : null
+    }
+    const disarm = (entry: CheckpointEntry) => {
+        clearTimeout(entry.timer)
+        entry.timer = undefined
+    }
+    const arm = (entry: CheckpointEntry) => {
+        if (entry.pending || entry.timer !== undefined || entry.generation === entry.persisted) return
+        entry.timer = setTimeout(() => {
+            entry.timer = undefined
+            void write(entry).catch(error => { entry.failure ??= error })
+        }, Math.max(0, (entry.due ?? Date.now() + interval) - Date.now()))
+    }
+    const write = (entry: CheckpointEntry): Promise<void> => {
+        if (entry.pending) return entry.pending
+        if (entry.generation === entry.persisted) return Promise.resolve()
+        disarm(entry)
+        const generation = entry.generation
+        const value = entry.removed ? null : JSON.stringify(entry.record)
+        entry.due = null
+        entry.pending = settings.patch(storageKey, { [entry.key]: value }).then(() => {
+            entry.persisted = generation
+        }, error => {
+            entry.due = Math.max(entry.due ?? 0, Date.now() + interval)
+            throw error
+        }).finally(() => {
+            entry.pending = undefined
+            arm(entry)
+        })
+        return entry.pending
+    }
+    const changed = (entry: CheckpointEntry, remove = false) => {
+        entry.removed = remove
+        entry.generation++
+        entry.due ??= Date.now() + interval
+        arm(entry)
+    }
+    const clearEntry = (entry: CheckpointEntry) => {
+        entry.record = emptyRecord()
+        changed(entry, true)
+    }
+    const flush = async () => {
+        const results = await Promise.allSettled([...entries.values()].map(async entry => {
+            disarm(entry)
+            try {
+                if (entry.pending) await entry.pending
+                while (entry.generation !== entry.persisted) await write(entry)
+                if (entry.failure !== undefined) throw entry.failure
+            } finally {
+                entry.failure = undefined
+            }
+        }))
+        const errors = results.flatMap(result => result.status === 'rejected' ? [result.reason] : [])
+        if (loadFailure !== undefined) { errors.push(loadFailure); loadFailure = undefined }
+        if (errors.length) throw new AggregateError(errors, 'Official publication metadata could not be saved')
+    }
+    return {
+        publishedAs: key => current()?.record.assets[key] ?? null,
+        record(key, replacementKey) {
+            const entry = current()
+            if (!entry || entry.record.assets[key] === replacementKey) return
+            entry.record.assets[key] = replacementKey
+            changed(entry)
+        },
+        clear() {
+            const entry = current()
+            if (entry) clearEntry(entry)
+        },
+        // Account entries remain owned until explicitly cleared, including dirty generations.
+        reset() {},
+        flush,
+        async clearAll() {
+            for (const key of Object.keys(loaded)) entryFor(key)
+            for (const entry of entries.values()) clearEntry(entry)
+            await flush()
+        },
+    }
+}

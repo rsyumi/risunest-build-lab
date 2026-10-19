@@ -37,6 +37,7 @@ export type AssetAliasPayloadSource = 'cas' | 'remote' | 'missing'
 /** Remote availability is distinct from physical CAS existence. */
 export interface RemoteAssetReader {
     statObject(hash: string): Promise<number | null>
+    statObjects?(hashes: readonly string[]): Promise<(number | null)[]>
     readObject(hash: string, range?: BlobReadRange): Promise<Uint8Array | null>
 }
 
@@ -230,7 +231,10 @@ function createTypedAssetRepositoryReader(
 }
 
 export interface CompleteAssetAliasStore extends AssetAliasCatalog,
-    Pick<PersistentDataStore, 'readRoot' | 'readRevision' | 'commitAssetAlias'> {}
+    Pick<PersistentDataStore, 'readRoot' | 'readRevision' | 'commitAssetAlias'> {
+    readAssetAliasesByKeys?: PersistentDataStore['readAssetAliasesByKeys']
+    readLibraryIdentity?: PersistentDataStore['readLibraryIdentity']
+}
 
 export interface AssetObjectUrlResolver {
     resolveObjectUrl(input: {
@@ -295,6 +299,7 @@ export type CompleteAssetRepositoryBlobStore = BlobStore &
             key: string,
             ownedData: Uint8Array,
             metadata: BlobWriteMetadata,
+            verifyContent?: boolean,
         ): Promise<PreparedCompleteAssetWrite>
         prepareOwnedNewInlayImage(
             key: string,
@@ -309,6 +314,7 @@ export interface CompleteTypedAssetRepository {
         identity: AssetAliasIdentity,
         ownedData: Uint8Array,
         metadata: BlobWriteMetadata,
+        verifyContent?: boolean,
     ): Promise<PreparedCompleteAssetWrite>
     prepareOwnedNewInlayImage(
         identity: AssetAliasIdentity,
@@ -372,6 +378,7 @@ export function createCompleteTypedAssetRepository(
         identity: AssetAliasIdentity,
         ownedData: Uint8Array,
         metadata: Parameters<BlobStore['put']>[2],
+        verifyContent = false,
     ): Promise<PreparedCompleteAssetWrite> => {
         validateAssetAliasIdentity(identity)
         if (metadata.kind !== identity.kind) {
@@ -384,6 +391,7 @@ export function createCompleteTypedAssetRepository(
             size: ownedData.byteLength,
         } as AssetAlias
         validateAssetAlias(pendingAlias)
+        const expectedLibrary = verifyContent ? await options.store.readLibraryIdentity?.() : undefined
         const session = await options.writeSessions?.begin()
         try {
             const prepared = session
@@ -391,6 +399,9 @@ export function createCompleteTypedAssetRepository(
                 : await options.cas.prepare(ownedData)
             if (prepared.byteSize !== ownedData.byteLength) {
                 throw new Error(`Prepared payload size mismatch for ${identity.key}`)
+            }
+            if (verifyContent && prepared.contentHash !== await hashPayloadBytes(ownedData)) {
+                throw new Error(`Prepared payload integrity mismatch for ${identity.key}`)
             }
             const alias = { ...pendingAlias, objectHash: prepared.contentHash } as AssetAlias
             validateAssetAlias(alias)
@@ -420,7 +431,8 @@ export function createCompleteTypedAssetRepository(
                                 }
                             }
                             try {
-                                await options.store.commitAssetAlias(alias, revision)
+                                if (expectedLibrary === undefined) await options.store.commitAssetAlias(alias, revision)
+                                else await options.store.commitAssetAlias(alias, revision, expectedLibrary)
                                 committed = true
                                 break
                             } catch (error) {
@@ -640,11 +652,12 @@ export function createCompleteAssetRepositoryBlobStore(
     return {
         imageGeometry: options.imageGeometry,
         resolveImageSource: (key) => repository.resolveImageSource(requireNamespacedBlobIdentity(key)),
-        prepareOwnedPut(key, ownedData, metadata) {
+        prepareOwnedPut(key, ownedData, metadata, verifyContent) {
             return repository.prepareOwnedPut(
                 requireNamespacedBlobIdentity(key, metadata.kind),
                 ownedData,
                 metadata,
+                verifyContent,
             )
         },
         prepareOwnedNewInlayImage(key, ownedData, input) {
@@ -661,6 +674,14 @@ export function createCompleteAssetRepositoryBlobStore(
                 metadata,
             )
         },
+        async putVerified(key, data, metadata, beforeActivate) {
+            const prepared = await repository.prepareOwnedPut(
+                requireNamespacedBlobIdentity(key, metadata.kind), data.slice(), metadata, true,
+            )
+            try { await beforeActivate?.() }
+            catch (error) { await prepared.abort(); throw error }
+            return prepared.activate()
+        },
         async putNewInlayImage(key, data, input) {
             return await repository.putNewInlayImage(
                 requireNamespacedBlobIdentity(key, 'inlay'),
@@ -670,6 +691,48 @@ export function createCompleteAssetRepositoryBlobStore(
         },
         read: (key, range) => repository.read(requireNamespacedBlobIdentity(key), range),
         stat: (key) => repository.stat(requireNamespacedBlobIdentity(key)),
+        async statMany(keys) {
+            if (!options.store.readAssetAliasesByKeys) {
+                const results: (BlobMetadata | null)[] = []
+                for (const key of keys) results.push(await repository.stat(requireNamespacedBlobIdentity(key)))
+                return results
+            }
+            const identities = [...new Set(keys)].map(key => requireNamespacedBlobIdentity(key))
+            const found = new Map<string, BlobMetadata>()
+            for (const kind of ['asset', 'inlay'] as const) {
+                const selected = identities.filter(identity => identity.kind === kind).map(identity => identity.key)
+                for (let start = 0; start < selected.length; start += 512) {
+                    const page = selected.slice(start, start + 512)
+                    const aliases = (await options.store.readAssetAliasesByKeys(kind, page)).value
+                    const requested = new Set(page)
+                    for (const alias of aliases) {
+                        validateAssetAlias(alias)
+                        if (alias.kind !== kind || !requested.has(alias.key)) throw new Error('Asset batch identity mismatch')
+                    }
+                    const hashes = [...new Set(aliases.flatMap(alias => alias.objectHash ? [alias.objectHash] : []))]
+                    const sizes = options.cas.statObjects
+                        ? await options.cas.statObjects(hashes)
+                        : await Promise.all(hashes.map(hash => options.cas.statObject(hash)))
+                    if (sizes.length !== hashes.length) throw new Error('Asset batch size response mismatch')
+                    const known = new Map(hashes.map((hash, index) => [hash, sizes[index]]))
+                    if (options.remote) {
+                        const remoteHashes = hashes.filter(hash => known.get(hash) === null)
+                        const remoteSizes = options.remote.statObjects
+                            ? await options.remote.statObjects(remoteHashes)
+                            : await Promise.all(remoteHashes.map(hash => options.remote!.statObject(hash)))
+                        if (remoteSizes.length !== remoteHashes.length) throw new Error('Remote asset batch size response mismatch')
+                        remoteHashes.forEach((hash, index) => known.set(hash, remoteSizes[index]))
+                    }
+                    for (const alias of aliases) {
+                        const size = alias.objectHash ? known.get(alias.objectHash) : null
+                        if (size == null) continue
+                        if (size !== alias.size) throw new Error(`Asset alias size mismatch for ${alias.key}`)
+                        found.set(alias.key, aliasBlobMetadata(alias))
+                    }
+                }
+            }
+            return keys.map(key => found.get(key) ?? null)
+        },
         async list(query) {
             const items = await repository.list(query)
             for (const item of items) requireNamespacedBlobIdentity(item.key, item.kind)

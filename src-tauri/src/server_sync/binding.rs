@@ -16,6 +16,7 @@ use risunest_sync_wire::{
     stamp::DecimalU64,
     MAX_METADATA_BYTES,
 };
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -63,6 +64,45 @@ struct VerifiedStage {
 struct VerifiedClaim {
     stage: VerifiedStage,
     receipt: NewDeviceClaimReceipt,
+}
+
+pub(crate) fn configure(store: &PersistentStore, config: super::client::ServerConfig) -> Result<()> {
+    let client = super::client::ServerClient::new(config)?;
+    client.resolve_configured_identity()?;
+    let stored = StoredConfig::persist(store.repository_root(), &client.config())?;
+    OperationLog::open(store.repository_root())?.save_config("candidate", &stored)
+}
+
+pub(crate) fn persist_resolved_endpoint(store: &PersistentStore, core: &LwwClient) -> Result<()> {
+    let Some(expected) = &core.access else { return Ok(()); };
+    let resolved = core.client.config();
+    if expected.endpoint == resolved.endpoint { return Ok(()); }
+    // Serialize the comparison and all active copies across send and receive workers.
+    let transaction = store.server_config_transaction()?;
+    if store.server_stored_config()?.as_ref() != Some(expected) { return Ok(()); }
+    let mut updated = expected.clone();
+    updated.endpoint = resolved.endpoint;
+    let log_transaction = rusqlite::Transaction::new_unchecked(&core.log.0, rusqlite::TransactionBehavior::Immediate)?;
+    if core.log.config("active")?.as_ref() == Some(expected) {
+        core.log.save_config("active", &updated)?;
+    }
+    let body: Option<String> = core.log.0.query_row(
+        "SELECT body FROM bindings WHERE id='active'", [], |row| row.get(0),
+    ).optional()?;
+    if let Some(body) = body {
+        let mut target: VerifiedTarget = serde_json::from_str(&body)
+            .map_err(|_| SyncError::new("binding-integrity", 409))?;
+        if target.config == *expected {
+            target.config = updated.clone();
+            core.log.0.execute("UPDATE bindings SET body=?1 WHERE id='active'", [
+                serde_json::to_string(&target).map_err(|_| SyncError::new("binding-integrity", 409))?,
+            ])?;
+        }
+    }
+    store.server_save_config(&updated)?;
+    log_transaction.commit()?;
+    transaction.commit()?;
+    Ok(())
 }
 
 fn candidate(store: &PersistentStore) -> Result<LwwClient> {
@@ -716,7 +756,7 @@ pub(crate) fn activate(
         return Err(SyncError::new("binding-target-changed", 409));
     }
     let log = OperationLog::open(store.repository_root())?;
-    let (target, stage) = if let Some((authorization_id, writer_id)) = authorization {
+    let (mut target, stage) = if let Some((authorization_id, writer_id)) = authorization {
         let claim: VerifiedClaim = log.verified("claims", authorization_id)?;
         if claim.receipt.writer_id != writer_id
             || store.lww_clock_state()?.writer_id != writer_id
@@ -755,6 +795,17 @@ pub(crate) fn activate(
             }
             selected => selected,
         };
+        // Reuse the verified endpoint only for the same registration, including its credential.
+        let selected = selected.map(|mut target| {
+            if let Some(active) = active.as_ref().filter(|active| active.target_id == target.target_id) {
+                let mut recovered = target.config.clone();
+                recovered.endpoint = active.config.endpoint.clone();
+                if recovered == active.config {
+                    target.config = recovered;
+                }
+            }
+            target
+        });
         let target = selected
             .filter(|target| {
                 state.library_id.as_deref() == Some(&target.config.library_id)
@@ -788,6 +839,10 @@ pub(crate) fn activate(
     if core.client.resolve_identity()?.epoch != target.epoch {
         return Err(SyncError::new("server-epoch-changed", 409));
     }
+    target.config.endpoint = core.client.config().endpoint;
+    core.access = Some(target.config.clone());
+    let transaction = store.server_config_transaction()?;
+    assert_authority(store, header)?;
     store.server_save_config(&target.config)?;
     log.save_config("active", &target.config)?;
     for kind in ["fresh-writer", "fresh-writer-claim"] {
@@ -800,6 +855,7 @@ pub(crate) fn activate(
         "INSERT INTO bindings VALUES('active',?1) ON CONFLICT(id) DO UPDATE SET body=excluded.body",
         [serde_json::to_string(&target).map_err(|_| SyncError::new("binding-integrity", 409))?],
     )?;
+    transaction.commit()?;
     if let Some(stage) = stage.filter(|stage| {
         store
             .lww_receive_progress(header.binding_authority)

@@ -28,7 +28,7 @@ const equal = (actual: unknown, expected: unknown, name: string) => {
 }
 const blockedRequests: string[] = []
 window.addEventListener('securitypolicyviolation', event => blockedRequests.push(event.violatedDirective))
-const phase = await invoke<{ runId: string; phase: string }>('boundary_phase')
+const phase = await invoke<{ runId: string; phase: string; accountOrigin?: string }>('boundary_phase')
 const cases: string[] = []
 let measurements: unknown
 try {
@@ -39,7 +39,11 @@ try {
         await runNativeExitPhase(phase, store, fixture)
         await new Promise<never>(() => {})
     }
-    if (phase.phase === 'asset-benchmark' || phase.phase === 'asset-benchmark-small') {
+    if (phase.phase === 'official-account-benchmark') {
+        const { runOfficialAccountMeasurements } = await import('../../benchmarks/official-account/suite')
+        measurements = await runOfficialAccountMeasurements(store, phase.accountOrigin ?? '')
+        cases.push('official-account-assets-and-ledger')
+    } else if (phase.phase === 'asset-benchmark' || phase.phase === 'asset-benchmark-small') {
         const { runNativeAssetMeasurements } = await import('../../benchmarks/native-assets/suite')
         measurements = await runNativeAssetMeasurements(store, phase.phase === 'asset-benchmark-small')
         cases.push(phase.phase === 'asset-benchmark-small' ? 'small-asset-bytes-aliases' : 'asset-bytes-aliases-and-inlays')

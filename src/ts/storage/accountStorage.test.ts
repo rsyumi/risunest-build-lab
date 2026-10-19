@@ -1801,6 +1801,38 @@ describe('AccountStorage structured wire contract', () => {
         expect(forbidden.cancel).toHaveBeenCalledOnce()
     })
 
+    it.each([401, 403])('stops a native asset read when HTTP %s persists after one authentication', async status => {
+        const { options } = nativeReauthenticationFixture()
+        mocks.alertLogin.mockResolvedValue(JSON.stringify({ id: 'account-a', token: 'fresh-token', data: {} }))
+        mocks.fetchProtectedResource
+            .mockResolvedValueOnce(response(null, status))
+            .mockResolvedValueOnce(response(null, status))
+            .mockRejectedValue(new Error('Unexpected third request'))
+        const { AccountStorage, AccountReadError } = await loadStorage()
+        const result = new AccountStorage(options).readItem('assets/blocked')
+        await expect(result).rejects.toBeInstanceOf(AccountReadError)
+        await expect(result).rejects.toMatchObject({ kind: 'http', status })
+        expect(mocks.alertLogin).toHaveBeenCalledOnce()
+    })
+
+    it.each([429, 503, 404])('preserves HTTP %s and Retry-After in a native asset failure', async status => {
+        const { options } = nativeReauthenticationFixture()
+        mocks.fetchProtectedResource.mockResolvedValueOnce(response('synthetic error', status, { 'Retry-After': '120' }))
+        const { AccountStorage } = await loadStorage()
+        await expect(new AccountStorage(options).readItem('assets/failure')).rejects.toMatchObject({ kind: 'http', status, retryAfter: '120' })
+    })
+    it.each(['get', 'set'])('classifies a native asset cache %s failure as local storage failure', async action => {
+        const { options } = nativeReauthenticationFixture()
+        const assetCache = {
+            getItem: async () => { if (action === 'get') throw new Error('synthetic storage failure'); return null },
+            setItem: async () => { throw new Error('synthetic quota failure') },
+        }
+        mocks.fetchProtectedResource.mockResolvedValueOnce(response(Uint8Array.of(1)))
+        const { AccountStorage } = await loadStorage()
+        await expect(new AccountStorage({ ...options, assetCache }).readItem('assets/failure')).rejects.toMatchObject({ kind: 'local' })
+        expect(mocks.alertLogin).not.toHaveBeenCalled()
+    })
+
     it('unmigrates assets referenced by the account cold character before disabling account', async () => {
         const officialCold = {
             character: {

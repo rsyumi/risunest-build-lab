@@ -1,5 +1,5 @@
 use risunest_network_log::reqwest::RequestBuilderExt;
-use super::{restore, JobControl, JobPhase, JobProgress, JobResultSummary, NativeJobError, OpenedJobSource};
+use super::{restore, ImportCounts, JobControl, JobDetail, JobPhase, JobProgress, JobResultSummary, JobStage, NativeJobError, OpenedJobSource, StageUnit};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
@@ -43,6 +43,7 @@ pub(crate) fn restore_official_snapshot(
 ) -> Result<JobResultSummary, NativeJobError> {
     job.start(JobPhase::ReadingSource)
         .map_err(job_state_error)?;
+    report_download_progress(job, 0, None)?;
     let downloaded =
         tauri::async_runtime::block_on(download_snapshot(&request, owned_directory, job))?;
     let DownloadOutcome::File(mut source) = downloaded else {
@@ -265,7 +266,11 @@ async fn download_snapshot_attempt(
 }
 
 fn report_download_progress(job: &JobControl, written: u64, length: Option<u64>) -> Result<(), NativeJobError> {
-    let previous = job.status().progress;
+    let status = job.status();
+    let stage_completed = status.detail.as_ref().map(|detail| detail.stage_completed).unwrap_or(0).max(written);
+    job.set_detail(JobDetail::new(JobStage::DownloadingAccountBackup, StageUnit::Bytes,
+        stage_completed, length.map(|length| length.max(stage_completed)), ImportCounts::default())).map_err(job_state_error)?;
+    let previous = status.progress;
     job.set_progress(JobProgress {
         completed_bytes: written.max(previous.completed_bytes),
         total_bytes: previous.total_bytes.or(length.map(|length| length * 2)),

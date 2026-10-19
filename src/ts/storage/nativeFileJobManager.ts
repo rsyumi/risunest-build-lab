@@ -91,6 +91,7 @@ export interface SharedNativeFileOperationContext {
 }
 
 export interface SharedNativeFileOperationOptions {
+    beforeSettlement?(signal: AbortSignal): Promise<void>
     userInitiated?: boolean
     presentation?: NativeFileOperationPresentation
     format?: NativeFileOperationFormat
@@ -210,7 +211,7 @@ function outcomeFromSettlement(
     }
     if ('error' in settlement) {
         const warningCodes = mergeWarningCodes(statusWarnings, stringWarningCodes(settlement.error))
-        if (isAbortError(settlement.error)) {
+        if (isAbortError(settlement.error) || state.status?.officialAssets?.state === 'cancelled') {
             return {
                 ...base, state: 'cancelled', warningCodes,
                 ...(isBackgroundExpiryReason(settlement.error) ? { interruption: 'background-expired' as const } : {}),
@@ -367,31 +368,43 @@ function runSharedNativeFileOperationWithAdmission<T>(
             releaseAdmission()
         },
     }
+    let taskSignal = controller.signal
+    let finalized = false
+    const finalize = async () => {
+        if (finalized) return
+        finalized = true
+        await options.beforeSettlement?.(taskSignal)
+    }
     try {
         const taskKind = options.format === 'library-backup' || options.format === 'risu-save'
             ? (kind === 'export' ? 'backup' : 'restore') : kind
         runWithMobileBackgroundTask(taskKind, async task => {
-            const waiting = bodyOnly ? null : waitForLibraryFileOperation(task.signal ?? context.signal)
-            if (waiting) {
-                updateActiveState({ waitingForSync: true })
-                await waiting
-                updateActiveState({ waitingForSync: false })
-            }
-            return operation({
-            ...context,
-            signal: task.signal ?? context.signal,
-            onStatus: status => {
-                context.onStatus(status)
-                task.progress(backgroundTaskPercent(status))
-            },
-            })
-        }, controller.signal, options.userInitiated ?? true).then(
+            taskSignal = task.signal ?? context.signal
+            try {
+                const waiting = bodyOnly ? null : waitForLibraryFileOperation(task.signal ?? context.signal)
+                if (waiting) {
+                    updateActiveState({ waitingForSync: true })
+                    await waiting
+                    updateActiveState({ waitingForSync: false })
+                }
+                return await operation({
+                    ...context,
+                    signal: task.signal ?? context.signal,
+                    onStatus: status => {
+                        context.onStatus(status)
+                        task.progress(backgroundTaskPercent(status))
+                    },
+                })
+            } finally { await finalize() }
+        }, controller.signal, options.userInitiated ?? true).finally(finalize).then(
             value => { settle({ value }); resolveOperation(value) },
             error => { settle({ error }); rejectOperation(error) },
         )
     } catch (error) {
-        settle({ error })
-        rejectOperation(error)
+        void finalize().then(
+            () => { settle({ error }); rejectOperation(error) },
+            failure => { settle({ error: failure }); rejectOperation(failure) },
+        )
     }
     return promise
 }

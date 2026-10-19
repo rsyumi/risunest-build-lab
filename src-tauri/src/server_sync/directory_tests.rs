@@ -163,20 +163,55 @@ fn authenticated_identity_rejection_does_not_try_registry_fallback() {
     identity_task.join().unwrap();
 }
 fn directory_server(body: String) -> (String, std::thread::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", server.server_addr());
     let task = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        let input = request(&mut stream).to_lowercase();
-        assert!(input.starts_with("get /endpoints/"));
-        assert!(!input.contains("authorization"));
-        assert!(!input.contains("x-risu-library"));
-        response(&mut stream, &body, "200 OK");
+        let request = server.recv_timeout(Duration::from_secs(10)).unwrap().expect("registry lookup");
+        assert_eq!(request.method(), &tiny_http::Method::Get);
+        assert!(request.url().starts_with("/endpoints/"));
+        assert!(!request.headers().iter().any(|header| {
+            header.field.equiv("authorization") || header.field.equiv("x-risu-library")
+        }));
+        request.respond(tiny_http::Response::from_string(body)).unwrap();
     });
     (endpoint, task)
+}
+
+struct ResponseServer {
+    endpoint: String,
+    requests: Arc<std::sync::atomic::AtomicUsize>,
+    server: Arc<tiny_http::Server>,
+    task: Option<std::thread::JoinHandle<()>>,
+}
+impl ResponseServer {
+    fn new(body: String, status: u16) -> Self {
+        let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
+        let endpoint = format!("http://{}", server.server_addr());
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let serving = server.clone();
+        let count = requests.clone();
+        let task = std::thread::spawn(move || {
+            while let Ok(request) = serving.recv() {
+                count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if status == 200 {
+                    assert_eq!(request.method(), &tiny_http::Method::Get);
+                    assert!(request.url().starts_with("/endpoints/"));
+                    assert!(!request.headers().iter().any(|header| {
+                        header.field.equiv("authorization") || header.field.equiv("x-risu-library")
+                    }));
+                }
+                request.respond(tiny_http::Response::from_string(body.clone()).with_status_code(status)).unwrap();
+            }
+        });
+        Self { endpoint, requests, server, task: Some(task) }
+    }
+    fn requests(&self) -> usize { self.requests.load(std::sync::atomic::Ordering::Relaxed) }
+}
+impl Drop for ResponseServer {
+    fn drop(&mut self) {
+        self.server.unblock();
+        self.task.take().unwrap().join().unwrap();
+    }
 }
 fn directory() -> risunest_sync_connect::Directory {
     risunest_sync_connect::Directory {
@@ -224,7 +259,9 @@ fn offline_clients_share_registry_admission() {
     assert_eq!(task.join().unwrap().unwrap_err().code, "directory-response-error");
 }
 #[test]
-fn native_directory_recovery_accepts_http_after_verifying_identity() {
+fn configuring_through_directory_persists_only_the_verified_endpoint() {
+    use crate::server_sync::{binding, credentials::StoredConfig, lww_client::OperationLog, lww_tests::local};
+
     for device in ["device", "wrong-device"] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -246,25 +283,206 @@ fn native_directory_recovery_accepts_http_after_verifying_identity() {
         let envelope = risunest_sync_connect::seal_endpoint(&directory.uuid, &directory.key, &endpoint).unwrap();
         let (registry, registry_task) = directory_server(envelope);
         directory.base_url = registry;
-        let mut config = tests::config("http://127.0.0.1:1");
+        let retired = ResponseServer::new(String::new(), 503);
+        let mut config = tests::config(&retired.endpoint);
         config.directory = Some(directory);
-        let mut client = ServerClient::new(config).unwrap();
-        client.http = Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(5))
-            .build()
-            .unwrap();
-        let result = client.resolve_identity();
+        let (root, store) = local();
+        let previous = StoredConfig::persist(root.path(), &config).unwrap();
+        let log = OperationLog::open(root.path()).unwrap();
+        log.save_config("candidate", &previous).unwrap();
+        let result = binding::configure(&store, config.clone());
+        let stored = log.config("candidate").unwrap().unwrap();
         if device == "device" {
             assert!(result.is_ok(), "{}", result.unwrap_err().code);
-            assert_eq!(client.config().endpoint, endpoint);
+            let saved = stored.resolve(root.path()).unwrap();
+            assert_eq!(saved.endpoint, endpoint);
+            assert_eq!(saved.library_id, config.library_id);
+            assert_eq!(saved.device_id, config.device_id);
+            assert_eq!(saved.token, config.token);
+            assert_eq!(serde_json::to_value(saved.directory).unwrap(), serde_json::to_value(config.directory).unwrap());
         } else {
             assert_eq!(result.unwrap_err().code, "device-identity-mismatch");
-            assert_eq!(client.config().endpoint, "http://127.0.0.1:1");
+            assert_eq!(serde_json::to_value(stored).unwrap(), serde_json::to_value(previous).unwrap());
         }
         registry_task.join().unwrap();
         server.join().unwrap();
+    }
+}
+
+#[test]
+fn separate_receive_and_ack_clients_recover_a_stored_old_endpoint() {
+    use axum::response::IntoResponse;
+    use crate::server_sync::{
+        credentials::StoredConfig,
+        lww_tests::{drain_publications, header, local, save, LocalServerFixture},
+    };
+
+    let lost_reply = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let lose_first_reply = lost_reply.clone();
+    let server = LocalServerFixture::with_router(|router| {
+        router.layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let lose_first_reply = lose_first_reply.clone();
+                async move {
+                    let ack = request.uri().path() == "/ack";
+                    let response = next.run(request).await;
+                    if ack && response.status().is_success()
+                        && lose_first_reply.swap(false, std::sync::atomic::Ordering::Relaxed)
+                    {
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response()
+                    } else {
+                        response
+                    }
+                }
+            },
+        ))
+    });
+    let (_source_root, mut source) = local();
+    let (_target_root, mut target) = local();
+    let sender = server.client(&source);
+    let receiver = server.client(&target);
+    let mut config = receiver.client.config();
+    drop(receiver);
+    let mut directory = directory();
+    let envelope = risunest_sync_connect::seal_endpoint(&directory.uuid, &directory.key, &server.endpoint).unwrap();
+    let registry = ResponseServer::new(envelope, 200);
+    directory.base_url = registry.endpoint.clone();
+    config.directory = Some(directory);
+    let retired = ResponseServer::new(String::new(), 503);
+    let stored = StoredConfig::persist(target.repository_root(), &config).unwrap();
+    target.server_save_config(&stored).unwrap();
+
+    for language in ["ja", "de"] {
+        save(&mut source, &["root", "language"], serde_json::json!(language));
+        drain_publications(&sender, &mut source, &[]).unwrap();
+        let request = header(&target);
+        let page = crate::server_sync::commands::with_lww_client(&mut target, None, |core, store| {
+            core.client.retry_budget = tests::no_sleep_budget();
+            core.receive_page(store, &request)
+        }).unwrap();
+        target.lww_stage_receive(&page).unwrap();
+        target.lww_apply_receive(&crate::persistent_store::lww::ApplyReceive {
+            header: page.header.clone(),
+            generating: vec![],
+        }).unwrap();
+        target.lww_finish_receive(&page.header).unwrap();
+        if language == "ja" {
+            let mut outdated = stored.clone();
+            outdated.endpoint = retired.endpoint.clone();
+            target.server_save_config(&outdated).unwrap();
+        }
+        // The production ACK command opens another client from the stored registration.
+        crate::server_sync::commands::with_lww_client(&mut target, None, |core, store| {
+            core.client.retry_budget = tests::no_sleep_budget();
+            core.finish_receive(store, &page.header)
+        }).unwrap();
+        let db = rusqlite::Connection::open(server.root().join("metadata.sqlite")).unwrap();
+        let ack: String = db.query_row("SELECT ack FROM devices WHERE id=?1", [&config.device_id], |row| row.get(0)).unwrap();
+        assert_eq!(ack, page.progress.cursor.0.to_string());
+    }
+    assert!(!lost_reply.load(std::sync::atomic::Ordering::Relaxed));
+    save(&mut target, &["root", "language"], serde_json::json!("fr"));
+    let request = header(&target);
+    assert!(crate::server_sync::commands::with_lww_client(&mut target, None, |core, store| {
+        core.push(store, &request, &[])
+    }).unwrap().is_some());
+    assert_eq!(registry.requests(), 1);
+}
+
+fn seed_binding_server(server: &crate::server_sync::lww_tests::LocalServerFixture) {
+    use crate::server_sync::lww_tests::{drain_publications, local, save};
+    let (_root, mut source) = local();
+    save(&mut source, &["root", "language"], serde_json::json!("ja"));
+    drain_publications(&server.client(&source), &mut source, &[]).unwrap();
+}
+
+fn install_binding_config(store: &crate::persistent_store::PersistentStore, config: &crate::server_sync::credentials::StoredConfig) {
+    let log = crate::server_sync::lww_client::OperationLog::open(store.repository_root()).unwrap();
+    store.server_save_config(config).unwrap();
+    log.save_config("active", config).unwrap();
+    for slot in ["active", "selected"] {
+        let mut target: serde_json::Value = log.verified("bindings", slot).unwrap();
+        target["config"] = serde_json::to_value(config).unwrap();
+        log.0.execute("UPDATE bindings SET body=?1 WHERE id=?2", rusqlite::params![target.to_string(), slot]).unwrap();
+    }
+}
+
+fn assert_binding_config(store: &crate::persistent_store::PersistentStore, expected: &crate::server_sync::credentials::StoredConfig) {
+    let log = crate::server_sync::lww_client::OperationLog::open(store.repository_root()).unwrap();
+    let target: serde_json::Value = log.verified("bindings", "active").unwrap();
+    let expected = serde_json::to_value(expected).unwrap();
+    assert_eq!(serde_json::to_value(store.server_stored_config().unwrap().unwrap()).unwrap(), expected);
+    assert_eq!(serde_json::to_value(log.config("active").unwrap().unwrap()).unwrap(), expected);
+    assert_eq!(target["config"], expected);
+}
+
+#[test]
+fn recovered_binding_endpoints_survive_reactivation_without_replacing_credentials() {
+    use crate::server_sync::{binding, commands::with_lww_client, credentials::StoredConfig, lww_client::OperationLog, lww_tests::{header, local, LocalServerFixture}};
+    for during_activation in [true, false] {
+        let server = LocalServerFixture::new();
+        seed_binding_server(&server);
+        let (root, mut store) = local();
+        let (mut config, _) = server.candidate(&store);
+        let mut directory = directory();
+        let registry = ResponseServer::new(risunest_sync_connect::seal_endpoint(&directory.uuid, &directory.key, &server.endpoint).unwrap(), 200);
+        directory.base_url = registry.endpoint.clone();
+        config.directory = Some(directory);
+        let expected = StoredConfig::persist(root.path(), &config).unwrap();
+        OperationLog::open(root.path()).unwrap().save_config("candidate", &expected).unwrap();
+        binding::first_binding_cycle(&mut store, Arc::new(TestIoCounters::default()), |_| {}).unwrap();
+        let retired = ResponseServer::new(String::new(), 503);
+        let mut outdated = expected.clone();
+        outdated.endpoint = retired.endpoint.clone();
+        install_binding_config(&store, &outdated);
+        drop(store);
+        let mut store = crate::persistent_store::PersistentStore::open(root.path()).unwrap();
+        if during_activation {
+            let request = header(&store);
+            binding::activate(&mut store, &request, None).unwrap();
+        } else {
+            let error = with_lww_client(&mut store, None, |core, _| {
+                core.client.resolve_identity()?;
+                Err::<(), _>(SyncError::new("synthetic-operation-failed", 409))
+            }).unwrap_err();
+            assert_eq!(error.code, "synthetic-operation-failed");
+        }
+        assert_binding_config(&store, &expected);
+        drop(store);
+        let mut store = crate::persistent_store::PersistentStore::open(root.path()).unwrap();
+        let request = header(&store);
+        binding::activate(&mut store, &request, None).unwrap();
+        assert_binding_config(&store, &expected);
+        assert_eq!(registry.requests(), 1);
+    }
+}
+
+#[test]
+fn late_endpoint_recovery_cannot_overwrite_a_newer_endpoint_or_credential() {
+    use crate::server_sync::{binding, credentials::StoredConfig, lww_client::LwwClient, lww_tests::{local, LocalServerFixture}};
+    let server = LocalServerFixture::new();
+    seed_binding_server(&server);
+    let (root, mut store) = local();
+    server.prepare_binding_candidate(&store);
+    binding::first_binding_cycle(&mut store, Arc::new(TestIoCounters::default()), |_| {}).unwrap();
+    let expected = store.server_stored_config().unwrap().unwrap();
+    for changed_credential in [false, true] {
+        install_binding_config(&store, &expected);
+        let mut resolved = expected.resolve(root.path()).unwrap();
+        resolved.endpoint = server.endpoint.replace("127.0.0.1", "localhost");
+        let mut late = LwwClient::new(root.path(), resolved).unwrap();
+        late.access = Some(expected.clone());
+        late.client.resolve_identity().unwrap();
+        let newer = if changed_credential {
+            StoredConfig::persist(root.path(), &expected.resolve(root.path()).unwrap()).unwrap()
+        } else {
+            let mut newer = expected.clone();
+            newer.endpoint = format!("{}/", server.endpoint);
+            newer
+        };
+        install_binding_config(&store, &newer);
+        binding::persist_resolved_endpoint(&store, &late).unwrap();
+        assert_binding_config(&store, &newer);
     }
 }
 

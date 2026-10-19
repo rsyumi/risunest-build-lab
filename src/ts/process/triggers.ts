@@ -1,3 +1,4 @@
+import { userScriptConsole } from '../userScriptConsole'
 import { parseChatML } from "../parser/chatML";
 import { v4 } from "uuid";
 import { risuChatParser as risuChatParserGlobal } from "../parser/parser.svelte";
@@ -1973,7 +1974,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                 }
                 case 'v2ConsoleLog':{
                     const sourceValue = effect.sourceType === 'value' ? risuChatParser(effect.source,{chara:char}) : getVar(risuChatParser(effect.source,{chara:char}))
-                    console.log(sourceValue)
+                    userScriptConsole.log(sourceValue)
                     break
                 }
                 case 'v2StopTrigger':{

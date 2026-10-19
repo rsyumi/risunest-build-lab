@@ -4,7 +4,7 @@ use crate::device_secrets::{self as device, Purpose};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct StoredConfig {
     pub endpoint: String,

@@ -468,7 +468,7 @@ async function hypaMemoryV3MainExp(
                     ? result.error
                     : "Empty summary returned";
 
-                console.log(logPrefix, "Summarization failed:", `\n${errorMessage}`);
+                console.error(logPrefix, "Summarization failed:", `\n${errorMessage}`);
 
                 return {
                     currentTokens,
@@ -1197,7 +1197,7 @@ async function hypaMemoryV3Main(
                     tags: [],
                 });
             } catch (error) {
-                console.log(logPrefix, "Summarization failed:", `\n${error}`);
+                console.error(logPrefix, "Summarization failed:", `\n${error}`);
 
                 return {
                     currentTokens,
@@ -1425,7 +1425,7 @@ async function hypaMemoryV3Main(
 
                     queries.push(summarizeResult);
                 } catch (error) {
-                    console.log(logPrefix, "Summarization failed:", `\n${error}`);
+                    console.error(logPrefix, "Summarization failed:", `\n${error}`);
 
                     return {
                         currentTokens,

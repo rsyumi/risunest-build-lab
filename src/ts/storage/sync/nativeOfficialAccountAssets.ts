@@ -1,12 +1,11 @@
 import type { AccountStorage } from '../accountStorage'
 import type { BlobStore } from '../blobStore'
-import { storeActiveAsset } from '../accountAssetAccess'
 import type { NativeDeviceSettings } from '../nativeDeviceSettings'
 import type { PersistentDataStore } from '../persistentDataStore'
-import { withPersistentRevisionLease } from '../persistentRecordIterator'
 import type { OfficialAssetLedger } from './officialAssetLedger'
-import { collectPinnedReferences } from './officialAccountSnapshot'
-import { nativeOfficialAccountKeys } from './nativeOfficialAccountFlow'
+import { createOfficialAccountAssetContinuation, OfficialAssetOwnershipError } from './officialAccountAssetContinuation'
+import { emptyOfficialAccountAssetCounts, type OfficialAccountAssetOptions, type OfficialAccountAssetOutcome } from './officialAccountAssetOutcome'
+import { transferOfficialAccountAssets } from './officialAccountTransfer'
 
 export function createNativeOfficialAccountAssets(dependencies: {
     settings: NativeDeviceSettings
@@ -15,48 +14,89 @@ export function createNativeOfficialAccountAssets(dependencies: {
     account: Pick<AccountStorage, 'readItem'>
     ledger: OfficialAssetLedger
     flushMetadata(): Promise<void>
+    origin: string
+    concurrency?: 1 | 2 | 4
+    getAccountId(): string | null | undefined
 }) {
-    const { settings, store, account, ledger } = dependencies
-    const key = nativeOfficialAccountKeys.pendingAssets
-    const clear = () => settings.set(key, null)
-    const prepare = (accountId: string) => settings.set(key, { accountId })
-    const complete = async (accountId: string, onProgress?: (completed: number, total: number) => void): Promise<number> => {
-        const pending = await settings.get(key) as { accountId?: unknown } | null
-        if (pending?.accountId !== accountId) return 0
-        const lease = await store.acquireRevision((await store.readRoot()).revision)
-        return withPersistentRevisionLease(lease, async reader => {
-            const references = await collectPinnedReferences(reader)
+    const { account, ledger } = dependencies
+    const continuation = createOfficialAccountAssetContinuation(dependencies)
+    const complete = async (accountId: string, options: OfficialAccountAssetOptions = {}): Promise<OfficialAccountAssetOutcome> => {
+        const outcome: OfficialAccountAssetOutcome = { phase: 'checking', state: 'running', counts: emptyOfficialAccountAssetCounts(), failedKeys: [] }
+        const counts = outcome.counts
+        let lastReportAt = -Infinity, lastPhase = ''
+        const report = () => {
+            const phase = `${outcome.phase}:${outcome.state}`
+            if (phase === lastPhase && Date.now() - lastReportAt < 150) return
+            lastPhase = phase; lastReportAt = Date.now()
+            options.onProgress?.({ ...outcome, counts: { ...counts } })
+        }
+        const receipt = await continuation.load(accountId, options.operationId)
+        if (!receipt) throw new OfficialAssetOwnershipError('receipt')
+        outcome.operationId = receipt.operationId
+        options.onRestoreStatus?.(receipt.status)
+        const failedBefore = new Set([...receipt.failedKeys, ...options.previousFailedKeys ?? []])
+        const stillFailed = new Set(failedBefore)
+        report()
+        try {
+            await continuation.start(receipt)
+            const assets = receipt.manifest
+            counts.required = assets.length
+            counts.notAttempted = counts.required
+            report()
+            if (options.signal?.aborted) { outcome.state = 'cancelled'; return outcome }
             const blobs = await dependencies.resolveBlobs()
-            let missing = 0
-            let completed = 0
-            onProgress?.(completed, references.assets.length)
-            for (const asset of references.assets) {
-                if (await blobs.stat(asset)) {
-                    onProgress?.(++completed, references.assets.length)
-                    continue
-                }
-                const result = await account.readItem(asset)
-                if (result.kind === 'missing') {
-                    missing += 1
-                    onProgress?.(++completed, references.assets.length)
-                    continue
-                }
-                const name = asset.replace(/\\/g, '/').split('/').pop() ?? asset
-                await storeActiveAsset(blobs, asset, result.bytes, {
-                    kind: 'asset', mime: '', name, ext: name.split('.').pop() ?? '',
-                })
-                const verified = await blobs.read(asset)
-                if (!verified || verified.length !== result.bytes.length
-                    || verified.some((value, index) => value !== result.bytes[index])) {
-                    throw new Error('Restored account asset verification failed')
-                }
-                ledger.record(asset, asset)
-                onProgress?.(++completed, references.assets.length)
+            if (!blobs.statMany || !blobs.putVerified) throw new Error('Native account asset storage is unavailable')
+            const present: Awaited<ReturnType<NonNullable<BlobStore['statMany']>>> = []
+            for (let offset = 0; offset < assets.length; offset += 512) {
+                if (options.signal?.aborted) { outcome.state = 'cancelled'; return outcome }
+                await continuation.guard(receipt)
+                const batch = await blobs.statMany(assets.slice(offset, offset + 512))
+                present.push(...batch)
+                batch.forEach((value, index) => { if (value) { counts.alreadyPresent++; counts.notAttempted--; stillFailed.delete(assets[offset + index]) } })
+                report()
             }
-            await dependencies.flushMetadata()
-            if (missing === 0) await clear()
-            return missing
-        })
+            const remaining = assets.filter((_asset, index) => !present[index])
+            const queue = [...remaining.filter(asset => !failedBefore.has(asset)), ...remaining.filter(asset => failedBefore.has(asset))]
+            outcome.phase = 'downloading'
+            report()
+            const result = await transferOfficialAccountAssets({
+                accountId, origin: dependencies.origin, keys: queue, concurrency: dependencies.concurrency, signal: options.signal,
+                read: async (key, options) => { await continuation.guard(receipt); return account.readItem(key, options) },
+                install: async (asset, bytes, signal) => {
+                    await blobs.putVerified!(asset, bytes, {
+                        kind: 'asset', mime: '', name: asset.replace(/\\/g, '/').split('/').pop() ?? asset,
+                        ext: asset.split('.').pop() ?? '',
+                    }, async () => { if (signal.aborted) throw signal.reason; await continuation.guard(receipt) })
+                    ledger.record(asset, asset)
+                },
+                settled(asset, result) {
+                    counts[result]++
+                    counts.notAttempted--
+                    if (result === 'failed') stillFailed.add(asset)
+                    else stillFailed.delete(asset)
+                    report()
+                },
+                progress(transfer) { outcome.transfer = transfer; report() },
+            })
+            outcome.reason = result.reason
+            if (result.cancelled) outcome.state = 'cancelled'
+        } catch (error) { outcome.reason = error instanceof OfficialAssetOwnershipError && error.reason !== 'receipt' ? error.reason : 'local' }
+        finally {
+            outcome.phase = 'finishing'
+            report()
+            try { await dependencies.flushMetadata() }
+            catch { outcome.reason = 'local'; outcome.state = 'failed' }
+            if (outcome.state === 'running' && options.signal?.aborted) outcome.state = 'cancelled'
+            if (outcome.state === 'running') {
+                outcome.state = outcome.reason || counts.failed ? 'failed' : 'succeeded'
+                if (counts.failed && !outcome.reason) outcome.reason = 'files'
+            }
+            outcome.failedKeys = [...stillFailed]
+            try { await continuation.settle(receipt, outcome) }
+            catch (error) { outcome.state = 'failed'; outcome.reason = error instanceof OfficialAssetOwnershipError && error.reason !== 'receipt' ? error.reason : 'local' }
+            report()
+        }
+        return outcome
     }
-    return { prepare, complete, clear }
+    return { ...continuation, complete }
 }
