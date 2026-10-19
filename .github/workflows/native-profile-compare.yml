@@ -1,0 +1,218 @@
+name: Native profile comparison
+run-name: Native profile ${{ inputs.source_sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full snapshot commit SHA in this build-lab repository
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2022, ubuntu-24.04, macos-15-intel, macos-15]
+        variant: [baseline, crate-opt0]
+        include:
+          - { runner: windows-2022, target: x86_64-pc-windows-msvc }
+          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { runner: macos-15-intel, target: x86_64-apple-darwin }
+          - { runner: macos-15, target: aarch64-apple-darwin }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/source/src-tauri/target
+      SNAPSHOT_SHA: ${{ inputs.source_sha }}
+      VITE_RISU_LEGAL_CONFIGURED: "TRUE"
+    steps:
+      - name: Validate dispatch inputs
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git config --global core.autocrlf false
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Verify snapshot identity and integrity
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SNAPSHOT_SHA"
+          node ../control/scripts/verify-snapshot.mjs . sync
+          mkdir -p artifacts
+          cp .build-lab/source.json artifacts/source.json
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 10.34.1
+      - uses: dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install Linux package dependencies
+        if: runner.os == 'Linux'
+        timeout-minutes: 15
+        run: sudo apt-get -o Acquire::Retries=2 --error-on=any update && sudo apt-get -o Acquire::Retries=2 install -y build-essential pkg-config libwebkit2gtk-4.1-dev libssl-dev libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev patchelf desktop-file-utils shared-mime-info xdg-utils libfuse2t64 gnome-keyring dbus-x11 xvfb
+      - name: Install locked frontend inputs
+        run: pnpm install --frozen-lockfile
+      - name: Use a temporary directory without symlinked ancestors
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p "$RUNNER_TEMP/tests"
+          echo "TMPDIR=$(cd "$RUNNER_TEMP/tests" && pwd -P)" >> "$GITHUB_ENV"
+      - name: Use runner temporary storage for Windows tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $nativeTestTemp = Join-Path $env:RUNNER_TEMP 'native-tests'
+          New-Item -ItemType Directory -Force -Path $nativeTestTemp | Out-Null
+          "TEMP=$nativeTestTemp" >> $env:GITHUB_ENV
+          "TMP=$nativeTestTemp" >> $env:GITHUB_ENV
+      - name: Select the crate profile
+        if: matrix.variant == 'crate-opt0'
+        run: |
+          set -euo pipefail
+          mkdir -p .cargo
+          printf '[profile.release.package.risunest]\nopt-level = 0\n' > .cargo/config.toml
+          cat .cargo/config.toml
+      - name: App native tests
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          dbus-run-session -- bash scripts/linux-native-tests.sh --release --target ${{ matrix.target }} 2>&1 | tee artifacts/app-native.log
+      - name: App native tests
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path src-tauri/Cargo.toml --release --locked --target ${{ matrix.target }} 2>&1 | tee artifacts/app-native.log
+      - name: App native tests
+        if: runner.os == 'Windows'
+        run: |
+          set -euo pipefail
+          isolated=(
+            external_storage::packaging::tests::c_a_spool_with_room_for_two_objects_still_finishes_the_publication
+            external_storage::packaging::tests::c_a_no_op_publication_whose_every_run_exceeds_the_bound_writes_nothing
+            external_storage::packaging::tests::c_required_edits_beyond_the_bound_are_all_published_beside_a_bounded_cycle
+          )
+          skips=()
+          for test in "${isolated[@]}"; do skips+=(--skip "$test"); done
+          cargo test --manifest-path src-tauri/Cargo.toml --release --locked --target '${{ matrix.target }}' -- "${skips[@]}" 2>&1 | tee artifacts/app-native.log
+          cargo test --manifest-path src-tauri/Cargo.toml --release --locked --target '${{ matrix.target }}' --lib -- --exact "${isolated[@]}" --test-threads=1 --nocapture 2>&1 | tee artifacts/native-storage-tests.log
+          grep -F 'test result: ok. 3 passed; 0 failed; 0 ignored;' artifacts/native-storage-tests.log
+      - name: Persistence boundary
+        if: matrix.runner == 'windows-2022' || matrix.runner == 'macos-15'
+        run: |
+          set -euo pipefail
+          pnpm desktop:test-boundary:agent 2>&1 | tee artifacts/boundary.log
+      - name: Persistence boundary
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          xvfb-run -a dbus-run-session -- bash scripts/linux-native-tests.sh --boundary 2>&1 | tee artifacts/boundary.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-profile-${{ matrix.runner }}-${{ matrix.variant }}-${{ github.run_attempt }}
+          path: source/artifacts/
+          retention-days: 3
+          if-no-files-found: warn
+  wasm-recheck:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [baseline, dev-parallel, release-crate-opt0]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/source/src-tauri/target
+      SNAPSHOT_SHA: ${{ inputs.source_sha }}
+      VARIANT: ${{ matrix.variant }}
+      CC_wasm32_unknown_unknown: clang
+      AR_wasm32_unknown_unknown: llvm-ar
+    steps:
+      - name: Validate dispatch inputs
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Verify snapshot identity and integrity
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SNAPSHOT_SHA"
+          node ../control/scripts/verify-snapshot.mjs . sync
+          mkdir -p artifacts
+          cp .build-lab/source.json artifacts/source.json
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 10.34.1
+      - uses: dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install native and WASM build dependencies
+        timeout-minutes: 15
+        run: sudo apt-get -o Acquire::Retries=2 --error-on=any update && sudo apt-get -o Acquire::Retries=2 install -y clang llvm pkg-config libwebkit2gtk-4.1-dev libssl-dev libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev gnome-keyring dbus-x11
+      - name: Install locked frontend inputs
+        run: pnpm install --frozen-lockfile
+      - name: Install the locked WASM binding generator
+        shell: pwsh
+        run: |
+          $lock = Get-Content -Raw crates/external-storage-wasm/Cargo.lock
+          $version = [regex]::Match($lock, 'name = "wasm-bindgen"\r?\nversion = "([^"]+)"').Groups[1].Value
+          if (-not $version) { throw 'Missing wasm-bindgen lockfile version' }
+          cargo install wasm-bindgen-cli --version $version --locked
+          if ($LASTEXITCODE -ne 0) { throw 'wasm-bindgen installation failed' }
+      - name: WASM core tests
+        run: |
+          set -euo pipefail
+          pnpm test:wasm 2>&1 | tee artifacts/wasm.log
+      - name: Recheck native artifacts after the standalone WASM build
+        run: |
+          set -euo pipefail
+          case "$VARIANT" in
+            baseline) args=(--lib external_storage -- --test-threads=1) ;;
+            dev-parallel) args=(--lib external_storage) ;;
+            release-crate-opt0) args=(--release --config 'profile.release.package.risunest.opt-level=0' --lib external_storage -- --test-threads=1) ;;
+            *) exit 1 ;;
+          esac
+          dbus-run-session -- bash scripts/linux-native-tests.sh "${args[@]}" 2>&1 | tee artifacts/recheck.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wasm-recheck-${{ matrix.variant }}-${{ github.run_attempt }}
+          path: source/artifacts/
+          retention-days: 3
+          if-no-files-found: warn
