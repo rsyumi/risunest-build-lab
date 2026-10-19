@@ -371,6 +371,51 @@ describe('native asset repository adapters', () => {
         )
     })
 
+    it('keeps a large source the native encoder left unchanged without downloading it back', async () => {
+        const transferSize = 64 * 1024 + 1
+        const source = new Uint8Array(transferSize)
+        source.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+        const invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+            if (command === 'native_asset_bytes_probe') return false
+            if (command === 'native_media_inlay_input_open') return { capacity: 64 * 1024 }
+            if (command === 'native_media_inlay_input_chunk') {
+                return Number(args?.offset) + (args?.data as number[]).length
+            }
+            if (command === 'native_media_encode_inlay_finish') {
+                return {
+                    data: null,
+                    outputId: null,
+                    outputSize: transferSize,
+                    sourceKept: true,
+                    metadata: {
+                        key: 'kept-inlay', kind: 'inlay', size: transferSize,
+                        mime: 'image/png', name: 'kept.png', ext: 'png',
+                        inlayType: 'image', width: 1, height: 1,
+                        preservationReason: 'color-profile',
+                    },
+                }
+            }
+            return undefined
+        })
+
+        const encoded = await createNativeNewInlayImageEncoder(invoke).encodeNewInlayImage(
+            'kept-inlay',
+            source,
+            { name: 'kept.png', options: { format: 'webp', quality: 85, maxDimension: 0, skipReencode: true, animationDecodeBytes: 256 * 1024 * 1024, animationMaxFps: 0 } },
+        )
+
+        expect(encoded.data).toBe(source)
+        expect(encoded.metadata).toMatchObject({ mime: 'image/png', ext: 'png', preservationReason: 'color-profile' })
+        expect(invoke.mock.calls.map(([command]) => command)).toEqual([
+            'native_asset_bytes_probe',
+            'native_media_inlay_input_open',
+            'native_media_inlay_input_chunk',
+            'native_media_inlay_input_chunk',
+            'native_media_encode_inlay_finish',
+            'native_media_inlay_input_cancel',
+        ])
+    })
+
     it('normalizes ignored original conversion options before invoking native code', async () => {
         const source = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
         const invoke = vi.fn(async () => ({

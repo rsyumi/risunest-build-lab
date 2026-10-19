@@ -1990,10 +1990,11 @@ pub(crate) async fn download_control_catalogs(
     catalogs:&[wire::StoredObject],staging_root:&Path,root_key:&[u8;32],record_into:Option<&Path>,
     provider:&dyn Provider,repository:&RepositoryHandle,cancel:&Cancellation,
 ) -> Result<Vec<PreparedObject>> {
+    let format_repository_id=super::lww_segment::format_repository_id(&repository.repository_id);
     let mut objects=BTreeMap::new();let mut roots=BTreeMap::new();
     for (index,catalog) in catalogs.iter().enumerate() {
         cancel.check()?;
-        if catalog.header.repository_id!=repository.repository_id || catalog.header.role!=wire::ObjectRole::Catalog {
+        if catalog.header.repository_id!=format_repository_id || catalog.header.role!=wire::ObjectRole::Catalog {
             return Err(corrupt("control catalog scope differs"));
         }
         if let Some(previous)=roots.insert(catalog.header.object_id.clone(),catalog.clone()) {
@@ -2023,8 +2024,9 @@ pub(crate) async fn revalidate_catalog(
     catalog:&wire::StoredObject,kind:wire::CatalogKind,root_key:&[u8;32],provider:&dyn Provider,
     repository:&RepositoryHandle,scratch_root:&Path,cancel:&Cancellation,
 ) -> Result<()> {
+    let format_repository_id=super::lww_segment::format_repository_id(&repository.repository_id);
     if !matches!(kind,wire::CatalogKind::Records|wire::CatalogKind::Assets)
-        || catalog.header.repository_id!=repository.repository_id || catalog.header.role!=wire::ObjectRole::Catalog {return Err(corrupt("dependency catalog scope differs"));}
+        || catalog.header.repository_id!=format_repository_id || catalog.header.role!=wire::ObjectRole::Catalog {return Err(corrupt("dependency catalog scope differs"));}
     let stage=super::leftovers::managed_scratch(scratch_root,"catalog-check-")?;
     let remote=RemoteObject::from_stored(catalog,repository)?;
     let (entries,packs,_)=read_catalog(&remote,kind,root_key,stage.path(),provider,repository,cancel).await?;
@@ -2042,11 +2044,12 @@ pub(crate) async fn admit_data_catalogs(
     provider:&dyn Provider,repository:&RepositoryHandle,cancel:&Cancellation,
 ) -> Result<Vec<String>> {
     if catalogs.is_empty() {return Ok(Vec::new());}
+    let format_repository_id=super::lww_segment::format_repository_id(&repository.repository_id);
     let stage=super::leftovers::managed_scratch(store.repository_root(),"data-catalogs-")?;
     let mut hashes=BTreeSet::new();let mut roots=BTreeMap::new();
     for (index,catalog) in catalogs.iter().enumerate() {
         cancel.check()?;
-        if catalog.header.repository_id!=repository.repository_id || catalog.header.role!=wire::ObjectRole::Catalog {return Err(corrupt("control catalog scope differs"));}
+        if catalog.header.repository_id!=format_repository_id || catalog.header.role!=wire::ObjectRole::Catalog {return Err(corrupt("control catalog scope differs"));}
         if let Some(previous)=roots.insert(catalog.header.object_id.clone(),catalog.clone()) {
             if previous!=*catalog {return Err(corrupt("control catalog identity differs"));}continue;
         }
@@ -2643,8 +2646,9 @@ pub(crate) async fn admit_asset_catalogs(
     let cas=PayloadCas::new(store.repository_root()).map_err(transient)?;
     let mut planned=BTreeMap::<String,super::lww_residency::SharedPackedSource>::new();let mut proofs=Vec::new();
     let mut interner=super::lww_residency::ObjectInterner::default();
+    let format_repository_id=super::lww_segment::format_repository_id(&repository.repository_id);
     for catalog in catalogs {
-        if catalog.header.repository_id!=repository.repository_id || catalog.header.role!=wire::ObjectRole::Catalog {
+        if catalog.header.repository_id!=format_repository_id || catalog.header.role!=wire::ObjectRole::Catalog {
             return Err(corrupt("asset catalog repository or role differs"));
         }
         let root=RemoteObject::from_stored(catalog,repository)?;

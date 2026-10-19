@@ -520,6 +520,28 @@ describe('LocalWriter streamed backup entries', () => {
         expect(remove).not.toHaveBeenCalled()
     })
 
+    test('desktop WebView downloads preserve an existing file when the save dialog is cancelled', async () => {
+        state.platform = { runtime: 'tauri', os: 'windows' }
+        const files = new Map([['report.txt', 'existing']])
+        vi.mocked(save).mockResolvedValueOnce(null)
+        const write = vi.mocked(writeFile).mockImplementationOnce(async path => { files.set(String(path), 'overwritten') })
+        await expect(downloadFile('report.txt', 'new', { saveDialog: true })).resolves.toBe(false)
+        expect(files.get('report.txt')).toBe('existing')
+        expect(write).not.toHaveBeenCalled()
+        write.mockReset()
+    })
+
+    test('desktop WebView downloads write only the path selected in the save dialog', async () => {
+        state.platform = { runtime: 'tauri', os: 'windows' }
+        const files = new Map([['report.txt', new TextEncoder().encode('existing')]])
+        vi.mocked(save).mockResolvedValueOnce('/synthetic/report (1).txt')
+        const write = vi.mocked(writeFile).mockImplementationOnce(async (path, bytes) => { files.set(String(path), new Uint8Array(bytes as Uint8Array)) })
+        await expect(downloadFile('report.txt', 'new', { saveDialog: true })).resolves.toBe(true)
+        expect(new TextDecoder().decode(files.get('report.txt'))).toBe('existing')
+        expect(new TextDecoder().decode(files.get('/synthetic/report (1).txt'))).toBe('new')
+        write.mockReset()
+    })
+
     test('hands an Android download to the picker bridge and reports its cancellation', async () => {
         state.platform = { runtime: 'tauri', os: 'android' }
         state.downloadThroughAndroidSaf.mockResolvedValueOnce(false)

@@ -2154,7 +2154,7 @@ export const languageEnglish = {
 
             title: 'App updates',
             automatic: 'Check automatically',
-            automaticHelp: 'Checks after the app is ready, at most once every six hours.',
+            automaticHelp: 'Checks when the app starts and every six hours while it runs.',
             currentVersion: 'Current version',
             installMethod: 'Install method',
             lastChecked: 'Last checked',

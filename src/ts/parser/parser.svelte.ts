@@ -32,6 +32,8 @@ import {
     resolveEmotionAsset,
     type AssetLookupIndex,
 } from './assetLookup';
+import { ByteBudgetLru } from '../util/byteBudgetLru';
+import { getRuntimePerformanceBudgets, subscribeRuntimePerformanceProfile } from '../runtimePerformanceProfile';
 
 export { getAssetDistance as getDistance } from './assetLookup';
 
@@ -406,18 +408,19 @@ async function renderHighlightableMarkdown(data:string, settings?: MarkdownRende
             if(languageModule){
                 hljs.registerLanguage(lang, languageModule.default)
             }
+            // A replacer function keeps `$$`, `$&` and `$'` in the code literal.
             if(lang === 'none'){
-                rendered = rendered.replace(placeholder, `<pre><code>${md.utils.escapeHtml(code)}</code></pre>`)
+                rendered = rendered.replace(placeholder, () => `<pre><code>${md.utils.escapeHtml(code)}</code></pre>`)
             }
             else if(lang === 'error'){
-                rendered = rendered.replace(placeholder, `<div class="risu-error"><h1>${language.error}</h1>${md.utils.escapeHtml(code)}</div>`)
+                rendered = rendered.replace(placeholder, () => `<div class="risu-error"><h1>${language.error}</h1>${md.utils.escapeHtml(code)}</div>`)
             }
             else{
                 const highlighted = hljs.highlight(code, {
                     language: lang,
                     ignoreIllegals: true
                 }).value
-                rendered = rendered.replace(placeholder, `<pre class="hljs" x-hl-lang="${fileExt}"><code>${highlighted}</code></pre>`)   
+                rendered = rendered.replace(placeholder, () => `<pre class="hljs" x-hl-lang="${fileExt}"><code>${highlighted}</code></pre>`)
             }
         } catch (error) {
             
@@ -500,13 +503,15 @@ async function parseAdditionalAssets(data:string, char:simpleCharacterArgument|c
             && selectedAssetLookupCache.characterAssets === characterAssets
             && selectedAssetLookupCache.emotionAssets === emotionAssets
     }
-    const assetLookup = canUseSelectedCache
-        ? selectedAssetLookupCache.index
-        : createAssetLookupIndex({
-            characterAssets,
-            emotionAssets,
-            moduleAssets: renderContext.moduleAssets ?? getModuleAssets(),
-        })
+    let assetLookup: AssetLookupIndex | undefined = canUseSelectedCache ? selectedAssetLookupCache.index : undefined
+    const getAssetLookup = () => assetLookup ??= createAssetLookupIndex({
+        characterAssets,
+        emotionAssets,
+        moduleAssets: renderContext.moduleAssets ?? getModuleAssets(),
+    })
+    // Most text has no asset tags, so build the index on the first tag. A reactive
+    // caller still reads every asset here, so an asset edit re-runs it as before.
+    if ($effect.tracking()) getAssetLookup()
 
     let needsSourceAccess = false
     let cx: number|null = null
@@ -527,7 +532,7 @@ async function parseAdditionalAssets(data:string, char:simpleCharacterArgument|c
         }
 
         if(type === 'emotion'){
-            const srcPath = resolveEmotionAsset(assetLookup, name)?.srcPaths[0]
+            const srcPath = resolveEmotionAsset(getAssetLookup(), name)?.srcPaths[0]
             const image = srcPath ? await resolveImage(srcPath) : null
             const path = image?.url ?? (srcPath ? await getFileSrcCached(srcPath) : null)
             if(!path){
@@ -550,7 +555,7 @@ async function parseAdditionalAssets(data:string, char:simpleCharacterArgument|c
 
         const exactOnly = (renderContext.legacyMediaFindings ?? DBState.db.legacyMediaFindings) === true
         const match = resolveAdditionalAsset(
-            assetLookup,
+            getAssetLookup(),
             name,
             exactOnly ? -1 : (renderContext.assetMaxDifference ?? DBState.db.assetMaxDifference),
             getAssetDistance,
@@ -722,20 +727,31 @@ function parseThoughtsAndTools(
     let result = '',
         i = 0
     while (i < data.length) {
-        if (data.slice(i, i + 10) === '<Thoughts>') {
-            let j = i + 10,
-                depth = 1
-            while (j < data.length && depth > 0) {
-                if (data.slice(j, j + 10) === '<Thoughts>') depth++
-                if (data.slice(j, j + 11) === '</Thoughts>') depth--
-                j++
+        // Jump between tags instead of copying one character at a time.
+        const start = data.indexOf('<Thoughts>', i)
+        if (start === -1) {
+            result += data.substring(i)
+            break
+        }
+        result += data.substring(i, start)
+        i = start
+        let j = i + 10,
+            depth = 1
+        while (depth > 0) {
+            j = data.indexOf('<', j)
+            if (j === -1) {
+                j = data.length
+                break
             }
-            if (depth === 0 || thoughtMode === 'collapsed') {
-                const contentEnd = depth === 0 ? j - 1 : data.length
-                result += `<details data-risu-thought${thoughtMode === 'collapsed' ? ' data-risu-streaming-thought' : ''}><summary>${language.cot}</summary>${data.substring(i + 10, contentEnd)}</details>`
-                i = depth === 0 ? j + 10 : data.length
-                continue
-            }
+            if (data.startsWith('<Thoughts>', j)) depth++
+            else if (data.startsWith('</Thoughts>', j)) depth--
+            j++
+        }
+        if (depth === 0 || thoughtMode === 'collapsed') {
+            const contentEnd = depth === 0 ? j - 1 : data.length
+            result += `<details data-risu-thought${thoughtMode === 'collapsed' ? ' data-risu-streaming-thought' : ''}><summary>${language.cot}</summary>${data.substring(i + 10, contentEnd)}</details>`
+            i = depth === 0 ? j + 10 : data.length
+            continue
         }
         result += data[i++]
     }
@@ -1038,6 +1054,19 @@ function decodeStyleRule<T extends CssAtRuleAST | CssDeclarationAST>(rule:T):T{
     return rule
 }
 
+// Scoping depends only on the CSS after CBS, and parsing grows faster than the CSS.
+// A style that every row or streaming update repeats is parsed once.
+function createScopedStyleCache() {
+    return new ByteBudgetLru<string, string>(
+        getRuntimePerformanceBudgets().scopedStyleCacheBytes,
+        (text, scoped) => (text.length + scoped.length) * 2 + 32,
+    )
+}
+let scopedStyleCache = createScopedStyleCache()
+subscribeRuntimePerformanceProfile(() => {
+    scopedStyleCache = createScopedStyleCache()
+})
+
 /**
  * Decodes one <risu-style> body into scoped CSS. Returns the CSS on its own so
  * the caller can put it into a real <style> element instead of a markup string.
@@ -1069,6 +1098,10 @@ function decodeStyleContent(
             currentTime: parser.currentTime,
             triggerId: parser.triggerId,
         } : undefined)
+        const cached = scopedStyleCache.get(text)
+        if (cached !== undefined) {
+            return { css: cached }
+        }
         const ast = css.parse(text)
         const rules = ast?.stylesheet?.rules
         if(rules){
@@ -1077,12 +1110,12 @@ function decodeStyleContent(
             }
             ast.stylesheet.rules = rules
         }
-        return {
-            css: css.stringify(ast, {
-                indent: '',
-                compress: true,
-            })
-        }
+        const scoped = css.stringify(ast, {
+            indent: '',
+            compress: true,
+        })
+        scopedStyleCache.set(text, scoped)
+        return { css: scoped }
     } catch (error) {
         if (error instanceof CbsHistoryAccessError) throw error
         if(renderContext.returnCSSError ?? DBState.db.returnCSSError){
@@ -1692,6 +1725,8 @@ function blockEndMatcher(p1:string,type:{type:blockMatch,type2?:string,mode?:str
     }
 }
 
+const blockBoundary = /\{[{#]|#\}|\}\}/g
+
 export function risuChatParser(da:string, arg:{
     chatID?:number
     projectedChatID?:number
@@ -1959,7 +1994,12 @@ export function risuChatParser(da:string, arg:{
                 break
             }
             default:{
-                nested[0] += da[pointer]
+                // Copy plain text up to the next {{, {#, #} or }} in one step; the cases above
+                // would only append any other brace or hash.
+                blockBoundary.lastIndex = pointer
+                const end = blockBoundary.exec(da)?.index ?? da.length
+                nested[0] += da.substring(pointer, end)
+                pointer = end - 1
                 break
             }
         }

@@ -111,8 +111,18 @@ fn storage(error: impl std::fmt::Display) -> ProviderError {
     ProviderError::new(ErrorKind::Transient).caused(&error)
 }
 
+#[cfg(test)]
+static OPENS: std::sync::Mutex<BTreeMap<std::path::PathBuf, usize>> = std::sync::Mutex::new(BTreeMap::new());
+/// How many times a store under `root` was opened.
+#[cfg(test)]
+pub(crate) fn opens(root: &Path) -> usize {
+    OPENS.lock().unwrap().get(root).copied().unwrap_or(0)
+}
+
 impl ConnectionStore {
     pub(crate) fn open(root: &Path) -> Result<Self> {
+        #[cfg(test)]
+        { *OPENS.lock().unwrap().entry(root.to_owned()).or_default() += 1; }
         std::fs::create_dir_all(root).map_err(storage)?;
         if crate::trust_boundary::is_link_like(&std::fs::symlink_metadata(root).map_err(storage)?) {
             return Err(corrupt());

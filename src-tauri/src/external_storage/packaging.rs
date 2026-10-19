@@ -3496,8 +3496,9 @@ pub(super) async fn carry_asset_catalog(
     limits:PackageLimits,journal:&mut TransferJournal,provider:&dyn Provider,
     repository:&RepositoryHandle,cancel:&Cancellation,
 ) -> Result<CompletedAssetCatalog> {
+    let format_repository_id=super::lww_segment::format_repository_id(&repository.repository_id);
     entries.sort_by(|a,b|a.key.cmp(&b.key));
-    for entry in &entries {entry.validate(&repository.repository_id,repository)?;}
+    for entry in &entries {entry.validate(&format_repository_id,repository)?;}
     if entries.windows(2).any(|pair|pair[0].key==pair[1].key) {return Err(corrupt("duplicate carried asset"));}
     let fingerprint=catalog_fingerprint_of(wire::CatalogKind::Assets,
         entries.iter().map(|entry|(entry.key.as_str(),entry.byte_length,entry.content_sha256.as_str())));
@@ -3507,7 +3508,7 @@ pub(super) async fn carry_asset_catalog(
     let mut packs=BTreeMap::new();
     for entry in &entries {for pack in &entry.packs {packs.insert(pack.object_id.clone(),pack.clone());}}
     let mut referenced=packs.into_values().collect::<Vec<_>>();
-    let root=build_catalog(wire::CatalogKind::Assets,entries,&fingerprint,&repository.repository_id,
+    let root=build_catalog(wire::CatalogKind::Assets,entries,&fingerprint,&format_repository_id,
         &build_root,root_key,limits,None,None,true,&mut cache,&mut evidence,journal,
         provider,repository,cancel,&mut referenced).await?;
     Ok(CompletedAssetCatalog{catalog:root.stored(repository)?,referenced})
@@ -3560,7 +3561,8 @@ async fn package_and_upload_content_catalog(
     let mut cache=PackageCache::open(cache_root)?;
     let mut evidence=ObjectEvidence::open(repository_root,journal.connection_id())?;
     let mut referenced=Vec::new();
-    let cached=match cache.catalog(&repository.repository_id,repository,kind,&fingerprint)? {
+    let format_repository_id=super::lww_segment::format_repository_id(&repository.repository_id);
+    let cached=match cache.catalog(&format_repository_id,repository,kind,&fingerprint)? {
         Some(root)=>revalidate_cached_catalog(&root,&mut cache,&mut evidence,journal,root_key,provider,repository,cancel).await?,
         None=>None,
     };
@@ -3574,11 +3576,11 @@ async fn package_and_upload_content_catalog(
         let (items,bytes)=source_totals(&sources);
         prepared.plan(items,bytes);
         let (entries,uploaded)=build_entries(kind,sources,
-            &repository_root.join("external-storage"),&repository.repository_id,&build_root,
+            &repository_root.join("external-storage"),&format_repository_id,&build_root,
             root_key,limits,None,None,false,&mut cache,&mut evidence,journal,provider,repository,
             prepared,&mut maintenance,&mut hydration,cancel).await?;
         referenced.extend(uploaded);
-        build_catalog(kind,entries,&fingerprint,&repository.repository_id,
+        build_catalog(kind,entries,&fingerprint,&format_repository_id,
             &build_root,root_key,limits,None,None,false,&mut cache,&mut evidence,journal,
             provider,repository,cancel,&mut referenced).await?
     };
@@ -5581,14 +5583,18 @@ mod tests {
 
     #[test]
     fn control_catalog_carries_a_verified_indivisible_message_page() {
+        for repository_id in super::super::lww_tests::repository_id_cases() {
         runtime().block_on(async {
             let root=tempfile::tempdir().unwrap();let destination=tempfile::tempdir().unwrap();
             let page=risunest_external_storage_format::logical_records::encode_message_page(&[
                 serde_json::json!({"role":"user","content":"x".repeat(risunest_sync_wire::MAX_METADATA_BYTES)})]).unwrap();
             let source=root.path().join("frozen-page");std::fs::write(&source,&page.bytes).unwrap();
             let (capture,_)=captured(root.path(),"segment-controls",0,b"{}",b"unrelated asset");
-            let provider=FakeProvider::new(false);let repository=fake::repository();let key=[17;32];
-            let mut transfer=journal(&root.path().join("data-journal"),"segment-controls",&capture);
+            let provider=FakeProvider::new(false);let mut repository=fake::repository();repository.repository_id=repository_id.clone();let key=[17;32];
+            let mut transfer=TransferJournal::open(&root.path().join("data-journal"),JobIdentity {
+                job_id:"segment-controls".into(),connection_id:"connection".into(),repository_id:repository_id.clone(),
+                capture_id:capture.id.clone(),capture:capture.identity.clone(),
+            }).unwrap();
             let completed=package_and_upload_control_catalog(vec![AssetCatalogSource{content_hash:page.hash.clone(),byte_length:page.size,source:ObjectSource::File(source)}],
                 root.path(),&root.path().join("data-cache"),&key,limits(256*1024),&mut transfer,&provider,&repository,&PhaseProgress::silent(),&Cancellation::default(),None).await.unwrap();
             let mut store=crate::persistent_store::PersistentStore::open(destination.path()).unwrap();
@@ -5604,6 +5610,8 @@ mod tests {
             for (name,reads) in pack_reads {assert_eq!(provider.read_attempts(&name),reads,"known controls are removed before pack turnover");}
             let remote=RemoteObject::from_stored(&completed.catalog,&repository).unwrap();
             assert!(snapshot_restore::read_catalog(&remote,wire::CatalogKind::Assets,&key,&root.path().join("wrong-kind"),&provider,&repository,&Cancellation::default()).await.is_err());
+            let mut foreign=fake::repository();foreign.repository_id=format!("{repository_id}other");
+            assert_eq!(snapshot_restore::revalidate_catalog(&completed.catalog,wire::CatalogKind::Records,&key,&provider,&foreign,root.path(),&Cancellation::default()).await.unwrap_err().kind,ErrorKind::Corrupt);
             let packs=completed.referenced.iter().filter(|object|object.role==ObjectRole::Pack).collect::<Vec<_>>();
             let reads=packs.iter().map(|pack|provider.read_attempts(&pack.receipt.locator.object)).collect::<Vec<_>>();
             snapshot_restore::revalidate_catalog(&completed.catalog,wire::CatalogKind::Records,&key,&provider,&repository,root.path(),&Cancellation::default()).await.unwrap();
@@ -5617,6 +5625,7 @@ mod tests {
             assert_eq!(snapshot_restore::revalidate_catalog(&completed.catalog,wire::CatalogKind::Records,&key,&provider,&repository,root.path(),&Cancellation::default()).await.unwrap_err().kind,ErrorKind::NotFound);
             assert_eq!(provider.upload_attempts(&pack.object_id),uploads,"aged immutable verification never repairs or replaces the captured source");
         });
+        }
     }
 
     #[test]

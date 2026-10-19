@@ -115,7 +115,7 @@ let fetchLog: fetchLog[] = []
 
 import { normalizeDownloadFileName } from "./downloadFileName"
 
-export async function downloadFile(name: string, dat: Uint8Array | ArrayBuffer | string): Promise<boolean> {
+export async function downloadFile(name: string, dat: Uint8Array | ArrayBuffer | string, options: { saveDialog?: boolean } = {}): Promise<boolean> {
     name = normalizeDownloadFileName(name)
     if (typeof (dat) === 'string') {
         dat = Buffer.from(dat, 'utf-8')
@@ -138,7 +138,13 @@ export async function downloadFile(name: string, dat: Uint8Array | ArrayBuffer |
         return downloadThroughAndroidSaf(name, data)
     }
     else if (isTauri) {
-        await writeFile(name, data, { baseDir: BaseDirectory.Download })
+        if (options.saveDialog) {
+            const destination = await save({ defaultPath: name })
+            if (!destination) return false
+            await writeFile(destination, data)
+        } else {
+            await writeFile(name, data, { baseDir: BaseDirectory.Download })
+        }
     }
     else {
         const blob = new Blob([data], { type: 'application/octet-stream' })

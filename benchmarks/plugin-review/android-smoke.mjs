@@ -78,6 +78,52 @@ async function connect() {
         return { call, evaluate, close }
     } catch (error) { close(); throw error }
 }
+async function checkDownloads() {
+    const name = `plugin-${token}.bin`
+    const size = 4 * 1024 * 1024 + 17
+    const file = `/sdcard/Download/${name}`
+    const dump = '/data/local/tmp/risunest-plugin-download-picker.xml'
+    async function waitForPicker() {
+        const deadline = Date.now() + 30000
+        while (Date.now() < deadline) {
+            await run(['shell', 'uiautomator', 'dump', dump], 10000)
+            const xml = (await run(['shell', 'cat', dump])).stdout
+            const save = xml.match(/<node\b[^>]*resource-id="android:id\/button1"[^>]*>/)?.[0]
+            if (save && /text="SAVE"/i.test(save)) return save
+            const state = await client.evaluate('window.__pluginReview.downloadResult')
+            assert.ok(!state.error, state.error)
+            await delay(250)
+        }
+        throw new Error('Synthetic download picker unavailable')
+    }
+    async function waitForResult(saved) {
+        const deadline = Date.now() + 30000
+        while (Date.now() < deadline) {
+            const state = await client.evaluate('window.__pluginReview.downloadResult')
+            if (state.done) { assert.equal(state.error, undefined); assert.equal(state.saved, saved); return }
+            await delay(100)
+        }
+        throw new Error('Synthetic download did not settle')
+    }
+    try {
+        await client.evaluate(`window.__pluginReview.download(${JSON.stringify(token)}, ${JSON.stringify(name)}, ${size})`)
+        const button = await waitForPicker()
+        const bounds = /bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/.exec(button).slice(1).map(Number)
+        await run(['shell', 'input', 'tap', String(Math.floor((bounds[0] + bounds[2]) / 2)), String(Math.floor((bounds[1] + bounds[3]) / 2))])
+        await waitForResult(true)
+        const hash = (await run(['shell', 'sha256sum', file])).stdout.split(/\s/)[0]
+        const expected = createHash('sha256').update(Uint8Array.from({ length: size }, (_, index) => index % 251)).digest('hex')
+        assert.equal(hash, expected, 'Published download bytes differ')
+        await client.evaluate(`window.__pluginReview.download(${JSON.stringify(token)}, ${JSON.stringify(name)}, 4)`)
+        await waitForPicker()
+        await run(['shell', 'input', 'keyevent', '4'])
+        await waitForResult(false)
+        assert.equal((await run(['shell', 'sha256sum', file])).stdout.split(/\s/)[0], expected, 'Cancelled download changed the file')
+        return { bytes: size, sha256: hash, immediateRevocation: true, cancelled: true }
+    } finally {
+        await run(['shell', 'rm', '-f', file, dump], 10000, true)
+    }
+}
 async function main() {
     android.assertAvd((await run(['emu', 'avd', 'name'])).stdout)
     assert.equal((await run(['shell', 'getprop', 'sys.boot_completed'])).stdout.trim(), '1')
@@ -95,6 +141,9 @@ async function main() {
     }, sleep: delay })
     assert.match((await run(['install', '-r', '-t', apk], 120000)).stdout, /Success/)
     assert.match((await run(['shell', 'pm', 'clear', packageName])).stdout, /Success/)
+    if (Number((await run(['shell', 'getprop', 'ro.build.version.sdk'])).stdout.trim()) >= 33) {
+        await run(['shell', 'pm', 'grant', packageName, 'android.permission.POST_NOTIFICATIONS'])
+    }
     await run(['shell', 'run-as', packageName, 'mkdir', '-p', 'files'])
     // The token is fixed-format hex and the destination is fixed inside this synthetic package.
     await run(['shell', 'run-as', packageName, 'sh', '-c', `'echo ${token} > files/risunest-plugin-review-owner'`])
@@ -114,13 +163,21 @@ async function main() {
     })
     await run(['forward', '--no-rebind', `tcp:${port}`, `localabstract:webview_devtools_remote_${pid}`]); forwarded = true
     client = await connect()
+    const readyDeadline = Date.now() + 30000
+    while (await client.evaluate('window.__pluginReview?.marker') !== 'synthetic-plugin-review-v1' && Date.now() < readyDeadline) await delay(100)
     assert.equal(await client.evaluate('window.__pluginReview?.marker'), 'synthetic-plugin-review-v1')
     const environment = await client.evaluate('({userAgent:navigator.userAgent,visible:document.visibilityState === "visible"})')
     assert.equal(environment.visible, true)
     const result = await client.evaluate(`window.__pluginReview.run(${JSON.stringify(token)}).catch(error => ({passed:false,assertion:error.message}))`, 180000)
+    assert.equal(result.passed, true, 'Plugin Android acceptance failed')
+    const originalUrl = await client.evaluate('location.href')
+    await client.evaluate("location.href = 'https://example.invalid/blocked-document'; true")
+    const downloads = await checkDownloads()
+    assert.equal(await client.evaluate('location.href'), originalUrl, 'External navigation replaced the app')
+    const navigation = { externalDocumentBlocked: true }
     const report = { timestamp: new Date().toISOString(), synthetic: true, platform: 'android-emulator', serial, avd,
         androidApi: Number((await run(['shell', 'getprop', 'ro.build.version.sdk'])).stdout.trim()),
-        apkSha256: createHash('sha256').update(await readFile(apk)).digest('hex'), environment, ...result }
+        apkSha256: createHash('sha256').update(await readFile(apk)).digest('hex'), environment, ...result, downloads, navigation }
     await mkdir(path.dirname(output), { recursive: true })
     await writeFile(output, JSON.stringify(report, null, 2) + '\n')
     console.log(JSON.stringify(report))

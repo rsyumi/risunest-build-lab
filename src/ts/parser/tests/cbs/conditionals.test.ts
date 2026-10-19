@@ -121,6 +121,19 @@ describe('#if', () => {
   })
 })
 
+describe('legacy {#if}', () => {
+  test('renders the body after its newline when truthy', () => {
+    expect(risuChatParser('a {#if 1\n shown #} b')).toBe('a shown b')
+    expect(risuChatParser('a {#if 0\nhidden#} b')).toBe('a  b')
+    expect(risuChatParser('a{#if 1\n{{#if 1}}x{{/}}#}b')).toBe('axb')
+  })
+
+  test('keeps braces and hashes that open or close nothing', () => {
+    expect(risuChatParser('a{b}c#d}#{e #')).toBe('a{b}c#d}#{e #')
+    expect(risuChatParser('{#if 1#} x {#y#}')).toBe('{#if 1#} x {#y#}')
+  })
+})
+
 describe('#if_pure', () => {
   test('renders when "1" or "true"', () => {
     expect(quickParse('#if_pure 1', 'CBS')).toBe(`0 CBS 9`)

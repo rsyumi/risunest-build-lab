@@ -1970,7 +1970,7 @@ export const languageKorean = {
 
             title: '앱 업데이트',
             automatic: '자동으로 확인',
-            automaticHelp: '6시간마다 자동으로 확인합니다.',
+            automaticHelp: '앱을 시작할 때와 실행 중 6시간마다 자동으로 확인합니다.',
             currentVersion: '현재 버전',
             installMethod: '설치 방식',
             lastChecked: '마지막 확인',

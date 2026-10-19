@@ -1160,7 +1160,14 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
             : safeStructuredClone(arg.chat ?? char.chats[char.chatPage])
     )
     if (chat !== arg.chat) inheritHistoryWindow(arg.chat, chat)
-    char = arg.displayMode ? char : cloneTriggerCharacter(char, chat)
+    const canRunTrigger = (trigger: triggerscript) =>
+        trigger.effect[0]?.type === 'triggercode' ||
+        trigger.effect[0]?.type === 'triggerlua' ||
+        (arg.manualName ? trigger.comment === arg.manualName : mode === trigger.type)
+    // Effects edit a copy of the character, which is not needed when no trigger runs.
+    char = arg.displayMode || !(char.triggerscript.some(canRunTrigger) || moduleTriggers.some(canRunTrigger))
+        ? char
+        : cloneTriggerCharacter(char, chat)
     let varChanged = false
     let stopSending = arg.stopSending ?? false
     const CharacterlowLevelAccess = char.lowLevelAccess ?? false
@@ -1375,15 +1382,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
         if (arg.generation?.signal.aborted) break
         let tempVars:Record<string, number> = {}
 
-        if(trigger.effect[0]?.type === 'triggercode' || trigger.effect[0]?.type === 'triggerlua'){
-            //
-        }
-        else if(arg.manualName){
-            if(trigger.comment !== arg.manualName){
-                continue
-            }
-        }
-        else if(mode !== trigger.type){
+        if(!canRunTrigger(trigger)){
             continue
         }
 

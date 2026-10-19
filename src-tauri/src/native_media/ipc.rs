@@ -2,6 +2,7 @@ use super::{encode_inlay_image, EncodedInlayImage, InlayEncodeOptions, InlayImag
 use crate::persistent_store::PersistentStoreState;
 use crate::native_log::logged;
 use std::{
+    borrow::Cow,
     collections::HashMap,
     fs,
     io::{Read, Seek, SeekFrom, Write},
@@ -26,6 +27,8 @@ pub(crate) struct EncodedInlayIpcResult {
     data: Option<Vec<u8>>,
     output_id: Option<String>,
     output_size: u64,
+    /// The renderer already holds these bytes, so none are sent back.
+    source_kept: bool,
     metadata: InlayImageMetadata,
 }
 
@@ -489,10 +492,27 @@ fn finish_encoded_result(
     state: &NativeMediaIpcState,
     id: String,
     generation: u64,
-    encoded: EncodedInlayImage,
+    encoded: EncodedInlayImage<'_>,
 ) -> Result<EncodedInlayIpcResult, String> {
     let EncodedInlayImage { data, metadata } = encoded;
     let output_size = data.len() as u64;
+    let data = match data {
+        Cow::Borrowed(_) => {
+            state
+                .pool
+                .lock()
+                .map_err(|error| format!("native media transfer mutex poisoned: {error}"))?
+                .complete_inline(&id, generation)?;
+            return Ok(EncodedInlayIpcResult {
+                data: None,
+                output_id: None,
+                output_size,
+                source_kept: true,
+                metadata,
+            });
+        }
+        Cow::Owned(data) => data,
+    };
     {
         let mut pool = state
             .pool
@@ -513,6 +533,7 @@ fn finish_encoded_result(
             data: Some(data),
             output_id: None,
             output_size,
+            source_kept: false,
             metadata,
         });
     }
@@ -545,6 +566,7 @@ fn finish_encoded_result(
         data: None,
         output_id: Some(output_id),
         output_size,
+        source_kept: false,
         metadata,
     })
 }
@@ -812,7 +834,8 @@ mod tests {
         assert!(state.pool.lock().unwrap().transfers.is_empty());
         assert_eq!(state.pool.lock().unwrap().reserved_bytes, 0);
         let result = super::encode_direct(&state, "next", b"original", "file.bin", None).unwrap();
-        assert_eq!(result.data.as_deref(), Some(b"original".as_slice()));
+        assert!(result.source_kept && result.data.is_none());
+        assert_eq!(result.output_size, b"original".len() as u64);
     }
 
     #[test]
@@ -1138,7 +1161,13 @@ mod tests {
     }
 
     #[test]
-    fn streamed_original_image_round_trips_through_the_product_encoder() {
+    fn streamed_images_reach_the_renderer_through_the_product_encoder() {
+        for format in [InlayEncodeFormat::Original, InlayEncodeFormat::Png] {
+            streamed_image_reaches_the_renderer(format);
+        }
+    }
+
+    fn streamed_image_reaches_the_renderer(format: InlayEncodeFormat) {
         let directory = tempfile::tempdir().unwrap();
         let state = NativeMediaIpcState::default();
         state.configure(directory.path().to_owned()).unwrap();
@@ -1187,39 +1216,49 @@ mod tests {
         let processing_id = input.id;
         let generation = input.generation;
         drop(input.file);
+        let kept = format == InlayEncodeFormat::Original;
+        let options = InlayEncodeOptions {
+            format,
+            ..InlayEncodeOptions::default()
+        };
+        let expected = encode_inlay_image("synthetic-round-trip", &source, "synthetic.png", Some(options.clone()))
+            .unwrap()
+            .data
+            .into_owned();
         let result = finish_encoded_result(
             &state,
             processing_id,
             generation,
-            encode_inlay_image(
-                "synthetic-round-trip",
-                &uploaded,
-                "synthetic.png",
-                Some(InlayEncodeOptions {
-                    format: InlayEncodeFormat::Original,
-                    ..InlayEncodeOptions::default()
-                }),
-            )
-            .unwrap(),
+            encode_inlay_image("synthetic-round-trip", &uploaded, "synthetic.png", Some(options)).unwrap(),
         )
         .unwrap();
         assert!(result.data.is_none());
-        assert_eq!(result.output_size, source.len() as u64);
-        let output_id = result.output_id.unwrap();
-        let mut downloaded = Vec::with_capacity(source.len());
-        for start in (0..source.len()).step_by(NATIVE_MEDIA_IPC_CHUNK_BYTES) {
-            let end = (start + NATIVE_MEDIA_IPC_CHUNK_BYTES).min(source.len());
-            downloaded.extend(
-                state
-                    .pool
-                    .lock()
-                    .unwrap()
-                    .read_download(&output_id, start as u64, end as u64)
-                    .unwrap(),
-            );
+        assert_eq!(result.output_size, expected.len() as u64);
+        if kept {
+            // The renderer keeps its own bytes, so nothing is spooled or reserved.
+            assert!(result.source_kept);
+            assert!(result.output_id.is_none());
+            assert_eq!(expected, source);
+            assert!(state.pool.lock().unwrap().transfers.is_empty());
+        } else {
+            assert!(!result.source_kept);
+            assert!(expected.len() > NATIVE_MEDIA_IPC_CHUNK_BYTES);
+            let output_id = result.output_id.unwrap();
+            let mut downloaded = Vec::with_capacity(expected.len());
+            for start in (0..expected.len()).step_by(NATIVE_MEDIA_IPC_CHUNK_BYTES) {
+                let end = (start + NATIVE_MEDIA_IPC_CHUNK_BYTES).min(expected.len());
+                downloaded.extend(
+                    state
+                        .pool
+                        .lock()
+                        .unwrap()
+                        .read_download(&output_id, start as u64, end as u64)
+                        .unwrap(),
+                );
+            }
+            assert_eq!(downloaded, expected);
+            state.pool.lock().unwrap().cancel_renderer(&output_id);
         }
-        assert_eq!(downloaded, source);
-        state.pool.lock().unwrap().cancel_renderer(&output_id);
         assert_eq!(state.pool.lock().unwrap().reserved_bytes, 0);
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
     }

@@ -1300,7 +1300,11 @@ impl<'a> WebViewBuilder<'a> {
     self
   }
 
-  /// Set a navigation handler to decide if incoming url is allowed to navigate.
+  /// Set a navigation handler for the main frame.
+  /// On Linux this runs when the response arrives, before the new document is committed,
+  /// or when loading fails before a response. Returning `false` also suppresses the error page.
+  /// Child frames keep their own navigation, except that Android may also report non-HTTP(S)
+  /// child-frame navigations through its WebView callback.
   ///
   /// The closure take a `String` parameter as url and returns a `bool` to determine whether the navigation should happen.
   /// `true` allows to navigate and `false` does not.

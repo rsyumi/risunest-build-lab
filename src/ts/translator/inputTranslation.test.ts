@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const f = vi.hoisted(() => ({ fetch: vi.fn(), request: vi.fn(), alert: vi.fn(), translatorType: 'deepl' }))
+const f = vi.hoisted(() => ({ fetch: vi.fn(), request: vi.fn(), alert: vi.fn(), translatorType: 'deepl', translator: 'ko' }))
 vi.mock('../storage/database.svelte', () => ({
     getDatabase: () => ({
-        characters: [], presetRegex: [], translator: 'ko', translatorInputLanguage: 'en', aiModel: 'gpt',
+        characters: [], presetRegex: [], translator: f.translator, translatorInputLanguage: 'en', aiModel: 'gpt',
         translatorType: f.translatorType, deeplOptions: { freeApi: true, key: 'synthetic' },
     }) as ReturnType<typeof import('../storage/database.svelte').getDatabase>,
     getCurrentCharacter: () => undefined,
@@ -14,11 +14,25 @@ vi.mock('../process/request/request', async importOriginal => ({ ...await import
 vi.mock('../alert', async importOriginal => ({ ...await importOriginal<typeof import('../alert')>(), alertError: f.alert }))
 vi.mock('localforage', async () => (await import('../plugins/localforage.testSupport')).localforageModule(new Map()))
 
-import { translate } from './translator'
+import { getDatabase } from '../storage/database.svelte'
+import { setRuntimePerformanceProfile } from '../runtimePerformanceProfile'
+import { translate, type TranslateHTMLContext } from './translator'
+
+function liveRowContext(): TranslateHTMLContext {
+    return {
+        scriptContext: {
+            presetRegex: [], moduleRegexScripts: [], moduleAssets: [],
+            dynamicAssets: false, dynamicAssetsEditDisplay: false,
+            parserContext: { database: getDatabase(), character: { type: 'simple', customscript: [], chaId: 'live' } },
+        },
+        liveProjection: true,
+    } as unknown as TranslateHTMLContext
+}
 
 beforeEach(() => {
     vi.clearAllMocks()
     f.translatorType = 'deepl'
+    f.translator = 'ko'
     f.fetch.mockResolvedValue({ ok: false, data: 'synthetic unavailable' })
     f.request.mockResolvedValue({ type: 'fail', result: 'synthetic unavailable' })
 })
@@ -46,5 +60,38 @@ describe('translation error ownership', () => {
         f.request.mockResolvedValue({ type, result: [] })
         await expect(translate(`${type} input`, false, undefined, 'throw')).rejects.toThrow('Unexpected response type')
         expect(f.alert).not.toHaveBeenCalled()
+    })
+})
+
+describe('live chat rows', () => {
+    it('reuses a translation made for the same live row text', async () => {
+        f.fetch.mockResolvedValue({ ok: true, data: { translations: [{ text: 'Live translated' }] } })
+        const text = 'live row text that renders again'
+        await expect(translate(text, false, liveRowContext())).resolves.toBe('Live translated')
+        await expect(translate(text, false, liveRowContext())).resolves.toBe('Live translated')
+        expect(f.fetch).toHaveBeenCalledOnce()
+    })
+    it('translates the same text again for another target language', async () => {
+        f.fetch.mockImplementation(async (_url: string, init: { body: { target_lang: string } }) => (
+            { ok: true, data: { translations: [{ text: `in ${init.body.target_lang}` }] } }
+        ))
+        const text = 'text read in two languages'
+        await expect(translate(text, false)).resolves.toBe('in KO')
+        await expect(translate('in KO', true)).resolves.toBe(text)
+        f.translator = 'ja'
+        await expect(translate(text, false)).resolves.toBe('in JA')
+        expect(f.fetch).toHaveBeenCalledTimes(2)
+    })
+    it('keeps translations within the memory budget of the device profile', async () => {
+        f.fetch.mockResolvedValue({ ok: true, data: { translations: [{ text: 'Long translated' }] } })
+        setRuntimePerformanceProfile('low-spec')
+        try {
+            const text = 'x'.repeat(3 * 1024 * 1024)
+            await translate(text, false)
+            await translate(text, false)
+        } finally {
+            setRuntimePerformanceProfile('normal')
+        }
+        expect(f.fetch).toHaveBeenCalledTimes(2)
     })
 })

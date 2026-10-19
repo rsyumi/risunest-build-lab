@@ -994,15 +994,37 @@ fn remove_final_files(files: &[PathBuf], budget: Duration) -> Result<()> {
             Ok(())
         }
     };
-    set_final_dispositions(handles.len(), budget, |index, delete| {
-        disposition(&handles[index].1, delete)
-    })
+    set_final_dispositions(
+        handles.len(),
+        budget.saturating_sub(started.elapsed()),
+        |index, delete| disposition(&handles[index].1, delete),
+    )
     .map_err(|(index, error)| {
         format!(
             "removal-file-failed: {} ({error})",
             files[handles[index].0].display()
         )
-    })
+    })?;
+    drop(handles);
+    // Shared-delete readers can keep successful dispositions pending after our handles close.
+    loop {
+        let mut pending = false;
+        for file in files {
+            match file.try_exists() {
+                Ok(exists) => pending |= exists,
+                Err(error) if matches!(error.raw_os_error(), Some(5 | 32)) => pending = true,
+                Err(_) => return Err("removal-path-unavailable".into()),
+            }
+        }
+        if !pending {
+            return Ok(());
+        }
+        let remaining = budget.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err("removal-finalization-pending".into());
+        }
+        std::thread::sleep(Duration::from_millis(50).min(remaining));
+    }
 }
 
 #[cfg(windows)]
@@ -1886,7 +1908,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn files_a_retried_uninstall_needs_are_removed_last() {
-        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileStandardInfo, GetFileInformationByHandleEx, FILE_STANDARD_INFO,
+        };
         let (_temp, root, server, registry) = fixture();
         let install = server.parent().unwrap().to_owned();
         windows_bundle(
@@ -1960,6 +1985,122 @@ mod tests {
         remove_planned_files(&plan, Duration::from_secs(5)).unwrap();
         scan.join().unwrap();
         assert_eq!(fs::read_dir(&install).unwrap().count(), 0);
+
+        let (_temp, root, server, registry) = fixture();
+        let install = server.parent().unwrap();
+        windows_bundle(
+            &server,
+            &[
+                "server",
+                "risunest-sync-manager.exe",
+                "risunest-sync-manager-background.exe",
+            ],
+        );
+        let helper = install.join("source-helper");
+        fs::write(&helper, b"synthetic helper").unwrap();
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(7)
+            .open(install.join("risunest-sync-manager.exe"))
+            .unwrap();
+        let plan = plan_at(&registry, &root, &server, false).unwrap();
+        let budget = Duration::from_millis(75);
+        let started = Instant::now();
+        let result = remove_planned_files_with(&plan, budget, || {
+            prepare_finalization(&registry, &root, &server, false, &helper)
+        });
+        let mut info: FILE_STANDARD_INFO = unsafe { std::mem::zeroed() };
+        assert_ne!(
+            unsafe {
+                GetFileInformationByHandleEx(
+                    held.as_raw_handle().cast(),
+                    FileStandardInfo,
+                    (&mut info as *mut FILE_STANDARD_INFO).cast(),
+                    std::mem::size_of_val(&info) as u32,
+                )
+            },
+            0
+        );
+        assert!(info.DeletePending);
+        assert_eq!(
+            forget_finalization_at(&registry, &root, &server).unwrap_err(),
+            "removal-finalization-pending"
+        );
+        let retry = finalization_directory(&server).unwrap();
+        assert!(retry.join("receipt.json").is_file());
+        assert!(retry.join("manager.exe").is_file());
+        assert!(!retry.join("complete").exists());
+        assert!(record_path(&registry, &root).is_file());
+        drop(held);
+        assert_eq!(result.unwrap_err(), "removal-finalization-pending");
+        assert!(started.elapsed() >= budget);
+        resume_finalization_at(&registry, &server, false, || Ok(Vec::new())).unwrap();
+        assert!(super::final_files(install)
+            .iter()
+            .all(|file| !file.exists()));
+        assert!(!record_path(&registry, &root).exists());
+        assert!(retry.join("complete").is_file());
+
+        let (_temp, root, server, registry) = fixture();
+        let install = server.parent().unwrap();
+        windows_bundle(
+            &server,
+            &[
+                "server",
+                "risunest-sync-manager.exe",
+                "risunest-sync-manager-background.exe",
+            ],
+        );
+        let helper = install.join("source-helper");
+        fs::write(&helper, b"synthetic helper").unwrap();
+        prepare_finalization(&registry, &root, &server, false, &helper).unwrap();
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(7)
+            .open(install.join("risunest-sync-manager.exe"))
+            .unwrap();
+        let files = super::final_files(install);
+        let (send, receive) = std::sync::mpsc::channel();
+        let removal = std::thread::spawn(move || {
+            send.send(remove_final_files(&files, Duration::from_secs(5)))
+                .unwrap();
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut info: FILE_STANDARD_INFO = unsafe { std::mem::zeroed() };
+            assert_ne!(
+                unsafe {
+                    GetFileInformationByHandleEx(
+                        held.as_raw_handle().cast(),
+                        FileStandardInfo,
+                        (&mut info as *mut FILE_STANDARD_INFO).cast(),
+                        std::mem::size_of_val(&info) as u32,
+                    )
+                },
+                0
+            );
+            if info.DeletePending {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "final file never became delete-pending"
+            );
+            std::thread::yield_now();
+        }
+        let before_release = receive.recv_timeout(Duration::from_millis(75));
+        drop(held);
+        removal.join().unwrap();
+        assert!(matches!(
+            before_release,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        receive.recv().unwrap().unwrap();
+        assert!(super::final_files(install)
+            .iter()
+            .all(|file| !file.exists()));
+        forget_finalization_at(&registry, &root, &server).unwrap();
+        commit_finalization_at(&registry, &server).unwrap();
     }
 
     #[cfg(windows)]

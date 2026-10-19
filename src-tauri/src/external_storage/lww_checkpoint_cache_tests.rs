@@ -18,7 +18,7 @@ async fn checkpoint(f: &mut CycleFixture) -> String {
     let writer = f.a.lww_clock_state().unwrap().writer_id;
     f.sender.compact_published(&mut f.a, directory.path(), "00000000-0000-4000-8000-0000000000e2",
         &writer, &f.sender.capabilities, &Cancellation::default(), None).await.unwrap();
-    f.sender.snapshot_receipts(&Cancellation::default()).await.unwrap()[0].locator.object.clone()
+    f.sender.checkpoint_receipts(&Cancellation::default()).await.unwrap()[0].locator.object.clone()
 }
 
 #[test]

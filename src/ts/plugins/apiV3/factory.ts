@@ -2,6 +2,8 @@ import { recordNativeLogError } from '../../nativeLog'
 import { isTauri } from '../../platform'
 import { consoleLog, installConsoleCapture, isConsoleLogLevel } from '../../consoleLog'
 import { attachPluginReadProvenance, collectPluginReadProvenance, type PluginReadProvenance } from '../pluginReadBaselines'
+import { type PluginDownloadHandler } from './pluginDownload'
+import { installWebviewBridge } from '../../webviewDownload'
 
 type MsgType =
     | 'CALL_ROOT'
@@ -74,6 +76,7 @@ await (async function() {
             seen.add(object);
             const token = readProvenance.get(object);
             if (token) entries.push({ path, token });
+            if (ArrayBuffer.isView(object)) return;
             for (const [key, child] of Object.entries(object)) visit(child, [...path, Array.isArray(object) ? Number(key) : key]);
         }
         visit(value, []);
@@ -665,7 +668,7 @@ export class SandboxHost {
     private activeStreamCleanups = new Set<() => void>();
     private unreadStreamCleanups = new Set<() => void>();
 
-    constructor(apiFactory: any) {
+    constructor(apiFactory: any, private download?: PluginDownloadHandler) {
         this.apiFactory = apiFactory;
     }
 
@@ -1173,6 +1176,14 @@ export class SandboxHost {
 
                     const args = this.deserializeArgs(data.args || [], usedAbortIds);
                     const signalKey = data.type === 'CALL_ROOT' ? requestSignalKeys.get(String(data.method)) : undefined;
+                    let downloadSignal: AbortSignal | undefined;
+                    if (data.type === 'CALL_ROOT' && data.method === '_downloadFile' && this.download) {
+                        const id = crypto.randomUUID();
+                        const controller = new AbortController();
+                        this.abortControllers.set(id, controller);
+                        usedAbortIds.push(id);
+                        downloadSignal = controller.signal;
+                    }
                     if (signalKey && !args[1]?.[signalKey]) {
                         const id = crypto.randomUUID();
                         const controller = new AbortController();
@@ -1187,9 +1198,13 @@ export class SandboxHost {
 
 
                     if (data.type === 'CALL_ROOT') {
-                        const fn = this.apiFactory[data.method!];
-                        if (typeof fn !== 'function') throw new Error(`API method ${data.method} not found`);
-                        result = await fn(...args);
+                        if (downloadSignal) {
+                            result = await this.download!(args[0], args[1], downloadSignal);
+                        } else {
+                            const fn = this.apiFactory[data.method!];
+                            if (typeof fn !== 'function') throw new Error(`API method ${data.method} not found`);
+                            result = await fn(...args);
+                        }
                     } else {
                         const instance = this.instanceRegistry.get(data.id!);
                         if (!instance) throw new Error("Instance not found or released");
@@ -1331,6 +1346,7 @@ export class SandboxHost {
             window.addEventListener('unhandledrejection', event => reportPluginError(event.reason));
             (async () => {
                 ${GUEST_BRIDGE_SCRIPT}
+                ${this.download ? `(${installWebviewBridge.toString()})((name, source) => window.risuai._downloadFile(name, source), reportPluginError);` : ''}
                     
                 const settled = () => {
                     flushConsole();

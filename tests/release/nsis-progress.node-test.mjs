@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 
 const compiler = process.env.NSIS_MAKENSIS ?? join(process.env.LOCALAPPDATA ?? '', 'tauri', 'NSIS', 'makensis.exe');
@@ -50,7 +51,21 @@ function commandStage(command) {
   throw new Error(`Unrecognized synthetic manager command: ${command}`);
 }
 
-test('NSIS displays the active operation and does not complete failed Sync setup or removal', { skip }, () => {
+async function removeFixture(root) {
+  const deadline = performance.now() + 5000;
+  for (;;) {
+    try {
+      rmSync(root, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const remaining = deadline - performance.now();
+      if (process.platform !== 'win32' || !['EPERM', 'EBUSY', 'ENOTEMPTY'].includes(error.code) || remaining <= 0) throw error;
+      await delay(Math.min(50, remaining));
+    }
+  }
+}
+
+test('NSIS displays the active operation and does not complete failed Sync setup or removal', { skip }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'risunest-nsis-progress-'));
   const compile = (name, source) => {
     const script = join(root, `${name}.nsi`);
@@ -59,6 +74,7 @@ test('NSIS displays the active operation and does not complete failed Sync setup
     assert.equal(result.status, 0, `${result.error ?? ''}\n${result.stdout}\n${result.stderr}`);
     return join(root, `${name}.exe`);
   };
+  let verificationError;
   try {
     // NSIS executes the hooks, renders its real progress control, and handles Abort.
     // Manager processes and modal error dialogs are simulated to keep failures unattended.
@@ -262,8 +278,16 @@ SectionEnd
     assert.match(waiting.failure, /synthetic-failure:80070005/);
     assert.doesNotMatch(waiting.failure, /ignored diagnostic text/);
     assert.equal(waiting.progress.at(-1)[0], 'finish-removal');
+  } catch (error) {
+    verificationError = error;
+    throw error;
   } finally {
-    assert.equal(dirname(root), resolve(tmpdir()));
-    rmSync(root, { recursive: true, force: true });
+    try {
+      assert.equal(dirname(root), resolve(tmpdir()));
+      await removeFixture(root);
+    } catch (cleanupError) {
+      if (verificationError) throw new AggregateError([verificationError, cleanupError], 'NSIS progress verification and fixture cleanup failed');
+      throw cleanupError;
+    }
   }
 });

@@ -55,15 +55,16 @@ const production: UpdateControllerDependencies = {
 export async function checkForAppUpdate(
     manual = false,
     dependencies: UpdateControllerDependencies = production,
+    startup = false,
 ): Promise<void> {
     if (!isTauri && dependencies === production) return
     if (['downloading', 'applying'].includes(get(appUpdateState).phase)) return
     if (activeCheck) return activeCheck
-    activeCheck = runCheck(manual, dependencies).finally(() => { activeCheck = null })
+    activeCheck = runCheck(manual, startup, dependencies).finally(() => { activeCheck = null })
     return activeCheck
 }
 
-async function runCheck(manual: boolean, dependencies: UpdateControllerDependencies): Promise<void> {
+async function runCheck(manual: boolean, startup: boolean, dependencies: UpdateControllerDependencies): Promise<void> {
     let settings: AppUpdateSettings
     try {
         settings = dependencies.settings()
@@ -79,7 +80,7 @@ async function runCheck(manual: boolean, dependencies: UpdateControllerDependenc
     }
     if (!manual) {
         if (!settings.autoUpdateCheck) return
-        if (dependencies.now() - settings.lastCheckedAt < UPDATE_CHECK_INTERVAL_MS) return
+        if (!startup && dependencies.now() - settings.lastCheckedAt < UPDATE_CHECK_INTERVAL_MS) return
     }
     appUpdateState.update(state => ({ ...state, phase: 'checking', update: null, progress: null, error: '', manual, popupVisible: manual }))
     try {
@@ -151,7 +152,9 @@ export async function startAppUpdateChecks(): Promise<void> {
             return
         }
         stopSettingsListener = subscribeAppUpdateSettings(scheduleAutomaticCheck)
-        const run = () => scheduleAutomaticCheck()
+        const run = () => {
+            if (started) void checkForAppUpdate(false, production, true).finally(scheduleAutomaticCheck)
+        }
         if ('requestIdleCallback' in window) window.requestIdleCallback(run, { timeout: 5_000 })
         else setTimeout(run, 0)
     } catch (error) {

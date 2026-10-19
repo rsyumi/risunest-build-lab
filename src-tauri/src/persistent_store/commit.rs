@@ -2502,11 +2502,15 @@ pub(super) fn apply_conversation_mutation(
                 messages,
             )?;
 
+            let stored_detail: Value;
             let detail = match conversation {
-                Some(value) => value.clone(),
-                None => serde_json::from_str(&existing_detail)?,
+                Some(value) => value,
+                None => {
+                    stored_detail = serde_json::from_str(&existing_detail)?;
+                    &stored_detail
+                }
             };
-            let name = required_display_name(&detail, "Conversation")?;
+            let name = required_display_name(detail, "Conversation")?;
             let recent_at = detail
                 .get("lastDate")
                 .and_then(Value::as_i64)
@@ -2520,7 +2524,7 @@ pub(super) fn apply_conversation_mutation(
                 recent_at,
                 name,
                 old_count + delta,
-                &detail,
+                detail,
             )?;
             refresh_character_summary(transaction, generation, character_id)?;
 

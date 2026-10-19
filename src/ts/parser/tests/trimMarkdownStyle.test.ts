@@ -2,7 +2,10 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import { writable } from 'svelte/store'
+import css from '@adobe/css-tools'
 import { ParseMarkdown, trimMarkdown } from '../parser.svelte'
+import { DBState } from '../../stores.svelte'
+import { DisplayReadRecord } from '../../process/scriptVariableReads'
 
 vi.mock('../../platform', async () => (await import('../../platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 
@@ -87,6 +90,28 @@ describe('trimMarkdown style handling', () => {
         const out = await ParseMarkdown('<style>.mybox { color: red; }</style><div class="mybox">hello</div>', null, 'back')
         expect(out).toContain('<style>.chattext .x-risu-mybox{color:red;}</style>')
         expect(out).toContain('<div class="x-risu-mybox">hello</div>')
+    })
+
+    it('parses repeated CSS once while the CBS in it runs on every render', async () => {
+        const chat = DBState.db.characters[0].chats[0]
+        const parseCss = vi.spyOn(css, 'parse')
+        const render = async () => {
+            const reads = new DisplayReadRecord()
+            const out = await ParseMarkdown('<style>.cached-box { color: {{getvar::tone}}; }</style>', null, 'back', -1, {}, { variableReads: reads })
+            return { out, reads: [...reads.keys] }
+        }
+        try {
+            chat.scriptstate = { $tone: 'red' }
+            const first = await render()
+            expect(first).toEqual({ out: '<style>.chattext .x-risu-cached-box{color:red;}</style>', reads: ['tone'] })
+            expect(await render()).toEqual(first)
+            expect(parseCss).toHaveBeenCalledOnce()
+            chat.scriptstate = { $tone: 'blue' }
+            expect((await render()).out).toBe('<style>.chattext .x-risu-cached-box{color:blue;}</style>')
+        } finally {
+            parseCss.mockRestore()
+            chat.scriptstate = {}
+        }
     })
 
     it('keeps styles whose CSS contains an svg data uri', async () => {

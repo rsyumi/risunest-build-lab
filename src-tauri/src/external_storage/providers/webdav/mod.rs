@@ -98,6 +98,7 @@ fn collection_folder(collection: Collection) -> &'static str {
     match collection {
         Collection::Segments => "segments",
         Collection::Snapshots => role_folder(ObjectRole::SyncState),
+        Collection::Checkpoints => role_folder(ObjectRole::Snapshot),
         Collection::BackupPoints => role_folder(ObjectRole::BackupPoint),
         Collection::InventoryPages => role_folder(ObjectRole::InventoryPage),
         Collection::Descriptors => role_folder(ObjectRole::Descriptor),
@@ -401,6 +402,10 @@ fn capabilities(_profile: Profile) -> Capabilities {
 struct ListingCursor {
     identity: String,
     folder: String,
+    /// Checkpoints share the snapshots folder, so the folder alone does not
+    /// say which listing a cursor and its cached members belong to.
+    #[serde(default)]
+    checkpoints: bool,
     after: String,
 }
 
@@ -988,13 +993,14 @@ impl Provider for WebdavProvider {
                 return Err(unsupported());
             }
             let folder = collection_folder(collection).to_owned();
+            let checkpoints = collection == Collection::Checkpoints;
             let marker = cursor.map(|cursor| {
                 if cursor.len() > 4096 { return Err(paths::corrupt()); }
                 let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(cursor)
                     .map_err(|_| paths::corrupt())?;
                 let marker: ListingCursor = serde_json::from_slice(&bytes).map_err(|_| paths::corrupt())?;
                 if marker.identity != repository.connection_identity || marker.folder != folder
-                    || marker.after.is_empty() {
+                    || marker.checkpoints != checkpoints || marker.after.is_empty() {
                     return Err(paths::corrupt());
                 }
                 Ok(marker)
@@ -1016,6 +1022,7 @@ impl Provider for WebdavProvider {
                 let mut objects = std::collections::VecDeque::new();
                 for member in all.into_iter().filter(|member| !member.collection && marker.as_ref().is_none_or(|marker| member.name > marker.after)) {
                     if crate::external_storage::contract::role_member_name(collection, &member.name) == crate::external_storage::contract::RoleMemberName::Foreign { continue; }
+                    if !crate::external_storage::contract::lists_snapshot_member(collection, &member.name) { continue; }
                     objects.push_back(ObjectReceipt {
                         locator: RemoteLocator {
                             connection_identity: repository.connection_identity.clone(),
@@ -1037,7 +1044,7 @@ impl Provider for WebdavProvider {
                     .strip_prefix(&format!("{folder}/")).ok_or_else(paths::corrupt)?.to_owned();
                 let cursor = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
                     serde_json::to_vec(&ListingCursor {
-                        identity: repository.connection_identity.clone(), folder: folder.clone(), after,
+                        identity: repository.connection_identity.clone(), folder: folder.clone(), checkpoints, after,
                     }).map_err(|_| paths::corrupt())?);
                 if cursor.len() > 4096 { return Err(paths::corrupt()); }
                 let mut listings = self.listings.lock().map_err(|_| paths::corrupt())?;

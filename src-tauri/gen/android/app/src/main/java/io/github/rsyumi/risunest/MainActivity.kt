@@ -73,6 +73,12 @@ private const val LEGACY_BACKUP_SOURCE_REQUEST_STATE = "risu.legacy-backup-sourc
 private const val LEGACY_BACKUP_SOURCE_CANCELLED_STATE = "risu.legacy-backup-source-cancelled"
 private const val TAG = "RisuNative"
 
+internal fun externalDownloadUrl(value: String): String? = try {
+  val url = java.net.URI(value)
+  if (url.scheme?.lowercase() in listOf("http", "https") && !url.host.isNullOrEmpty()
+      && url.host.lowercase() != "tauri.localhost" && url.rawUserInfo == null) value else null
+} catch (_: Exception) { null }
+
 internal typealias RendererRecoveryFailureLogger = (step: String, error: Throwable) -> Unit
 
 private fun logRendererRecoveryFailure(step: String, error: Throwable) {
@@ -767,6 +773,15 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
 
   override fun onWebViewCreate(webView: WebView) {
     super.onWebViewCreate(webView)
+    webView.setDownloadListener { url, _, _, _, _ ->
+      externalDownloadUrl(url)?.let { target ->
+        try {
+          startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(target)))
+        } catch (error: Exception) {
+          Log.e(TAG, "Could not open download in browser", error)
+        }
+      }
+    }
     frontendReady.cancel()
     if (lifecycleWebView != null) {
       cancelUnclaimedReservedDestination()

@@ -1072,6 +1072,8 @@ impl Provider for S3Provider {
                 .iter()
                 .filter_map(|listed| {
                     let object = context.object_of(folder, &listed.key)?;
+                    let name = object.rsplit('/').next()?;
+                    if !crate::external_storage::contract::lists_snapshot_member(collection, name) { return None; }
                     Some(ObjectReceipt {
                         locator: RemoteLocator {
                             connection_identity: repository.connection_identity.clone(),

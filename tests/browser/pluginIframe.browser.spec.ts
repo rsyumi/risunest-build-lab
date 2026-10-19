@@ -1,4 +1,5 @@
 import { inflateSync } from 'node:zlib'
+import { readFile } from 'node:fs/promises'
 import type { Page } from '@playwright/test'
 import { test, expect } from './fixture'
 
@@ -174,4 +175,244 @@ test('production CSP and opaque origin block network, string compilation and par
         { key: 'network', value: true }, { key: 'eval', value: true },
         { key: 'function', value: true }, { key: 'parent', value: true }, { key: 'storage', value: true },
     ])
+})
+
+test('native download compatibility saves detached Blob anchors before immediate URL revocation', async ({ page }) => {
+    await page.goto('/')
+    await page.evaluate(() => window.boundary.loadDownload(`
+        const file = new File([new Uint8Array([0, 255, 13, 10])], 'original.bin');
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(file);
+        a.download = '한글.charx';
+        a.click();
+        URL.revokeObjectURL(a.href);
+    `))
+    await expect.poll(() => page.evaluate(() => window.boundary.downloads.files)).toEqual([{ name: '한글.charx', bytes: [0, 255, 13, 10] }])
+    await expect.poll(() => page.evaluate(() => window.boundary.downloadIdle)).toBe(true)
+    expect(await page.evaluate(() => window.boundary.downloads.errors)).toEqual([])
+})
+
+test('native compatibility handles real user clicks and data URLs in the opaque iframe', async ({ page }) => {
+    await page.goto('/')
+    await page.evaluate(() => window.boundary.loadDownload(`
+        const a = document.createElement('a');
+        a.href = 'data:application/octet-stream;base64,AP8NCg==';
+        a.download = 'export.risup';
+        a.textContent = 'Save';
+        document.body.append(a);
+    `))
+    await page.frameLocator('[data-risu-plugin-frame]').getByText('Save', { exact: true }).click()
+    await expect.poll(() => page.evaluate(() => window.boundary.downloads.files)).toEqual([{ name: 'export.risup', bytes: [0, 255, 13, 10] }])
+    await expect(page.locator('[data-risu-plugin-frame]')).toHaveAttribute('sandbox', 'allow-scripts allow-modals allow-downloads')
+})
+
+test('native compatibility preserves prevented clicks and ordinary links', async ({ page }) => {
+    await page.goto('/')
+    await page.evaluate(() => window.boundary.loadDownload(`
+        const a = document.createElement('a');
+        a.href = 'data:text/plain,blocked';
+        a.download = 'blocked.txt';
+        a.onclick = event => event.preventDefault();
+        a.click();
+        document.body.append(a);
+        a.click();
+        const ordinary = document.createElement('a');
+        ordinary.href = 'data:text/plain,ordinary';
+        document.body.append(ordinary);
+        window.addEventListener('click', event => {
+            if (!event.composedPath().includes(ordinary)) return;
+            parent.postMessage({ fixture: 'ordinary-link', prevented: event.defaultPrevented }, '*');
+            event.preventDefault();
+        });
+        ordinary.click();
+        document.body.dataset.done = 'yes';
+    `))
+    await expect(page.frameLocator('[data-risu-plugin-frame]').locator('body')).toHaveAttribute('data-done', 'yes')
+    await expect.poll(() => page.evaluate(() => window.boundary.downloadIdle)).toBe(true)
+    expect(await page.evaluate(() => window.boundary.downloads.files)).toEqual([])
+    expect(await page.evaluate(() => window.boundary.events)).toContainEqual({ fixture: 'ordinary-link', prevented: false })
+})
+
+test('native compatibility accepts FileSaver-style non-bubbling dispatched clicks', async ({ page }) => {
+    const engineDownloads: string[] = []
+    page.on('download', download => engineDownloads.push(download.suggestedFilename()))
+    await page.goto('/')
+    await page.evaluate(() => window.boundary.loadDownload(`
+        for (const attached of [false, true]) {
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(new Blob(['dispatched']));
+            a.download = attached ? 'attached.txt' : 'detached.txt';
+            if (attached) document.body.append(a);
+            a.dispatchEvent(new MouseEvent('click'));
+            URL.revokeObjectURL(a.href);
+        }
+    `))
+    await expect.poll(() => page.evaluate(() => window.boundary.downloads.files)).toEqual([
+        { name: 'detached.txt', bytes: [...Buffer.from('dispatched')] },
+        { name: 'attached.txt', bytes: [...Buffer.from('dispatched')] },
+    ])
+    expect(engineDownloads).toEqual([])
+})
+
+test('another frame cannot submit a native download', async ({ page }) => {
+    await page.goto('/')
+    await page.evaluate(() => {
+        window.boundary.loadDownload('document.body.dataset.ready = "yes"')
+        const other = document.createElement('iframe')
+        other.sandbox.add('allow-scripts')
+        other.srcdoc = `<script>parent.postMessage({type:'CALL_ROOT',reqId:'forged-download',method:'_downloadFile',args:['forged.txt','data:text/plain,forged']},'*');parent.postMessage({fixture:'download-forgery-sent'},'*')<\/script>`
+        document.body.append(other)
+    })
+    await expect.poll(() => page.evaluate(() => window.boundary.events)).toContainEqual({ fixture: 'download-forgery-sent' })
+    await expect(page.frameLocator('[data-risu-plugin-frame]').locator('body')).toHaveAttribute('data-ready', 'yes')
+    expect(await page.evaluate(() => window.boundary.downloads.files)).toEqual([])
+})
+
+test('native compatibility delivers HTTP bytes and reports failed downloads', async ({ page, baseURL }) => {
+    await page.route('**/synthetic-download.bin', route => route.fulfill({ body: Buffer.from([0, 255, 7]), contentType: 'application/octet-stream' }))
+    await page.goto('/')
+    await page.evaluate(url => window.boundary.loadDownload(`
+        const a = document.createElement('a');
+        a.href = ${JSON.stringify(url)};
+        a.download = 'network.bin';
+        document.body.append(a);
+        a.click();
+    `), new URL('/synthetic-download.bin', baseURL).href)
+    await expect.poll(() => page.evaluate(() => window.boundary.downloads.files)).toEqual([{ name: 'network.bin', bytes: [0, 255, 7] }])
+    await page.evaluate(() => { window.boundary.downloads.mode = 'fail'; window.boundary.loadDownload(`
+        const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['fail']));
+        a.download = 'failed.txt'; a.click();
+    `) })
+    await expect.poll(() => page.evaluate(() => window.boundary.downloads.errors)).toEqual(['Error: Synthetic storage failure'])
+    await page.evaluate(() => { window.boundary.downloads.mode = 'cancel'; window.boundary.loadDownload(`
+        const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['cancel']));
+        a.download = 'cancelled.txt'; a.click();
+    `) })
+    await expect.poll(() => page.evaluate(() => window.boundary.downloadIdle)).toBe(true)
+    expect(await page.evaluate(() => window.boundary.downloads.files.length)).toBe(1)
+    expect(await page.evaluate(() => window.boundary.downloads.errors.length)).toBe(1)
+})
+
+test('unloading a plugin aborts its pending download without saving or reporting an error', async ({ page, baseURL }) => {
+    let release!: () => void
+    let started!: () => void
+    const ready = new Promise<void>(resolve => { started = resolve })
+    const response = new Promise<void>(resolve => { release = resolve })
+    await page.route('**/pending-download.bin', async route => {
+        started()
+        await response
+        await route.fulfill({ body: 'too late' }).catch(() => {})
+    })
+    await page.goto('/')
+    await page.evaluate(url => window.boundary.loadDownload(`
+        const a = document.createElement('a'); a.href = ${JSON.stringify(url)};
+        a.download = 'pending.bin'; a.click();
+    `), new URL('/pending-download.bin', baseURL).href)
+    await ready
+    await page.evaluate(() => window.boundary.unloadDownload())
+    release()
+    await expect.poll(() => page.evaluate(() => window.boundary.downloadIdle)).toBe(true)
+    expect(await page.evaluate(() => window.boundary.downloads.files)).toEqual([])
+    expect(await page.evaluate(() => window.boundary.downloads.errors)).toEqual([])
+})
+
+test('web mode leaves Blob downloads to the browser', async ({ page }) => {
+    await page.goto('/')
+    await page.evaluate(() => window.boundary.loadDownload(`
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob(['browser bytes']));
+        a.download = 'browser.txt'; a.textContent = 'Download';
+        document.body.append(a);
+    `, false))
+    const downloaded = page.waitForEvent('download')
+    await page.frameLocator('[data-risu-plugin-frame]').getByText('Download', { exact: true }).click()
+    const file = await downloaded
+    expect(file.suggestedFilename()).toBe('browser.txt')
+    expect(await readFile((await file.path())!, 'utf8')).toBe('browser bytes')
+    expect(await page.evaluate(() => window.boundary.downloads.files)).toEqual([])
+})
+
+
+test('native plugin popups remain sandboxed while normal iframe links remain usable', async ({ page, context }) => {
+    await context.route('https://synthetic.invalid/frame', route => route.fulfill({ contentType: 'text/html', headers: { 'Allow-CSP-From': '*' }, body: '<p>Frame destination</p>' }))
+    await page.goto('/')
+    const original = page.url()
+    await page.evaluate(() => window.boundary.loadDownload(`
+        const popup = window.open('https://synthetic.invalid/popup');
+        document.body.dataset.popup = String(popup === null);
+        const a = document.createElement('a');
+        a.href = 'https://synthetic.invalid/frame'; a.textContent = 'Frame link'; document.body.append(a);
+    `))
+    const frame = page.frameLocator('[data-risu-plugin-frame]')
+    await expect(frame.locator('body')).toHaveAttribute('data-popup', 'true')
+    await frame.getByText('Frame link', { exact: true }).click()
+    await expect(frame.getByText('Frame destination')).toBeVisible()
+    expect(context.pages()).toHaveLength(1)
+    await expect(page).toHaveURL(original)
+})
+
+test('main-document downloads cancel default handling before the existing window click listener', async ({ page, context }) => {
+    await context.route('https://synthetic.invalid/main.bin', route => route.fulfill({ body: Buffer.from([5, 0, 255]) }))
+    await page.goto('/')
+    await page.evaluate(() => {
+        window.addEventListener('click', event => {
+            const anchor = event.target as HTMLAnchorElement
+            if (anchor.target === '_blank' && !event.defaultPrevented) document.body.dataset.defaultDownload = 'uncancelled'
+        })
+        window.boundary.installMainBridge()
+        const file = document.createElement('a')
+        file.href = 'https://synthetic.invalid/main.bin'
+        file.download = 'main.bin'; file.target = '_blank'; document.body.append(file); file.click()
+    })
+    await expect.poll(() => page.evaluate(() => window.boundary.downloads.files)).toEqual([{ name: 'main.bin', bytes: [5, 0, 255] }])
+    expect(await page.locator('body').getAttribute('data-default-download')).toBeNull()
+    expect(context.pages()).toHaveLength(1)
+})
+
+test('main links use the opener only when replacing the main document', async ({ page }) => {
+    await page.goto('/')
+    const original = page.url()
+    await page.evaluate(() => {
+        window.boundary.installMainBridge()
+        const a = document.createElement('a')
+        a.href = 'https://synthetic.invalid/main'; a.textContent = 'Main link'; document.body.append(a)
+        const internal = document.createElement('a')
+        internal.href = '#same-document'; document.body.append(internal); internal.click()
+        const prevented = document.createElement('a')
+        prevented.href = 'https://synthetic.invalid/prevented'; prevented.onclick = event => event.preventDefault()
+        document.body.append(prevented); prevented.click()
+    })
+    await page.getByText('Main link', { exact: true }).click()
+    await page.evaluate(() => {
+        window.addEventListener('click', event => event.preventDefault())
+        window.addEventListener('auxclick', event => event.preventDefault())
+        const a = document.createElement('a')
+        a.href = 'https://synthetic.invalid/browser-default'; document.body.append(a)
+        for (const modifier of ['ctrlKey', 'shiftKey', 'metaKey', 'altKey']) {
+            a.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, [modifier]: true }))
+        }
+        a.dispatchEvent(new MouseEvent('auxclick', { bubbles: true, cancelable: true, button: 1 }))
+        a.target = '_blank'; a.click()
+    })
+    await expect.poll(() => page.evaluate(() => window.boundary.downloads.opened)).toEqual(['https://synthetic.invalid/main'])
+    await expect(page).toHaveURL(original + '#same-document')
+})
+
+test('main popup windows and named iframe targets keep their native browser behavior', async ({ page, context }) => {
+    await context.route('https://synthetic.invalid/popup', route => route.fulfill({ contentType: 'text/html', body: '<script>opener.postMessage("synthetic-auth", "*")</script>' }))
+    await context.route('https://synthetic.invalid/embedded', route => route.fulfill({ contentType: 'text/html', body: '<p>Embedded page</p>' }))
+    await page.goto('/')
+    await page.evaluate(() => {
+        window.boundary.installMainBridge()
+        window.addEventListener('message', event => { if (event.data === 'synthetic-auth') document.body.dataset.auth = 'received' })
+        const frame = document.createElement('iframe'); frame.name = 'embedded'; document.body.append(frame)
+        const a = document.createElement('a'); a.href = 'https://synthetic.invalid/embedded'; a.target = 'embedded'; a.textContent = 'Embedded link'; document.body.append(a)
+    })
+    const popup = page.waitForEvent('popup')
+    expect(await page.evaluate(() => !!window.open('https://synthetic.invalid/popup', '_blank'))).toBe(true)
+    await expect(page.locator('body')).toHaveAttribute('data-auth', 'received')
+    await page.getByText('Embedded link', { exact: true }).click()
+    await expect(page.frameLocator('[name="embedded"]').getByText('Embedded page')).toBeVisible()
+    expect(await page.evaluate(() => window.boundary.downloads.opened)).toEqual([])
+    await (await popup).close()
 })

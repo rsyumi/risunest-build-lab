@@ -688,6 +688,12 @@ pub(crate) fn pds_read_root(
     logged("pds_read_root", with_store(state, |store| store.read_root(lease.as_deref())))
 }
 
+/// The current revision, for callers that would otherwise read the whole root for it.
+#[tauri::command(async)]
+pub(crate) fn pds_read_revision(state: State<'_, PersistentStoreState>) -> Result<i64, StoreError> {
+    logged("pds_read_revision", with_store(state, |store| store.revision()))
+}
+
 #[tauri::command(async)]
 pub(crate) fn pds_query_presets(
     state: State<'_, PersistentStoreState>,
@@ -786,9 +792,9 @@ pub(crate) fn pds_read_conversation(
     character_id: String,
     conversation_id: String,
     lease: Option<String>,
-) -> Result<Option<Versioned<Value>>, StoreError> {
+) -> Result<Option<Versioned<super::StoredConversation>>, StoreError> {
     logged("pds_read_conversation", with_store(state, |store| {
-        store.read_conversation(&character_id, &conversation_id, lease.as_deref())
+        store.read_stored_conversation(&character_id, &conversation_id, lease.as_deref())
     }))
 }
 
@@ -809,9 +815,9 @@ pub(crate) fn pds_read_conversation_window(
     state: State<'_, PersistentStoreState>,
     query: ConversationWindowQuery,
     lease: Option<String>,
-) -> Result<Option<Versioned<ConversationWindow>>, StoreError> {
+) -> Result<Option<Versioned<ConversationWindow<super::StoredJson>>>, StoreError> {
     logged("pds_read_conversation_window", with_store(state, |store| {
-        store.read_conversation_window(&query, lease.as_deref())
+        store.read_stored_conversation_window(&query, lease.as_deref())
     }))
 }
 
@@ -2921,6 +2927,24 @@ mod tests {
             assert!(entry.message.contains(summary));
             assert!(!entry.message.contains("private-payload-value"));
         }
+    }
+
+    #[test]
+    fn reads_the_root_revision_without_the_root() {
+        let directory = tempdir().expect("create temporary directory");
+        let mut store = PersistentStore::open(directory.path()).expect("open persistent store");
+        let staging = store.replace_begin().expect("begin staging");
+        store
+            .replace_put_root(&staging.staging_id, &json!({ "username": "synthetic" }))
+            .expect("stage root");
+        store.replace_commit(&staging.staging_id, Some(0)).expect("commit root");
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        app.manage(PersistentStoreState::with_test_store(store));
+        let root = pds_read_root(app.state(), None).expect("read root");
+        assert_eq!(root.revision, 1);
+        assert_eq!(pds_read_revision(app.state()).expect("read revision"), root.revision);
     }
 
     #[test]

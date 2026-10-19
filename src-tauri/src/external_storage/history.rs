@@ -332,6 +332,8 @@ mod tests {
             for name in &names {
                 provider.seed(name, ObjectRole::BackupBundle, vec![1; 8]);
             }
+            // No backup point covers a sync checkpoint, and history never opens one.
+            provider.seed("00000000-0000-4000-8000-000000000001", ObjectRole::Snapshot, vec![1; 8]);
             let key = |name: &str| locator_key(&RemoteLocator {
                 connection_identity: handle.connection_identity.clone(),
                 collection: None,

@@ -7,6 +7,41 @@ use std::{collections::{BTreeMap, BTreeSet}, path::Path};
 
 pub(crate) type Coverage = BTreeMap<String, DecimalU64>;
 
+pub(super) fn open(
+    bytes: &[u8],
+    receipt: &ObjectReceipt,
+    repository: &RepositoryHandle,
+    root_key: &[u8; 32],
+) -> Result<(super::packaging::RemoteObject, Checkpoint)> {
+    use risunest_external_storage_format::{crypto::derive_key, snapshot as wire};
+    use std::io::Cursor;
+    receipt.locator.validate_for(repository)?;
+    if !receipt.complete || receipt.byte_length != bytes.len() as u64 {
+        return Err(segment::corrupt());
+    }
+    let repository_id = segment::format_repository_id(&repository.repository_id);
+    let key = derive_key(root_key, &repository_id, "metadata").map_err(sql)?;
+    let mut plaintext = Vec::new();
+    let header = wire::open_envelope(&mut Cursor::new(bytes), &mut plaintext, &key, wire::MAX_METADATA_BYTES as u64).map_err(sql)?;
+    let document = Checkpoint::decode(&plaintext)?;
+    for body in document.standalone_bodies.values() {
+        body.locator.as_ref().ok_or_else(segment::corrupt)?.validate_for(repository)?;
+    }
+    if header.repository_id != repository_id || header.role != wire::ObjectRole::SyncState
+        || header.object_id != document.snapshot_id || document.repository_id != repository_id {
+        return Err(segment::corrupt());
+    }
+    Ok((super::packaging::RemoteObject {
+        repository_id: header.repository_id,
+        object_id: header.object_id,
+        role: ObjectRole::Snapshot,
+        receipt: receipt.clone(),
+        ciphertext_sha256: segment::digest(bytes),
+        plaintext_length: plaintext.len() as u64,
+        plaintext_sha256: segment::digest(&plaintext),
+    }, document))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Checkpoint {

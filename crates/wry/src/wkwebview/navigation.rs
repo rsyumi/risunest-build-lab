@@ -72,12 +72,14 @@ pub(crate) fn navigation_policy(
       } else {
         (*handler).call((WKNavigationActionPolicy::Cancel,));
       }
-    } else {
+    } else if action.targetFrame().is_some_and(|frame| frame.isMainFrame()) {
       let function = &this.ivars().navigation_policy_function;
       match function(url.to_string()) {
         true => (*handler).call((WKNavigationActionPolicy::Allow,)),
         false => (*handler).call((WKNavigationActionPolicy::Cancel,)),
       };
+    } else {
+      (*handler).call((WKNavigationActionPolicy::Allow,));
     }
   }
 }

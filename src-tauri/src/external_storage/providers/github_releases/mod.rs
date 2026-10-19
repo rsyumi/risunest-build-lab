@@ -899,6 +899,8 @@ impl Provider for GithubReleases {
         Box::pin(crate::external_storage::leases::control_request(cancel, async move {
             if collection == Collection::Segments { return Err(ProviderError::new(ErrorKind::Unsupported)); }
             cancel.check()?;
+            // This adapter never stores a sync checkpoint.
+            if collection == Collection::Checkpoints { return Ok(ObjectPage { objects: Vec::new(), next_cursor: None }); }
             let context = self.context(repository)?;
             if limit == 0 || limit > 1000 {
                 return Err(ProviderError::new(ErrorKind::Unsupported));

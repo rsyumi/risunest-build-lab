@@ -80,6 +80,9 @@
     let translationEvidence: Message | null = null
     let editPopup: ChatEditorPopup | null = null
     let chatBodyRevision = $state(0)
+    // Explicit refreshes replace this so the message is parsed once per flush.
+    // Assigning without reading keeps a caller's effect from depending on it.
+    let displayRequest = $state.raw({})
     let bodyRoot:HTMLElement|null = $state(null)
     let editTarget: CapturedChatMessageTarget | null = null
     let editEvidence: Message | null = null
@@ -312,7 +315,7 @@
             if (editIntent) editIntent = selectedConversationOperations.rebindMessageEditIntent(editIntent, input)
             if (partialEditIntent) partialEditIntent = selectedConversationOperations.rebindMessageEditIntent(partialEditIntent, input)
         }
-        if (!state.preserveDisplay) updateDisplayedMessage()
+        if (!state.preserveDisplay) displayRequest = {}
     }
 
     export function refreshParserProjection(
@@ -409,7 +412,7 @@
         // Complete-history renders have no bounded projection object to change.
         // They still need to re-evaluate scripts when any message changes.
         chatBodyRevision += 1
-        updateDisplayedMessage()
+        displayRequest = {}
     }
 
     function currentConversationSession() {
@@ -873,6 +876,7 @@
     }
 
     $effect.pre(() => {
+        void displayRequest
         updateDisplayedMessage()
     });
 

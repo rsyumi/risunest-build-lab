@@ -19,10 +19,28 @@ import { getNodetextToSentence, sleep } from "../util"
 import { processScriptFull, type ProcessScriptCaptureContext } from "../process/scripts"
 import localforage from "localforage"
 import sendSound from '../../etc/send.mp3'
+import { ByteBudgetLru } from "../util/byteBudgetLru"
+import { getRuntimePerformanceBudgets, subscribeRuntimePerformanceProfile } from "../runtimePerformanceProfile"
 
-let cache={
-    origin: [''],
-    trans: ['']
+// Translations made this session. A key carries the settings the request
+// depends on, so a changed language or translator translates again.
+let translationCache: ByteBudgetLru<string, string> | null = null
+subscribeRuntimePerformanceProfile(() => { translationCache = null })
+
+function cachedTranslations(): ByteBudgetLru<string, string> {
+    return translationCache ??= new ByteBudgetLru<string, string>(
+        getRuntimePerformanceBudgets().translationCacheBytes,
+        (key, value) => (key.length + value.length) * 2 + 32,
+    )
+}
+
+function translationCacheKey(db: Database, from: string, target: string, reverse: boolean, text: string): string {
+    return JSON.stringify([reverse, db.translatorType, db.translatorInputLanguage, from, target]) + text
+}
+
+function rememberTranslation(key: string, value: string): void {
+    const cache = cachedTranslations()
+    if (cache.get(key) === undefined) cache.set(key, value)
 }
 
 let bergamotTranslate: (text: string, from: string, to: string, html?: boolean) => Promise<string>|null = null
@@ -38,6 +56,12 @@ export interface TranslateHTMLContext {
     projectedChatID?: number
     chara?: character | string
     cbsConditions?: CbsConditions
+    /** A row of the live chat, which shares the translations made this session. */
+    liveProjection?: true
+}
+
+function sharesLiveTranslation(captureContext?: TranslateHTMLContext): boolean {
+    return !captureContext || captureContext.liveProjection === true
 }
 
 export function getCurrentTranslatorPreset(database: Database = getDatabase()): TranslatorPreset {
@@ -46,18 +70,14 @@ export function getCurrentTranslatorPreset(database: Database = getDatabase()): 
 
 export async function translate(text:string, reverse:boolean, captureContext?: TranslateHTMLContext, errorMode: 'alert' | 'throw' = 'alert') {
     let db = captureContext?.scriptContext.parserContext.database ?? getDatabase()
-    if(!captureContext){
-        if(!reverse){
-            const ind = cache.origin.indexOf(text)
-            if(ind !== -1){
-                return cache.trans[ind]
-            }
+    const target = db.aiModel.startsWith('novellist') ? 'ja' : 'en'
+    if(sharesLiveTranslation(captureContext)){
+        if(text === ''){
+            return ''
         }
-        else{
-            const ind = cache.trans.indexOf(text)
-            if(ind !== -1){
-                return cache.origin[ind]
-            }
+        const cached = cachedTranslations().get(translationCacheKey(db, db.translator, target, reverse, text))
+        if(cached !== undefined){
+            return cached
         }
     }
 
@@ -65,7 +85,7 @@ export async function translate(text:string, reverse:boolean, captureContext?: T
         text,
         reverse,
         db.translator,
-        db.aiModel.startsWith('novellist') ? 'ja' : 'en',
+        target,
         undefined,
         captureContext,
         errorMode,
@@ -128,9 +148,12 @@ export async function runTranslator(text:string, reverse:boolean, from:string,ta
 
     const result = fullResult.join("\n").trim()
 
-    if(!captureContext){
-        cache.origin.push(reverse ? result : text)
-        cache.trans.push(reverse ? text : result)
+    if(sharesLiveTranslation(captureContext)){
+        const db = captureContext?.scriptContext.parserContext.database ?? getDatabase()
+        const origin = reverse ? result : text
+        const translated = reverse ? text : result
+        rememberTranslation(translationCacheKey(db, from, target, false, origin), translated)
+        rememberTranslation(translationCacheKey(db, from, target, true, translated), origin)
     }
 
 
