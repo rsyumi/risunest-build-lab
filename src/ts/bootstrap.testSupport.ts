@@ -242,6 +242,7 @@ export function officialAccountBootstrapModule() {
 export function officialAssetLedgerModule() {
     return {
         createAccountScopedOfficialAssetLedger: () => stub<ReturnType<typeof import('./storage/sync/officialAssetLedger')['createAccountScopedOfficialAssetLedger']>>({ reset: vi.fn() }),
+        createNativeOfficialAssetLedger: async () => stub<Awaited<ReturnType<typeof import('./storage/sync/officialAssetLedger')['createNativeOfficialAssetLedger']>>>({ reset: vi.fn(), flush: vi.fn(async () => {}), clearAll: vi.fn(async () => {}) }),
     } satisfies Partial<typeof import('./storage/sync/officialAssetLedger')>
 }
 

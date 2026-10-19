@@ -1,9 +1,8 @@
 import { asBuffer } from "../../util";
 import type { InlayEncodeOptions } from "../../storage/blobStore";
 
-export function isGifImage(data: Uint8Array): boolean {
-    return data.byteLength >= 6 && new TextDecoder().decode(data.subarray(0, 6)).startsWith('GIF8')
-}
+import { hasAvifBrand, isGifImage, imageFormatFromBytes } from '../../media/imageFormats';
+export { hasAvifBrand, isGifImage } from '../../media/imageFormats';
 
 export function isAnimatedWebP(data: Uint8Array): boolean {
     if (data.byteLength < 12
@@ -51,49 +50,9 @@ export function keepsBrowserOriginal(data: Uint8Array): boolean {
     return isAnimatedInlayImage(data) || hasAvifBrand(data)
 }
 
-export function hasAvifBrand(data: Uint8Array): boolean {
-    const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
-    const text = new TextDecoder()
-    for (let offset = 0; offset + 8 <= data.byteLength;) {
-        const size32 = view.getUint32(offset)
-        const type = text.decode(data.subarray(offset + 4, offset + 8))
-        let headerSize = 8
-        let boxSize = size32
-        if (size32 === 1) {
-            if (offset + 16 > data.byteLength) return false
-            const high = view.getUint32(offset + 8)
-            const low = view.getUint32(offset + 12)
-            boxSize = high * 0x1_0000_0000 + low
-            headerSize = 16
-        } else if (size32 === 0) {
-            boxSize = data.byteLength - offset
-        }
-        if (!Number.isSafeInteger(boxSize) || boxSize < headerSize || offset + boxSize > data.byteLength) return false
-        if (type === 'ftyp') {
-            const brandsStart = offset + headerSize
-            if (brandsStart + 8 > offset + boxSize) return false
-            for (let brandOffset = brandsStart; brandOffset + 4 <= offset + boxSize; brandOffset += brandOffset === brandsStart ? 8 : 4) {
-                const brand = text.decode(data.subarray(brandOffset, brandOffset + 4)).toLowerCase()
-                if (brand === 'avif' || brand === 'avis') return true
-            }
-            return false
-        }
-        offset += boxSize
-    }
-    return false
-}
-
 export function inlayImageSignature(data: Uint8Array): { mime: string, ext: string } | null {
-    const isPng = data.byteLength >= 8
-        && data.slice(0, 8).every((value, index) => value === [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a][index])
-    if (isPng) return { mime: 'image/png', ext: 'png' }
-    if (data.byteLength >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) return { mime: 'image/jpeg', ext: 'jpg' }
-    if (data.byteLength >= 12
-        && new TextDecoder().decode(data.subarray(0, 4)) === 'RIFF'
-        && new TextDecoder().decode(data.subarray(8, 12)) === 'WEBP') return { mime: 'image/webp', ext: 'webp' }
-    if (isGifImage(data)) return { mime: 'image/gif', ext: 'gif' }
-    if (hasAvifBrand(data)) return { mime: 'image/avif', ext: 'avif' }
-    return null
+    const format = imageFormatFromBytes(data)
+    return format ? { mime: format.mime, ext: format.ext } : null
 }
 
 export interface CanvasEncodedInlayImage {

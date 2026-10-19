@@ -4,6 +4,7 @@ import { createConversationOperationContext, type ConversationCommitObserver } f
 
 const mocks = vi.hoisted(() => ({
     iosDependencies: undefined as any,
+    ios: false,
     session: null as any,
     currentCharacter: null as any,
     events: [] as string[],
@@ -57,6 +58,7 @@ const mocks = vi.hoisted(() => ({
     trimUntilPunctuation: vi.fn((value: string) => value),
 }))
 
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule(() => mocks.ios ? { runtime: 'tauri', os: 'ios' } : { runtime: 'web', os: 'windows' }))
 vi.mock('../iosNative', async (importOriginal) => {
     const original = await importOriginal<typeof import('../iosNative')>()
     return { ...original,
@@ -340,6 +342,7 @@ function streamingSnapshots(...values: string[]) {
 describe('sendChat generation session integration', () => {
     beforeEach(() => {
         mocks.iosDependencies = undefined
+        mocks.ios = false
         vi.spyOn(console, 'log').mockImplementation(() => undefined)
         doingChat.set(false)
         mocks.session = null
@@ -1648,7 +1651,11 @@ describe('sendChat generation session integration', () => {
         const { alertNormal } = await import('../alert')
         const { notifyIOSGenerationComplete } = await import('../iosNative')
         const { language } = await import('../../lang')
+        const { setGenerationBackground } = await import('./generationState')
+        const { beginGenerationBackground } = await import('./generationBackground')
         installDatabase()
+        mocks.ios = true
+        setGenerationBackground(beginGenerationBackground)
         const events = new EventTarget()
         const dispose = vi.fn(async () => undefined)
         mocks.iosDependencies = {
@@ -1670,8 +1677,10 @@ describe('sendChat generation session integration', () => {
         if (end === 'user-stop') expect(alertNormal).not.toHaveBeenCalled()
         else expect(alertNormal).toHaveBeenCalledExactlyOnceWith(language.generationInterruptedInBackground)
         expect(notifyIOSGenerationComplete).not.toHaveBeenCalled()
-        expect(dispose).toHaveBeenCalledWith('generation', false)
+        await vi.waitFor(() => expect(dispose).toHaveBeenCalledWith('generation', false))
         mocks.iosDependencies = undefined
+        mocks.ios = false
+        setGenerationBackground(undefined)
     })
 
     describe('generation end notes', () => {

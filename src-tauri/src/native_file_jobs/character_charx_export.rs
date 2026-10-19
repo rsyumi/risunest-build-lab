@@ -52,6 +52,7 @@ pub(crate) fn export_character_charx(
         handoff_directory,
         destination_path,
         job,
+        None,
     )
 }
 
@@ -65,6 +66,7 @@ pub(crate) fn export_character_charx_container(
     handoff_directory: &Path,
     destination_path: Option<&Path>,
     job: &JobControl,
+    rendition: Option<&super::portrait_rendition::PortraitRendition>,
 ) -> Result<JobResultSummary, NativeJobError> {
     export_character_charx_container_with_release(
         prepared,
@@ -78,6 +80,7 @@ pub(crate) fn export_character_charx_container(
         job,
         CharXLimits::default(),
         PreparedRisuSaveExport::release_reader,
+        rendition,
     )
 }
 
@@ -94,6 +97,7 @@ fn export_character_charx_container_with_release<F>(
     job: &JobControl,
     limits: CharXLimits,
     release_reader: F,
+    rendition: Option<&super::portrait_rendition::PortraitRendition>,
 ) -> Result<JobResultSummary, NativeJobError>
 where
     F: FnOnce(&mut PreparedRisuSaveExport) -> StoreResult<()>,
@@ -111,6 +115,7 @@ where
         job,
         limits,
         &mut release_reader,
+        rendition,
     );
     match release_reader.take() {
         Some(release_reader) => super::error::finish_with_release(
@@ -135,6 +140,7 @@ fn export_character_charx_container_with_reader<F>(
     job: &JobControl,
     limits: CharXLimits,
     release_reader: &mut Option<F>,
+    rendition: Option<&super::portrait_rendition::PortraitRendition>,
 ) -> Result<JobResultSummary, NativeJobError>
 where
     F: FnOnce(&mut PreparedRisuSaveExport) -> StoreResult<()>,
@@ -349,6 +355,7 @@ where
             owned_directory,
             job,
             limits,
+            rendition,
         )?,
     };
     let source_bytes = fs::metadata(&source).map_err(io_error)?.len();
@@ -454,6 +461,7 @@ fn create_appended_jpeg_source(
     owned_directory: &Path,
     job: &JobControl,
     limits: CharXLimits,
+    rendition: Option<&super::portrait_rendition::PortraitRendition>,
 ) -> Result<std::path::PathBuf, NativeJobError> {
     if job.is_cancel_requested() {
         return Err(cancelled(
@@ -491,6 +499,7 @@ fn create_appended_jpeg_source(
         }
         None => FALLBACK_PORTRAIT.to_vec(),
     };
+    let portrait = super::portrait_rendition::apply(portrait, rendition)?;
     let portrait = bounded_jpeg_portrait(&portrait, limits.max_entry_decoded_bytes, job)?;
     let source = owned_directory.join("character.jpeg");
     let file = OpenOptions::new()
@@ -1302,6 +1311,7 @@ mod tests {
             &fixture.directory.path().join("handoffs"),
             Some(&destination),
             &job,
+            None,
         )
         .unwrap();
 
@@ -1393,6 +1403,7 @@ mod tests {
             &fixture.directory.path().join("handoffs"),
             Some(&destination),
             &job,
+            None,
         )
         .unwrap_err();
 
@@ -1445,6 +1456,7 @@ mod tests {
                             message: "injected checkpoint failure".to_owned(),
                         })
                     },
+                    None,
                 )
                 .unwrap_err();
 
@@ -1686,6 +1698,7 @@ mod tests {
                 &job,
                 limits,
                 PreparedRisuSaveExport::release_reader,
+                None,
             )
             .unwrap_err();
 

@@ -851,7 +851,7 @@ async fn upload_control_object(
     })
 }
 
-async fn open_listed_point(
+pub(super) async fn open_listed_point(
     receipt: ObjectReceipt,
     descriptor: &Descriptor,
     root_key: &[u8; 32],
@@ -911,7 +911,7 @@ async fn open_listed_inventory_page(
 ) -> Result<ListedInventoryPage> {
     open_listed_inventory_page_in_scope(receipt,descriptor,root_key,provider,repository,cancel,None).await
 }
-async fn open_listed_inventory_page_in_scope(
+pub(super) async fn open_listed_inventory_page_in_scope(
     receipt: ObjectReceipt,
     descriptor: &Descriptor,
     root_key: &[u8; 32],

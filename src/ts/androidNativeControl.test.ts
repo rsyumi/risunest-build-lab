@@ -29,7 +29,7 @@ describe('scoped Android control transport', () => {
         vi.resetModules()
         const ready = vi.fn((text: string) => {
             expect(window.RisuLifecycleBridge?.onFlushComplete).toBeTypeOf('function')
-            expect(window.RisuGenerationKeepAlive?.begin).toBeTypeOf('function')
+            expect(window.RisuGenerationKeepAlive?.notificationsEnabled).toBeTypeOf('function')
             expect(Boolean(window.RisuSafBridge)).toBe(safEnabled)
             expect(JSON.parse(text)).toEqual({ method: 'lifecycle.onFrontendReady', args: [] })
         })

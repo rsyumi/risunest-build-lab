@@ -209,7 +209,7 @@ fn a_cancelled_scan_reports_the_stop_the_renderer_asked_for() {
     let guard = state.admit_renderer_operation().unwrap();
     let session = open_session(&state, &guard, None).unwrap();
     let error = scan_quick(&session, &probe).unwrap_err();
-    release(&state, &guard, &session.lease);
+    session.close(&state, &guard);
     assert!(
         matches!(&error, StoreError::Validation { message } if message == crate::data_health::CANCELLED),
         "{error:?}"
@@ -568,4 +568,33 @@ fn completion_requires_current_diagnosis_and_returns_new_native_eligibility() {
     assert!(!has(&completed.result, codes::INTENT_QUARANTINED));
     assert!(complete_intent(&state, &health, finding, diagnosis.revision, diagnosis.scanned_at).is_err());
     assert_eq!(with_store_mutex(&state, |store| store.lww_binding_authority()).unwrap().0, 1);
+}
+
+/// The scan's reader holds a read transaction its lease does not count. Released after the lease,
+/// it pins the WAL against the truncate checkpoint the release runs, and that checkpoint waits out
+/// the store's busy timeout before it settles for a passive one that leaves the WAL in place.
+#[test]
+fn a_scan_closes_its_reader_before_the_lease_goes_back() {
+    let (_directory, state, _) = damaged_payload_fixture();
+    let health = DataHealthState::default();
+    let scans: [&dyn Fn() -> StoreResult<ScanResult>; 2] =
+        [&|| quick_scan(&state, &health), &|| deep_scan(&state, &health, false)];
+    for (index, scan) in scans.into_iter().enumerate() {
+        let wal = with_store_mutex(&state, |store| {
+            // A pinned WAL then fails the truncate at once instead of after five seconds.
+            store.connection.busy_timeout(std::time::Duration::ZERO)?;
+            // The write leaves frames, so the scan's reader reads through the WAL. A value equal
+            // to the stored one would leave the page clean and write none.
+            store.set_app_kv("device-backup-commit:before-data-health-scan", &serde_json::json!(index))?;
+            Ok(std::path::PathBuf::from(format!("{}-wal", store.database_path.display())))
+        })
+        .unwrap();
+        assert!(fs::metadata(&wal).unwrap().len() > 0);
+        scan().unwrap();
+        assert_eq!(
+            fs::metadata(&wal).unwrap().len(),
+            0,
+            "the release truncates the WAL only when no reader outlives the lease"
+        );
+    }
 }

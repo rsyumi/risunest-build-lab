@@ -43,6 +43,7 @@ import { dispatchChatOutputListeners } from '../plugins/pluginChatOutputListener
 import { createProductionPluginChatOutputProjector } from '../plugins/pluginDatabaseAccess'
 import { activatePresetChainForRequest } from "./presetChain";
 import {
+    joinGenerationSignal,
     reserveGeneration,
     type GenerationReservation,
 } from './generationState'
@@ -93,8 +94,7 @@ import {
     type CompleteConversationLease,
     type WindowedConversationMutationController,
 } from '../storage/activeWorkingSet.svelte'
-import { beginAndroidGenerationKeepAlive, endAndroidGenerationKeepAlive } from '../androidGenerationKeepAlive'
-import { beginIOSGeneration, notifyIOSGenerationComplete, isBackgroundExpiryReason } from "../iosNative";
+import { notifyIOSGenerationComplete } from "../iosNative";
 import { isTauriIOS, isTauriAndroid, isTauriDesktop } from "../platform";
 import { notifyDesktop } from "../desktopNotifications";
 import { planChatParserHistory } from '../chatParserHistory'
@@ -678,10 +678,8 @@ export async function sendChat(arg:{
     let releaseGeneration: (() => void) | null = null
     let enteredGeneration = false
     let generationReturned = false
-    let generationKeepAliveAcquired = false
-    let iosGeneration:
-      | Awaited<ReturnType<typeof beginIOSGeneration>>
-      | undefined;
+    const background = reservation.background
+    let generationSignal: ReturnType<typeof joinGenerationSignal> | undefined
     try {
         const initialTarget = captureSelectedConversationTarget()
         const mayUseBoundedHistory = (DBState.db.hypaV3 || getHistoryWindowMemoryMode(arg.historyLimit) !== null)
@@ -703,11 +701,10 @@ export async function sendChat(arg:{
         enteredGeneration = true
         if (!arg.preview && !arg.previewPrompt) noteGenerationStarted(lifecycle.generationTarget)
         if (lifecycle.generationTarget) lifecycle.releaseGeneration = releaseGeneration = registerGeneratingConversation(lifecycle.generationTarget)
-        generationKeepAliveAcquired = await beginAndroidGenerationKeepAlive()
-        iosGeneration = await beginIOSGeneration(arg.signal)
-        lifecycle.onProgress = iosGeneration.progress;
+        generationSignal = joinGenerationSignal(arg.signal, background?.signal)
+        if (background) lifecycle.onProgress = completed => background.progress(completed)
         const result = await sendChatInternal(
-          { ...arg, signal: iosGeneration.signal },
+          { ...arg, signal: generationSignal.signal },
           lifecycle,
           reservation,
           conversationResources,
@@ -715,7 +712,7 @@ export async function sendChat(arg:{
         generationReturned = true
         return lifecycle.isTargetCurrent() && result
     } catch (error) {
-        if (iosGeneration?.signal?.aborted || arg.signal?.aborted) {
+        if (generationSignal?.signal?.aborted || arg.signal?.aborted) {
             generationReturned = true
             return false
         }
@@ -750,13 +747,9 @@ export async function sendChat(arg:{
         conversationResources.windowedController?.release()
         await conversationResources.preparation?.release()
         conversationResources.completeLease?.release()
-        await endAndroidGenerationKeepAlive(generationKeepAliveAcquired)
-        await iosGeneration
-          ?.dispose(generationReturned && lifecycle.responseCompleted && !iosGeneration.signal?.aborted)
-          .catch((error) =>
-            console.error("iOS generation cleanup failed", error),
-          );
-        if (isBackgroundExpiryReason(iosGeneration?.signal?.reason) && !arg.signal?.aborted) {
+        generationSignal?.release()
+        background?.settle(generationReturned && lifecycle.responseCompleted && !generationSignal?.signal?.aborted)
+        if (background?.takeExpiry() && !arg.signal?.aborted) {
             alertNormal(language.generationInterruptedInBackground)
         }
         ownedReservation?.release({

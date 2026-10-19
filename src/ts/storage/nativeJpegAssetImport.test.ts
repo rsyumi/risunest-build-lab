@@ -81,7 +81,7 @@ describe('native JPEG asset import', () => {
         expect(fence.release).toHaveBeenCalledOnce()
         expect(result).toEqual({
             revision: 8,
-            logicalId: `assets/${'a'.repeat(64)}.jpeg`,
+            logicalId: `assets/${'a'.repeat(64)}.jpg`,
         })
     })
 

@@ -603,6 +603,49 @@ fn asset_alias_receive_retains_remote_custody_before_apply_and_hydrates_only_mis
     );
 }
 #[test]
+fn image_families_keep_aliases_references_and_bodies_after_two_client_sync_and_restart() {
+    let server = LocalServerFixture::new();
+    let (a_root, mut a) = local();
+    let (b_root, mut b) = local();
+    let ca = server.client(&a);
+    let cb = server.client(&b);
+    let fixtures: &[(&str, &[u8])] = &[
+        ("png", include_bytes!("../../../tests/fixtures/images/animated.png")),
+        ("jpg", include_bytes!("../../../tests/fixtures/images/still.jpg")),
+        ("gif", include_bytes!("../../../tests/fixtures/images/animated.gif")),
+        ("webp", include_bytes!("../../../tests/fixtures/images/animated.webp")),
+        ("avif", include_bytes!("../../../tests/fixtures/images/animated.avif")),
+    ];
+    let mut aliases = Vec::new();
+    for (ext, bytes) in fixtures {
+        let key = format!("assets/synthetic.{ext}");
+        let mut alias = put_asset(&mut a, &key, bytes);
+        alias.ext = ext.to_string();
+        alias.mime = format!("image/{}", if *ext == "jpg" { "jpeg" } else { ext });
+        a.commit_asset_alias(&alias, a.revision().unwrap()).unwrap();
+        save(&mut a, &["exists", "character", ext], serde_json::json!({"type":"character"}));
+        save(&mut a, &["character", ext, "image"], serde_json::json!(key));
+        aliases.push(alias);
+    }
+    drain_publications(&ca, &mut a, &[]).unwrap();
+    receive(&cb, &mut b);
+    b.hydrate_registered_remote_assets(|| Ok(())).unwrap();
+    drop(a); drop(b);
+    for root in [a_root.path(), b_root.path()] {
+        let store = PersistentStore::open(root).unwrap();
+        let revision = store.revision().unwrap();
+        let cas = crate::asset_repository::PayloadCas::new(root).unwrap();
+        for ((ext, bytes), alias) in fixtures.iter().zip(&aliases) {
+            assert_eq!(store.read_asset_alias("asset", &alias.key, None).unwrap().unwrap().value, *alias);
+            assert_eq!(store.read_character(ext, None).unwrap().unwrap().value["image"], alias.key);
+            assert_eq!(cas.read_object(alias.object_hash.as_ref().unwrap()).unwrap().unwrap(), *bytes);
+        }
+        assert_eq!(store.revision().unwrap(), revision);
+        assert!(store.lww_read_outbox(0.into(), 256).unwrap().entries.is_empty());
+    }
+}
+
+#[test]
 fn clients_made_inside_a_lane_count_what_they_publish_receive_and_download() {
     use super::progress::{within, ProgressLane};
     let server = LocalServerFixture::new();

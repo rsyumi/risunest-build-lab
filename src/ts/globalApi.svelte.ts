@@ -977,7 +977,7 @@ export function openURL(url: string) {
         void openUrl(url).catch((error) => alertError(String(error)))
     }
     else if (isTauri) {
-        open(url)
+        void open(url).catch((error) => alertError(String(error)))
     }
     else {
         window.open(url, "_blank")

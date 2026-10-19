@@ -5,6 +5,7 @@ import { globalFetch, loadAsset } from "../globalApi.svelte";
 import { language } from "src/lang";
 import { sleep } from "../util";
 import { runVITS } from "./transformers";
+import { holdModelCall } from "./generationBackground";
 import {
     getTTSPreprocessors,
     getTTSPostprocessors,
@@ -78,6 +79,10 @@ async function playAudio(audio: ArrayBuffer, mimeType: string, ctx: { ttsMode: s
 }
 
 export async function sayTTS(character:character,text:string) {
+    return holdModelCall(() => sayTTSUnderHold(character, text))
+}
+
+async function sayTTSUnderHold(character:character,text:string) {
     try {
         if(!character){
             const v = getCurrentCharacter()

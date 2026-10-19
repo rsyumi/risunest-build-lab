@@ -525,6 +525,20 @@ fn preserves_an_animation_with_more_frames_than_the_limit_allows() {
 }
 
 #[test]
+fn the_frame_limit_counts_frames_a_scaled_and_capped_timeline_folds_away() {
+    let source = animated_gif_fixture(&vec![20u32; 601], 8, 8);
+
+    let refused = super::decode_inlay_animation(
+        &source,
+        super::InlayAnimation::Gif,
+        &animation_options(4, 10),
+    )
+    .err();
+
+    assert_eq!(refused.as_deref(), Some("Inlay animation has too many frames"));
+}
+
+#[test]
 fn preserves_an_animation_the_settings_ask_to_keep_as_it_is() {
     let source = animated_gif_fixture(&[30, 30, 30], 64, 64);
 
@@ -573,10 +587,10 @@ fn preserves_formats_and_broken_bytes_this_device_cannot_re_encode() {
     )
     .unwrap();
 
-    assert_eq!(stored_avif.data, avif);
+    assert_eq!(stored_avif.data, &avif[..]);
     assert_eq!(stored_avif.metadata.mime, "image/avif");
     assert_eq!(stored_avif.metadata.ext, "avif");
-    assert_eq!(stored_broken.data, broken);
+    assert_eq!(stored_broken.data, &broken[..]);
     // Nothing in the bytes says what this is, so the file name decides.
     assert_eq!(stored_broken.metadata.mime, "image/png");
     assert_eq!(stored_broken.metadata.ext, "png");
@@ -634,7 +648,7 @@ fn configurable_inlay_encoding_preserves_original_and_skipped_webp_bytes() {
         .unwrap();
         assert_eq!(result.metadata.mime, expected_mime);
         assert_eq!(result.metadata.ext, expected_ext);
-        assert_eq!(result.data.as_slice() == source.as_slice(), expected_bytes);
+        assert_eq!(result.data[..] == source[..], expected_bytes);
     }
     let png_result = encode_inlay_image(
         "png",
@@ -704,7 +718,7 @@ fn configured_webp_quality_is_forwarded_instead_of_using_the_default() {
         let expected = webp::Encoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height())
             .encode(quality)
             .to_vec();
-        assert_eq!(encoded.as_slice(), expected.as_slice());
+        assert_eq!(encoded[..], expected[..]);
         let decoded = image::load_from_memory_with_format(encoded, ImageFormat::WebP).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (32, 24));
     }

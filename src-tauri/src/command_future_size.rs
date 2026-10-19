@@ -135,6 +135,8 @@ async_commands![
     native_media::ipc::native_media_inlay_output_read,
     asset_repository::commands::asset_cas_read_bytes,
     asset_repository::commands::asset_cas_stat_object,
+    asset_repository::commands::asset_cas_stat_objects,
+    asset_repository::commands::asset_remote_stat_objects,
     asset_repository::commands::asset_remote_stat_object,
     asset_repository::commands::asset_remote_hydrate_object,
     asset_repository::commands::asset_cas_job_begin,

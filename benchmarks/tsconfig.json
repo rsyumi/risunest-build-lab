@@ -11,6 +11,7 @@
     "./sync-ui/**/*.ts",
     "./device-backup/**/*.ts",
     "./legacy-restore/**/*.ts",
+    "./official-account/**/*.ts",
     "./plugin-review/**/*.ts",
     "../src/**/*.d.ts"
   ],

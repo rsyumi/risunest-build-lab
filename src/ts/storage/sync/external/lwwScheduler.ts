@@ -13,6 +13,8 @@ export interface LwwSchedulerDependencies {
     turnLimit?: number
     setTimer?(callback: () => void, delay: number): unknown
     clearTimer?(timer: unknown): void
+    /** Reports whether work is running, waiting, or due without a new check. */
+    busy?(busy: boolean): void
 }
 type ExplicitKind = 'publish' | 'receive' | 'manual'
 interface Waiting {
@@ -33,6 +35,10 @@ export function createLwwScheduler(dependencies: LwwSchedulerDependencies) {
     const clearTimer = dependencies.clearTimer ?? (timer => clearTimeout(timer as ReturnType<typeof setTimeout>))
     const limit = dependencies.turnLimit ?? 4
     let enabled = false
+    // Hidden: timers stop, routine publishes wait, and only a receive that returned pages continues.
+    let hidden = false
+    let receiveMore = false
+    let reportedBusy = false
     let epoch = 0
     let lifetime = new AbortController()
     let dirtyVersion = 0
@@ -55,8 +61,16 @@ export function createLwwScheduler(dependencies: LwwSchedulerDependencies) {
     const serviceRetryAt: Record<LwwOperation, number> = { publish: 0, receive: 0, maintenance: 0 }
     const blocked = new Set<LwwOperation>()
     const failureByOperation = new Map<LwwOperation, unknown>()
+    const reportBusy = () => {
+        const busy = !!inFlight || !!maintenance || waiting.size > 0
+            || enabled && (receivePending || !hidden && dirtyVersion !== coveredVersion)
+        if (busy === reportedBusy) return
+        reportedBusy = busy
+        dependencies.busy?.(busy)
+    }
     const checkSettled = () => {
         if (!inFlight && !maintenance && !waiting.size) { quiescence?.resolve(); quiescence = undefined }
+        reportBusy()
     }
     const aborted = () => new DOMException('Sync scheduling stopped', 'AbortError')
     const clearWake = () => { if (wakeTimer !== undefined) clearTimer(wakeTimer); wakeTimer = undefined }
@@ -78,7 +92,7 @@ export function createLwwScheduler(dependencies: LwwSchedulerDependencies) {
     }
     const scheduleReceive = () => {
         clearReceive()
-        if (!enabled) return
+        if (!enabled || hidden) return
         receiveTimer = setTimer(() => { receiveTimer = undefined; receivePending = true; pump() }, emptyListings >= 3 ? 60_000 : 20_000)
     }
     const resetListing = () => {
@@ -87,10 +101,10 @@ export function createLwwScheduler(dependencies: LwwSchedulerDependencies) {
         if (backedOff && receiveTimer !== undefined) scheduleReceive()
     }
     const scheduleMaintenance = () => {
-        if (!enabled || !dependencies.maintain || maintenanceTimer !== undefined || maintenance || blocked.has('maintenance')) return
+        if (!enabled || hidden || !dependencies.maintain || maintenanceTimer !== undefined || maintenance || blocked.has('maintenance')) return
         maintenanceTimer = setTimer(() => {
             maintenanceTimer = undefined
-            if (!enabled) return
+            if (!enabled || hidden) return
             if (!dependencies.available() || hasPublish()) { scheduleMaintenance(); return }
             const captured = epoch
             const signal = lifetime.signal
@@ -99,6 +113,7 @@ export function createLwwScheduler(dependencies: LwwSchedulerDependencies) {
             }, error => { if (captured === epoch && !signal.aborted) rememberFailure(error, 'maintenance') }).finally(() => {
                 maintenance = undefined; scheduleMaintenance(); checkSettled()
             })
+            reportBusy()
         }, Math.max(60_000, retryAt.maintenance - now()))
     }
     const execute = async (operation: 'publish' | 'receive', routine: boolean, signal: AbortSignal, captured: number, publish?: (call: LwwCall) => Promise<LwwTurn>) => {
@@ -122,7 +137,8 @@ export function createLwwScheduler(dependencies: LwwSchedulerDependencies) {
                     immediate ||= result.count > 0
                 } else if (!hasPublish()) firstDirty = undefined
             } else {
-                receivePending ||= result.more
+                receiveMore = result.more && result.count > 0
+                receivePending ||= hidden ? receiveMore : result.more
                 emptyListings = result.more || result.count ? 0 : emptyListings + 1
                 if (result.more && !result.count) retryAt.receive = Math.max(retryAt.receive, now() + 20_000)
                 scheduleReceive()
@@ -130,20 +146,23 @@ export function createLwwScheduler(dependencies: LwwSchedulerDependencies) {
         } catch (error) {
             if (captured === epoch && !signal.aborted) {
                 if (operation === 'publish') { firstDirty ??= now(); immediate = true }
-                else receivePending = true
+                else { receiveMore = false; receivePending ||= !hidden }
                 rememberFailure(error, operation)
             }
             throw error
         }
     }
     const explicitDue = (item: Waiting) => item.kind === 'manual' ? Math.max(serviceRetryAt.publish, serviceRetryAt.receive) : serviceRetryAt[item.kind]
-    const pump = () => {
+    const pump = () => { dispatch(); reportBusy() }
+    const dispatch = () => {
         clearWake()
         if (inFlight) return
         const pendingExplicit = waiting.get('manual') ?? waiting.get('publish') ?? waiting.get('receive')
         const explicit = pendingExplicit && explicitDue(pendingExplicit) <= now() ? pendingExplicit : undefined
         const routine = enabled && dependencies.available()
-        const publishDue = routine && hasPublish() && !blocked.has('publish') ? sendDue() : Infinity
+        // A hidden receive continues only while its next page is due now.
+        if (hidden && receivePending && (!routine || blocked.has('receive') || retryAt.receive > now())) receivePending = false
+        const publishDue = routine && !hidden && hasPublish() && !blocked.has('publish') ? sendDue() : Infinity
         const receiveDue = routine && receivePending && !blocked.has('receive') ? retryAt.receive : Infinity
         let operation: 'publish' | 'receive' | undefined
         if (!explicit) {
@@ -234,13 +253,13 @@ export function createLwwScheduler(dependencies: LwwSchedulerDependencies) {
     }
     const receiveNow = (force = false, signal?: AbortSignal) => {
         if (force) return requestExplicit('receive', signal)
-        if (!enabled || !dependencies.available()) return Promise.resolve()
+        if (!enabled || hidden || !dependencies.available()) return Promise.resolve()
         clearReceive(); receivePending = true; pump()
         return settled()
     }
     const start = (publish = true) => {
         if (enabled) return
-        enabled = true; epoch++; lifetime = new AbortController(); emptyListings = 0; nextDirection = 'publish'
+        enabled = true; hidden = false; receiveMore = false; epoch++; lifetime = new AbortController(); emptyListings = 0; nextDirection = 'publish'
         receivePending = true
         if (publish) { dirtyVersion++; firstDirty = now(); lastDirty = now(); immediate = true }
         pump(); scheduleMaintenance()
@@ -248,12 +267,17 @@ export function createLwwScheduler(dependencies: LwwSchedulerDependencies) {
     const pauseAutomatic = () => {
         enabled = false
         clearWake(); clearReceive(); clearMaintenance()
-        coveredVersion = dirtyVersion; firstDirty = undefined; immediate = false; receivePending = false
+        coveredVersion = dirtyVersion; firstDirty = undefined; immediate = false; receivePending = false; receiveMore = false
     }
     return {
         dirty,
         start,
         pauseAutomatic() { pauseAutomatic(); pump() },
+        /** Aborts routine work whose background time ran out; requests with their own callers keep running. */
+        expire() {
+            pauseAutomatic(); lifetime.abort(aborted())
+            pump(); checkSettled()
+        },
         stop() {
             pauseAutomatic(); epoch++; lifetime.abort(aborted())
             for (const item of waiting.values()) { item.controller.abort(aborted()); item.reject(aborted()) }
@@ -261,9 +285,22 @@ export function createLwwScheduler(dependencies: LwwSchedulerDependencies) {
             activeWaiting?.controller.abort(aborted()); activeWaiting?.reject(aborted())
             checkSettled()
         },
+        /**
+         * Keeps work already running and stops starting new checks until `resumeForeground`.
+         * With `publish`, what was queued before hiding is sent unless the service asked to wait.
+         */
+        background(publish = false, signal?: AbortSignal): Promise<void> {
+            const publication = publish && !blocked.has('publish') && serviceRetryAt.publish <= now()
+                ? requestExplicit('publish', signal) : Promise.resolve()
+            hidden = true
+            clearReceive(); clearMaintenance()
+            if (!receiveMore) receivePending = false
+            pump()
+            return publication
+        },
         resumeForeground(publish = true) {
             if (!enabled) start(publish)
-            else { resetListing(); if (publish) dirty(true); receivePending = true; pump() }
+            else { hidden = false; resetListing(); if (publish) dirty(true); receivePending = true; pump(); scheduleMaintenance() }
             return settled()
         },
         conversationOpened() { resetListing(); return receiveNow() },

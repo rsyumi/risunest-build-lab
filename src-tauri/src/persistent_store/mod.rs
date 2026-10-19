@@ -749,17 +749,48 @@ pub(crate) struct ConversationWindowQuery {
     pub(crate) skip_parser_work: Option<bool>,
 }
 
+/// `M` is `StoredJson` where messages go to the renderer as stored, without parsing them.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ConversationWindow {
+pub(crate) struct ConversationWindow<M = Value> {
     pub(crate) character_id: String,
     pub(crate) conversation_id: String,
-    pub(crate) messages: Vec<Value>,
+    pub(crate) messages: Vec<M>,
     pub(crate) start_index: i64,
     pub(crate) end_index: i64,
     pub(crate) total_messages: i64,
     pub(crate) has_more_before: bool,
     pub(crate) has_more_after: bool,
+}
+
+/// A stored JSON text, validated and serialized verbatim.
+pub(crate) type StoredJson = Box<serde_json::value::RawValue>;
+
+/// A conversation as `read_conversation` returns it, with the messages kept as stored.
+#[derive(Debug)]
+pub(crate) struct StoredConversation {
+    pub(crate) detail: serde_json::Map<String, Value>,
+    pub(crate) messages: Vec<StoredJson>,
+}
+
+impl Serialize for StoredConversation {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        // The shape and key order of the detail with `message` inserted into it.
+        let replaces = self.detail.contains_key("message");
+        let mut map = serializer.serialize_map(Some(self.detail.len() + usize::from(!replaces)))?;
+        for (key, value) in &self.detail {
+            if key == "message" {
+                map.serialize_entry(key, &self.messages)?;
+            } else {
+                map.serialize_entry(key, value)?;
+            }
+        }
+        if !replaces {
+            map.serialize_entry("message", &self.messages)?;
+        }
+        map.end()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1747,6 +1778,17 @@ impl PersistentStore {
         query::read_conversation(connection, character_id, conversation_id, &target)
     }
 
+    /// `read_conversation` for the renderer, which receives the messages as stored.
+    pub(crate) fn read_stored_conversation(
+        &self,
+        character_id: &str,
+        conversation_id: &str,
+        lease: Option<&str>,
+    ) -> StoreResult<Option<Versioned<StoredConversation>>> {
+        let (connection, target) = self.read_view(lease)?;
+        query::read_stored_conversation(connection, character_id, conversation_id, &target)
+    }
+
     pub(crate) fn read_conversation_metadata(
         &self,
         character_id: &str,
@@ -1764,6 +1806,16 @@ impl PersistentStore {
     ) -> StoreResult<Option<Versioned<ConversationWindow>>> {
         let (connection, target) = self.read_view(lease)?;
         query::read_conversation_window(connection, query, &target)
+    }
+
+    /// `read_conversation_window` for the renderer, which receives the messages as stored.
+    pub(crate) fn read_stored_conversation_window(
+        &self,
+        query: &ConversationWindowQuery,
+        lease: Option<&str>,
+    ) -> StoreResult<Option<Versioned<ConversationWindow<StoredJson>>>> {
+        let (connection, target) = self.read_view(lease)?;
+        query::read_stored_conversation_window(connection, query, &target)
     }
 
     pub(crate) fn read_conversation_message_metadata_window(

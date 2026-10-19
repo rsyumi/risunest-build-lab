@@ -29,6 +29,7 @@ const state = vi.hoisted(() => ({
     nativeRestore: vi.fn(async () => null),
     fullReadFile: vi.fn(async () => new Uint8Array([99])),
     restoreEvents: [] as string[],
+    writerInits: 0,
     replacePersistentDatabase: vi.fn(async (_database: Database, _reason: string, _options?: import('../storage/saveCoordinator').PersistentReplacementOptions) => ({
         kind: 'committed', revision: 1, projection: 'applied',
     } as const)),
@@ -42,6 +43,7 @@ const state = vi.hoisted(() => ({
 }))
 
 vi.mock('../alert', async () => (await import('./backupRestore.testSupport')).alertModule())
+vi.mock('../mobileBackgroundTask', async () => (await import('../mobileBackgroundTask.testSupport')).mobileBackgroundTaskModule())
 vi.mock('../storage/portableBackupFileRouteProduction.svelte', () => ({restoreBackupFromSystemPicker: state.nativeRestore}))
 vi.mock('@tauri-apps/api/core', async importOriginal => ({
     ...await importOriginal<typeof import('@tauri-apps/api/core')>(), invoke: vi.fn(async () => undefined),
@@ -53,6 +55,7 @@ vi.mock('../globalApi.svelte', () => ({
     getUncleanables: state.getUncleanables,
     LocalWriter: class {
         async init() {
+            state.writerInits++
             return true
         }
 
@@ -486,11 +489,14 @@ describe('local backup persistent snapshot', () => {
         )
         const acquireRevision = store.acquireRevision.bind(store)
         let readPluginStorage: ReturnType<typeof vi.fn> | undefined
+        let readConversation: ReturnType<typeof vi.fn> | undefined
         vi.spyOn(store, 'acquireRevision').mockImplementation(async (revision) => {
             const lease = await acquireRevision(revision)
             const readPinnedPluginStorage = lease.readPluginStorage.bind(lease)
             readPluginStorage = vi.fn(readPinnedPluginStorage)
             lease.readPluginStorage = readPluginStorage
+            readConversation = vi.fn(lease.readConversation.bind(lease))
+            lease.readConversation = readConversation
             return lease
         })
         const live = structuredClone(persisted)
@@ -541,6 +547,10 @@ describe('local backup persistent snapshot', () => {
         expect(readPluginStorage).toHaveBeenCalledTimes(2)
         expect(readPluginStorage).toHaveBeenNthCalledWith(1, UNOWNED_PLUGIN_OWNER, 'zero')
         expect(readPluginStorage).toHaveBeenNthCalledWith(2, UNOWNED_PLUGIN_OWNER, 'nested')
+        // Only the database export reads conversations; the asset scan skips them.
+        const conversationReads = readConversation!.mock.calls.map(([characterId, conversationId]) => `${characterId}/${conversationId}`)
+        expect(conversationReads.length).toBeGreaterThan(0)
+        expect(conversationReads).toEqual([...new Set(conversationReads)])
         expect(materializeDatabase).not.toHaveBeenCalled()
         expect(state.runtime.capturePersistentMutationToken).toHaveBeenCalledWith(
             'partial-local-backup',
@@ -577,15 +587,35 @@ describe('local backup persistent snapshot', () => {
             read,
         }
 
+        const { runWithMobileBackgroundTask } = await import('../mobileBackgroundTask')
+        const background = new AbortController()
+        const task = { signal: background.signal, progress: vi.fn(), dispose: async () => {} }
+        let initsAtHold = -1
+        vi.mocked(runWithMobileBackgroundTask).mockImplementation(async (_kind, operation) => {
+            initsAtHold = state.writerInits
+            return operation(task)
+        })
+        state.writerInits = 0
         const { SavePartialLocalBackup } = await import('./backuplocal')
         await SavePartialLocalBackup()
 
+        // The hold begins once the destination is chosen and reports each asset.
+        expect(runWithMobileBackgroundTask).toHaveBeenCalledExactlyOnceWith('backup', expect.any(Function), undefined, true)
+        expect(initsAtHold).toBe(1)
+        expect(task.progress).toHaveBeenCalledOnce()
         expect(read).toHaveBeenCalledWith('assets\\partial-profile.png')
         expect(read).toHaveBeenCalledWith('assets/partial-profile.png')
         expect(state.written.get('assets\\partial-profile.png')).toEqual(profileBytes)
         const { alertMd, alertNormal } = await import('../alert')
         expect(alertMd).not.toHaveBeenCalled()
         expect(alertNormal).toHaveBeenCalledWith('Success')
+
+        // Expiry stops the backup before it writes another entry.
+        state.written.clear()
+        background.abort()
+        await expect(SavePartialLocalBackup()).rejects.toMatchObject({ name: 'AbortError' })
+        expect(state.written.size).toBe(0)
+        vi.mocked(runWithMobileBackgroundTask).mockReset()
     })
 
     it('streams a native pinned export into the local backup entry', async () => {

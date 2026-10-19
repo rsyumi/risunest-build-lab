@@ -1,7 +1,7 @@
 import { selectDomFiles } from '../storage/fileSelection'
 import type { SelectedFileSlices } from '../storage/nativeFileSelection'
 import { prepareExternalDatabaseImport } from '../storage/upstreamImport'
-import { runWithMobileBackgroundTask } from '../mobileBackgroundTask'
+import { measuredTaskPercent, runWithMobileBackgroundTask, type MobileBackgroundTask } from '../mobileBackgroundTask'
 import { BaseDirectory, open, writeFile } from "@tauri-apps/plugin-fs";
 import { fetch as nativeFetch } from "@tauri-apps/plugin-http";
 import localforage from "localforage";
@@ -21,6 +21,7 @@ import {
     readBackupAsset,
     readLocalBackupAsset,
     scanPinnedBackupRecords,
+    type PinnedBackupReferences,
     writeBackupAsset,
 } from "./backupAssets";
 import { classifyPocketRisuEntry, PocketRisuInlayImporter } from "./pocketRisuBackup";
@@ -295,11 +296,11 @@ export async function SavePartialLocalBackup(){
     })).confirmed) return
 
     alertWait("Saving partial local backup...")
-    return runWithMobileBackgroundTask('backup', () => withFlushedRisuSaveExport(
+    return withFlushedRisuSaveExport(
         getPersistentDataRuntime(),
         'partial-local-backup',
         (pinned) => savePartialLocalBackupSnapshot(blobStore, pinned),
-    ), undefined, true)
+    )
 }
 
 async function savePartialLocalBackupSnapshot(blobStore: BlobStore, pinned: PinnedRisuSaveExport) {
@@ -312,12 +313,24 @@ async function savePartialLocalBackupSnapshot(blobStore: BlobStore, pinned: Pinn
         alertError('Failed')
         return
     }
+    // The destination is chosen, so the picker never holds the background task.
+    return runWithMobileBackgroundTask('backup', (task) => writePartialLocalBackup(blobStore, pinned, references, writer, task), undefined, true)
+}
 
+async function writePartialLocalBackup(
+    blobStore: BlobStore,
+    pinned: PinnedRisuSaveExport,
+    references: PinnedBackupReferences,
+    writer: LocalWriter,
+    task: MobileBackgroundTask,
+) {
     const assetMap = references.assetLabels
     const missingAssets: string[] = []
 
     const assetKeys = references.assetKeys
     for(let i=0;i<assetKeys.length;i++){
+        task.signal?.throwIfAborted()
+        task.progress(measuredTaskPercent(i, assetKeys.length))
         const key = assetKeys[i]
         let message = `Saving partial local backup... (${i + 1} / ${assetKeys.length})`
         if (missingAssets.length > 0) {

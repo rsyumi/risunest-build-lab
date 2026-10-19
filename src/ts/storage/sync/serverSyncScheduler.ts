@@ -2,7 +2,10 @@ export interface ServerSyncSchedulerDependencies {
     push(): Promise<void>
     pull(completeAvailable?: boolean): Promise<void>
     connect(operationId: string): Promise<void>
+    /** Stops the notification channel and cancels running work. */
     disconnect(): Promise<void>
+    /** Stops only the notification channel, so running work continues while hidden. */
+    stopNotifications?(): Promise<void>
     retryClock?(): Promise<void>
     publishHidden?(): Promise<void>
     automaticSyncAvailable?(): boolean
@@ -68,12 +71,12 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
         }, outageUntil - Date.now())
     }
     const failedLanes = new Set<Lane>()
-    const disconnect = () => {
+    const disconnect = (stop = dependencies.disconnect) => {
         if (!disconnecting) disconnecting = (async () => {
-            await dependencies.disconnect()
+            await stop()
             const started = connecting
             // A start that was already running may finish after the stop, so stop again once it settles.
-            if (started) { await started; await dependencies.disconnect() }
+            if (started) { await started; await stop() }
         })().finally(() => { disconnecting = undefined })
         return disconnecting
     }
@@ -204,7 +207,8 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
             else {
                 connected = false
                 if (publishPending && !blocked && dependencies.publishHidden) await publishHidden()
-                if (!foreground) await disconnect()
+                // Hiding stops checks and the notification channel; sends and receives already running finish.
+                if (!foreground) await disconnect(dependencies.stopNotifications ?? dependencies.disconnect)
             }
         },
         localChange(immediate = false) {

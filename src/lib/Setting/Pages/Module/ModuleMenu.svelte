@@ -1,4 +1,6 @@
 <script lang="ts">
+    import { imageAliases, selectedImageFormat } from "src/ts/media/imageFormats"
+    import { mapSelectedFiles } from "src/ts/util"
     import ListPager from "src/lib/UI/GUI/ListPager.svelte"
     import { language } from "src/lang";
     import TextInput from "src/lib/UI/GUI/TextInput.svelte";
@@ -266,20 +268,21 @@
                 <th class="font-medium cursor-pointer w-10">
                     <button class="hover:text-green-500" onclick={async () => {
                         const moduleId = currentModule.id
-                        const da = await selectMultipleFile(['png', 'webp', 'mp4', 'mp3', 'gif', 'jpeg', 'jpg', 'ttf', 'otf', 'css', 'webm', 'woff', 'woff2', 'svg', 'avif'])
+                        const failures: string[] = []
+                        const da = await selectMultipleFile([...imageAliases, 'mp4', 'mp3', 'ttf', 'otf', 'css', 'webm', 'woff', 'woff2', 'svg'], { failures })
                         if(!da){
                             return
                         }
-                        for(const f of da){
+                        await mapSelectedFiles(da, async f => {
                             const img = f.data
                             const name = f.name
-                            const extension = name.split('.').pop().toLowerCase()
+                            const extension = selectedImageFormat(img, name)?.ext ?? name.split('.').pop().toLowerCase()
                             const imgp = await saveAsset(img,'', extension)
                             const module = DBState.db.modules.find(module => module.id === moduleId)
                             if (!module) return
                             module.assets ??= []
                             module.assets.push([name, imgp, extension])
-                        }
+                        }, failures)
                     }}>
                         <PlusIcon />
                     </button>

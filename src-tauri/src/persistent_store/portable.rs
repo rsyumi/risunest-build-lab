@@ -320,7 +320,9 @@ impl PersistentStore {
         }
         let temporary=tempfile::tempdir_in(&self.snapshots_dir)?;
         let certified=crate::sqlite_open::open(temporary.path().join("certified.sqlite"))?;
-        certified.execute_batch("PRAGMA cache_size=-16384; PRAGMA temp_store=FILE; CREATE TABLE controls(hash TEXT PRIMARY KEY,body BLOB NOT NULL)")?;
+        // A scratch table that is dropped with its directory, so no commit needs to be durable.
+        certified.execute_batch("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-16384; PRAGMA temp_store=FILE;
+            CREATE TABLE controls(hash TEXT PRIMARY KEY,body BLOB NOT NULL); BEGIN")?;
         let read_manifest = |hash: &str| -> StoreResult<Option<Vec<u8>>> {
             Ok(source.query_row("SELECT body FROM backup_controls WHERE hash=?1",[hash],|row|row.get(0)).optional()?)
         };
@@ -349,6 +351,7 @@ impl PersistentStore {
                 certified.execute("INSERT INTO controls VALUES(?1,?2)",rusqlite::params![hash,body])?;
                 Ok(())
             })?;
+        certified.execute_batch("COMMIT")?;
         let controls:i64=source.query_row("SELECT COUNT(*) FROM backup_controls",[],|row|row.get(0))?;
         if usize::try_from(controls).ok()!=Some(inventory.controls.len()) {return Err(invalid("unreferenced original control"));}
         for hash in inventory.controls.keys() {

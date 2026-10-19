@@ -14,57 +14,224 @@ import org.junit.Test
 import org.w3c.dom.Element
 
 class GenerationForegroundServiceTest {
-  @Test
-  fun `notification refresh failure preserves an admitted owner until end`() {
+  private fun taskId(index: Int) = "00000000-0000-4000-8000-%012d".format(index)
+
+  private class Hosted {
     val registry = BackgroundTaskRegistry()
     val lifecycle = GenerationForegroundLifecycle()
+    var starts = 0
     var stops = 0
-    val first = registry.begin("sync", { lifecycle.begin { true } }, {})!!
-    val second = registry.begin("backup", { lifecycle.begin { true } }, {}, { error("refresh") })!!
-    assertEquals(2, registry.snapshot().size)
-    assertTrue(registry.end(first) { lifecycle.end { stops++; true } })
-    assertEquals(0, stops)
-    assertTrue(registry.end(second) { lifecycle.end { stops++; true } })
-    assertEquals(1, stops)
-    assertTrue(registry.snapshot().isEmpty())
+    var refuse: String? = null
+    val expired = mutableListOf<String>()
+    val start: () -> String? = {
+      if (lifecycle.begin { if (refuse == null) { starts++; true } else false }) null else refuse
+    }
+    val stop: () -> Boolean = { lifecycle.end { stops++; true } }
+    fun begin(id: String, kind: String, deferred: Boolean = false, refresh: () -> Unit = {}) =
+      registry.begin(id, kind, deferred, start, { expired.add(it) }, refresh)
+    fun end(id: String) = registry.end(id, stop)
+  }
+
+  @Test
+  fun `notification refresh failure preserves an admitted owner until end`() {
+    val host = Hosted()
+    assertEquals(BACKGROUND_ACTIVE, host.begin(taskId(1), "sync"))
+    assertEquals(BACKGROUND_ACTIVE, host.begin(taskId(2), "backup") { error("refresh") })
+    assertEquals(2, host.registry.snapshot().size)
+    assertTrue(host.end(taskId(1)))
+    assertEquals(0, host.stops)
+    assertTrue(host.end(taskId(2)))
+    assertEquals(1, host.stops)
+    assertTrue(host.registry.snapshot().isEmpty())
   }
 
   @Test
   fun `background owners keep independent progress and cannot end a newer task`() {
-    val registry = BackgroundTaskRegistry()
-    val lifecycle = GenerationForegroundLifecycle()
-    var starts = 0
-    var stops = 0
-    val expired = mutableListOf<String>()
-    fun begin(kind: String) = registry.begin(kind, { lifecycle.begin { starts++; true } }, { expired.add(it) })!!
-    fun end(id: String) = registry.end(id) { lifecycle.end { stops++; true } }
-    val backup = begin("backup")
-    val sync = begin("sync")
-    assertEquals(1, starts)
-    assertTrue(registry.progress(backup, 42))
-    assertFalse(registry.progress(sync, 101))
-    assertEquals(listOf(BackgroundTaskStatus("backup", 42), BackgroundTaskStatus("sync")), registry.snapshot())
-    assertTrue(end(backup))
-    assertEquals(0, stops)
-    assertFalse(end(backup))
-    assertFalse(registry.progress(backup, 99))
-    assertTrue(end(sync))
-    assertEquals(1, stops)
-    val restore = begin("restore")
-    registry.clear(notify = true)
-    assertEquals(listOf(restore), expired)
-    assertFalse(end(restore))
-    assertTrue(registry.snapshot().isEmpty())
+    val host = Hosted()
+    val backup = taskId(1)
+    val sync = taskId(2)
+    host.begin(backup, "backup")
+    host.begin(sync, "sync")
+    assertEquals(1, host.starts)
+    assertTrue(host.registry.progress(backup, 42))
+    assertFalse(host.registry.progress(sync, 101))
+    assertEquals(listOf(BackgroundTaskStatus("backup", 42), BackgroundTaskStatus("sync")), host.registry.snapshot())
+    assertTrue(host.end(backup))
+    assertEquals(0, host.stops)
+    assertFalse(host.end(backup))
+    assertFalse(host.registry.progress(backup, 99))
+    assertTrue(host.end(sync))
+    assertEquals(1, host.stops)
+    val restore = taskId(3)
+    host.begin(restore, "restore")
+    host.registry.clear(notify = true)
+    assertEquals(listOf(restore), host.expired)
+    assertFalse(host.end(restore))
+    assertTrue(host.registry.snapshot().isEmpty())
   }
 
   @Test
-  fun `failed background admission owns no task and unknown kinds cannot start`() {
-    val registry = BackgroundTaskRegistry()
-    var starts = 0
-    assertEquals(null, registry.begin("backup", { starts++; false }, {}))
-    assertEquals(null, registry.begin("unknown", { starts++; true }, {}))
-    assertEquals(1, starts)
-    assertTrue(registry.snapshot().isEmpty())
+  fun `invalid holds own nothing and a refused start stays registered without the service`() {
+    val host = Hosted()
+    assertEquals(BACKGROUND_INVALID, host.begin(taskId(1), "unknown"))
+    assertEquals(BACKGROUND_INVALID, host.begin("not-a-uuid", "backup"))
+    assertEquals(BACKGROUND_ACTIVE, host.begin(taskId(2), "backup"))
+    assertEquals(BACKGROUND_INVALID, host.begin(taskId(2), "sync"))
+    assertTrue(host.end(taskId(2)))
+    assertEquals(1, host.starts)
+    assertEquals(1, host.stops)
+
+    host.refuse = BACKGROUND_REFUSED
+    assertEquals(BACKGROUND_REFUSED, host.begin(taskId(3), "export"))
+    assertTrue(host.registry.snapshot().isEmpty())
+    host.refuse = null
+    host.registry.promote(host.start)
+    assertEquals(listOf(BackgroundTaskStatus("export")), host.registry.snapshot())
+    assertEquals(2, host.starts)
+  }
+
+  @Test
+  fun `deferred holds take the service only while the app is off screen`() {
+    val host = Hosted()
+    var refreshes = 0
+    assertEquals(BACKGROUND_DEFERRED, host.begin(taskId(1), "sync", deferred = true))
+    assertEquals(BACKGROUND_DEFERRED, host.begin(taskId(2), "generation", deferred = true))
+    assertEquals(0, host.starts)
+    assertTrue(host.registry.snapshot().isEmpty())
+    assertTrue(host.end(taskId(2)))
+    assertEquals(0, host.stops)
+
+    host.registry.promote(host.start) { refreshes++ }
+    assertEquals(1, host.starts)
+    assertEquals(1, refreshes)
+    assertEquals(listOf(BackgroundTaskStatus("sync")), host.registry.snapshot())
+    assertEquals(BACKGROUND_ACTIVE, host.begin(taskId(3), "sync", deferred = true))
+    assertEquals(1, host.starts)
+
+    host.registry.demote(host.stop)
+    assertEquals(1, host.stops)
+    assertTrue(host.registry.snapshot().isEmpty())
+    assertTrue(host.end(taskId(1)))
+    assertTrue(host.end(taskId(3)))
+    assertEquals(1, host.stops)
+  }
+
+  @Test
+  fun `returning to the screen keeps immediate holds in the service`() {
+    val host = Hosted()
+    host.begin(taskId(1), "export")
+    host.begin(taskId(2), "sync", deferred = true)
+    host.registry.promote(host.start)
+    host.registry.demote(host.stop)
+    assertEquals(0, host.stops)
+    assertEquals(listOf(BackgroundTaskStatus("export")), host.registry.snapshot())
+    assertTrue(host.end(taskId(1)))
+    assertEquals(1, host.stops)
+  }
+
+  @Test
+  fun `a refused promotion stops trying and the next leave starts the service again`() {
+    val host = Hosted()
+    var attempts = 0
+    val start: () -> String? = { attempts++; host.start() }
+    host.begin(taskId(1), "sync", deferred = true)
+    host.begin(taskId(2), "sync", deferred = true)
+    host.refuse = BACKGROUND_REFUSED
+    host.registry.promote(start)
+    assertEquals(1, attempts)
+    assertTrue(host.registry.snapshot().isEmpty())
+
+    host.refuse = null
+    host.registry.demote(host.stop)
+    host.registry.promote(start)
+    assertEquals(1, host.starts)
+    assertEquals(2, host.registry.snapshot().size)
+  }
+
+  @Test
+  fun `expiry and destruction end only holds the service protected`() {
+    val host = Hosted()
+    host.begin(taskId(1), "sync", deferred = true)
+    host.begin(taskId(2), "backup")
+    host.registry.clear(notify = true)
+    assertEquals(listOf(taskId(2)), host.expired)
+    host.registry.promote(host.start)
+    assertEquals(listOf(BackgroundTaskStatus("sync")), host.registry.snapshot())
+  }
+
+  @Test
+  fun `a service that never reached the foreground leaves holds registered for the next start`() {
+    val host = Hosted()
+    host.begin(taskId(1), "backup")
+    host.registry.release()
+    assertTrue(host.registry.snapshot().isEmpty())
+    assertTrue(host.end(taskId(1)))
+    assertEquals(0, host.stops)
+    host.begin(taskId(2), "backup")
+    host.registry.release()
+    host.registry.promote(host.start)
+    assertEquals(listOf(BackgroundTaskStatus("backup")), host.registry.snapshot())
+  }
+
+  @Test
+  fun `an end from a page that was torn down cannot stop a fresh hold`() {
+    val host = Hosted()
+    host.begin(taskId(1), "generation")
+    host.registry.clearAll()
+    host.lifecycle.stopAll { true }
+    host.begin(taskId(2), "generation")
+    assertFalse(host.end(taskId(1)))
+    assertEquals(listOf(BackgroundTaskStatus("generation")), host.registry.snapshot())
+    assertTrue(host.end(taskId(2)))
+    assertEquals(1, host.stops)
+  }
+
+  @Test
+  fun `notification groups kinds beside generation with a mean percent and a kind icon`() {
+    assertEquals(
+      BackgroundNotificationContent(true, emptyList(), -1, BackgroundNotificationIcon.CHAT),
+      backgroundNotificationContent(listOf(BackgroundTaskStatus("generation"))),
+    )
+    assertEquals(
+      BackgroundNotificationContent(
+        generation = true,
+        lines = listOf(BackgroundNotificationLine("backup", 30), BackgroundNotificationLine("export", 90)),
+        percent = 50,
+        icon = BackgroundNotificationIcon.UPLOAD,
+      ),
+      backgroundNotificationContent(listOf(
+        BackgroundTaskStatus("backup", 20),
+        BackgroundTaskStatus("generation"),
+        BackgroundTaskStatus("export", 90),
+        BackgroundTaskStatus("backup", 40),
+      )),
+    )
+    assertEquals(
+      BackgroundNotificationContent(
+        generation = false,
+        lines = listOf(BackgroundNotificationLine("restore", 10), BackgroundNotificationLine("sync", -1)),
+        percent = -1,
+        icon = BackgroundNotificationIcon.SYNC,
+      ),
+      backgroundNotificationContent(listOf(BackgroundTaskStatus("restore", 10), BackgroundTaskStatus("sync"))),
+    )
+    assertEquals(
+      BackgroundNotificationIcon.DOWNLOAD,
+      backgroundNotificationContent(listOf(BackgroundTaskStatus("import"), BackgroundTaskStatus("restore"))).icon,
+    )
+  }
+
+  @Test
+  fun `a stop before the start reaches the service leaves stopping to that start`() {
+    val lifecycle = GenerationForegroundLifecycle()
+    var token = -1L
+    val stopped = mutableListOf<Boolean>()
+    assertTrue(lifecycle.begin { token = it; true })
+    assertTrue(lifecycle.end { stopped.add(it); true })
+    assertTrue(lifecycle.begin { token = it; true })
+    assertTrue(lifecycle.activate(token, 1, {}, {}))
+    assertTrue(lifecycle.stopAll { stopped.add(it); true })
+    assertEquals(listOf(false, true), stopped)
   }
 
   @Test

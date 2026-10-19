@@ -55,7 +55,7 @@ describe('native tokenizer batch boundary', () => {
         if (route.kind !== 'native-tiktoken') throw new Error('candidate route was not selected')
 
         await expect(
-            invokeNativeTokenizerBatch(route, ['hello', '\ud800', 'hello'], 'ids', invoke),
+            invokeNativeTokenizerBatch(route, ['hello', '\ud800', 'a\ud83d\ude00\ude00b'], 'ids', invoke),
         ).resolves.toEqual({
             mode: 'ids',
             artifact_fingerprint: NATIVE_TOKENIZER_FINGERPRINTS.cl100k_base,
@@ -67,7 +67,7 @@ describe('native tokenizer batch boundary', () => {
                 tokenizer_id: 'cl100k_base',
                 artifact_fingerprint: NATIVE_TOKENIZER_FINGERPRINTS.cl100k_base,
                 mode: 'ids',
-                texts: ['hello', '�', 'hello'],
+                texts: ['hello', '�', 'a\ud83d\ude00\ufffdb'],
             },
         })
     })

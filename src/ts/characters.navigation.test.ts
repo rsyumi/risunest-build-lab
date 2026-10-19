@@ -73,7 +73,8 @@ vi.mock('./alert', () => ({
     alertStore: { set: mocks.presentAlert },
     alertWait: vi.fn(),
 }))
-vi.mock('./util', () => ({
+vi.mock('./util', async importOriginal => ({
+    ...await importOriginal<typeof import('./util')>(),
     checkNullish: (value: unknown) => value === null || value === undefined,
     findCharacterbyId: mocks.findCharacterbyId,
     findCharacterIndexbyId: vi.fn(),
@@ -102,6 +103,7 @@ vi.mock('./globalApi.svelte', () => ({
 vi.mock('./process/inlayScreen', () => ({ updateInlayScreen: (value: unknown) => value }))
 vi.mock('./parser/parser.svelte', async () => (await import('./parser/parser.testSupport')).parserStubModule())
 vi.mock('./translator/translator', () => ({ translateHTML: vi.fn() }))
+vi.mock('./mobileBackgroundTask', async () => (await import('./mobileBackgroundTask.testSupport')).mobileBackgroundTaskModule())
 vi.mock('./process/index.svelte', async () => {
     const { writable } = await import('svelte/store')
     return { doingChat: writable(false) }
@@ -157,6 +159,7 @@ import {
     addCharEmotion,
     addingEmotion,
 } from './characters'
+import { beginMobileBackgroundTask } from './mobileBackgroundTask'
 import { createMetadataOnlySelectedConversation } from './storage/selectedConversationLifecycle'
 import { language } from 'src/lang'
 import { SelectedConversationPromotionStaleError } from './storage/activeWorkingSet.svelte'
@@ -202,7 +205,9 @@ describe('runtime chat identity', () => {
         mocks.database.characters = [{ type: 'character', chaId: 'first', emotionImages: [], chats: [] }]
         mocks.selectMultipleFile.mockResolvedValueOnce([{ name: 'synthetic.png', data: new Uint8Array([1]) }])
         mocks.saveImage.mockRejectedValueOnce(new Error('Synthetic save failure'))
-        await expect(addCharEmotion(0)).rejects.toThrow('Synthetic save failure')
+        await addCharEmotion(0)
+        expect(mocks.alertError).toHaveBeenCalledWith('synthetic.png: Synthetic save failure')
+        expect(mocks.database.characters[0].emotionImages).toEqual([])
         expect(get(addingEmotion)).toBe(false)
     })
 
@@ -1055,25 +1060,10 @@ describe('chat list operations', () => {
         const pageSlack = 8 * 1024
         const { utf8ByteLength } = await import('./storage/nativePersistenceValue')
         const { encodeNativeCommit } = await import('./storage/nativeCommitTransport')
-        let encodedRequests = 0
-        class EncodingWorker {
-            onmessage: ((event: { data: { bytes: Uint8Array } }) => void) | null = null
-            onerror: (() => void) | null = null
-            terminate() {}
-            postMessage(data: { pages: Uint8Array[]; byteLength: number }, transfer: ArrayBuffer[]) {
-                expect(Object.keys(data)).toEqual(['pages', 'byteLength'])
-                expect(data.byteLength).toBeLessThan(pageBytes + pageSlack)
-                expect(data.pages.every((page) => page.byteLength <= 1024 * 1024)).toBe(true)
-                const received = structuredClone(data, { transfer })
-                expect(data.pages.every((page) => page.byteLength === 0)).toBe(true)
-                const bytes = new Uint8Array(received.byteLength)
-                let offset = 0
-                for (const page of received.pages) { bytes.set(page, offset); offset += page.byteLength }
-                encodedRequests++
-                Promise.resolve().then(() => this.onmessage?.({ data: { bytes } }))
-            }
-        }
-        vi.stubGlobal('Worker', EncodingWorker)
+        let largestRequest = 0
+        vi.stubGlobal('Worker', class {
+            constructor() { throw new Error('The commit encoder must not start a worker') }
+        })
         const initial = buildSelectedCharacter()
         const reactive = createPersistentSaveObserverHarness({ ...mocks.database } as any)
         mocks.database.characters = reactive.database.characters
@@ -1090,6 +1080,7 @@ describe('chat list operations', () => {
                 expect(input.expectedRevision).toBe(revision)
                 const encoded = await encodeNativeCommit({ commit: input, assetAliases: [] })
                 expect(JSON.parse(new TextDecoder().decode(encoded)).commit).toEqual(input)
+                largestRequest = Math.max(largestRequest, encoded.byteLength)
                 requests.push(input)
                 for (const mutation of input.conversations ?? []) {
                     if (mutation.type !== 'replace-range') continue
@@ -1155,7 +1146,7 @@ describe('chat list operations', () => {
             expect(requests.find((request) => request.addCharacter)?.addCharacter.chats).toEqual([])
             expect(largestEncoding).toBeLessThan(pageBytes + pageSlack)
             expect(requests.filter((request) => request.conversations?.some((mutation: any) => mutation.start > 0))).toHaveLength(4)
-            expect(encodedRequests).toBe(requests.length)
+            expect(largestRequest).toBeLessThan(pageBytes + pageSlack)
             expect(coordinator.hasPendingPersistenceWork).toBe(false)
         } finally {
             stringify.mockRestore()
@@ -1499,9 +1490,17 @@ describe('chat list operations', () => {
         // HTML file, then the default '0' answers translate the content and keep names.
         mocks.alertSelect.mockResolvedValueOnce('2')
         vi.mocked(translateHTML).mockResolvedValue('<p>translated <img src="x" onerror="alert(1)"></p>')
+        const events: string[] = []
+        vi.mocked(beginMobileBackgroundTask).mockImplementationOnce(kind => {
+            events.push(`hold ${kind}`)
+            return { progress() {}, async dispose() { events.push('release') } }
+        })
+        mocks.downloadFile.mockImplementationOnce(async () => { events.push('download'); return true })
 
         await exportChat(0)
 
+        // Translation holds the background task, which ends before the save picker opens.
+        expect(events).toEqual(['hold export', 'release', 'download'])
         const exported = Buffer.from(mocks.downloadFile.mock.calls[0][1]).toString()
         expect(exported).toContain('<p>translated <img src="x"></p>')
         expect(exported).not.toContain('onerror')

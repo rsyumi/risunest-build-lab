@@ -1,3 +1,4 @@
+import { selectedImageFormat } from '../../media/imageFormats';
 import { alertToast } from "../../alert";
 import { language } from "src/lang";
 import { getRuntimePerformanceBudgets } from "../../runtimePerformanceProfile";
@@ -34,7 +35,7 @@ export type InlayAsset = {
     width?: number
 }
 
-/** Well below the native transfer ceiling, and the only reason an attachment is refused. */
+/** Well below the native transfer ceiling. */
 export const maxNewInlayInputBytes = 64 * 1024 * 1024
 
 export class InlayInputTooLargeError extends Error {
@@ -43,10 +44,6 @@ export class InlayInputTooLargeError extends Error {
         this.name = 'InlayInputTooLargeError'
     }
 }
-
-const inlayImageExts = [
-    'jpg', 'jpeg', 'png', 'gif', 'webp', 'avif'
-]
 
 const inlayAudioExts = [
     'wav', 'mp3', 'ogg', 'flac'
@@ -83,14 +80,15 @@ export async function postInlayAsset(img:{
     data:Uint8Array
 }){
 
-    const extention = img.name.split('.').at(-1)
+    const extention = img.name.split('.').at(-1)?.toLowerCase()
+    const image = selectedImageFormat(img.data, img.name)
 
-    if(inlayImageExts.includes(extention)){
+    if(image){
         const imgid = v4()
         await setInlayAsset(imgid, {
             name: img.name,
-            data: new Blob([asBuffer(img.data)], {type: `image/${extention}`}),
-            ext: extention,
+            data: new Blob([asBuffer(img.data)], {type: image.mime}),
+            ext: image.ext,
             type: 'image',
         })
         return imgid

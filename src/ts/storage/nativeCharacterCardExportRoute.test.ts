@@ -97,6 +97,39 @@ describe('native character card export route', () => {
         expect(JSON.stringify(calls)).not.toContain('data:image')
     })
 
+    it.each(['success', 'export', 'cancel', 'decode'])('cleans the staged rendition on %s without reopening the picker', async outcome => {
+        const owned = new Map([['/owned/rendition', 'png']])
+        const controller = new AbortController()
+        let destination = 'previous'
+        let picks = 0
+        const action = exportNativeCharacterCardFromPicker({
+            characterId: 'avif', suggestedName: 'card.png', format: 'png-card', projectCharacter: () => ({}),
+        }, { signal: controller.signal }, {
+            isDesktop: () => true, isAndroid: () => false,
+            chooseDestination: async () => { picks++; return '/chosen/card.png' },
+            runtime: () => ({ revision: 7, flushPendingData: async () => {} }),
+            readCharacter: async () => ({ image: 'assets/old.png' }) as never,
+            preparePortrait: async (_character, revision) => {
+                expect(revision).toBe(7)
+                if (outcome === 'decode') { owned.clear(); throw new Error('decode failed') }
+                if (outcome === 'cancel') controller.abort()
+                return { descriptor: { sourceHash: 'a'.repeat(64), path: '/owned/rendition' }, release: async () => { owned.clear() } }
+            },
+            runExport: async input => {
+                expect(input.portraitRendition?.sourceHash).toBe('a'.repeat(64))
+                expect(owned.get(input.portraitRendition!.path)).toBe('png')
+                if (outcome === 'export') throw new Error('export failed')
+                destination = 'new card'
+                return null
+            },
+        })
+        if (outcome === 'success') await action
+        else await expect(action).rejects.toBeDefined()
+        expect(picks).toBe(1)
+        expect(owned.size).toBe(0)
+        expect(destination).toBe(outcome === 'success' ? 'new card' : 'previous')
+    })
+
     it('leaves Web and a cancelled picker on the compatibility path', async () => {
         const input = {
             characterId: 'json-character',

@@ -47,7 +47,10 @@ import {
     invalidateAssetSourceCache,
     setUsingSw
 } from "./globalApi.svelte";
-import { isTauri, isTauriAndroid, isTauriDesktop } from "./platform";
+import { isTauri, isTauriAndroid, isTauriDesktop, isTauriIOS } from "./platform";
+import { expireMobileDeferredHolds, mobileDeferredHoldsSettled } from "./mobileBackgroundTask";
+import { setGenerationBackground } from "./process/generationState";
+import { beginGenerationBackground } from "./process/generationBackground";
 import { registerModelDynamic } from "./model/modellist";
 import {
     prepareDatabaseForPersistence,
@@ -114,7 +117,7 @@ import {
 import {
     initializeOfficialAccountBootstrap,
 } from "./storage/sync/officialAccountBootstrap";
-import { createAccountScopedOfficialAssetLedger } from "./storage/sync/officialAssetLedger";
+import { createAccountScopedOfficialAssetLedger, createNativeOfficialAssetLedger } from "./storage/sync/officialAssetLedger";
 import {
     configureOfficialAccountAssetReader,
     createStructuredAccountAssetReader,
@@ -374,28 +377,30 @@ export async function loadData() {
                 nativeOfficialAccountKeys.association,
             )
             : null
-        const nativeAssetLedger = nativeDeviceSettings
-            ? await createNativeDeviceSettingsBag(
-                nativeDeviceSettings,
-                nativeOfficialAccountKeys.assetLedger,
-            )
-            : null
         const associationStorage = nativeAssociation?.storage ?? localStorage
-        const ledgerStorage = nativeAssetLedger?.storage ?? localStorage
         const getNativeAccountId = () => nativeOfficialFlow
             ? nativeOfficialFlow.getAccountId()
             : nativeCredential?.id ?? null
-        const officialAssetLedger = createAccountScopedOfficialAssetLedger(
-            ledgerStorage,
-            () => isTauri ? getNativeAccountId() ?? undefined : getDatabase().account?.id,
+        const nativeAssetLedger = nativeDeviceSettings
+            ? await createNativeOfficialAssetLedger(
+                nativeDeviceSettings,
+                nativeOfficialAccountKeys.assetLedger,
+                () => getNativeAccountId() ?? undefined,
+            )
+            : null
+        const officialAssetLedger = nativeAssetLedger ?? createAccountScopedOfficialAssetLedger(
+            localStorage,
+            () => getDatabase().account?.id,
         )
         const flushNativeOfficialMetadata = async () => {
-            await nativeAssociation?.flush()
-            await nativeAssetLedger?.flush()
+            const results = await Promise.allSettled([nativeAssociation?.flush(), nativeAssetLedger?.flush()])
+            const failures = results.flatMap(result => result.status === 'rejected' ? [result.reason] : [])
+            if (failures.length) throw new AggregateError(failures, 'Official account metadata could not be saved')
         }
         const clearNativeOfficialMetadata = async () => {
-            await nativeAssociation?.clear()
-            await nativeAssetLedger?.clear()
+            const results = await Promise.allSettled([nativeAssociation?.clear(), nativeAssetLedger?.clearAll()])
+            const failures = results.flatMap(result => result.status === 'rejected' ? [result.reason] : [])
+            if (failures.length) throw new AggregateError(failures, 'Official account metadata could not be cleared')
             officialAssetLedger.reset()
         }
         let nativePublicationRecovery: NativeOfficialPublicationRecovery | null = null
@@ -521,12 +526,10 @@ export async function loadData() {
             configureOfficialAccountAssetReader(null)
             const restoredAssets = createNativeOfficialAccountAssets({
                 settings: nativeDeviceSettings!, store: runtime.store, resolveBlobs: resolveBlobStore,
-                account: accountStorage, ledger: officialAssetLedger, flushMetadata: flushNativeOfficialMetadata,
+                account: accountStorage, ledger: officialAssetLedger, flushMetadata: flushNativeOfficialMetadata, origin: new URL(hubURL).origin,
+                getAccountId: getNativeAccountId,
             })
-            const completeRestoreAssets = async (accountId: string, onProgress?: (completed: number, total: number) => void) => {
-                const missing = await restoredAssets.complete(accountId, onProgress)
-                if (missing > 0) alertNormal(language.risuNest.backup.officialAssetsMissing.replace('{count}', String(missing)))
-            }
+            const completeRestoreAssets = restoredAssets.complete
             const service = createNativeOfficialAccountFlowService({
                 credentialVault: nativeCredentialVault,
                 adapter: officialAdapter,
@@ -545,8 +548,11 @@ export async function loadData() {
                 clearMetadata: clearNativeOfficialMetadata,
                 resetAccountSession: resetAccountStorageSession,
                 prepareRestoreAssets: restoredAssets.prepare,
+                bindRestoreAssets: restoredAssets.bind,
+                inspectRestoreAssets: restoredAssets.inspect,
+                stopRestoreAssets: restoredAssets.stop,
                 completeRestoreAssets,
-                clearRestoreAssets: restoredAssets.clear,
+                clearRestoreAssets: restoredAssets.cancelPreparation,
                 nativeRestore: async (initialCredential, options) => {
                     let credential = initialCredential
                     for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -589,10 +595,6 @@ export async function loadData() {
             nativeOfficialFlow = service.flow
             snapshotRequestReauthentication = service.snapshotRequestReauthentication
             configureNativeOfficialAccountFlow(service.flow)
-            if (nativeCredential && !excluded('account')) {
-                try { await completeRestoreAssets(nativeCredential.id) }
-                catch { alertError(language.risuNest.backup.officialAssetsRestoreFailed) }
-            }
             nativePublicationRecovery = createNativeOfficialPublicationRecovery(
                 recoveredNativeFileJobs.pendingOfficialPublications,
                 {
@@ -873,6 +875,10 @@ export async function loadData() {
         registerAndroidScreenshotPublicationRecovery()
         LoadingStatusState.startedAt = null
         loadedStore.set(true)
+        if (isTauri && !excluded('account') && nativeOfficialFlow) {
+            void import('./storage/sync/nativeOfficialAccountOperations').then(module => module.recoverNativeOfficialAccountAssets())
+                .catch(error => console.error('Official asset recovery could not start', error))
+        }
         if (isTauri && recoveredNativeFileJobs.pendingSnapshotBodies?.length) {
             void import('./storage/nativePersistentMaintenance').then(module =>
                 module.reattachNativeSnapshotRestoreBodies(recoveredNativeFileJobs.pendingSnapshotBodies),
@@ -904,9 +910,13 @@ export async function loadData() {
             alertNormal(language.risuNest.backup.restoreInterrupted)
             await waitAlert()
         }
+        if (isTauriAndroid || isTauriIOS) setGenerationBackground(beginGenerationBackground)
         if (isTauri) {
           schedulePeriodicNativeSnapshot();
-          installIOSPersistenceLifecycle((reason) => flushLifecycle(reason, true));
+          installIOSPersistenceLifecycle((reason) => flushLifecycle(reason, true), {
+            settled: mobileDeferredHoldsSettled,
+            expire: expireMobileDeferredHolds,
+          });
         }
         if (!excluded('modules')) moduleUpdate()
         void alertTOS().then(async (accepted) => {
@@ -1030,7 +1040,7 @@ async function cleanChunks() {
                     }
                 }
             } catch (error) {
-                console.log('error', remote.name)
+                console.warn('Remote asset cleanup failed:', remote.name, error)
             }
         }
     }

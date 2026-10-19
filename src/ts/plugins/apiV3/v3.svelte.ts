@@ -1,3 +1,4 @@
+import { userScriptConsole } from '../../userScriptConsole'
 import { pluginStartupGate } from '../pluginStartupGate'
 import { parseRisuChat } from '../parseRisuChat'
 import { createPluginDeviceKeyspace } from '../pluginDeviceKeyspace'
@@ -32,6 +33,7 @@ import { beginGenerationEndRun, type GenerationEndRun } from "src/ts/process/gen
 import { getModelInfo } from "src/ts/model/modellist";
 import type { ModelModeExtended } from "src/ts/process/request/shared";
 import { requestChatDataMain } from "src/ts/process/request/request";
+import { holdModelCall } from "src/ts/process/generationBackground";
 import { getModuleLorebooks } from "src/ts/process/modules";
 import {
     registerTTSPreprocessor,
@@ -1399,7 +1401,7 @@ const makeRisuaiAPIV3 = (
             risunest.unregisterUIPart(id);
         },
         log: (message:string) => {
-            console.log(`[RisuAI Plugin: ${plugin.name}] ${message}`);
+            userScriptConsole.log(`[RisuAI Plugin: ${plugin.name}] ${message}`);
         },
         createMutationObserver(callback: SafeMutationCallback): SafeMutationObserver {
             const observer = new SafeMutationObserver(callback)
@@ -1556,7 +1558,7 @@ const makeRisuaiAPIV3 = (
             staticModel?: string
             allowPlugins?: boolean
         }) => {
-            return requestChatDataMain({
+            return holdModelCall(() => requestChatDataMain({
                 formated: options.messages,
                 bias: {},
                 staticModel: options.staticModel,
@@ -1569,7 +1571,7 @@ const makeRisuaiAPIV3 = (
                 // explicitly with `allowPlugins: true`, accepting responsibility
                 // for avoiding provider-to-provider call loops.
                 blockPlugins: !options.allowPlugins,
-            }, options.mode, pluginLifetime.signal)
+            }, options.mode, pluginLifetime.signal), pluginLifetime.signal)
         },
         sendChat: async (message: string) => {
             const authorityEpoch = getPersistentStorageAuthorityEpoch();

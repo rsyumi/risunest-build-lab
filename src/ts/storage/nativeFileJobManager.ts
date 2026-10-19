@@ -1,5 +1,5 @@
 import { isBackgroundExpiryReason } from '../iosNative'
-import { measuredTaskPercent, runWithMobileBackgroundTask } from '../mobileBackgroundTask'
+import { measuredTaskPercent, runWithDeferredMobileBackgroundTask, runWithMobileBackgroundTask, type MobileBackgroundTask } from '../mobileBackgroundTask'
 import { Mutex } from '../mutex'
 import { get, writable } from 'svelte/store'
 import { invoke } from '@tauri-apps/api/core'
@@ -91,6 +91,7 @@ export interface SharedNativeFileOperationContext {
 }
 
 export interface SharedNativeFileOperationOptions {
+    beforeSettlement?(signal: AbortSignal): Promise<void>
     userInitiated?: boolean
     presentation?: NativeFileOperationPresentation
     format?: NativeFileOperationFormat
@@ -160,7 +161,8 @@ function backgroundTaskPercent({ kind, phase, progress, detail }: NativeFileJobS
         return phase === 'reading-source' ? measuredTaskPercent(progress.completedBytes, progress.totalBytes) : null
     }
     const percent = measuredTaskPercent(progress.completedBytes, progress.totalBytes)
-    return percent === null && detail?.stage === 'copying-source' && detail.stageUnit === 'bytes'
+    return percent === null && (detail?.stage === 'copying-source' && detail.stageUnit === 'bytes'
+        || detail?.stage === 'publishing-destination' && detail.stageUnit === 'items')
         ? measuredTaskPercent(detail.stageCompleted, detail.stageTotal) : percent
 }
 
@@ -210,7 +212,7 @@ function outcomeFromSettlement(
     }
     if ('error' in settlement) {
         const warningCodes = mergeWarningCodes(statusWarnings, stringWarningCodes(settlement.error))
-        if (isAbortError(settlement.error)) {
+        if (isAbortError(settlement.error) || state.status?.officialAssets?.state === 'cancelled') {
             return {
                 ...base, state: 'cancelled', warningCodes,
                 ...(isBackgroundExpiryReason(settlement.error) ? { interruption: 'background-expired' as const } : {}),
@@ -367,31 +369,48 @@ function runSharedNativeFileOperationWithAdmission<T>(
             releaseAdmission()
         },
     }
+    let taskSignal = controller.signal
+    let finalized = false
+    const finalize = async () => {
+        if (finalized) return
+        finalized = true
+        await options.beforeSettlement?.(taskSignal)
+    }
     try {
         const taskKind = options.format === 'library-backup' || options.format === 'risu-save'
             ? (kind === 'export' ? 'backup' : 'restore') : kind
-        runWithMobileBackgroundTask(taskKind, async task => {
-            const waiting = bodyOnly ? null : waitForLibraryFileOperation(task.signal ?? context.signal)
-            if (waiting) {
-                updateActiveState({ waitingForSync: true })
-                await waiting
-                updateActiveState({ waitingForSync: false })
-            }
-            return operation({
-            ...context,
-            signal: task.signal ?? context.signal,
-            onStatus: status => {
-                context.onStatus(status)
-                task.progress(backgroundTaskPercent(status))
-            },
-            })
-        }, controller.signal, options.userInitiated ?? true).then(
+        const protectedOperation = async (task: MobileBackgroundTask) => {
+            taskSignal = task.signal ?? context.signal
+            try {
+                const waiting = bodyOnly ? null : waitForLibraryFileOperation(task.signal ?? context.signal)
+                if (waiting) {
+                    updateActiveState({ waitingForSync: true })
+                    await waiting
+                    updateActiveState({ waitingForSync: false })
+                }
+                return await operation({
+                    ...context,
+                    signal: task.signal ?? context.signal,
+                    onStatus: status => {
+                        context.onStatus(status)
+                        task.progress(backgroundTaskPercent(status))
+                    },
+                })
+            } finally { await finalize() }
+        }
+        // Automatic work is protected only if the app leaves the screen while it runs.
+        void (options.userInitiated === false
+            ? runWithDeferredMobileBackgroundTask(taskKind, protectedOperation, controller.signal)
+            : runWithMobileBackgroundTask(taskKind, protectedOperation, controller.signal, true)
+        ).finally(finalize).then(
             value => { settle({ value }); resolveOperation(value) },
             error => { settle({ error }); rejectOperation(error) },
         )
     } catch (error) {
-        settle({ error })
-        rejectOperation(error)
+        void finalize().then(
+            () => { settle({ error }); rejectOperation(error) },
+            failure => { settle({ error: failure }); rejectOperation(failure) },
+        )
     }
     return promise
 }

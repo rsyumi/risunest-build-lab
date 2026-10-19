@@ -76,6 +76,34 @@ export function generateContract(target) {
     throw new Error(
       `${target} reference revision differs from the approved contract`,
     );
+  const { root, types, nodes, files } = sourceContract(rootPath);
+  for (const name of [
+    "src/ts/storage/risuSave.ts",
+    "src/ts/bootstrap.ts",
+    "src/ts/drive/backuplocal.ts",
+    ...(target === "pocket"
+      ? ["server/node/utils.cjs", "server/node/server.cjs"]
+      : []),
+  ]) {
+    files.set(name, sha256(fs.readFileSync(path.join(rootPath, name))));
+  }
+  return {
+    version: 1,
+    target,
+    reference: {
+      revision: reference.revision,
+      files: Object.fromEntries(
+        [...files].sort(([a], [b]) => a.localeCompare(b, "en")),
+      ),
+    },
+    root,
+    types,
+    nodes,
+  };
+}
+
+/** Contract nodes for the types `src/ts/storage/database.svelte.ts` declares in a checkout. */
+export function sourceContract(rootPath) {
   const databasePath = path.join(rootPath, "src/ts/storage/database.svelte.ts");
   const program = ts.createProgram([databasePath], {
     target: ts.ScriptTarget.ESNext,
@@ -209,29 +237,7 @@ export function generateContract(target) {
       checker.getTypeAtLocation(declaration),
     );
   types.DataBase = root;
-  for (const name of [
-    "src/ts/storage/risuSave.ts",
-    "src/ts/bootstrap.ts",
-    "src/ts/drive/backuplocal.ts",
-    ...(target === "pocket"
-      ? ["server/node/utils.cjs", "server/node/server.cjs"]
-      : []),
-  ]) {
-    files.set(name, sha256(fs.readFileSync(path.join(rootPath, name))));
-  }
-  return {
-    version: 1,
-    target,
-    reference: {
-      revision: reference.revision,
-      files: Object.fromEntries(
-        [...files].sort(([a], [b]) => a.localeCompare(b, "en")),
-      ),
-    },
-    root,
-    types,
-    nodes,
-  };
+  return { root, types, nodes, files };
 }
 
 export function verifySourcePins(contract) {

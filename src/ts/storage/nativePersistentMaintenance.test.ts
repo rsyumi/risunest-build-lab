@@ -20,6 +20,9 @@ vi.mock('../platform', async () => (await import('../platform.testSupport')).pla
 
 import {
     applyNativeDataHealthRepair,
+    completeNativeDataHealthIntent,
+    deepScanNativeDataHealth,
+    scanNativeDataHealth,
     previewNativeDataHealthRepair,
     undoNativeDataHealthRepair,
     deleteNativePersistentSnapshot,
@@ -43,14 +46,29 @@ import { get } from 'svelte/store'
 import { cancelActiveNativeFileOperation, dismissNativeFileOperationOutcome, nativeFileOperation, nativeFileOperationOutcome, runSharedNativeFileOperation } from './nativeFileJobManager'
 
 describe('native persistent maintenance', () => {
-    it('sends the viewed diagnosis identity and expected revision for repair and undo', async () => {
-        await previewNativeDataHealthRepair(['repair'], 123)
-        await applyNativeDataHealthRepair(['repair'], true, 7, 123)
-        await undoNativeDataHealthRepair('journal', 8)
+    it('sends the viewed diagnosis identity and expected revision for repair and undo under a maintenance hold', async () => {
+        const held: string[] = []
+        window.RisuBackgroundTasks = {
+            begin: vi.fn(async (_id: string, kind: string) => { held.push(kind); return 'active' }),
+            progress: vi.fn(async () => {}),
+            end: vi.fn(async () => {}),
+        }
+        mocks.os = 'android'
+        try {
+            await previewNativeDataHealthRepair(['repair'], 123)
+            await applyNativeDataHealthRepair(['repair'], true, 7, 123)
+            await undoNativeDataHealthRepair('journal', 8)
+            await completeNativeDataHealthIntent(2, 9, 123)
+        } finally {
+            mocks.os = 'windows'
+            delete window.RisuBackgroundTasks
+        }
+        expect(held).toEqual(Array(3).fill('maintenance'))
         expect(mocks.invoke.mock.calls).toEqual([
             ['pds_data_health_repair_preview', { selection: ['repair'], expectedScannedAt: 123 }],
             ['pds_data_health_repair_apply', { selection: ['repair'], snapshot: true, expectedRevision: 7, expectedScannedAt: 123 }],
             ['pds_data_health_undo', { journalId: 'journal', expectedRevision: 8 }],
+            ['pds_data_health_complete_intent', { finding: 2, expectedRevision: 9, expectedScannedAt: 123 }],
         ])
     })
     beforeEach(() => {
@@ -99,19 +117,41 @@ describe('native persistent maintenance', () => {
         ])
     })
 
-    it('maps storage maintenance commands through their typed invoke boundary', async () => {
-        mocks.invoke.mockResolvedValue({})
-
-        await getNativePersistentStorageStats()
-        await deleteNativePersistentSnapshot('ab18b8a5-f45c-46ba-bbf9-74b2cae87717')
-        await previewNativePersistentAssetGc()
-        await executeNativePersistentAssetGc()
+    it('maps storage maintenance commands through their typed invoke boundary, holding only user-started work', async () => {
+        mocks.invoke.mockImplementation(async command => command === 'pds_snapshot_list' ? [] : {})
+        const held: string[] = []
+        window.RisuBackgroundTasks = {
+            begin: vi.fn(async (_id: string, kind: string) => { held.push(kind); return 'active' }),
+            progress: vi.fn(async () => {}),
+            end: vi.fn(async () => {}),
+        }
+        mocks.os = 'android'
+        try {
+            await getNativePersistentStorageStats()
+            await deleteNativePersistentSnapshot('ab18b8a5-f45c-46ba-bbf9-74b2cae87717')
+            await previewNativePersistentAssetGc()
+            await createPeriodicNativeSnapshotIfDue()
+            expect(held).toEqual([])
+            await executeNativePersistentAssetGc()
+            await createNativePersistentSnapshot('manual')
+            await scanNativeDataHealth()
+            await deepScanNativeDataHealth(true)
+            expect(held).toEqual(Array(4).fill('maintenance'))
+        } finally {
+            mocks.os = 'windows'
+            delete window.RisuBackgroundTasks
+        }
 
         expect(mocks.invoke.mock.calls).toEqual([
             ['pds_storage_stats'],
             ['pds_snapshot_delete', { id: 'ab18b8a5-f45c-46ba-bbf9-74b2cae87717' }],
             ['pds_asset_gc_preview'],
+            ['pds_snapshot_list'],
+            ['pds_snapshot_create', { reason: 'periodic' }],
             ['pds_asset_gc_execute'],
+            ['pds_snapshot_create', { reason: 'manual' }],
+            ['pds_data_health_scan'],
+            ['pds_data_health_deep_scan', { resume: true }],
         ])
     })
 
@@ -287,7 +327,7 @@ describe('native persistent maintenance', () => {
         expect(mocks.invoke).toHaveBeenCalledTimes(1)
     })
 
-    it('copies the missing bodies only after the snapshot job has activated', async () => {
+    it('copies the missing bodies only after the snapshot job has activated, under one hold across both', async () => {
         const events: string[] = []
         mocks.snapshotRestore.mockImplementation(async () => { events.push('activated'); return activation })
         mocks.invoke.mockImplementation(async command => {
@@ -296,8 +336,21 @@ describe('native persistent maintenance', () => {
             if (command === 'native_snapshot_restore_bodies_start') return bodyReceipt
             if (command === 'native_snapshot_restore_bodies_status') return bodyStatus
         })
-        await expect(restoreNativePersistentSnapshot({choose:async()=>'snapshot.db',onEmpty:vi.fn()})).resolves.toBe(true)
-        expect(events.slice(0, 3)).toEqual(['pds_snapshot_list', 'activated', 'native_snapshot_restore_bodies_start'])
+        let held = 0
+        window.RisuBackgroundTasks = {
+            begin: vi.fn(async () => { held++; return 'active' }),
+            progress: vi.fn(async () => {}),
+            end: vi.fn(async () => { if (--held === 0) events.push('released') }),
+        }
+        mocks.os = 'android'
+        try {
+            await expect(restoreNativePersistentSnapshot({choose:async()=>'snapshot.db',onEmpty:vi.fn()})).resolves.toBe(true)
+        } finally {
+            mocks.os = 'windows'
+            delete window.RisuBackgroundTasks
+        }
+        const work = events.filter(event => event !== 'native_snapshot_restore_bodies_status')
+        expect(work).toEqual(['pds_snapshot_list', 'activated', 'native_snapshot_restore_bodies_start', 'released'])
         expect(mocks.relaunch).not.toHaveBeenCalled()
     })
     it('leaves a restore failure to the operation dialog and copies the bodies when the app recovers the activation', async () => {

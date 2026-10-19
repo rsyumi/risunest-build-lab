@@ -238,3 +238,26 @@ it('keeps completed summaries and stops subsequent requests when a deferred summ
     expect(requestChatData).toHaveBeenCalledTimes(2)
     expect(room.hypaV3Data).toBeUndefined()
 })
+
+it.each([false, true])('retains failed summary diagnostics in the error log (experimental: %s)', async (useExperimentalImpl) => {
+    const { requestChatData } = await import('../request/request')
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const preset = createHypaV3Preset('Failure diagnostics', {
+        summarizationModel: 'subModel', memoryTokensRatio: 0.2,
+        extraSummarizationRatio: 0, maxChatsPerSummary: 2,
+        recentMemoryRatio: 1, similarMemoryRatio: 0, queryChatCount: 1,
+        preserveOrphanedMemory: false, useExperimentalImpl,
+    })
+    setDatabaseLite({ maxResponse: 128, hypaModel: 'MiniLM', hypaV3PresetId: 0, hypaV3Presets: [preset] } as never)
+    const chats = Array.from({ length: 10 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: 'x'.repeat(80), memo: 'm' + i })) as any[]
+    await vi.mocked(requestChatData).withImplementation(
+        async () => ({ type: 'fail', result: 'Synthetic summary outage' }),
+        async () => {
+            const result = await hypaMemoryV3(chats, tokenTotal(chats), 300,
+                { id: 'failure-chat', message: [] } as unknown as Chat,
+                { type: 'character', chaId: 'owner', name: 'Owner' } as character, tokenizer([]))
+            expect(result.error).toContain('Synthetic summary outage')
+            expect(errors.mock.calls.flat().join(' ')).toContain('Synthetic summary outage')
+        },
+    )
+})

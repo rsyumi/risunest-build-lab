@@ -1,3 +1,4 @@
+mod portrait_rendition;
 pub(crate) mod admission;
 mod character_charx_export;
 mod character_json_export;
@@ -315,6 +316,8 @@ pub(crate) enum NativeFileJobStartRequest {
         expected_revision: i64,
     },
     ExportCharacterCharx {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        portrait_rendition: Option<portrait_rendition::PortraitRenditionDescriptor>,
         destination: Option<String>,
         expected_revision: i64,
         character_id: String,
@@ -326,6 +329,8 @@ pub(crate) enum NativeFileJobStartRequest {
         module: Option<Value>,
     },
     ExportCharacterCard {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        portrait_rendition: Option<portrait_rendition::PortraitRenditionDescriptor>,
         destination: Option<String>,
         expected_revision: i64,
         character_id: String,
@@ -1656,6 +1661,7 @@ impl NativeFileJobState {
                 }
             }
             NativeFileJobStartRequest::ExportCharacterCharx {
+                portrait_rendition,
                 destination,
                 expected_revision,
                 character_id,
@@ -1675,6 +1681,10 @@ impl NativeFileJobState {
                         "character CharX export requires module metadata",
                     )
                 })?;
+                if portrait_rendition.is_some() && container != CharacterCharxContainer::AppendedCharxJpeg {
+                    return Err(error::invalid_input("plain CharX does not use a portrait rendition"));
+                }
+                let portrait_rendition = portrait_rendition.map(|value| value.read(&self.root)).transpose()?;
                 let destination = destination.map(PathBuf::from);
                 if let Some(destination) = destination.as_deref() {
                     validate_desktop_destination(destination)?;
@@ -1699,6 +1709,7 @@ impl NativeFileJobState {
                     })
                     .map_err(native_store_error)?;
                 NativeFileJobTask::ExportCharacterCharx {
+                    portrait_rendition,
                     destination,
                     character_id,
                     card,
@@ -1708,12 +1719,17 @@ impl NativeFileJobState {
                 }
             }
             NativeFileJobStartRequest::ExportCharacterCard {
+                portrait_rendition,
                 destination,
                 expected_revision,
                 character_id,
                 format,
                 metadata,
             } => {
+                if portrait_rendition.is_some() && format != CharacterCardExportFormat::PngCard {
+                    return Err(error::invalid_input("JSON cards do not use a portrait rendition"));
+                }
+                let portrait_rendition = portrait_rendition.map(|value| value.read(&self.root)).transpose()?;
                 let destination = destination.map(PathBuf::from);
                 if let Some(destination) = destination.as_deref() {
                     validate_desktop_destination(destination)?;
@@ -1738,6 +1754,7 @@ impl NativeFileJobState {
                     })
                     .map_err(native_store_error)?;
                 NativeFileJobTask::ExportCharacterCard {
+                    portrait_rendition,
                     destination,
                     character_id,
                     format,
@@ -2379,6 +2396,7 @@ impl NativeFileJobState {
                         &job,
                     ),
                     NativeFileJobTask::ExportCharacterCharx {
+                        portrait_rendition,
                         destination,
                         character_id,
                         card,
@@ -2395,8 +2413,10 @@ impl NativeFileJobState {
                         &root.join("handoffs"),
                         destination.as_deref(),
                         &job,
+                        portrait_rendition.as_ref(),
                     ),
                     NativeFileJobTask::ExportCharacterCard {
+                        portrait_rendition,
                         destination,
                         character_id,
                         format,
@@ -2423,6 +2443,7 @@ impl NativeFileJobState {
                                 &root.join("handoffs"),
                                 destination.as_deref(),
                                 &job,
+                                portrait_rendition.as_ref(),
                             )
                         }
                     },
@@ -2816,6 +2837,7 @@ enum NativeFileJobTask {
         store: crate::persistent_store::PersistentStore,
     },
     ExportCharacterCharx {
+        portrait_rendition: Option<portrait_rendition::PortraitRendition>,
         destination: Option<PathBuf>,
         character_id: String,
         card: Value,
@@ -2824,6 +2846,7 @@ enum NativeFileJobTask {
         prepared: crate::persistent_store::PreparedRisuSaveExport,
     },
     ExportCharacterCard {
+        portrait_rendition: Option<portrait_rendition::PortraitRendition>,
         destination: Option<PathBuf>,
         character_id: String,
         format: CharacterCardExportFormat,
@@ -3696,6 +3719,7 @@ pub(crate) struct JobProgress {
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum JobStage {
+    DownloadingAccountBackup,
     ReadingArchive,
     RequestingBackupKey,
     DecryptingDatabase,
@@ -7999,6 +8023,7 @@ mod tests {
         assert!(matches!(
             plain,
             NativeFileJobStartRequest::ExportCharacterCharx {
+                portrait_rendition: None,
                 container: CharacterCharxContainer::PlainCharx,
                 ..
             }
@@ -8050,6 +8075,7 @@ mod tests {
         assert!(matches!(
             appended,
             NativeFileJobStartRequest::ExportCharacterCharx {
+                portrait_rendition: None,
                 destination: None,
                 expected_revision: 8,
                 character_id,
@@ -8063,6 +8089,7 @@ mod tests {
         assert!(matches!(
             json_card,
             NativeFileJobStartRequest::ExportCharacterCard {
+                portrait_rendition: None,
                 destination: None,
                 expected_revision: 9,
                 character_id,
@@ -8075,6 +8102,7 @@ mod tests {
         assert!(matches!(
             png_card,
             NativeFileJobStartRequest::ExportCharacterCard {
+                portrait_rendition: None,
                 destination: Some(destination),
                 expected_revision: 10,
                 character_id,

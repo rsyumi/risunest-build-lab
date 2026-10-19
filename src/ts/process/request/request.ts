@@ -24,6 +24,7 @@ import { requestClaude } from './anthropic';
 import { requestGoogleCloudVertex } from './google';
 import { requestOpenAI, requestOpenAILegacyInstruct, requestOpenAIResponseAPI } from "./openAI/requests";
 import { applyAdditionalParameters, applyParameters, getAdditionalParameters, type ModelModeExtended } from './shared';
+import { holdModelCall } from '../generationBackground';
 
 export type ToolCall = {
     name: string;
@@ -206,6 +207,10 @@ function normalizeOllamaStreamResponse(response: Response): Response {
 }
 
 export async function requestChatData(arg:requestDataArgument, model:ModelModeExtended, abortSignal:AbortSignal=null):Promise<requestDataResponse> {
+    return holdModelCall(() => requestChatDataUnderHold(arg, model, abortSignal), abortSignal)
+}
+
+async function requestChatDataUnderHold(arg:requestDataArgument, model:ModelModeExtended, abortSignal:AbortSignal=null):Promise<requestDataResponse> {
     if (pluginStartupGate.refuse()) return { type: 'fail', result: language.risuNest.pluginStartup.requestRefused }
     const db = getDatabase()
     const fallBackModels:string[] = safeStructuredClone(db?.fallbackModels?.[model] ?? [])

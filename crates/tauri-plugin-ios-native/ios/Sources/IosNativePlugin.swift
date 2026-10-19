@@ -45,6 +45,8 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
     private var publicationId: String?
     private var continued: [String: BGTask] = [:]
     private var continuedPending: String?
+    // User actions that asked for continued processing, oldest first, with their subtitles.
+    private var continuedCandidates: [(id: String, label: String)] = []
     private var progress: [String: TaskProgress] = [:]
     private var continuedRegistered = false
     private var continuedErrorCode: Int?
@@ -70,12 +72,13 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
                       let task = task as? BGContinuedProcessingTask else { task.setTaskCompleted(success: false); return }
                 self.continuedPending = nil
                 self.continued[id] = task
-                let progress = self.progress[id] ?? TaskProgress(completed: 0, total: 0)
-                task.progress.totalUnitCount = progress.total
-                task.progress.completedUnitCount = progress.completed
-                task.expirationHandler = { [weak self] in
+                self.showContinued(task, for: id)
+                task.expirationHandler = { [weak self, weak task] in
                     DispatchQueue.main.async {
-                        guard let self = self, let current = self.continued.removeValue(forKey: id) else { return }
+                        // The task may have passed to a later user action since it launched.
+                        guard let self = self, let task = task,
+                              let id = self.continued.first(where: { $0.value === task })?.key,
+                              let current = self.continued.removeValue(forKey: id) else { return }
                         self.expired.insert(id)
                         if let assertion = self.tasks.removeValue(forKey: id) { UIApplication.shared.endBackgroundTask(assertion) }
                         self.emit("expired", id: id)
@@ -99,6 +102,9 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
                     let id = UUID().uuidString
                     let task = UIApplication.shared.beginBackgroundTask(withName: "RisuNest local save") { [weak self] in
                         guard let self = self, let task = self.tasks.removeValue(forKey: id) else { return }
+                        // Work that waits on this assertion stops when it expires.
+                        self.expired.insert(id)
+                        self.emit("expired", id: id)
                         UIApplication.shared.endBackgroundTask(task)
                     }
                     if task != .invalid { self.tasks[id] = task }
@@ -157,10 +163,7 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
                     UIApplication.shared.endBackgroundTask(task)
                     return
                 }
-                if self.continuedPending == id {
-                    BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: self.taskIdentifier)
-                    self.continuedPending = nil
-                }
+                self.releaseContinued(id, success: false)
                 self.expired.insert(id)
                 self.emit("expired", id: id)
                 UIApplication.shared.endBackgroundTask(task)
@@ -174,18 +177,20 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
             self.continuedErrorCode = nil
             var mode = "limited"
             #if compiler(>=6.2)
-            if #available(iOS 26.0, *), args.continued == true, self.continuedRegistered,
-               self.continued.isEmpty, self.continuedPending == nil {
-                let request = BGContinuedProcessingTaskRequest(identifier: self.taskIdentifier, title: "RisuNest", subtitle: label)
-                request.strategy = .fail
-                self.continuedPending = id
-                do {
-                    try BGTaskScheduler.shared.submit(request)
-                    mode = "continued"
-                } catch {
-                    self.continuedPending = nil
-                    self.continuedErrorCode = (error as NSError).code
-                    NSLog("RisuNest continued processing rejected: code=%ld refresh=%ld", (error as NSError).code, UIApplication.shared.backgroundRefreshStatus.rawValue)
+            if #available(iOS 26.0, *), args.continued == true, self.continuedRegistered {
+                self.continuedCandidates.append((id: id, label: label))
+                if self.continued.isEmpty, self.continuedPending == nil {
+                    let request = BGContinuedProcessingTaskRequest(identifier: self.taskIdentifier, title: "RisuNest", subtitle: label)
+                    request.strategy = .fail
+                    self.continuedPending = id
+                    do {
+                        try BGTaskScheduler.shared.submit(request)
+                        mode = "continued"
+                    } catch {
+                        self.continuedPending = nil
+                        self.continuedErrorCode = (error as NSError).code
+                        NSLog("RisuNest continued processing rejected: code=%ld refresh=%ld", (error as NSError).code, UIApplication.shared.backgroundRefreshStatus.rawValue)
+                    }
                 }
             }
             #endif
@@ -199,15 +204,47 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
             if let task = self.tasks.removeValue(forKey: args.id) {
                 UIApplication.shared.endBackgroundTask(task)
             }
-            if let task = self.continued.removeValue(forKey: args.id) { task.setTaskCompleted(success: args.success == true) }
-            if self.continuedPending == args.id {
-                BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: self.taskIdentifier)
-                self.continuedPending = nil
-            }
+            self.releaseContinued(args.id, success: args.success == true)
             self.progress.removeValue(forKey: args.id)
             self.expired.remove(args.id)
             invoke.resolve()
         }
+    }
+
+    /// Passes continued processing to the next running user action that asked for it, or ends it.
+    private func releaseContinued(_ id: String, success: Bool) {
+        continuedCandidates.removeAll { $0.id == id }
+        let next = continuedCandidates.first { tasks[$0.id] != nil && !expired.contains($0.id) }?.id
+        if let task = continued.removeValue(forKey: id) {
+            if let next = next {
+                continued[next] = task
+                showContinued(task, for: next)
+            } else {
+                task.setTaskCompleted(success: success)
+            }
+        }
+        if continuedPending == id {
+            if let next = next {
+                continuedPending = next
+            } else {
+                BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: taskIdentifier)
+                continuedPending = nil
+            }
+        }
+    }
+
+    /// Shows the owning action's subtitle and progress on the continued-processing task.
+    private func showContinued(_ task: BGTask, for id: String) {
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *), let task = task as? BGContinuedProcessingTask {
+            let progress = self.progress[id] ?? TaskProgress(completed: 0, total: 0)
+            task.progress.totalUnitCount = progress.total
+            task.progress.completedUnitCount = progress.completed
+            if let label = continuedCandidates.first(where: { $0.id == id })?.label {
+                task.updateTitle("RisuNest", subtitle: label)
+            }
+        }
+        #endif
     }
 
     @objc func resetGeneration(_ invoke: Invoke) {
@@ -218,6 +255,7 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
             self.tasks.removeAll()
             self.continued.removeAll()
             self.continuedPending = nil
+            self.continuedCandidates.removeAll()
             self.progress.removeAll()
             self.expired.removeAll()
             invoke.resolve()

@@ -1,4 +1,6 @@
+import type { PortraitRenditionDescriptor } from './characterPortraitRendition'
 import type { ExportExclusions } from './exportExcludedReport'
+import type { OfficialAccountAssetProgress } from './sync/officialAccountAssetOutcome'
 import { nativeRestoreDeadline, NativeRestoreControlTimeout, type NativeRestoreClock } from './nativeRestoreDeadline'
 import { exportIOSFile } from './iosFiles'
 import { MAX_CONTENT_METADATA_BYTES } from './contentImportLimits'
@@ -240,6 +242,10 @@ export interface NativeSnapshotBodiesStarted {
 }
 
 export type NativeFileJobStage =
+    | 'downloading-account-backup'
+    | 'checking-account-assets'
+    | 'downloading-account-assets'
+    | 'finishing-account-restore'
     | 'reading-archive'
     | 'requesting-backup-key'
     | 'decrypting-database'
@@ -315,6 +321,8 @@ export function resolveNativeFileJobStage(
         return 'assign-plugin-values'
     }
     if (status.detail) return status.detail.stage
+    // A failed or cancelled job also reports `complete`; the stage it stopped in stays current.
+    const endedEarly = status.state === 'failed' || status.state === 'cancelled'
     if (status.kind === 'official-publication-upload') {
         switch (status.phase) {
             case 'queued':
@@ -326,8 +334,9 @@ export function resolveNativeFileJobStage(
             case 'awaiting-publication-retry':
                 return 'publishing-destination'
             case 'finalizing-publication':
-            case 'complete':
                 return 'finalizing-export'
+            case 'complete':
+                return endedEarly ? null : 'finalizing-export'
             default:
                 return null
         }
@@ -343,8 +352,9 @@ export function resolveNativeFileJobStage(
             case 'publishing-destination':
                 return 'publishing-destination'
             case 'finalizing-export':
-            case 'complete':
                 return 'finalizing-export'
+            case 'complete':
+                return endedEarly ? null : 'finalizing-export'
             default:
                 return null
         }
@@ -435,6 +445,7 @@ export interface NativePortableBodyRetryRequest {
 }
 
 export interface NativeFileJobStatus {
+    officialAssets?: OfficialAccountAssetProgress
     exportCaptureRevision?: number
     portableBodyRetry?: {stagingId: string; catalogSha256: string; pending: boolean; available: boolean; sourceRequired: boolean}
     jobId: string
@@ -627,6 +638,7 @@ export interface NativeFileExportJobOptions extends NativeFileJobOptions {
 }
 
 export interface NativeCharacterCharxExportInput {
+    portraitRendition?: PortraitRenditionDescriptor
     characterId: string
     destination: NativeCharacterCharxExportDestination
     expectedRevision: number
@@ -636,6 +648,7 @@ export interface NativeCharacterCharxExportInput {
 }
 
 export interface NativeCharacterCardExportInput {
+    portraitRendition?: PortraitRenditionDescriptor
     characterId: string
     destination: NativeCharacterCharxExportDestination
     expectedRevision: number
@@ -680,6 +693,8 @@ export interface NativeBackupExportDependencies extends NativeFileJobDependencie
     copyToAndroidSaf(
         request: AndroidSafDestinationRequest,
     ): Promise<AndroidSafDestinationResult>
+    /** Keeps a user-started export running in the background, passing the signal that also ends on expiry. */
+    holdExport?<T>(operation: (signal: AbortSignal | undefined) => Promise<T>, signal: AbortSignal | undefined): Promise<T>
 }
 
 const productionDependencies: NativeFileJobDependencies = {
@@ -696,6 +711,8 @@ const productionBackupExportDependencies: NativeBackupExportDependencies = {
     copyToIOSFiles: exportIOSFile,
     copyToAndroidSaf: (request) => copyNativeExportToAndroidSaf(request),
     reserveAndroidDestination: reserveAndroidSafDestination,
+    holdExport: async (operation, signal) => (await import('../mobileBackgroundTask'))
+        .runWithMobileBackgroundTask('export', (task) => operation(task.signal), signal, true),
 }
 
 export class NativeFileJobError extends Error {
@@ -2202,6 +2219,8 @@ interface NativeManagedExportSpec {
     reservation?: AndroidSafDestinationReservation
     relaySafCopyProgress?: boolean
     retainHandoffOnPublicationFailure?: boolean
+    /** Holds its own background task; exports run inside a shared file operation already hold one. */
+    holdsBackground?: boolean
     prepareRequest(): Record<string, unknown> | Promise<Record<string, unknown>>
 }
 
@@ -2225,8 +2244,11 @@ async function runNativeManagedExport(
         if (!dependencies.reserveAndroidDestination) throw new NativeFileJobError('unsupported', 'Android SAF destination reservation is unavailable')
         reservation = await dependencies.reserveAndroidDestination(spec.destination.suggestedName, spec.androidSourceKind ?? 'risuSave', options.signal)
     }
-    return withAndroidSafDestination(reservation, () =>
-        runNativeManagedExportToDestination(spec, options, dependencies, reservation))
+    const run = (signal = options.signal) =>
+        runNativeManagedExportToDestination(spec, { ...options, signal }, dependencies, reservation)
+    // The destination is chosen by now, so the picker never holds the background task.
+    return withAndroidSafDestination(reservation, () => spec.holdsBackground && dependencies.holdExport
+        ? dependencies.holdExport(run, options.signal) : run())
 }
 
 async function runNativeManagedExportToDestination(
@@ -2418,6 +2440,7 @@ export function runNativeCharacterCharxExport(
     return runNativeManagedExport(
         {
             operation: 'Native character CharX export',
+            holdsBackground: true,
             safLengthMismatchLabel: 'character CharX',
             handoffCleanupCommand: 'native_character_charx_handoff_cleanup',
             destination: input.destination,
@@ -2428,6 +2451,7 @@ export function runNativeCharacterCharxExport(
                     : {}),
                 expectedRevision: input.expectedRevision,
                 characterId: input.characterId,
+                ...(input.portraitRendition ? { portraitRendition: input.portraitRendition } : {}),
                 ...(input.container ? { container: input.container } : {}),
                 card: input.card,
                 module: input.module,
@@ -2446,6 +2470,7 @@ export function runNativeCharacterCardExport(
     return runNativeManagedExport(
         {
             operation: 'Native character card export',
+            holdsBackground: true,
             safLengthMismatchLabel: 'character card',
             handoffCleanupCommand: 'native_character_card_handoff_cleanup',
             destination: input.destination,
@@ -2456,6 +2481,7 @@ export function runNativeCharacterCardExport(
                     : {}),
                 expectedRevision: input.expectedRevision,
                 characterId: input.characterId,
+                ...(input.portraitRendition ? { portraitRendition: input.portraitRendition } : {}),
                 format: input.format,
                 metadata: input.metadata,
             }),
@@ -2473,6 +2499,7 @@ export function runNativeRisuModuleExport(
     return runNativeManagedExport(
         {
             operation: 'Native RISUM export',
+            holdsBackground: true,
             safLengthMismatchLabel: 'RISUM',
             handoffCleanupCommand: 'native_risu_module_handoff_cleanup',
             destination: input.destination,

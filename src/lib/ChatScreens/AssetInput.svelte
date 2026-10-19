@@ -1,4 +1,6 @@
 <script lang="ts">
+    import { imageAliases, selectedImageFormat } from "src/ts/media/imageFormats"
+    import { mapSelectedFiles } from "src/ts/util"
     import ListPager from "src/lib/UI/GUI/ListPager.svelte"
     import { FileMusicIcon, PlusIcon } from "@lucide/svelte";
     import { type character } from "src/ts/storage/database.svelte";
@@ -32,19 +34,20 @@
 </script>
 <button class="hover:text-green-500 bg-textcolor2 flex justify-center items-center w-16 h-16 m-1 rounded-md" onclick={async () => {
         {
-            const da = await selectMultipleFile(['png', 'webp', 'mp4', 'mp3', 'gif'])
-            currentCharacter.additionalAssets = currentCharacter.additionalAssets ?? []
-            if(!da){
+            const target = currentCharacter
+            const failures: string[] = []
+            const da = await selectMultipleFile([...imageAliases, 'mp4', 'mp3'], { failures })
+            if(!da?.length){
                 return
             }
-            for(const f of da){
-                console.log(f)
+            target.additionalAssets = target.additionalAssets ?? []
+            await mapSelectedFiles(da, async f => {
                 const img = f.data
                 const name = f.name
-                const extension = name.split('.').pop().toLowerCase()
+                const extension = selectedImageFormat(img, name)?.ext ?? name.split('.').pop().toLowerCase()
                 const imgp = await saveAsset(img,'',extension)
-                currentCharacter.additionalAssets.push([name, imgp, extension])
-            }
+                target.additionalAssets.push([name, imgp, extension])
+            }, failures)
         }
     }}>
         <PlusIcon />

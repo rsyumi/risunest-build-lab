@@ -91,11 +91,13 @@ class AndroidControlBridgeTest {
     assertTrue(androidControlNotification("lifecycle.onFlushHold"))
     assertTrue(androidControlNotification("saf.copyExport"))
     assertFalse(androidControlNotification("saf.acknowledgeExport"))
-    assertFalse(androidControlNotification("generation.begin"))
+    assertFalse(androidControlNotification("background.defer"))
   }
 
   @Test fun dispatchSurfaceIsExplicitAndKeepsExistingArgumentShapes() {
-    assertEquals(0, androidControlArgumentCount("generation.begin"))
+    assertEquals(0, androidControlArgumentCount("generation.notificationsEnabled"))
+    assertEquals(2, androidControlArgumentCount("background.begin"))
+    assertEquals(2, androidControlArgumentCount("background.defer"))
     assertEquals(1, androidControlArgumentCount("lifecycle.onFlushHold"))
     assertEquals(1, androidControlArgumentCount("saf.acknowledgeExport"))
     assertEquals(1, androidControlArgumentCount("saf.pickPortableBackupSource"))

@@ -2,6 +2,7 @@ import type {
     NativeJpegAssetImportInput,
     NativeJpegAssetImportResult,
 } from './nativeJpegAssetImport'
+import { imageFormatForName, imageFormatFromBytes } from '../media/imageFormats'
 
 interface SelectedLegacyImage {
     name: string
@@ -12,6 +13,7 @@ export interface CharacterImageFileRouteDependencies {
     isTauriDesktop: boolean
     chooseDesktopPath(): Promise<string | null>
     readDesktopPath(path: string): Promise<Uint8Array>
+    readDesktopHeader(path: string): Promise<Uint8Array>
     chooseLegacyFile(): Promise<SelectedLegacyImage | null>
     nativeImport(input: NativeJpegAssetImportInput): Promise<NativeJpegAssetImportResult>
     legacyImport(data: Uint8Array, name: string): Promise<string>
@@ -42,7 +44,7 @@ function characterImageExtension(uri: string): string {
     const extension = separator < 0
         ? ''
         : path.slice(separator + 1).toLocaleLowerCase('en-US')
-    return ['png', 'webp', 'gif', 'jpg', 'jpeg'].includes(extension)
+    return imageFormatForName(`image.${extension}`)
         ? extension
         : 'png'
 }
@@ -87,7 +89,7 @@ export async function selectCharacterImageFile(
     const path = await dependencies.chooseDesktopPath()
     if (!path) return { kind: 'cancelled' }
     const name = fileNameFromPath(path)
-    if (isJpegName(name)) {
+    if (isJpegName(name) && imageFormatFromBytes(await dependencies.readDesktopHeader(path))?.ext === 'jpg') {
         const imported = await dependencies.nativeImport({
             source: { type: 'desktopPath', path },
             displayName: name,

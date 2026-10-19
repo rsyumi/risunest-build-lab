@@ -35,6 +35,8 @@ export function createMutationGatedPersistentDataStore(
         lwwDrainDeferred: store.lwwDrainDeferred ? (request) => gate.runWrite(() => store.lwwDrainDeferred!(request)) : undefined,
 
         readRoot: () => store.readRoot(),
+        readRevision: store.readRevision ? () => store.readRevision!() : undefined,
+        readLibraryIdentity: store.readLibraryIdentity ? () => store.readLibraryIdentity!() : undefined,
         queryPresets: () => store.queryPresets(),
         readPreset: (id: string) => store.readPreset(id),
         queryCharacters: (input: CharacterQuery): Promise<CharacterPage> =>
@@ -66,8 +68,8 @@ export function createMutationGatedPersistentDataStore(
             store.readAssetAliasesByKeys(kind, keys),
         listAssetAliases: (input: AssetAliasListQuery) => store.listAssetAliases(input),
         readAssetOwnerHead: (owner: AssetOwnerLocator) => store.readAssetOwnerHead(owner),
-        commitAssetAlias: (alias: AssetAlias, expectedRevision: DataRevision) =>
-            gate.runWrite(() => store.commitAssetAlias(alias, expectedRevision)),
+        commitAssetAlias: (...args: Parameters<PersistentDataStore['commitAssetAlias']>) =>
+            gate.runWrite(() => store.commitAssetAlias(...args)),
         deleteAssetAlias: (identity: AssetAliasIdentity, expectedRevision: DataRevision) =>
             gate.runWrite(() => store.deleteAssetAlias(identity, expectedRevision)),
         commit: (input: WorkingSetCommit) => gate.runWrite(() => store.commit(input)),

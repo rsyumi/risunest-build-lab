@@ -297,10 +297,14 @@ impl PreparedKeiUpload {
             .create_new(true)
             .open(&path)?;
         let mut guard = PayloadOutputGuard::new(path.clone());
-        let mut writer = HashingWriter::new(CancellableWriter {
-            inner: &mut file,
-            is_cancelled,
-        });
+        // The serializer writes token by token; the buffer turns that into large file writes.
+        let mut writer = io::BufWriter::with_capacity(
+            64 * 1024,
+            HashingWriter::new(CancellableWriter {
+                inner: &mut file,
+                is_cancelled,
+            }),
+        );
         write_payload(
             &reader.connection,
             &reader.target.generation,
@@ -308,7 +312,10 @@ impl PreparedKeiUpload {
             &self.account,
             &mut writer,
         )?;
-        let (bytes, sha256) = writer.finish();
+        let (bytes, sha256) = writer
+            .into_inner()
+            .map_err(|error| StoreError::from(error.into_error()))?
+            .finish();
         file.flush()?;
         file.sync_all()?;
         drop(file);

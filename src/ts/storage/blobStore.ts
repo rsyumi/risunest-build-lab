@@ -95,6 +95,8 @@ export interface BlobStore {
     resolveImageSource?(key: string): Promise<BlobImageSource | null>
     captureConditionalWrite?(key: string): Promise<ConditionalBlobWrite | null>
     put(key: string, data: Uint8Array, metadata: BlobWriteMetadata): Promise<BlobMetadata>
+    /** Verifies prepared native bytes before publishing their alias. */
+    putVerified?(key: string, data: Uint8Array, metadata: BlobWriteMetadata, beforeActivate?: () => Promise<void>): Promise<BlobMetadata>
     putNewInlayImage?(
         key: string,
         data: Uint8Array,
@@ -102,6 +104,7 @@ export interface BlobStore {
     ): Promise<InlayBlobMetadata>
     read(key: string, range?: BlobReadRange): Promise<Uint8Array | null>
     stat(key: string): Promise<BlobMetadata | null>
+    statMany?(keys: readonly string[]): Promise<(BlobMetadata | null)[]>
     list(query?: BlobListQuery): Promise<BlobMetadata[]>
     remove(key: string): Promise<void>
     resolveUrl(key: string): Promise<string | null>

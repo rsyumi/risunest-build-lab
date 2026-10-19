@@ -1,6 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { beginExternalProgress, externalProgressFailure } from './external/progress';
-import { beginMobileBackgroundTask } from "../../mobileBackgroundTask";
+import { beginDeferredMobileBackgroundTask, beginMobileBackgroundTask, measuredTaskPercent, type MobileBackgroundTask } from "../../mobileBackgroundTask";
 import { get } from "svelte/store";
 import { selectedCharID } from "src/ts/stores.svelte";
 import { getDatabase } from "../database.svelte";
@@ -70,13 +70,20 @@ export async function countConnectionOnlyAssets(connectionId: string): Promise<n
   if (!count(objects)) throw new Error("invalid-asset-residency-status");
   return objects;
 }
-function protectedCommand(name: string, args?: Record<string, unknown>, signal?: AbortSignal, operationId?: string) {
-  const operation = runProtectedCommand(name, args, signal, operationId);
+interface ProtectedHold {
+  kind: "sync" | "maintenance";
+  /** Routine work holds the service only if the app leaves the screen while it runs. */
+  routine?: boolean;
+  attach?(task: MobileBackgroundTask): void;
+}
+function protectedCommand(name: string, args: Record<string, unknown> | undefined, signal: AbortSignal | undefined, operationId: string | undefined, hold: ProtectedHold) {
+  const operation = runProtectedCommand(name, args, signal, operationId, hold);
   operations.add(operation);
   return operation.finally(() => { operations.delete(operation); });
 }
-async function runProtectedCommand(name: string, args?: Record<string, unknown>, signal?: AbortSignal, operationId?: string) {
-  const task = await beginMobileBackgroundTask("sync");
+async function runProtectedCommand(name: string, args: Record<string, unknown> | undefined, signal: AbortSignal | undefined, operationId: string | undefined, hold: ProtectedHold) {
+  const task = await (hold.routine ? beginDeferredMobileBackgroundTask(hold.kind) : beginMobileBackgroundTask(hold.kind, undefined, true));
+  hold.attach?.(task);
   let cancellation: Promise<void> | undefined;
   let admitted = operationId === undefined;
   const cancel = () => {
@@ -113,11 +120,15 @@ const selectedCharacterId = () =>
   getDatabase().characters[get(selectedCharID)]?.chaId ?? null;
 export const setAssetResidencyPolicy = (policy: AssetResidencyPolicy) =>
   policy === "full"
-    ? protectedCommand("server_sync_asset_policy", { policy, selectedCharacterId: selectedCharacterId() })
+    ? protectedCommand("server_sync_asset_policy", { policy, selectedCharacterId: selectedCharacterId() }, undefined, undefined, { kind: "sync" })
     : command("server_sync_asset_policy", { policy });
-/** Downloads connection-exclusive bodies, every holder's bodies, or files absent from a target. */
-export const downloadRemoteAssets = async (connectionId?: string, options?: { signal?: AbortSignal; target?: AssetResidencyTarget; showEmpty?: boolean; progressConnectionId?: string }) => {
+/**
+ * Downloads connection-exclusive bodies, every holder's bodies, or files absent from a target.
+ * A `routine` download, such as hydration after sync, shows no notification while the app is visible.
+ */
+export const downloadRemoteAssets = async (connectionId?: string, options?: { signal?: AbortSignal; target?: AssetResidencyTarget; showEmpty?: boolean; progressConnectionId?: string; routine?: boolean }) => {
   const operationId = crypto.randomUUID();
+  let task: MobileBackgroundTask | undefined;
   const externalId = connectionId ?? (options?.target?.kind === 'external' ? options.target.connectionId : options?.progressConnectionId);
   const run = externalId ? beginExternalProgress(externalId, 'download', options?.showEmpty ?? true) : undefined;
   let hasItems = false;
@@ -126,6 +137,7 @@ export const downloadRemoteAssets = async (connectionId?: string, options?: { si
     if (count(value.completedItems) && count(value.totalItems) && value.completedItems <= value.totalItems) {
       hasItems ||= value.totalItems > 0;
       if (value.totalItems > 0 || options?.showEmpty !== false) run?.items(value.completedItems, value.totalItems);
+      task?.progress(measuredTaskPercent(value.completedItems, value.totalItems));
     }
   };
   try {
@@ -135,7 +147,7 @@ export const downloadRemoteAssets = async (connectionId?: string, options?: { si
       operationId,
       ...(options?.target ? { target: options.target } : {}),
       ...(progress ? { progress, transferProgress: run!.networkChannel() } : {}),
-    }, options?.signal, operationId);
+    }, options?.signal, operationId, { kind: "sync", routine: options?.routine, attach: value => { task = value } });
     run?.finish('complete', hasItems || options?.showEmpty !== false);
     return result;
   } catch (error) { run?.finish(externalProgressFailure(error)); throw error; }
@@ -148,8 +160,10 @@ export async function evictLocalAssets(): Promise<AssetResidencyStatus> {
   cleanup = { operationId, controller };
   assetCleanupProgress.set({ operationId, state: 'running', sequence: 0, stage: 'preparing', completedItems: 0, totalItems: null, evictedItems: 0, evictedBytes: 0 });
   const progress = new Channel<AssetCleanupSnapshot>();
+  let task: MobileBackgroundTask | undefined;
   progress.onmessage = value => {
     if (!validAssetCleanupSnapshot(value)) return;
+    if (value.totalItems !== null) task?.progress(measuredTaskPercent(value.completedItems, value.totalItems));
     // The final channel message can arrive after invoke rejects. Preserve the
     // terminal state while accepting this operation's last partial counters.
     assetCleanupProgress.update(current => current?.operationId === operationId
@@ -157,7 +171,7 @@ export async function evictLocalAssets(): Promise<AssetResidencyStatus> {
       ? { ...current, ...value } : current);
   };
   try {
-    const result = await protectedCommand('server_sync_asset_evict', { operationId, progress }, controller.signal, operationId);
+    const result = await protectedCommand('server_sync_asset_evict', { operationId, progress }, controller.signal, operationId, { kind: 'maintenance', attach: value => { task = value } });
     assetCleanupProgress.update(current => current?.operationId === operationId ? { ...current, state: 'complete', evictedBytes: result.evictedBytes } : current);
     return result;
   } catch (error) {

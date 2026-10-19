@@ -33,6 +33,7 @@ import {
 } from './storage/nativePngCardAdapter'
 import { exportNativeCharacterCharxFromPicker } from './storage/nativeCharacterCharxExportRoute'
 import { exportNativeCharacterCardFromPicker } from './storage/nativeCharacterCardExportRoute'
+import { beginMobileBackgroundTask, type MobileBackgroundTask } from './mobileBackgroundTask'
 
 
 const EXTERNAL_HUB_URL = 'https://sv.risuai.xyz';
@@ -1718,6 +1719,7 @@ export async function exportCharacterCard(char:character, type:'png'|'json'|'cha
 } = {}) {
     let img = await readImage(char.image)
     const spec:'v2'|'v3' = arg.spec ?? 'v2' //backward compatibility
+    let background: MobileBackgroundTask | undefined
     try{
         char.image = ''
         img = type === 'png' ? (await reencodeImage(img)) : img
@@ -1731,6 +1733,8 @@ export async function exportCharacterCard(char:character, type:'png'|'json'|'cha
             }
             const ext = nameExt[type]
             await (localWriter as LocalWriter).init(ext[0], [ext[1]], `${char.name || 'character'}.${ext[1]}`)
+            // The destination is chosen, so the picker never holds the background task.
+            background = await beginMobileBackgroundTask('export', undefined, true)
         }
         const writer = (type === 'charx' || type === 'charxJpeg') ? (new CharXWriter(localWriter)) : type === 'json' ? (new BlankWriter()) : (new PngChunk.streamWriter(img, localWriter))
         await writer.init()
@@ -1989,6 +1993,9 @@ export async function exportCharacterCard(char:character, type:'png'|'json'|'cha
     }
     catch(e){
         alertError(e)
+    }
+    finally{
+        await background?.dispose()
     }
 }
 
@@ -2271,6 +2278,7 @@ export async function getRisuHub(arg:{
 export async function downloadRisuHub(id:string, arg:{
     forceRedirect?: boolean
 } = {}) {
+    let background: MobileBackgroundTask | undefined
     try {
         if(!arg.forceRedirect){
             if(!(await alertRisuServiceTOS())){
@@ -2281,6 +2289,7 @@ export async function downloadRisuHub(id:string, arg:{
                 msg: "Downloading..."
             })
         }
+        background = await beginMobileBackgroundTask('import', undefined, true)
         const res = await fetch(`${REALM_SITE_URL}/api/v1/download/dynamic/` + id + '?cors=true', {
             headers: {
                 "x-risu-api-version": "4"
@@ -2338,6 +2347,8 @@ export async function downloadRisuHub(id:string, arg:{
         console.error(error)
         console.log(error.stack)
         alertError("Error while importing")
+    } finally {
+        await background?.dispose()
     }
 }
 

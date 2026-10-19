@@ -21,6 +21,9 @@ impl PersistentStore {
         self.connection.execute("INSERT INTO server_sync_state VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET config=excluded.config", [serde_json::to_string(config).map_err(|_|SyncError::new("invalid-local-server-config",409))?])?;
         self.server_repair_residency_access()
     }
+    pub(crate) fn server_config_transaction(&self) -> Result<rusqlite::Transaction<'_>> {
+        Ok(rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)?)
+    }
     pub(crate) fn server_stored_config(&self) -> Result<Option<StoredConfig>> {
         let text: Option<String> = self
             .connection

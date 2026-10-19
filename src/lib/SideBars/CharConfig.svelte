@@ -1,7 +1,9 @@
 <script lang="ts">
+    import { imageAliases, selectedImageFormat } from "src/ts/media/imageFormats"
+    import { mapSelectedFiles } from "src/ts/util"
     import { language } from "../../lang";
     import { tokenizeAccurate } from "../../ts/tokenizer";
-    import { getCurrentCharacter, saveImage as saveAsset, type character } from "../../ts/storage/database.svelte";
+    import { getCurrentCharacter, type character } from "../../ts/storage/database.svelte";
     import { DBState } from 'src/ts/stores.svelte';
     import { untrack } from 'svelte';
     import { CharConfigSubMenu, MobileGUI, ShowRealmFrameStore, selectedCharID, hypaV3ModalOpen } from "../../ts/stores.svelte";
@@ -16,7 +18,7 @@
     import Help from "../Others/Help.svelte";
     import { exportChar } from "src/ts/characterCards";
     import { getElevenTTSVoices, getWebSpeechTTSVoices, getVOICEVOXVoices, oaiVoices, getNovelAIVoices } from "src/ts/process/tts";
-    import { getFileSrc } from "src/ts/globalApi.svelte";
+    import { getFileSrc, saveAsset } from "src/ts/globalApi.svelte";
 
     import TextInput from "../UI/GUI/TextInput.svelte";
     import NumberInput from "../UI/GUI/NumberInput.svelte";
@@ -512,18 +514,20 @@
                             <button class="hover:text-green-500" onclick={async () => {
                                 const characterId = DBState.db.characters[$selectedCharID].chaId
                                 {
-                                    const da = await selectMultipleFile(['png', 'webp', 'mp4', 'mp3', 'gif', 'jpeg', 'jpg', 'ttf', 'otf', 'css', 'webm', 'woff', 'woff2', 'svg', 'avif'])
+                                    const failures: string[] = []
+                                    const da = await selectMultipleFile([...imageAliases, 'mp4', 'mp3', 'ttf', 'otf', 'css', 'webm', 'woff', 'woff2', 'svg'], { failures })
                                     if(!da?.length){
                                         return
                                     }
                                     const assets: [string, string, string][] = []
-                                    for(const f of da){
+                                    await mapSelectedFiles(da, async f => {
                                         const img = f.data
                                         const name = f.name
-                                        const extension = name.split('.').pop().toLowerCase()
+                                        const extension = selectedImageFormat(img, name)?.ext ?? name.split('.').pop().toLowerCase()
                                         const imgp = await saveAsset(img,'', extension)
                                         assets.push([name, imgp, extension])
-                                    }
+                                    }, failures)
+                                    if (!assets.length) return
                                     await mutatePersistentCharacterDetail(characterId, 'add-character-assets', ({ character }) => {
                                         (character.additionalAssets ??= []).push(...assets)
                                     })

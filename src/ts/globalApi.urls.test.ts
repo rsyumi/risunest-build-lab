@@ -65,9 +65,12 @@ test.each(['Mozilla/5.0 (Linux; Android 14)', 'Mozilla/5.0 (Windows NT 10.0; Win
     },
 )
 
-test('Android reports a failed native URL handoff', async () => {
-    const openURL = await loadOpenURL('Mozilla/5.0 (Linux; Android 14)')
-    native.invoke.mockRejectedValueOnce('No activity can open this URL')
+test.each([
+    ['Android', 'Mozilla/5.0 (Linux; Android 14)', 'No activity can open this URL'],
+    ['Linux', 'Mozilla/5.0 (X11; Linux x86_64)', 'Scoped shell IO error: No such file or directory (os error 2)'],
+])('%s reports a failed native URL handoff', async (_name, userAgent, failure) => {
+    const openURL = await loadOpenURL(userAgent)
+    native.invoke.mockRejectedValueOnce(failure)
     openURL(url)
-    await vi.waitFor(() => expect(errors).toEqual(['No activity can open this URL']))
+    await vi.waitFor(() => expect(errors).toEqual([failure]))
 })

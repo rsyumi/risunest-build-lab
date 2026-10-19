@@ -1939,8 +1939,10 @@ export interface OobaSettings{
 
 
 export async function saveImage(data: Uint8Array, customId = '', fileName = '') {
+    const { requireImage } = await import('../media/imageFormats')
+    const format = requireImage(data)
     const { saveAsset } = await import('../globalApi.svelte')
-    return saveAsset(data, customId, fileName)
+    return saveAsset(data, customId, `${fileName || 'image'}.${format.ext}`)
 }
 
 export const defaultAIN:AINsettings = {

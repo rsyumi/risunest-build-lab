@@ -76,6 +76,7 @@ await (async function() {
             seen.add(object);
             const token = readProvenance.get(object);
             if (token) entries.push({ path, token });
+            if (ArrayBuffer.isView(object)) return;
             for (const [key, child] of Object.entries(object)) visit(child, [...path, Array.isArray(object) ? Number(key) : key]);
         }
         visit(value, []);
@@ -559,7 +560,6 @@ await (async function() {
     try {
         // Initialize cached properties
         const propsToInit = await window.risuai._getPropertiesForInitialization();
-        console.log('Initializing risuai properties:', JSON.stringify(propsToInit.list));
         for (let i = 0; i < propsToInit.list.length; i++) {
             const key = propsToInit.list[i];
             const value = propsToInit[key];

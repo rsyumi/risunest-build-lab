@@ -273,6 +273,14 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
         return invokeStore('pds_read_root', {})
     }
 
+    readRevision(): Promise<DataRevision> {
+        return invokeStore('pds_read_revision', {})
+    }
+
+    readLibraryIdentity(): Promise<string> {
+        return invokeStore('pds_read_library_identity', {})
+    }
+
     queryPresets(): Promise<PresetCatalog> {
         return invokeStore('pds_query_presets', {})
     }
@@ -375,8 +383,9 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
     commitAssetAlias(
         alias: AssetAlias,
         expectedRevision: DataRevision,
+        expectedLibrary?: string,
     ): Promise<{ revision: DataRevision }> {
-        return invokeStore('pds_commit_asset_alias', { alias, expectedRevision })
+        return invokeStore('pds_commit_asset_alias', { alias, expectedRevision, ...(expectedLibrary === undefined ? {} : { expectedLibrary }) })
     }
 
     deleteAssetAlias(

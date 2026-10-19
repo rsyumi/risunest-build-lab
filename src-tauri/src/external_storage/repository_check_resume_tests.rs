@@ -258,6 +258,7 @@ impl World {
             now_ms: self.clock.reading().wall_ms,
             unfinished: Vec::new(),
             cache_root: &cache,
+            reads: Default::default(),
         };
         let documents = ConnectedDocuments { connected: &b.connected, cancel: &cancel, scratch: &scratch };
         let available = |_: Instant| Ok(true);
@@ -429,12 +430,18 @@ fn a_kept_backup_resumes_after_the_head_moved_on_and_was_collected() {
     runtime().block_on(async {
         let world = World::new();
         let (first, head) = world.publish(60, 1, None).await;
-        world.keep(&first, "kept").await;
+        let point = world.keep(&first, "kept").await;
         let packs = world.packs(&first).await;
         world.stop_after_second("check", Some("kept"), &packs).await;
 
         world.publish(4, 2, Some(&head)).await;
+        let reads = || (world.provider.read_attempts(&point.object_id), world.provider.read_attempts("snapshot-kept"));
+        let earlier = reads();
         world.collect().await;
+        // Two runs. Each reads the kept backup for its roots and while marking,
+        // however often it rechecks the roots before deleting.
+        let later = reads();
+        assert_eq!((later.0 - earlier.0, later.1 - earlier.1), (4, 8), "a recheck read the backup again");
         assert!(!world.provider.holds(&first.reference.object_id), "the old state stayed");
         assert!(packs.keys().all(|id| world.provider.holds(id)), "a kept backup lost a pack");
 

@@ -1,3 +1,5 @@
+import { imageFixture } from '../../../../../tests/support/imageFixtures'
+import { imageAliases, imageFormatForName } from '../../../media/imageFormats'
 import { setRuntimePerformanceProfile } from 'src/ts/runtimePerformanceProfile'
 vi.mock('src/ts/alert', () => ({ alertToast: vi.fn() }))
 import fc from 'fast-check'
@@ -568,11 +570,11 @@ describe('postInlayAsset', () => {
             set src(_value: string) { throw new Error('source assignment failed') }
         })
 
-        await postInlayAsset({ name: 'broken.png', data: new Uint8Array([1]) })
+        await postInlayAsset({ name: 'broken.png', data: imageFixture('png') })
 
         // The bytes survive a decoder that never got started.
         const stored = await getInlayAssetBlob('test-uuid-1234')
-        expect(new Uint8Array(await stored!.data.arrayBuffer())).toEqual(new Uint8Array([1]))
+        expect(new Uint8Array(await stored!.data.arrayBuffer())).toEqual(imageFixture('png'))
         expect(stored).toMatchObject({ ext: 'png' })
         expect(revokeObjectURL).toHaveBeenCalledTimes(1)
         expect(revokeObjectURL).toHaveBeenCalledWith('blob:source-throw')
@@ -587,10 +589,10 @@ describe('postInlayAsset', () => {
             set src(_value: string) { queueMicrotask(() => this.onerror?.()) }
         })
 
-        await postInlayAsset({ name: 'broken.png', data: new Uint8Array([1]) })
+        await postInlayAsset({ name: 'broken.png', data: imageFixture('png') })
 
         const stored = await getInlayAssetBlob('test-uuid-1234')
-        expect(new Uint8Array(await stored!.data.arrayBuffer())).toEqual(new Uint8Array([1]))
+        expect(new Uint8Array(await stored!.data.arrayBuffer())).toEqual(imageFixture('png'))
         expect(revokeObjectURL).toHaveBeenCalledTimes(1)
         expect(revokeObjectURL).toHaveBeenCalledWith('blob:load-error')
     })
@@ -632,7 +634,7 @@ describe('postInlayAsset', () => {
     test('returns null for any unsupported extension', async () => {
         await fc.assert(
             fc.asyncProperty(
-                fc.string({ minLength: 1, maxLength: 10 }).filter((ext) => !allSupportedExts.includes(ext as any)),
+                fc.string({ minLength: 1, maxLength: 10 }).filter((ext) => !allSupportedExts.includes(ext.toLowerCase() as any) && !imageFormatForName(`file.${ext}`)),
                 async (ext) => {
                     store.clear()
                     const result = await postInlayAsset({

@@ -1,3 +1,4 @@
+import { prepareCharacterPortraitRendition } from './characterPortraitRendition'
 import { save } from './fileSelection'
 
 import { isTauriIOS, isTauriAndroid, isTauriDesktop } from '../platform'
@@ -38,6 +39,7 @@ interface NativeCharacterCardExportRouteDependencies {
         characterId: string,
         revision: DataRevision,
     ): Promise<CharacterDetail>
+    preparePortrait?: typeof prepareCharacterPortraitRendition
     runExport(
         input: NativeCharacterCardExportInput,
         options?: NativeFileJobOptions,
@@ -68,6 +70,7 @@ const productionDependencies: NativeCharacterCardExportRouteDependencies = {
             characterId,
             revision,
         ),
+    preparePortrait: prepareCharacterPortraitRendition,
     runExport: runNativeCharacterCardExport,
 }
 
@@ -86,11 +89,17 @@ export async function exportNativeCharacterCardFromPicker(
     if (flow.kind === 'cancelled') return null
     const character = await dependencies.readCharacter(input.characterId, flow.expectedRevision)
     const metadata = input.projectCharacter(character)
-    return dependencies.runExport({
-        characterId: input.characterId,
-        destination: flow.destination,
-        expectedRevision: flow.expectedRevision,
-        format: input.format,
-        metadata,
-    }, options)
+    const rendition = input.format === 'png-card'
+        ? await dependencies.preparePortrait?.(character, flow.expectedRevision, 'png-card', options.signal) : undefined
+    try {
+        options.signal?.throwIfAborted()
+        return await dependencies.runExport({
+            characterId: input.characterId,
+            destination: flow.destination,
+            expectedRevision: flow.expectedRevision,
+            ...(rendition ? { portraitRendition: rendition.descriptor } : {}),
+            format: input.format,
+            metadata,
+        }, options)
+    } finally { await rendition?.release() }
 }

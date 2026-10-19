@@ -28,7 +28,7 @@
     import { alertConfirm, alertError, alertNormal, openRisuAccountLogin } from 'src/ts/alert'
     import { restoreNativeOfficialAccountBackup } from 'src/ts/storage/sync/nativeOfficialAccountOperations'
     import { NativeAccountLoginError } from 'src/ts/storage/sync/nativeOfficialAccountFlow'
-    import { presentFileOperationError } from 'src/ts/storage/fileOperationErrorPresentation'
+    import { fileOperationErrorWasPresented, presentFileOperationError } from 'src/ts/storage/fileOperationErrorPresentation'
     import { hubURL } from 'src/ts/characterCards'
     import { getVersionString } from 'src/ts/globalApi.svelte'
     import { updateTextThemeAndCSS } from 'src/ts/gui/colorscheme'
@@ -142,13 +142,19 @@
     const jobShown = $derived(job.open && !job.compact)
     const jobDetails = $derived(formatErrorDetails($diagnosticInfo, job.terminal?.details || job.terminal?.reason || job.terminal?.summary || ''))
     const jobRecoveryRequired = $derived($nativeFileOperationOutcome?.error?.recoveryRequired === true)
+    const accountRetryAvailable = $derived(!!$nativeFileOperationOutcome?.status?.officialAssets?.operationId
+        && ['failed', 'cancelled'].includes($nativeFileOperationOutcome.status.officialAssets.state)
+        && !['account-changed', 'library-changed'].includes($nativeFileOperationOutcome.status.officialAssets.reason ?? ''))
     const bodyRetryAvailable = $derived($nativeFileOperationOutcome?.status?.kind === 'restore-portable-backup'
         && $nativeFileOperationOutcome.status.restoreAdoptionConfirmed === true
         && $nativeFileOperationOutcome.status.portableBodyRetry?.pending === true
         && $nativeFileOperationOutcome.status.portableBodyRetry.available === true
         && !$nativeFileOperationOutcome.status.portableBodyRetry.sourceRequired)
+    const stoppedAccountRestore = $derived($nativeFileOperationOutcome?.state === 'cancelled'
+        && $nativeFileOperationOutcome.status?.officialAssets?.state === 'cancelled'
+        && $nativeFileOperationOutcome.status.activationRevision !== undefined)
     // The restored data is in place, so the reader can move on unless the screen still waits for a refresh or the result is unknown.
-    const committedRecovery = $derived(jobRecoveryRequired
+    const committedRecovery = $derived((jobRecoveryRequired || stoppedAccountRestore)
         && $nativeFileOperationOutcome?.error?.code !== 'activation-outcome-unresolved'
         && $persistentWorkingSetRefreshRevision === null)
     const jobTicking = $derived(jobShown && job.terminal === null)
@@ -769,6 +775,16 @@
                                     {t.import.next}<ArrowRight />
                                 </button>
                             {:else}
+                                {#if accountRetryAvailable}
+                                    <button class="btn" type="button" onclick={() => {
+                                        const startedAt = Date.now()
+                                        void import('src/ts/storage/sync/nativeOfficialAccountOperations').then(module => module.retryNativeOfficialAccountAssetsFromOutcome()).then(continueAfterImport).catch(async error => {
+                                            if (fileOperationErrorWasPresented('import', startedAt)) return
+                                            const { failureReason } = await import('src/ts/gui/nativeFileJobDialogModel')
+                                            alertError(failureReason(error?.code ?? ''))
+                                        })
+                                    }}>{strings.retry}</button>
+                                {/if}
                                 {#if bodyRetryAvailable}
                                     <button class="btn" type="button" onclick={() => {
                                         void retryPortableRestoreBodiesFromOutcome().then(continueAfterImport).catch(() => {})

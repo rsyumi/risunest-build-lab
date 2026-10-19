@@ -1,5 +1,6 @@
 import type { InlayBlobMetadata, InlayEncodeOptions } from '../../storage/blobStore'
 import { emptyInlayOptimizationProgress, inlayOptimizationGainRatio, runInlayOptimization, type InlayOptimizationDeps, type InlayOptimizationProgress } from './inlayOptimizationJob'
+import { measuredTaskPercent, runWithMobileBackgroundTask } from '../../mobileBackgroundTask'
 
 export class InlayOptimizationController {
     private readonly preserved = new Set<string>()
@@ -33,11 +34,14 @@ export class InlayOptimizationController {
                     return result
                 },
             }
-            this.result = await runInlayOptimization(targets, { ...deps, encoder }, {
+            this.result = await runWithMobileBackgroundTask('maintenance', task => runInlayOptimization(targets, { ...deps, encoder }, {
                 options,
-                isCancelled: () => this.cancelRequested,
-                onProgress: value => { this.progress = value },
-            })
+                isCancelled: () => this.cancelRequested || !!task.signal?.aborted,
+                onProgress: value => {
+                    this.progress = value
+                    task.progress(measuredTaskPercent(value.scanned, value.total))
+                },
+            }), undefined, true)
             return this.result
         } finally {
             this.running = false

@@ -88,8 +88,7 @@ fn jpeg_extension(display_name: &str) -> Result<&'static str, NativeJobError> {
         .map(|(_, extension)| extension.to_ascii_lowercase())
         .as_deref()
     {
-        Some("jpg") => Ok("jpg"),
-        Some("jpeg") => Ok("jpeg"),
+        Some("jpg" | "jpeg") => Ok("jpg"),
         _ => Err(NativeJobError::new(
             "invalid-input",
             "native JPEG asset import requires a .jpg or .jpeg display name",
@@ -128,6 +127,13 @@ fn validate_ordinary_jpeg(
             "native JPEG asset import requires an ordinary JPEG source",
         ));
     }
+    let (width, height) = image::ImageReader::with_format(
+        std::io::BufReader::new(&mut source.file), image::ImageFormat::Jpeg,
+    ).into_dimensions().map_err(|_| NativeJobError::new("damaged-image", "JPEG image header is damaged"))?;
+    if width == 0 || height == 0 {
+        return Err(NativeJobError::new("damaged-image", "JPEG image dimensions are invalid"));
+    }
+    source.file.seek(SeekFrom::Start(0)).map_err(|error| NativeJobError::new("store-error", error.to_string()))?;
     Ok(())
 }
 
@@ -146,6 +152,7 @@ fn character_image_extension(uri: &str) -> &'static str {
         "gif" => "gif",
         "jpg" => "jpg",
         "jpeg" => "jpeg",
+        "avif" => "avif",
         _ => "png",
     }
 }
@@ -573,10 +580,10 @@ mod tests {
     }
 
     #[test]
-    fn imports_exact_jpeg_bytes_and_preserves_extension_and_owner_head() {
+    fn imports_exact_jpeg_bytes_with_canonical_extension_and_preserves_owner_head() {
         for extension in ["jpg", "jpeg"] {
             let (directory, store, character_id, owner_head) = open_fixture();
-            let bytes = [0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 0xff, 0xd9];
+            let bytes = *include_bytes!("../../../tests/fixtures/images/still.jpg");
             let source_path = directory.path().join(format!("portrait.{extension}"));
             fs::write(&source_path, bytes).expect("write JPEG source");
             let job = job();
@@ -594,12 +601,12 @@ mod tests {
             .expect("import JPEG asset");
 
             let reopened = PersistentStore::open(directory.path()).expect("reopen store");
-            let logical_id = format!("assets/{}.{}", result.source_sha256, extension);
+            let logical_id = format!("assets/{}.jpg", result.source_sha256);
             let alias = reopened
                 .read_asset_alias("asset", &logical_id, None)
                 .expect("read alias")
                 .expect("JPEG alias");
-            assert_eq!(alias.value.ext, extension);
+            assert_eq!(alias.value.ext, "jpg");
             assert_eq!(alias.value.mime, "image/jpeg");
             assert_eq!(
                 PayloadCas::new(directory.path())
@@ -640,7 +647,7 @@ mod tests {
     #[test]
     fn replacing_a_native_jpeg_preserves_its_extension_in_previous_portraits() {
         let (directory, store, character_id, _owner_head) = open_fixture();
-        let first_bytes = [0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 0xff, 0xd9];
+        let first_bytes = *include_bytes!("../../../tests/fixtures/images/still.jpg");
         let first_path = directory.path().join("first.JPEG");
         fs::write(&first_path, first_bytes).expect("write first JPEG source");
         let first = import_jpeg_asset(
@@ -655,9 +662,9 @@ mod tests {
             &job(),
         )
         .expect("import first JPEG asset");
-        let first_logical_id = format!("assets/{}.jpeg", first.source_sha256);
+        let first_logical_id = format!("assets/{}.jpg", first.source_sha256);
 
-        let second_bytes = [0xff, 0xd8, 0xff, 0xe1, 4, 5, 6, 0xff, 0xd9];
+        let second_bytes = *include_bytes!("../../../tests/fixtures/images/second.jpg");
         let second_path = directory.path().join("second.jpg");
         fs::write(&second_path, second_bytes).expect("write second JPEG source");
         import_jpeg_asset(
@@ -687,7 +694,7 @@ mod tests {
                 "type": "icon",
                 "name": "iconx",
                 "uri": first_logical_id,
-                "ext": "jpeg",
+                "ext": "jpg",
             }))
         );
     }
@@ -711,7 +718,7 @@ mod tests {
     fn conflict_cancel_and_source_failure_preserve_the_previous_image_and_owner_head() {
         for failure in ["conflict", "cancel", "source-length"] {
             let (directory, store, character_id, owner_head) = open_fixture();
-            let bytes = [0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 0xff, 0xd9];
+            let bytes = *include_bytes!("../../../tests/fixtures/images/still.jpg");
             let source_path = directory.path().join("portrait.jpeg");
             fs::write(&source_path, bytes).expect("write JPEG source");
             let job = job();
@@ -770,7 +777,7 @@ mod tests {
     #[test]
     fn rejects_a_missing_destination_owner_without_mutating_the_library() {
         let (directory, store, character_id, owner_head) = open_fixture();
-        let bytes = [0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 0xff, 0xd9];
+        let bytes = *include_bytes!("../../../tests/fixtures/images/still.jpg");
         let source_path = directory.path().join("portrait.jpeg");
         fs::write(&source_path, bytes).expect("write JPEG source");
 
@@ -865,7 +872,7 @@ mod tests {
         let existing_bytes = cas.read_object(existing_hash).expect("read existing asset")
             .expect("existing asset bytes");
         assert_eq!(existing_alias.size, existing_bytes.len() as i64);
-        let bytes = [0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 0xff, 0xd9];
+        let bytes = *include_bytes!("../../../tests/fixtures/images/still.jpg");
         let object_hash = hex::encode(Sha256::digest(bytes));
         let source_path = directory.path().join("portrait.jpeg");
         fs::write(&source_path, bytes).expect("write JPEG source");

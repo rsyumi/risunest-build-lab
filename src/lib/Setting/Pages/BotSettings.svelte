@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { imageAliases } from "src/ts/media/imageFormats"
     import { alertError } from "src/ts/alert";
     import { importRegex } from "src/ts/process/scripts";
     import { importPresetRegex } from "src/ts/setting/importPresetRegex";
@@ -808,7 +809,8 @@
             </div>
         </div>
         <button class="mt-2 text-textcolor2 hover:text-textcolor focus-within:text-textcolor" onclick={async () => {
-            const sel = await selectSingleFile(['png', 'jpg', 'jpeg', 'webp'])
+            const sel = await selectSingleFile(imageAliases, { image: true })
+            if (!sel) return
             const canvas = document.createElement('canvas')
             const ctx = canvas.getContext('2d')
             const img = new Image()

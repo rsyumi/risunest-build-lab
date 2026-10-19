@@ -71,6 +71,35 @@ describe("iOS generation lifecycle", () => {
       remove();
     }
   });
+  it.each(["settled", "active", "expired"] as const)(
+    "keeps the background save assertion while deferred work runs until it ends: %s",
+    async (ending) => {
+      let settle!: () => void;
+      const holds = {
+        settled: vi.fn(() => new Promise<void>((resolve) => { settle = resolve; })),
+        expire: vi.fn(),
+      };
+      const lifecycle = (detail: { event: string; id?: string }) =>
+        window.dispatchEvent(new CustomEvent("risunest-ios-lifecycle", { detail }));
+      const remove = installIOSPersistenceLifecycle(vi.fn(async () => {}), holds);
+      try {
+        lifecycle({ event: "background", id: "save-lease" });
+        await vi.waitFor(() => expect(holds.settled).toHaveBeenCalledOnce());
+        lifecycle({ event: "expired", id: "other-lease" });
+        await new Promise((resolve) => setTimeout(resolve));
+        expect(invoke).not.toHaveBeenCalled();
+        expect(holds.expire).not.toHaveBeenCalled();
+        if (ending === "settled") settle();
+        else lifecycle({ event: ending, ...(ending === "expired" ? { id: "save-lease" } : {}) });
+        await vi.waitFor(() =>
+          expect(invoke).toHaveBeenCalledWith("plugin:ios-native|end", { id: "save-lease" }),
+        );
+        expect(holds.expire).toHaveBeenCalledTimes(ending === "expired" ? 1 : 0);
+      } finally {
+        remove();
+      }
+    },
+  );
   it("reports actual progress in order and releases only after pending progress", async () => {
     const calls: string[] = [];
     const deps = {

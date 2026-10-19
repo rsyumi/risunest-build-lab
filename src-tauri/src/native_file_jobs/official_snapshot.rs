@@ -1,5 +1,5 @@
 use risunest_network_log::reqwest::RequestBuilderExt;
-use super::{restore, JobControl, JobPhase, JobProgress, JobResultSummary, NativeJobError, OpenedJobSource};
+use super::{restore, ImportCounts, JobControl, JobDetail, JobKind, JobPhase, JobProgress, JobResultSummary, JobStage, JobState, NativeJobError, OpenedJobSource, StageUnit};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
@@ -43,6 +43,7 @@ pub(crate) fn restore_official_snapshot(
 ) -> Result<JobResultSummary, NativeJobError> {
     job.start(JobPhase::ReadingSource)
         .map_err(job_state_error)?;
+    report_download_progress(job, 0, None)?;
     let downloaded =
         tauri::async_runtime::block_on(download_snapshot(&request, owned_directory, job))?;
     let DownloadOutcome::File(mut source) = downloaded else {
@@ -96,6 +97,7 @@ async fn download_snapshot(
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
                     Err(error) => return Err(store_error(error)),
                 }
+                reset_download_progress(job)?;
                 super::transfer_retry::wait_for_retry(job, retry_after).await?;
             }
             outcome => return outcome,
@@ -264,8 +266,24 @@ async fn download_snapshot_attempt(
     }))
 }
 
+fn reset_download_progress(job: &JobControl) -> Result<(), NativeJobError> {
+    let mut status = job.status.lock().map_err(|_| job_state_error("native job status mutex poisoned".to_owned()))?;
+    if status.kind != JobKind::RestoreOfficialAccountSnapshot || status.state != JobState::Running
+        || status.phase != JobPhase::ReadingSource {
+        return Err(job_state_error("official snapshot retry requires a running download".to_owned()));
+    }
+    // A retry replaces the partial response, including its advertised length.
+    status.progress = JobProgress::default();
+    status.detail = Some(JobDetail::new(JobStage::DownloadingAccountBackup, StageUnit::Bytes, 0, None, ImportCounts::default()));
+    Ok(())
+}
+
 fn report_download_progress(job: &JobControl, written: u64, length: Option<u64>) -> Result<(), NativeJobError> {
-    let previous = job.status().progress;
+    let status = job.status();
+    let stage_completed = status.detail.as_ref().map(|detail| detail.stage_completed).unwrap_or(0).max(written);
+    job.set_detail(JobDetail::new(JobStage::DownloadingAccountBackup, StageUnit::Bytes,
+        stage_completed, length.map(|length| length.max(stage_completed)), ImportCounts::default())).map_err(job_state_error)?;
+    let previous = status.progress;
     job.set_progress(JobProgress {
         completed_bytes: written.max(previous.completed_bytes),
         total_bytes: previous.total_bytes.or(length.map(|length| length * 2)),
@@ -823,6 +841,49 @@ mod tests {
         assert_eq!(bytes, b"abc");
         assert_eq!(job.status().progress.total_bytes, Some(6));
         server.join().unwrap();
+
+        for length in [Some(3), Some(768 * 1024), None] {
+            let mut partial = b"HTTP/1.1 200 OK\r\nContent-Length: 524288\r\nConnection: close\r\n\r\n".to_vec();
+            partial.extend(vec![b'a'; 256 * 1024]);
+            let expected = vec![b'b'; length.unwrap_or(3)];
+            let metadata = length.map(|n| format!("Content-Length: {n}\r\n")).unwrap_or_default();
+            let mut complete = format!("HTTP/1.1 200 OK\r\n{metadata}Connection: close\r\n\r\n").into_bytes();
+            complete.extend(&expected);
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server = thread::spawn(move || {
+                for response in [partial, complete] {
+                    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                    let mut stream = loop {
+                        match listener.accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && std::time::Instant::now() < deadline => thread::sleep(Duration::from_millis(1)),
+                            Err(error) => panic!("fixture accept failed: {error}"),
+                        }
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+                    stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+                    let mut request = Vec::new();
+                    let mut byte = [0];
+                    while !request.ends_with(b"\r\n\r\n") { stream.read_exact(&mut byte).unwrap(); request.push(byte[0]); }
+                    stream.write_all(&response).unwrap();
+                    stream.shutdown(Shutdown::Write).unwrap();
+                }
+            });
+            let directory = TempDir::new().unwrap();
+            let job = self::job();
+            let outcome = tauri::async_runtime::block_on(download_snapshot(&request(url), directory.path(), &job)).unwrap();
+            let DownloadOutcome::File(mut source) = outcome else { panic!("snapshot required") };
+            let mut bytes = Vec::new();
+            source.file.read_to_end(&mut bytes).unwrap();
+            assert_eq!(bytes, expected);
+            let detail = job.status().detail.unwrap();
+            assert_eq!(detail.stage_completed, expected.len() as u64);
+            assert_eq!(detail.stage_total, Some(expected.len() as u64));
+            server.join().unwrap();
+        }
     }
 
     #[test]

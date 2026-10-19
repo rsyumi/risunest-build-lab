@@ -184,7 +184,14 @@ export function createExternalStorageController(
         return job
     }
     const runDestination = async (connectionId: string, run: DestinationRun): Promise<void> => {
-        while (run.goals.length > 0 && !run.cancelled) {
+        // A goal's hold ends only after the next goal's begins, so the run keeps its background time.
+        let held: { task: MobileBackgroundTask; success: boolean } | undefined
+        const releaseHeld = async () => {
+            const value = held
+            held = undefined
+            await value?.task.dispose(value.success)
+        }
+        try { while (run.goals.length > 0 && !run.cancelled) {
             if (run.cancelling) {
                 await run.cancelling
                 run.cancelling = undefined
@@ -202,6 +209,7 @@ export function createExternalStorageController(
                 request.kind === 'cleanup' ? 'maintenance' : request.kind, run.abort.signal, request.reason === 'manual',
             )
             const background = acquisition instanceof Promise ? await acquisition : acquisition
+            if (held) await releaseHeld()
             const expired = () => {
                 run.abort.abort(background.signal?.reason)
                 if (run.active) run.cancelling ??= bridge.cancelJob(run.active.id).then(() => undefined, () => undefined)
@@ -282,12 +290,12 @@ export function createExternalStorageController(
                 background.signal?.removeEventListener('abort', expired)
                 await run.cancelling
                 run.cancelling = undefined
-                if (!request.backgroundTask) await background.dispose(success)
+                if (!request.backgroundTask) held = { task: background, success }
                 run.active = undefined
                 run.activeGoal = undefined
                 publish()
             }
-        }
+        } } finally { await releaseHeld() }
     }
 
     const kick = (connectionId: string, run: DestinationRun): void => {

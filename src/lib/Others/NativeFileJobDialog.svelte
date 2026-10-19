@@ -16,6 +16,10 @@
 
     import { retrySnapshotRestoreBodiesFromOutcome } from 'src/ts/storage/nativePersistentMaintenance'
 
+    const accountRetryAvailable = $derived(!!$nativeFileOperationOutcome?.status?.officialAssets?.operationId
+        && ['failed', 'cancelled'].includes($nativeFileOperationOutcome.status.officialAssets.state)
+        && !['account-changed', 'library-changed'].includes($nativeFileOperationOutcome.status.officialAssets.reason ?? ''))
+
     const snapshotRetryAvailable = $derived($nativeFileOperationOutcome?.status?.kind === 'snapshot-bodies'
         && ['failed', 'cancelled'].includes($nativeFileOperationOutcome.status.state))
 
@@ -197,6 +201,18 @@
                         </SettingButton>
                     {/if}
                     {#if model.closeVisible}
+                        {#if accountRetryAvailable}
+                            <SettingButton variant="secondary" onclick={() => {
+                                const startedAt = Date.now()
+                                void import('src/ts/storage/sync/nativeOfficialAccountOperations')
+                                    .then(({ retryNativeOfficialAccountAssetsFromOutcome }) => retryNativeOfficialAccountAssetsFromOutcome()).catch(async error => {
+                                        const { fileOperationErrorWasPresented } = await import('src/ts/storage/fileOperationErrorPresentation')
+                                        if (fileOperationErrorWasPresented('import', startedAt)) return
+                                        const { alertError } = await import('src/ts/alert')
+                                        alertError(failureReason(error?.code ?? ''))
+                                    })
+                            }}>{language.retry}</SettingButton>
+                        {/if}
                         {#if snapshotRetryAvailable}
                             <SettingButton variant="secondary" onclick={() => {void retrySnapshotRestoreBodiesFromOutcome().catch(async error => {
                                 const { alertError } = await import('src/ts/alert')

@@ -635,6 +635,10 @@ export interface PersistentDataStore {
     lwwDrainDeferred?(request: LwwApplyReceive): Promise<LwwApplyResult>
     open(): Promise<void>
     readRoot(): Promise<Versioned<PersistentRoot>>
+    /** The current revision alone; read it through `readCurrentRevision`. */
+    readRevision?(): Promise<DataRevision>
+    /** Stable across ordinary writes, changed by a full library replacement. */
+    readLibraryIdentity?(): Promise<string>
     queryPresets(): Promise<PresetCatalog>
     readPreset(id: string): Promise<Versioned<botPreset> | null>
     queryCharacters(input: CharacterQuery): Promise<CharacterPage>
@@ -663,7 +667,7 @@ export interface PersistentDataStore {
     readAssetAliasesByKeys(kind: AssetAliasKind, keys: string[]): Promise<Versioned<AssetAlias[]>>
     listAssetAliases(query: AssetAliasListQuery): Promise<AssetAliasPage>
     readAssetOwnerHead(owner: AssetOwnerLocator): Promise<Versioned<AssetOwnerHead> | null>
-    commitAssetAlias(alias: AssetAlias, expectedRevision: DataRevision): Promise<{ revision: DataRevision }>
+    commitAssetAlias(alias: AssetAlias, expectedRevision: DataRevision, expectedLibrary?: string): Promise<{ revision: DataRevision }>
     deleteAssetAlias(
         identity: AssetAliasIdentity,
         expectedRevision: DataRevision,
@@ -696,4 +700,11 @@ export interface PersistentDataStore {
     ): Promise<{ revision: DataRevision }>
     materializeDatabase(revision?: DataRevision): Promise<Database>
     acquireRevision(revision: DataRevision): Promise<PersistentRevisionLease>
+}
+
+/** The store's current revision, without reading the root where the store can answer alone. */
+export function readCurrentRevision(
+    store: Pick<PersistentDataStore, 'readRoot' | 'readRevision'>,
+): Promise<DataRevision> {
+    return store.readRevision ? store.readRevision() : store.readRoot().then((root) => root.revision)
 }

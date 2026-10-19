@@ -186,7 +186,7 @@ export function tauriFsModule(handle?: { write: (data: Uint8Array) => Promise<nu
 }
 
 export function tauriCoreModule() {
-    return { convertFileSrc: (path: string) => `asset://${path}` } satisfies Partial<typeof import('@tauri-apps/api/core')>
+    return { convertFileSrc: (path: string) => `asset://${path}`, invoke: vi.fn() } satisfies Partial<typeof import('@tauri-apps/api/core')>
 }
 
 export function tauriPathModule() {

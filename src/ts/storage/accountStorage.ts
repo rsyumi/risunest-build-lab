@@ -13,6 +13,9 @@ import {
     replacePersistentDatabase,
 } from "./persistentDataRuntime.svelte"
 import { isTauri } from "../platform"
+import { AccountReadError } from './accountReadError'
+import { accountReadDeadline, readAccountBody } from './accountReadBody'
+export { AccountReadError } from './accountReadError'
 
 export const AccountWarning = writable('')
 let risuSession = ''
@@ -37,6 +40,7 @@ export type AccountWriteResult =
 
 export interface AccountReadOptions {
     progress?(ratio: number): void
+    onBytes?(bytes: number): void
     signal?: AbortSignal
 }
 
@@ -355,9 +359,24 @@ export class AccountStorage{
         this.checkAuth()
         const expectedAccountId = this.getAccountId()
         let expectedToken = this.auth
+        const nativeAssetRead = key.startsWith('assets/') && !!this.credentialRouting
+        const checkReadOwner = () => {
+            if (options.signal?.aborted) throw abortReason(options.signal)
+            if (nativeAssetRead && this.getAccountId() !== expectedAccountId) throw new AccountReadError('account-changed')
+        }
+        const cacheOperation = async <T>(pending: Promise<T>): Promise<T> => {
+            try { return await pending }
+            catch (error) {
+                checkReadOwner()
+                if (nativeAssetRead) throw new AccountReadError('local')
+                throw error
+            }
+        }
+        checkReadOwner()
         if(key.startsWith('assets/')){
-            const cached = await this.assetCache.getItem(key)
+            const cached = await cacheOperation(this.assetCache.getItem(key))
             if(cached instanceof ArrayBuffer || ArrayBuffer.isView(cached)){
+                checkReadOwner()
                 return { kind: 'value', bytes: new Uint8Array(
                     cached instanceof ArrayBuffer
                         ? cached
@@ -366,27 +385,62 @@ export class AccountStorage{
             }
         }
         let da:Response|undefined
-        const saveDate = await this.databaseCache.getItem(key + '__date') as number|string|undefined
-        while((!da) || da.status === 403){
-            da = await fetchProtectedResource('/api/account/read/' + Buffer.from(key ,'utf-8').toString('hex') +
+        let deadline: ReturnType<typeof accountReadDeadline> | undefined
+        let reauthenticated = false
+        const saveDate = await cacheOperation(this.databaseCache.getItem(key + '__date')) as number|string|undefined
+        try {
+        while((!da) || da.status === 403 || (nativeAssetRead && da.status === 401)){
+            checkReadOwner()
+            deadline?.dispose()
+            deadline = nativeAssetRead ? accountReadDeadline(options.signal) : undefined
+            try {
+                da = await waitForSignal(fetchProtectedResource('/api/account/read/' + Buffer.from(key ,'utf-8').toString('hex') +
                 (key === accountDatabaseKey ? ('|' + v4()) : ''), withSignal({
                 method: "GET",
                 headers: {
                     'x-risu-key': key,
                     'x-risu-save-date': (saveDate || 0).toString()
                 }
-            }, options.signal))
-            if(da.status === 403){
+                }, deadline?.signal ?? options.signal)), deadline?.signal ?? options.signal)
+            } catch (error) {
+                checkReadOwner()
+                if (deadline?.signal.aborted) throw deadline.signal.reason
+                if (nativeAssetRead) throw new AccountReadError('transport')
+                throw error
+            }
+            try { checkReadOwner() }
+            catch (error) { await discardResponseBody(da); throw error }
+            if(da.status === 403 || (nativeAssetRead && da.status === 401)){
                 await discardResponseBody(da)
-                await this.reauthenticate(options.signal, expectedAccountId, expectedToken)
+                deadline?.dispose()
+                if (nativeAssetRead && reauthenticated) throw new AccountReadError('http', da.status)
+                try { await this.reauthenticate(options.signal, expectedAccountId, expectedToken) }
+                catch (error) {
+                    checkReadOwner()
+                    if (nativeAssetRead) throw new AccountReadError('http', da.status)
+                    throw error
+                }
+                reauthenticated = true
                 expectedToken = this.auth
             }
         }
         if(da.status === 303){
-            const data = await da.json()
+            let data: { match?: unknown }
+            try {
+                data = deadline ? JSON.parse(new TextDecoder().decode(await readAccountBody(da, deadline.signal, deadline.reset, options.onBytes))) : await da.json()
+                if (nativeAssetRead && (!data || typeof data.match !== 'boolean')) throw new Error('Invalid account cache response')
+            } catch (error) {
+                checkReadOwner()
+                if (deadline?.signal.aborted) throw deadline.signal.reason
+                if (nativeAssetRead) throw new AccountReadError('malformed', 303)
+                throw error
+            }
+            checkReadOwner()
             if(data.match){
-                const cached = await this.databaseCache.getItem(key) as ArrayBuffer|Uint8Array|null
+                const cached = await cacheOperation(this.databaseCache.getItem(key)) as ArrayBuffer|Uint8Array|null
+                checkReadOwner()
                 if(!cached){
+                    if (nativeAssetRead) throw new AccountReadError('malformed', 303)
                     throw new Error(`Cached account bytes are missing for ${key}`)
                 }
                 return { kind: 'not-modified', bytes: new Uint8Array(cached) }
@@ -397,14 +451,28 @@ export class AccountStorage{
         }
 
         if(da.status < 200 || da.status >= 300){
+            if (nativeAssetRead) {
+                await discardResponseBody(da)
+                throw new AccountReadError('http', da.status, da.headers.get('retry-after') ?? undefined)
+            }
             throw await da.text()
         }
         if(da.status === 204){
             return { kind: 'missing' }
         }
         if(key.startsWith('assets/')){
-            const ab = await da.arrayBuffer()
-            await this.assetCache.setItem(key, ab)
+            let ab: ArrayBuffer
+            try { ab = deadline ? (await readAccountBody(da, deadline.signal, deadline.reset, options.onBytes)).buffer as ArrayBuffer : await da.arrayBuffer() }
+            catch (error) {
+                checkReadOwner()
+                if (deadline?.signal.aborted) throw deadline.signal.reason
+                if (error instanceof AccountReadError) throw error
+                if (nativeAssetRead) throw new AccountReadError('transport')
+                throw error
+            }
+            checkReadOwner()
+            await cacheOperation(this.assetCache.setItem(key, ab))
+            checkReadOwner()
             return { kind: 'value', bytes: new Uint8Array(ab) }
         }
         if(!options.progress){
@@ -427,6 +495,7 @@ export class AccountStorage{
         }
 
         return { kind: 'value', bytes: appendable }
+        } finally { deadline?.dispose() }
     }
     keys():string[]{
         let db = getDatabase()

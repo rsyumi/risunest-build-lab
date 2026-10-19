@@ -1,3 +1,4 @@
+import { prepareCharacterPortraitRendition } from './characterPortraitRendition'
 import { save } from './fileSelection'
 
 import { isTauriIOS, isTauriAndroid, isTauriDesktop } from '../platform'
@@ -41,6 +42,7 @@ interface NativeCharacterCharxExportRouteDependencies {
         characterId: string,
         revision: DataRevision,
     ): Promise<CharacterDetail>
+    preparePortrait?: typeof prepareCharacterPortraitRendition
     runExport(
         input: NativeCharacterCharxExportInput,
         options?: NativeFileJobOptions,
@@ -67,6 +69,7 @@ const productionDependencies: NativeCharacterCharxExportRouteDependencies = {
             characterId,
             revision,
         ),
+    preparePortrait: prepareCharacterPortraitRendition,
     runExport: runNativeCharacterCharxExport,
 }
 
@@ -85,15 +88,21 @@ export async function exportNativeCharacterCharxFromPicker(
     if (flow.kind === 'cancelled') return null
     const character = await dependencies.readCharacter(input.characterId, flow.expectedRevision)
     const projected = input.projectCharacter(character)
-    return dependencies.runExport(
-        {
-            characterId: input.characterId,
-            destination: flow.destination,
-            expectedRevision: flow.expectedRevision,
-            ...(input.container ? { container: input.container } : {}),
-            card: projected.card,
-            module: projected.module,
-        },
-        options,
-    )
+    const rendition = input.container === 'appended-charx-jpeg'
+        ? await dependencies.preparePortrait?.(character, flow.expectedRevision, 'appended-charx-jpeg', options.signal) : undefined
+    try {
+        options.signal?.throwIfAborted()
+        return await dependencies.runExport(
+            {
+                characterId: input.characterId,
+                destination: flow.destination,
+                expectedRevision: flow.expectedRevision,
+                ...(rendition ? { portraitRendition: rendition.descriptor } : {}),
+                ...(input.container ? { container: input.container } : {}),
+                card: projected.card,
+                module: projected.module,
+            },
+            options,
+        )
+    } finally { await rendition?.release() }
 }

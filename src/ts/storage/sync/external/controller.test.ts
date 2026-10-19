@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
+import { beginMobileBackgroundTask, type MobileBackgroundTask } from '../../../mobileBackgroundTask'
 import { createExternalStorageController, type ExternalStorageJobBridge } from './controller'
 import type { ExternalJobSummary, ExternalStorageState } from './types'
+
+vi.mock('../../../mobileBackgroundTask', async () => (await import('../../../mobileBackgroundTask.testSupport')).mobileBackgroundTaskModule())
 
 const state: ExternalStorageState = {
     supported: true,
@@ -166,6 +169,30 @@ describe('external storage controller', () => {
         expect(bridge.startJob).toHaveBeenCalledTimes(2)
         expect(bridge.startJob).toHaveBeenNthCalledWith(1, expect.objectContaining({ kind: 'backup' }))
         expect(bridge.startJob).toHaveBeenNthCalledWith(2, expect.objectContaining({ kind: 'cleanup' }))
+    })
+
+    it('begins the next goal hold before the previous goal hold ends', async () => {
+        const events: string[] = []
+        vi.mocked(beginMobileBackgroundTask).mockImplementation((kind): MobileBackgroundTask => {
+            events.push(`begin ${kind}`)
+            return { progress() {}, async dispose() { events.push(`end ${kind}`) } }
+        })
+        try {
+            const firstPoll = deferred<ExternalJobSummary>()
+            const bridge: ExternalStorageJobBridge = {
+                startJob: vi.fn(async request => request.kind === 'backup' ? job('backup-job', 'running') : cleanupJob()),
+                getJob: vi.fn(async () => firstPoll.promise),
+                cancelJob: vi.fn(),
+            }
+            const controller = createExternalStorageController(bridge, state, { wait: async () => {} })
+            const session = { kind: 'foreground', id: 'foreground-1' } as const
+            const backup = controller.request({ connectionId: 'sync-1', kind: 'backup', targetRevision: '8', reason: 'manual', session })
+            await vi.waitFor(() => expect(bridge.getJob).toHaveBeenCalledWith('backup-job'))
+            const cleanup = controller.request({ connectionId: 'sync-1', kind: 'cleanup', targetRevision: '0', reason: 'manual', session })
+            firstPoll.resolve(job('backup-job', 'succeeded', '8'))
+            await backup; await cleanup; await controller.settled()
+            expect(events).toEqual(['begin backup', 'begin maintenance', 'end backup', 'end maintenance'])
+        } finally { vi.mocked(beginMobileBackgroundTask).mockReset() }
     })
 
     it('runs another kind after a blocked attempt without sharing its result', async () => {

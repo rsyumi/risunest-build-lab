@@ -6,6 +6,7 @@ import { recordNativeLogError } from '../nativeLog'
 import { isTauriAndroid, isTauriIOS } from '../platform'
 import { withLibraryFileSelection } from './libraryFileOperation'
 import { nativeRoots } from './nativePaths'
+import { ImageFormatError, imageFormatForName } from '../media/imageFormats'
 
 export interface NativeSelectedFile {
     path: string
@@ -23,6 +24,8 @@ export interface FileSelectionOptions {
     accept?: string
     multiple?: boolean
     signal?: AbortSignal
+    image?: boolean
+    onRejected?: (file: NativeSelectedFile, error: Error) => void
 }
 
 let selecting = false
@@ -41,7 +44,10 @@ function bridge(): NativeFileSelectionBridge {
     throw new Error('Native mobile file selection is unavailable')
 }
 
-function accepts(file: NativeSelectedFile, accept = ''): boolean {
+function accepts(file: NativeSelectedFile, accept = '', image = false): boolean {
+    const mime = file.mimeType.toLowerCase()
+    if (image && !imageFormatForName(file.name)
+        && (!mime || mime === 'application/octet-stream' || mime.startsWith('image/'))) return true
     const types = accept.toLowerCase().split(',').map(type => type.trim()).filter(Boolean)
     return !types.length || types.some(type => type === '*' || type === '*/*'
         || (type.startsWith('.') ? file.name.toLowerCase().endsWith(type)
@@ -98,10 +104,14 @@ async function withNativeSelection<T>(options: FileSelectionOptions, consume: (f
             if (selected.some(file => !Number.isSafeInteger(file.bytes) || file.bytes < 0)) {
                 throw new Error('The selected file has an invalid size')
             }
-            if (selected.some(file => !accepts(file, options.accept))) {
-                throw new Error(language.risuNest.importDialog.reasonUnsupportedFormat)
-            }
-            return await consume(selected, release)
+            const accepted = selected.filter(file => {
+                if (accepts(file, options.accept, options.image)) return true
+                const error = options.image ? new ImageFormatError('unsupported') : new Error(language.risuNest.importDialog.reasonUnsupportedFormat)
+                if (!options.onRejected) throw error
+                options.onRejected(file, error)
+                return false
+            })
+            return await consume(accepted, release)
         } finally {
             try { await release() }
             finally { selecting = false }
@@ -117,7 +127,13 @@ export function selectNativeFileData(options: FileSelectionOptions = {}) {
     return withNativeSelection(options, async files => {
         const selected: { name: string; data: Uint8Array<ArrayBuffer>; mimeType: string }[] = []
         for (const file of files) {
-            selected.push({ name: file.name, data: await readSelected(file, options.signal), mimeType: file.mimeType })
+            try {
+                selected.push({ name: file.name, data: await readSelected(file, options.signal), mimeType: file.mimeType })
+            } catch (error) {
+                options.signal?.throwIfAborted()
+                if (!options.onRejected) throw error
+                options.onRejected(file, error instanceof Error ? error : new Error(String(error)))
+            }
         }
         return selected
     }, [])

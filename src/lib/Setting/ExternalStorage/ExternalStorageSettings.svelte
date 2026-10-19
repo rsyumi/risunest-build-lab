@@ -31,6 +31,7 @@
         resumeExternalStorageJob,
         requestExternalStorageRestore,
         requestExternalStorageDeleteHistory,
+        startExternalStorageMaintenanceJob,
         stopExternalStorageRestore,
     } from 'src/ts/storage/sync/external/production'
     import type {
@@ -343,7 +344,7 @@
                 schedulePoll(true)
                 await operation
             } else {
-                const started = await bridge.startJob({
+                const started = await startExternalStorageMaintenanceJob({
                     connectionId: connection.id,
                     kind: job,
                     reason: 'manual',

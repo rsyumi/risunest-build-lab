@@ -20,6 +20,7 @@ import type { NativeFileJobOptions, NativeFileJobSource } from '../storage/nativ
 import { importDesktopNativeModulePath } from '../storage/nativeModuleFileRoute'
 import { assertModuleMCPImportAllowed, StdioModuleImportError } from './mcp/moduleImport'
 import { selectConversationModules } from './moduleSelection'
+import { runWithMobileBackgroundTask } from '../mobileBackgroundTask'
 
 export interface MCPModule{
     url: string
@@ -97,10 +98,11 @@ export async function exportModule(module:RisuModule, arg:{
     }
     const writer = new LocalWriter()
     await writer.init(module.name + '.module', ['charx'])
-    await exportCharacterCard(char, 'charx', {
+    // The destination is chosen, so the picker never holds the background task.
+    await runWithMobileBackgroundTask('export', () => exportCharacterCard(char, 'charx', {
         spec: 'v3',
         writer
-    })
+    }), undefined, true)
     if(alertEnd){
         alertNormal(language.successExport)
     }

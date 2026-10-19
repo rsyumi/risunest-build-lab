@@ -4,6 +4,7 @@ import { relaunch } from '../desktopRelaunch'
 import { isTauriIOS, isTauriMobile } from '../platform'
 import { NativeFileJobError, runNativeSnapshotRestore, type NativeFileJobStatus, type NativeSnapshotBodiesStarted, type NativeSnapshotBodyResult, type NativeSnapshotRestoreActivation } from './nativeFileJobs'
 import { nativeFileOperationOutcomeShown, runSharedNativeFileOperation, waitForSnapshotBodyOutcomeDismissal } from './nativeFileJobManager'
+import { runWithMobileBackgroundTask } from '../mobileBackgroundTask'
 import type {
     DataHealthResult,
     RepairApplied,
@@ -107,8 +108,13 @@ export async function checkpointNativePersistentStore(mode: NativeCheckpointMode
     await invoke('pds_checkpoint', { mode })
 }
 
+/** User-started maintenance keeps running after the app leaves the screen. */
+function runUserMaintenance<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+    return runWithMobileBackgroundTask('maintenance', () => args === undefined ? invoke<T>(command) : invoke<T>(command, args), undefined, true)
+}
+
 export function createNativePersistentSnapshot(reason: string): Promise<NativeSnapshotCreated> {
-    return invoke('pds_snapshot_create', { reason })
+    return runUserMaintenance('pds_snapshot_create', { reason })
 }
 
 export function listNativePersistentSnapshots(): Promise<NativeSnapshotInfo[]> {
@@ -128,15 +134,15 @@ export function previewNativePersistentAssetGc(): Promise<NativeAssetGcResult> {
 }
 
 export function executeNativePersistentAssetGc(): Promise<NativeAssetGcResult> {
-    return invoke('pds_asset_gc_execute')
+    return runUserMaintenance('pds_asset_gc_execute')
 }
 
 export function scanNativeDataHealth(): Promise<DataHealthResult> {
-    return invoke('pds_data_health_scan')
+    return runUserMaintenance('pds_data_health_scan')
 }
 
 export function deepScanNativeDataHealth(resume: boolean): Promise<DataHealthResult> {
-    return invoke('pds_data_health_deep_scan', { resume })
+    return runUserMaintenance('pds_data_health_deep_scan', { resume })
 }
 
 export function getNativeDataHealthResult(): Promise<DataHealthResult | null> {
@@ -161,7 +167,7 @@ export function applyNativeDataHealthRepair(
     expectedRevision: number,
     expectedScannedAt: number,
 ): Promise<RepairApplied> {
-    return invoke('pds_data_health_repair_apply', { selection, snapshot, expectedRevision, expectedScannedAt })
+    return runUserMaintenance('pds_data_health_repair_apply', { selection, snapshot, expectedRevision, expectedScannedAt })
 }
 
 export function discardNativeDataHealthIntent(
@@ -175,7 +181,7 @@ export function discardNativeDataHealthIntent(
 export function completeNativeDataHealthIntent(
     finding: number, expectedRevision: number, expectedScannedAt: number,
 ): Promise<{ completed: boolean; revision: number; result: DataHealthResult }> {
-    return invoke('pds_data_health_complete_intent', { finding, expectedRevision, expectedScannedAt })
+    return runUserMaintenance('pds_data_health_complete_intent', { finding, expectedRevision, expectedScannedAt })
 }
 
 export function listNativeDataHealthJournals(): Promise<RepairJournalSummary[]> {
@@ -183,7 +189,7 @@ export function listNativeDataHealthJournals(): Promise<RepairJournalSummary[]> 
 }
 
 export function undoNativeDataHealthRepair(journalId: string, expectedRevision: number): Promise<RepairUndone> {
-    return invoke('pds_data_health_undo', { journalId, expectedRevision })
+    return runUserMaintenance('pds_data_health_undo', { journalId, expectedRevision })
 }
 
 export class NativeSnapshotBodiesCommittedError extends NativeFileJobError {
@@ -290,21 +296,24 @@ export async function requestNativePersistentSnapshotRestore(id: string): Promis
     const copyBodies = async (activation: NativeSnapshotRestoreActivation): Promise<void> => {
         await completeNativeSnapshotRestoreBodies(activation.stagingId, activation.activationRevision, activation.bindingAuthority)
     }
-    let activation: NativeSnapshotRestoreActivation
-    try {
-        activation = await runSharedNativeFileOperation('import', `snapshot-restore:${id}`, context => runNativeSnapshotRestore(runtime, {snapshotId: id}, {
-            signal: context.signal,
-            onStatus: context.onStatus,
-            onBlockingChange: context.setBlocking,
-            afterActivationRecovery: copyBodies,
-        }), {presentation: 'dialog', format: 'library-backup'})
-    } catch (error) {
-        // The operation dialog already shows how an admitted restore ended.
-        if ((error instanceof DOMException && error.name === 'AbortError') || nativeFileOperationOutcomeShown('import')) return false
-        throw error
-    }
-    await copyBodies(activation)
-    return true
+    // One hold spans both phases, so the body copy still starts after the app leaves the screen.
+    return runWithMobileBackgroundTask('restore', async () => {
+        let activation: NativeSnapshotRestoreActivation
+        try {
+            activation = await runSharedNativeFileOperation('import', `snapshot-restore:${id}`, context => runNativeSnapshotRestore(runtime, {snapshotId: id}, {
+                signal: context.signal,
+                onStatus: context.onStatus,
+                onBlockingChange: context.setBlocking,
+                afterActivationRecovery: copyBodies,
+            }), {presentation: 'dialog', format: 'library-backup'})
+        } catch (error) {
+            // The operation dialog already shows how an admitted restore ended.
+            if ((error instanceof DOMException && error.name === 'AbortError') || nativeFileOperationOutcomeShown('import')) return false
+            throw error
+        }
+        await copyBodies(activation)
+        return true
+    }, undefined, true)
 }
 
 export async function restartNativeApp(): Promise<void> {
@@ -337,7 +346,8 @@ export async function createPeriodicNativeSnapshotIfDue(
         newestModifiedAt <= now
         && now - newestModifiedAt < PERIODIC_SNAPSHOT_INTERVAL_MS
     ) return null
-    return createNativePersistentSnapshot('periodic')
+    // Periodic work runs only while the app is visible, so it holds nothing.
+    return invoke<NativeSnapshotCreated>('pds_snapshot_create', { reason: 'periodic' })
 }
 
 export function sweepNativeMessageObjects(): Promise<void> {

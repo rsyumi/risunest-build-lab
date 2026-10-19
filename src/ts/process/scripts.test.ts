@@ -627,6 +627,42 @@ describe('history-sensitive regex conversation operations', () => {
         },
     )
 
+    it('checks the selected owner without visiting the rest of the library', async () => {
+        const chat = {
+            id: 'regex-chat',
+            message: [{ role: 'user', data: 'before', chatId: 'message-0' }],
+        } as Chat
+        const char = makeCharacter([{ ...makeScript('^input$', '{{getvar::scratch}}'), type: 'editdisplay' }])
+        char.chaId = 'regex-character'
+        char.chats = [chat]
+        char.chatPage = 0
+        const session = new ActiveConversationSession({
+            characterId: char.chaId,
+            conversationId: chat.id,
+            conversation: chat,
+            storeRevision: 21,
+        })
+        const others = ['first', 'second'].map((name) => ({ ...makeCharacter([]), chaId: `regex-${name}` }))
+        const visited: number[] = []
+        mocks.database.characters = new Proxy([...others, char], {
+            get(target, property, receiver) {
+                if (typeof property === 'string' && /^\d+$/.test(property)) visited.push(Number(property))
+                return Reflect.get(target, property, receiver)
+            },
+        }) as never
+        mocks.state.selectedCharIndex = 2
+        mocks.state.currentChat = chat
+        mocks.state.session = session
+
+        await processScriptFull(char, 'input', 'editdisplay', 0, {}, {
+            cache: 'bypass',
+            regexWorker: false,
+        })
+
+        expect(visited.length).toBeGreaterThan(0)
+        expect(new Set(visited)).toEqual(new Set([2]))
+    })
+
     it('applies @@inject through the active session batch instead of direct DB mutation', async () => {
         const chat = {
             id: 'regex-chat',

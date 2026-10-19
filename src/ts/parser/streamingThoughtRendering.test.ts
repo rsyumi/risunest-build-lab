@@ -204,6 +204,42 @@ describe('streaming thought rendering through the canonical parser', () => {
         expect(root.querySelector('details')).toBeNull()
         expect(root.textContent?.trim()).toBe('Partial')
     })
+    it.each([
+        ['off', '<Thoughts>a<Thoughts>b</Thoughts>c</Thoughts>d', ['abc'], 'd'],
+        ['off', '<Thoughts>x<Thoughts>y</Thoughts>z', ['y'], 'xz'],
+        ['collapsed', '<Thoughts>x<Thoughts>y</Thoughts>z', ['xyz'], ''],
+        ['off', '<Thoughts>a</Thoughts>mid<Thoughts>b</Thoughts>end', ['a', 'b'], 'midend'],
+        ['off', '</Thoughts>stray <b>bold</b><Thoughts>t <i>x</i></Thoughts><i>after</i><Thought', ['t x'], 'stray boldafter<Thought'],
+    ] as const)(
+        'delimits %s thoughts by their own nesting: %s',
+        async (mode, source, thoughts, outside) => {
+            const root = document.createElement('div')
+            root.innerHTML = await ParseMarkdown(
+                source,
+                character,
+                'normal',
+                -1,
+                {},
+                { streamingThoughtMode: mode },
+            )
+            const details = [...root.querySelectorAll('details[data-risu-thought]')]
+            expect(details.map((element) => [...element.childNodes]
+                .filter((node) => node.nodeName !== 'SUMMARY')
+                .map((node) => node.textContent)
+                .join(''))).toEqual(thoughts)
+            details.forEach((element) => element.remove())
+            expect(root.textContent?.trim()).toBe(outside)
+        },
+    )
+    it('renders a tool call that follows a thought', async () => {
+        const root = document.createElement('div')
+        root.innerHTML = await ParseMarkdown(
+            '<Thoughts>t</Thoughts><tool_call>xsearch</tool_call>',
+            character,
+        )
+        expect(root.querySelector('details[data-risu-thought]')?.textContent).toContain('t')
+        expect(root.querySelector('.x-risu-tool-call')?.textContent).toContain('search')
+    })
     it('does not interpret HTML in the recent thought preview', async () => {
         const root = document.createElement('div')
         root.innerHTML = await ParseMarkdown(

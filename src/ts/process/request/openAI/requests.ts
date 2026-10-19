@@ -681,7 +681,7 @@ export async function requestHTTPOpenAI(
                     const extracted = extractJSON(parsed, arg.extractJson)
                     return extracted
                 } catch (error) {
-                    console.log(error)
+                    console.warn(error)
                     return text
                 }
             }

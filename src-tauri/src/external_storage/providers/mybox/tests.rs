@@ -1260,8 +1260,6 @@ fn deleting_resolves_the_resource_id_and_refuses_the_head_and_descriptor_folders
             &listing(&[resource("pack-1.bin", "file-p", "file", 8)], None),
         ));
         replies.push(json(200, "{}"));
-        // The folder is re-read after the cache was dropped and is now empty.
-        replies.push(json(200, &listing(&[], None)));
         let api = WireServer::start(replies);
         let test = fixture();
         let provider = super::create(test.dependencies.clone()).unwrap();
@@ -1277,11 +1275,13 @@ fn deleting_resolves_the_resource_id_and_refuses_the_head_and_descriptor_folders
             .delete_object(&repository, &locator(config::PACKS, "pack-1.bin"), &cancel)
             .await
             .unwrap();
-        // A name the folder no longer holds is already in that state.
+        // A name the folder no longer holds is already in that state, and the
+        // folder listed before the deletion still answers without a request.
         provider
             .delete_object(&repository, &locator(config::PACKS, "pack-1.bin"), &cancel)
             .await
             .unwrap();
+        assert_eq!(api.requests.lock().unwrap().len(), 6);
 
         for refused in [
             provider.head_locator(&repository).unwrap(),
@@ -1298,7 +1298,7 @@ fn deleting_resolves_the_resource_id_and_refuses_the_head_and_descriptor_folders
         }
 
         let records = api.requests.lock().unwrap();
-        assert_eq!(records.len(), 7);
+        assert_eq!(records.len(), 6);
         assert!(
             records[5]
                 .headers
@@ -1311,17 +1311,52 @@ fn deleting_resolves_the_resource_id_and_refuses_the_head_and_descriptor_folders
         let counters: Vec<&[MyboxCounter]> = reservations
             .iter()
             .rev()
-            .take(3)
+            .take(2)
             .map(|(_, charge, _)| charge.counters.as_slice())
             .collect();
         assert_eq!(
             counters,
             vec![
-                &[MyboxCounter::ListMinute][..],
                 &[MyboxCounter::DeleteMinute][..],
                 &[MyboxCounter::ListMinute][..],
             ]
         );
+    });
+}
+
+#[test]
+fn a_deletion_answered_404_lists_the_folder_again_for_the_next_lookup() {
+    runtime().block_on(async {
+        let mut replies = open_replies(1_000, 10_000, 0);
+        replies.push(json(
+            200,
+            &listing(&[resource("pack-1.bin", "file-p", "file", 8)], None),
+        ));
+        replies.push(json(404, "{}"));
+        // Another device removed the cached resource and stored the name again.
+        replies.push(json(
+            200,
+            &listing(&[resource("pack-1.bin", "file-q", "file", 9)], None),
+        ));
+        let api = WireServer::start(replies);
+        let test = fixture();
+        let provider = super::create(test.dependencies.clone()).unwrap();
+        let cancel = Cancellation::default();
+        let (repository, _) = open(&provider, &api, OpenMode::Existing, &cancel)
+            .await
+            .unwrap();
+        let locator = config::locator(&repository.connection_identity, config::PACKS, "pack-1.bin");
+
+        provider
+            .delete_object(&repository, &locator, &cancel)
+            .await
+            .unwrap();
+        let found = provider
+            .lookup_metadata(&repository, &object_intent("pack-1", ObjectRole::Pack, &[1; 8]), None, &cancel)
+            .await
+            .unwrap()
+            .expect("the name stored again is found");
+        assert_eq!(found.byte_length, 9);
     });
 }
 

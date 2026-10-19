@@ -532,41 +532,15 @@ internal fun requestPostNotificationsIfNeeded(
   postToMain(launchRequest)
 }
 
-internal fun beginGenerationKeepAlive(
-  notificationsEnabled: () -> Boolean,
-  startService: () -> Boolean,
-): Boolean {
-  if (!notificationsEnabled()) return false
-  return startService()
-}
-
-internal class GenerationKeepAliveOwner {
-  private var closed = false
-
-  @Synchronized
-  fun begin(startGeneration: () -> Boolean): Boolean {
-    if (closed) return false
-    return startGeneration()
-  }
-
-  @Synchronized
-  fun end(stopGeneration: () -> Boolean): Boolean {
-    if (closed) return false
-    return stopGeneration()
-  }
-
-  @Synchronized
-  fun teardown(
-    removeJavascriptBridge: () -> Unit,
-    stopGeneration: () -> Unit,
-  ) {
-    if (closed) return
-    closed = true
-    try {
-      removeJavascriptBridge()
-    } finally {
-      stopGeneration()
-    }
+/** The page loses its bridge before its holds end, so it cannot begin one after teardown. */
+internal fun teardownBackgroundWork(
+  removeJavascriptBridge: () -> Unit,
+  stopBackgroundWork: () -> Unit,
+) {
+  try {
+    removeJavascriptBridge()
+  } finally {
+    stopBackgroundWork()
   }
 }
 
@@ -613,7 +587,6 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
       restart = { if (!coldRestartDispatcher.restart()) finishAndRemoveTask() },
     )
   }
-  private val generationKeepAliveOwner = GenerationKeepAliveOwner()
   private val mainHandler = Handler(Looper.getMainLooper())
   private val safScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
   private val portableSourceOwner = PortableSourceOwner()
@@ -758,6 +731,8 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
         safScope.launch(Dispatchers.IO) { PortableSourceNative.retireUnclaimed(portableSourceOwner) }
         cancelUnclaimedReservedDestination()
         retireSafDestinationRenderer()
+        // The lost page owned every background hold and cannot end them.
+        GenerationForegroundService.stopAll(this)
       },
       destroyView = webView::destroy,
       clearReference = {
@@ -876,7 +851,14 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   }
 
 
+  override fun onStart() {
+    super.onStart()
+    GenerationForegroundService.setVisible(this, true)
+  }
+
   override fun onStop() {
+    // Promote first, so a hold the hide flush begins starts protected.
+    if (!isFinishing) GenerationForegroundService.setVisible(this, false)
     lifecycleFlushDispatcher.onStop()
     super.onStop()
   }
@@ -950,14 +932,14 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     safSourceCancellations.clear()
     safDestinationCancellations.clear()
     safProgressThrottle.clearAll()
-    generationKeepAliveOwner.teardown(
+    teardownBackgroundWork(
       removeJavascriptBridge = {
         controlBridge?.close()
         controlBridge = null
         safControlBridge?.close()
         safControlBridge = null
       },
-      stopGeneration = { GenerationForegroundService.stopAll(this) },
+      stopBackgroundWork = { GenerationForegroundService.stopAll(this) },
     )
     lifecycleWebView = null
     super.onDestroy()
@@ -1055,15 +1037,15 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
       "lifecycle.onFlushHold" -> lifecycleCommands.onFlushHold(args[0])
       "lifecycle.requestExit" -> lifecycleCommands.requestExit()
       "lifecycle.requestRestart" -> lifecycleCommands.requestRestart()
-      "background.begin" -> GenerationForegroundService.beginTask(this, args[0]) { id ->
+      "background.begin", "background.defer" -> GenerationForegroundService.beginTask(
+        this, args[0], args[1], deferred = method == "background.defer",
+      ) { id ->
         lifecycleWebView?.evaluateJavascript(
           "window.dispatchEvent(new CustomEvent('risunest-background-expired',{detail:'$id'}));", null,
         )
       }
       "background.progress" -> GenerationForegroundService.taskProgress(args[0], args[1].toInt())
       "background.end" -> GenerationForegroundService.endTask(this, args[0])
-      "generation.begin" -> generationCommands.begin()
-      "generation.end" -> generationCommands.end()
       "generation.notificationsEnabled" -> generationCommands.notificationsEnabled()
       "generation.requestNotifications" -> requestCompletionNotifications()
       "notification.enabled" -> CompletionNotifications.enabled(this)
@@ -1147,17 +1129,6 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   }
 
   private inner class GenerationKeepAliveBridge {
-    fun begin(): Boolean = generationKeepAliveOwner.begin {
-      beginGenerationKeepAlive(
-        notificationsEnabled = { GenerationForegroundService.notificationsEnabled(this@MainActivity) },
-        startService = { GenerationForegroundService.start(this@MainActivity) },
-      )
-    }
-
-    fun end(): Boolean = generationKeepAliveOwner.end {
-      GenerationForegroundService.stop(this@MainActivity)
-    }
-
     fun notificationsEnabled(): Boolean = GenerationForegroundService.notificationsEnabled(this@MainActivity)
 
     fun openNotificationSettings(): Boolean = runCatching {

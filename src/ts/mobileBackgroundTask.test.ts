@@ -1,9 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-vi.mock('./platform', async () => (await import('./platform.testSupport')).platformModule({ runtime: 'tauri', os: 'android' }))
+const mocks = vi.hoisted(() => ({ os: 'android' as 'android' | 'ios', toast: vi.fn() }))
+vi.mock('./platform', async () => (await import('./platform.testSupport')).platformModule(() => ({ runtime: 'tauri', os: mocks.os })))
 vi.mock('./androidNativeControl', () => ({}))
-import { beginMobileBackgroundTask, hasMobileBackgroundTasks, measuredTaskPercent, runWithMobileBackgroundTask } from './mobileBackgroundTask'
+vi.mock('./alert', () => ({ alertToast: mocks.toast }))
+import { language } from '../lang'
+import { BackgroundExecutionExpiredError } from './iosNative'
+import { beginDeferredMobileBackgroundTask, beginMobileBackgroundTask, expireMobileDeferredHolds, hasMobileBackgroundTasks, measuredTaskPercent, mobileDeferredHoldsSettled, runWithMobileBackgroundTask } from './mobileBackgroundTask'
 import { runSharedNativeFileOperation, cancelActiveNativeFileOperation } from './storage/nativeFileJobManager'
-import { syntheticNativeFileJobStatus } from './storage/nativeFileJobs'
+import { syntheticNativeFileJobStatus, type NativeFileJobStatus } from './storage/nativeFileJobs'
 import { createExternalStorageController } from './storage/sync/external/controller'
 import type { ExternalJobSummary, ExternalStorageState } from './storage/sync/external/types'
 
@@ -13,9 +17,12 @@ function deferred<T>() {
     return { promise, resolve }
 }
 const bridge = { begin: vi.fn(), progress: vi.fn(), end: vi.fn() }
+/** The id TypeScript chose for the nth begin, which every later call for that hold uses. */
+const id = (index = 0): string => bridge.begin.mock.calls[index][0]
 beforeEach(() => {
-    let id = 0
-    bridge.begin.mockReset().mockImplementation(async () => `task-${++id}`)
+    mocks.os = 'android'
+    mocks.toast.mockReset()
+    bridge.begin.mockReset().mockImplementation(async (_id: string, _kind: string, deferred: boolean) => deferred ? 'deferred' : 'active')
     bridge.progress.mockReset().mockResolvedValue(undefined)
     bridge.end.mockReset().mockResolvedValue(undefined)
     window.RisuBackgroundTasks = bridge
@@ -26,26 +33,52 @@ afterEach(() => {
 })
 
 describe('mobile background task lifetime', () => {
-    it('retains pending admission and overlapping owners until each finishes', async () => {
+    it('retains pending admission and overlapping owners until each finishes, ending each by its own id', async () => {
         const admission = deferred<string>()
         bridge.begin.mockReturnValueOnce(admission.promise)
         const first = beginMobileBackgroundTask('backup')
         expect(hasMobileBackgroundTasks()).toBe(true)
         const second = await beginMobileBackgroundTask('sync')
-        admission.resolve('pending')
+        admission.resolve('active')
         const task = await first
         await second.dispose(true)
         expect(hasMobileBackgroundTasks()).toBe(true)
         await task.dispose(true)
         await task.dispose(true)
-        expect(bridge.end.mock.calls).toEqual([['task-1'], ['pending']])
+        expect(bridge.begin.mock.calls.map(call => call.slice(1))).toEqual([['backup', false], ['sync', false]])
+        expect(id(0)).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+        expect(bridge.end.mock.calls).toEqual([[id(1)], [id(0)]])
     })
 
-    it.each([null, new Error('unavailable')])('keeps foreground work available when admission fails: %s', async failure => {
-        if (failure) bridge.begin.mockRejectedValueOnce(failure)
-        else bridge.begin.mockResolvedValueOnce(null)
-        await expect(runWithMobileBackgroundTask('restore', async () => 'done')).resolves.toBe('done')
-        expect(bridge.end).not.toHaveBeenCalled()
+    it.each([
+        ['background', { state: 'refused', reason: 'background' }],
+        ['failed', { state: 'refused', reason: 'failed' }],
+        [new Error('android-control-timeout'), { state: 'refused', reason: 'timeout' }],
+        [new Error('unavailable'), { state: 'refused', reason: 'failed' }],
+    ] as const)('runs the work and ends a hold whose admission was refused: %s', async (outcome, protection) => {
+        if (outcome instanceof Error) bridge.begin.mockRejectedValueOnce(outcome)
+        else bridge.begin.mockResolvedValueOnce(outcome)
+        await expect(runWithMobileBackgroundTask('restore', async task => task.protection)).resolves.toEqual(protection)
+        // Native may still admit a late begin, so the hold always ends.
+        expect(bridge.end).toHaveBeenCalledExactlyOnceWith(id())
+    })
+
+    it('tells the user about refused protection only for user-started work', async () => {
+        bridge.begin.mockResolvedValue('background')
+        await (await beginMobileBackgroundTask('sync')).dispose()
+        await (await beginDeferredMobileBackgroundTask('sync')).dispose()
+        await vi.waitFor(() => expect(bridge.end).toHaveBeenCalledTimes(2))
+        expect(mocks.toast).not.toHaveBeenCalled()
+        await (await beginMobileBackgroundTask('sync', undefined, true)).dispose()
+        await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledExactlyOnceWith(language.risuNest.backgroundWorkMayStop))
+    })
+
+    it('registers a deferred hold that native protects only once the app leaves the screen', async () => {
+        const task = await beginDeferredMobileBackgroundTask('sync')
+        expect(bridge.begin).toHaveBeenCalledExactlyOnceWith(expect.any(String), 'sync', true)
+        expect(task.protection).toEqual({ state: 'deferred' })
+        await task.dispose()
+        expect(bridge.end).toHaveBeenCalledExactlyOnceWith(id())
     })
 
     it('releases on errors and cancellation during acquisition', async () => {
@@ -56,10 +89,10 @@ describe('mobile background task lifetime', () => {
         const operation = vi.fn(async () => {})
         const result = runWithMobileBackgroundTask('backup', operation, abort.signal)
         abort.abort()
-        pending.resolve('cancelled')
+        pending.resolve('active')
         await expect(result).rejects.toMatchObject({ name: 'AbortError' })
         expect(operation).not.toHaveBeenCalled()
-        expect(bridge.end).toHaveBeenCalledWith('cancelled')
+        expect(bridge.end.mock.calls).toEqual([[id(0)], [id(1)]])
     })
 
     it('serializes progress, clears unknown totals, and ignores reports after disposal', async () => {
@@ -70,7 +103,7 @@ describe('mobile background task lifetime', () => {
         task.progress(20)
         await task.dispose(true)
         task.progress(100)
-        expect(bridge.progress.mock.calls).toEqual([['task-1', 40], ['task-1', -1], ['task-1', 20]])
+        expect(bridge.progress.mock.calls).toEqual([[id(), 40], [id(), -1], [id(), 20]])
         expect(bridge.progress.mock.invocationCallOrder.at(-1)!).toBeLessThan(bridge.end.mock.invocationCallOrder[0])
         expect(measuredTaskPercent(2, 8)).toBe(25)
         expect(measuredTaskPercent(2, 0)).toBeNull()
@@ -83,31 +116,37 @@ describe('mobile background task lifetime', () => {
         document.dispatchEvent(new Event('visibilitychange'))
         window.dispatchEvent(new CustomEvent('risunest-background-expired', { detail: 'other' }))
         expect(task.signal?.aborted).toBe(false)
-        window.dispatchEvent(new CustomEvent('risunest-background-expired', { detail: 'task-1' }))
+        window.dispatchEvent(new CustomEvent('risunest-background-expired', { detail: id() }))
         expect(task.signal?.aborted).toBe(true)
         expect(hasMobileBackgroundTasks()).toBe(false)
         await task.dispose()
     })
 
-    it('protects the entire file operation and reports the same measured bytes', async () => {
+    it('protects the entire file operation and reports the same measured bytes and published items', async () => {
         const finish = deferred<void>()
         let signal: AbortSignal | undefined
+        let report: (status: NativeFileJobStatus) => void = () => {}
         const operation = runSharedNativeFileOperation('export', 'synthetic-backup', async context => {
             signal = context.signal
+            report = context.onStatus
             context.onStatus({
                 jobId: 'synthetic', kind: 'export-portable-backup', state: 'running', phase: 'writing-export',
                 progress: { completedBytes: 25, totalBytes: 100, completedItems: 0 },
             })
             await finish.promise
         }, { format: 'library-backup' })
-        await vi.waitFor(() => expect(bridge.progress).toHaveBeenCalledWith('task-1', 25))
-        expect(bridge.begin).toHaveBeenCalledWith('backup')
+        await vi.waitFor(() => expect(bridge.progress).toHaveBeenCalledWith(id(), 25))
+        expect(bridge.begin).toHaveBeenCalledWith(id(), 'backup', false)
+        report(syntheticNativeFileJobStatus({ kind: 'official-publication-upload' }, 'publishing-destination', {
+            stageCompleted: 3, stageTotal: 4, stageUnit: 'items',
+        }))
+        await vi.waitFor(() => expect(bridge.progress).toHaveBeenLastCalledWith(id(), 75))
         expect(bridge.end).not.toHaveBeenCalled()
         cancelActiveNativeFileOperation()
         expect(signal?.aborted).toBe(true)
         finish.resolve()
         await operation
-        expect(bridge.end).toHaveBeenCalledExactlyOnceWith('task-1')
+        expect(bridge.end).toHaveBeenCalledExactlyOnceWith(id())
     })
 
     it('reports the current restore phase and clears completed source bytes while work remains', async () => {
@@ -130,8 +169,8 @@ describe('mobile background task lifetime', () => {
                 progress: { completedBytes: 100, totalBytes: 100, completedItems: 0 },
             })
         }, { format: 'library-backup' })
-        expect(bridge.begin).toHaveBeenCalledWith('restore')
-        expect(bridge.progress.mock.calls).toEqual([['task-1', 25], ['task-1', -1], ['task-1', 50], ['task-1', 75], ['task-1', -1]])
+        expect(bridge.begin).toHaveBeenCalledWith(id(), 'restore', false)
+        expect(bridge.progress.mock.calls).toEqual([[id(), 25], [id(), -1], [id(), 50], [id(), 75], [id(), -1]])
     })
 
     it('protects external native polling and releases a blocked job', async () => {
@@ -142,13 +181,32 @@ describe('mobile background task lifetime', () => {
         }
         const controller = createExternalStorageController(native, { supported: true, selection: { kind: 'none', selectionEpoch: '0', paused: false }, connections: [], jobs: [] } as ExternalStorageState, { wait: async () => {} })
         const result = runWithMobileBackgroundTask('backup', backgroundTask => controller.request({ connectionId: 'connection', kind: 'backup', targetRevision: '1', reason: 'manual', session: { kind: 'foreground', id: 'session' }, backgroundTask }))
-        await vi.waitFor(() => expect(bridge.progress).toHaveBeenCalledWith('task-1', 50))
+        await vi.waitFor(() => expect(bridge.progress).toHaveBeenCalledWith(id(), 50))
         expect(bridge.begin).toHaveBeenCalledOnce()
         document.dispatchEvent(new Event('visibilitychange'))
         expect(native.cancelJob).not.toHaveBeenCalled()
         terminal.resolve({ ...job, state: 'failed' })
         await expect(result).resolves.toMatchObject({ kind: 'blocked' })
-        await vi.waitFor(() => expect(bridge.end).toHaveBeenCalledWith('task-1'))
+        await vi.waitFor(() => expect(bridge.end).toHaveBeenCalledWith(id()))
+    })
+})
+
+describe('iOS deferred holds', () => {
+    it('keeps the background-entry wait until each hold settles and aborts them when it expires', async () => {
+        mocks.os = 'ios'
+        const first = await beginDeferredMobileBackgroundTask('sync')
+        const second = await beginDeferredMobileBackgroundTask('generation')
+        expect(first.protection).toEqual({ state: 'deferred' })
+        const settled = vi.fn()
+        void mobileDeferredHoldsSettled().then(settled)
+        await first.dispose()
+        await Promise.resolve(); await Promise.resolve()
+        expect(settled).not.toHaveBeenCalled()
+        expireMobileDeferredHolds()
+        expect(second.signal?.reason).toBeInstanceOf(BackgroundExecutionExpiredError)
+        await second.dispose()
+        await vi.waitFor(() => expect(settled).toHaveBeenCalledOnce())
+        expect(bridge.begin).not.toHaveBeenCalled()
     })
 })
 
@@ -160,8 +218,9 @@ it.each([false, true])('distinguishes OS expiry after inner cancellation, user c
         throw new DOMException('inner cancellation', 'AbortError')
     }, caller.signal)
     await vi.waitFor(() => expect(hasMobileBackgroundTasks()).toBe(true))
+    await vi.waitFor(() => expect(bridge.begin).toHaveBeenCalledOnce())
     await Promise.resolve()
-    window.dispatchEvent(new CustomEvent('risunest-background-expired', { detail: 'task-1' }))
+    window.dispatchEvent(new CustomEvent('risunest-background-expired', { detail: id() }))
     const { isBackgroundExpiryReason } = await import('./iosNative')
     await expect(operation.catch(error => isBackgroundExpiryReason(error))).resolves.toBe(!userCancel)
 })

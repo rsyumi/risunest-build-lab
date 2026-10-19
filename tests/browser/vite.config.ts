@@ -52,7 +52,7 @@ export default defineConfig(({ mode }) => {
             outDir: resolve(import.meta.dirname, '../../.tmp/test-results/browser/dist'), emptyOutDir: true,
             rollupOptions: {
                 preserveEntrySignatures: 'strict',
-                input: [resolve(import.meta.dirname, 'index.html'), resolve(import.meta.dirname, 'dragDrop.html'), resolve(import.meta.dirname, 'sidebarTouch.html'), resolve(import.meta.dirname, 'modalNavigation.html'), resolve(import.meta.dirname, 'lazyApp.html'), resolve(import.meta.dirname, 'monaco.html'), resolve(import.meta.dirname, 'settledThought.html'), resolve(import.meta.dirname, 'switchContainment.html'), resolve(import.meta.dirname, 'chatRendering.html')],
+                input: [resolve(import.meta.dirname, 'imageFormats.html'), resolve(import.meta.dirname, 'index.html'), resolve(import.meta.dirname, 'dragDrop.html'), resolve(import.meta.dirname, 'sidebarTouch.html'), resolve(import.meta.dirname, 'modalNavigation.html'), resolve(import.meta.dirname, 'lazyApp.html'), resolve(import.meta.dirname, 'monaco.html'), resolve(import.meta.dirname, 'settledThought.html'), resolve(import.meta.dirname, 'switchContainment.html'), resolve(import.meta.dirname, 'chatRendering.html')],
             },
         },
     }

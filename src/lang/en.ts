@@ -1924,6 +1924,12 @@ export const languageEnglish = {
     skipSavingAssetsOnWebSync: "Skip Saving Assets on Web Sync",
     applyAdditionalParamsToAll: "Apply Additional Parameters to All Models",
     risuNest: {
+        backgroundWorkMayStop: 'The task may stop if you leave the app screen.',
+        imageFormats: {
+            unsupported: 'Unsupported image format. Use PNG, JPEG, GIF, WebP, or AVIF images.',
+            damaged: 'The image file is damaged and cannot be opened.',
+            portraitExportFailed: 'The portrait image could not be read, so the card could not be exported.',
+        },
         pluginStartup: {
             delayLabel: 'Load plugins after sync',
             delayHelp: 'Plugins load after synchronization completes when the app starts. Turning this off may cause plugin data to be overwritten with older values.',
@@ -2154,7 +2160,7 @@ export const languageEnglish = {
 
             title: 'App updates',
             automatic: 'Check automatically',
-            automaticHelp: 'Checks after the app is ready, at most once every six hours.',
+            automaticHelp: 'Checks when the app starts and every six hours while it runs.',
             currentVersion: 'Current version',
             installMethod: 'Install method',
             lastChecked: 'Last checked',
@@ -2762,6 +2768,7 @@ export const languageEnglish = {
                 'Uploads a backup to your RisuAI account or downloads it. Chat attachments are not included.',
             officialPublish: 'Create backup',
             officialRestore: 'Restore backup',
+            downloadMissingAccountAssets: 'Download missing assets',
             officialRestoreInlayWarning:
                 'Official account backups do not include separate chat attachments. Referenced images, audio, video, and signatures may not be restored. The app will restart after restoring the backup. Continue?',
             officialMissing:
@@ -2797,6 +2804,29 @@ export const languageEnglish = {
             overall: '{0} / {1}',
             preparing: 'Preparing',
             stageCopyingSource: 'Copying file',
+            stageDownloadingAccountBackup: 'Downloading account backup',
+            stageCheckingAccountAssets: 'Checking assets',
+            stageDownloadingAccountAssets: 'Downloading assets',
+            stageFinishingAccountRestore: 'Finishing restore',
+            stageCleaningTemporary: 'Removing temporary files',
+            accountAssetsRequired: 'Required assets',
+            accountTransferredBytes: 'Downloaded bytes',
+            accountTransferRate: 'Download speed',
+            accountActiveTransfers: 'Active downloads',
+            accountRetryWait: 'Retry wait',
+            accountAssetsPresent: 'On device',
+            accountAssetsInstalled: 'Downloaded',
+            accountAssetsMissing: 'Missing from account',
+            accountAssetsFailed: 'Failed',
+            accountAssetsNotAttempted: 'Remaining items',
+            stopAccountAssets: 'Stop download',
+            resultAccountAssetsStopped: 'Asset download was stopped. The backup has already been restored, so you can retry downloading the assets later.',
+            resultAccountAssetsIncomplete: 'The backup was restored, but some assets could not be downloaded.',
+            reasonAccountAssetService: 'The account server could not complete the downloads. Please try again later.',
+            reasonAccountAssetAuthentication: 'Account authentication failed. Please sign in again.',
+            reasonAccountAssetAccountChanged: 'The connected account changed, so the download stopped.',
+            reasonAccountAssetLibraryChanged: 'The restored data was replaced, so the download stopped.',
+            reasonAccountAssetLocal: 'The assets could not be saved.',
             stageReadingArchive: 'Reading backup file',
             stagePreparingAttachments: 'Preparing attachments',
             stageReadingDatabase: 'Reading database',
@@ -2855,6 +2885,7 @@ export const languageEnglish = {
             reasonTooLarge: '{0} is too large to import.',
             reasonExportTooLarge: '{0} is too large to export.',
             reasonCompatibleDatabaseTooLarge: 'The data is too large to export as a compatible backup. Use a RisuNest backup.',
+            reasonCompatibleUnsupportedValue: 'The data contains a value the target app does not support, so it could not be exported as a compatible backup. Use a RisuNest backup.',
             tooLargeItems: {
                 root: 'Settings data', preset: 'A preset', character: 'A character', conversation: 'A chat', message: 'A message', 'plugin-value': 'Plugin data',
                 record: 'A data item', backup: 'Backup data', 'backup-entry': 'A backup entry', card: 'The character card', module: 'The module', content: 'The card or module', 'owner-manifest': 'The additional asset list', 'compatible-database': 'The data',
@@ -2954,8 +2985,8 @@ export const languageEnglish = {
             keepAlive: 'Keep app alive while generating',
             keepAliveHelp:
                 "Uses a notification to help generation continue in the background. Android can still suspend or stop the app.",
-            keepAliveNeedsNotifications:
-                "This feature doesn't work while notifications are off.",
+            keepAliveWithoutNotification:
+                'While notifications are off, this works without showing a notification.',
             operatingSystem: 'Operating system',
             webView: 'WebView',
             refreshScreen: 'Refresh screen',

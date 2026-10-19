@@ -3,9 +3,11 @@ import type { NativeAccountCredentialVault } from '../nativeAccountCredential'
 import type { DataRevision } from '../persistentDataStore'
 import type { PersistentDataRuntime } from '../persistentDataRuntime'
 import type { PinnedPublication } from '../saveCoordinator'
-import { NativeFileJobActivationCommittedError, NativeFileJobActivationUnresolvedError, syntheticNativeFileJobStatus, type NativeFileRestoreJobOptions } from '../nativeFileJobs'
+import { NativeFileJobActivationCommittedError, NativeFileJobActivationUnresolvedError, NativeFileJobError, syntheticNativeFileJobStatus, type NativeFileJobStatus, type NativeFileRestoreJobOptions } from '../nativeFileJobs'
+import type { OfficialAccountAssetOptions, OfficialAccountAssetOutcome } from './officialAccountAssetOutcome'
 import type { OfficialPublicationOptions } from './officialAccountSnapshot'
 import type { OfficialPullResult } from './officialAccountSnapshot'
+import type { OfficialAssetRecovery } from './officialAccountAssetContinuation'
 
 /**
  * The credential is not here: it belongs to the OS vault, not to a stored
@@ -15,6 +17,7 @@ export const nativeOfficialAccountKeys = {
     association: 'official-account.association.v1',
     assetLedger: 'official-account.asset-ledger.v1',
     pendingAssets: 'official-account.pending-assets.v1',
+    assetContinuation: 'official-account.asset-continuation.v1',
 } as const
 
 export type NativeOfficialAccountCredential = NonNullable<Database['account']>
@@ -66,7 +69,10 @@ export interface NativeOfficialAccountFlowDependencies {
     clearMetadata(): Promise<void>
     resetAccountSession(): void
     prepareRestoreAssets?(accountId: string): Promise<void>
-    completeRestoreAssets?(accountId: string, onProgress?: (completed: number, total: number) => void): Promise<void>
+    bindRestoreAssets?(accountId: string, status?: NativeFileJobStatus): Promise<void>
+    inspectRestoreAssets?(accountId: string): Promise<OfficialAssetRecovery>
+    stopRestoreAssets?(accountId: string, operationId: string): Promise<void>
+    completeRestoreAssets?(accountId: string, options: OfficialAccountAssetOptions): Promise<OfficialAccountAssetOutcome>
     clearRestoreAssets?(): Promise<void>
     nativeRestore?(credential: NativeOfficialAccountCredential, options: NativeOfficialRestoreOptions): Promise<
         OfficialPullResult | { kind: 'compatibility-fallback' }
@@ -74,6 +80,7 @@ export interface NativeOfficialAccountFlowDependencies {
 }
 
 export type NativeOfficialRestoreOptions = Pick<NativeFileRestoreJobOptions, 'signal' | 'onStatus' | 'onBlockingChange'>
+export type NativeOfficialAssetResumeOptions = NativeOfficialRestoreOptions & { operationId?: string; currentLibrary?: boolean }
 
 export class NativeAccountLoginError extends Error {
     constructor(readonly rolledBack: boolean, readonly cause: unknown) {
@@ -88,6 +95,9 @@ export interface NativeOfficialAccountFlow {
     getToken(): string | null
     reauthenticate(loginResult: string): Promise<NativeOfficialAccountCredential>
     restore(options?: NativeOfficialRestoreOptions): Promise<OfficialPullResult>
+    resumeAssets(options?: NativeOfficialAssetResumeOptions): Promise<void>
+    inspectAssets(): Promise<OfficialAssetRecovery>
+    stopAssets(operationId: string): Promise<void>
     publish(signal?: AbortSignal, onProgress?: OfficialPublicationOptions['onProgress'], onStatus?: OfficialPublicationOptions['onStatus']): Promise<void>
     logout(): Promise<void>
 }
@@ -180,6 +190,58 @@ export function createNativeOfficialAccountFlowService(
         return parsedCredential
     }
     const reauthenticate = (loginResult: string) => login(parseCredential(loginResult))
+    const finishAssets = async (accountId: string, options: NativeOfficialAssetResumeOptions, activationRevision: DataRevision, lastStatus?: NativeFileJobStatus, initialize?: () => Promise<void>) => {
+        options.onBlockingChange?.(true)
+        let failed = false
+        let missingAssets = false
+        let failureCode = 'official-assets-incomplete'
+        let originalError: unknown
+        try {
+            await initialize?.()
+            const assets = await dependencies.completeRestoreAssets?.(accountId, {
+                signal: options.signal,
+                operationId: options.operationId,
+                onRestoreStatus(status) { if (status) { lastStatus = status; activationRevision = status.activationRevision ?? activationRevision } },
+                onProgress(progress) {
+                    const counts = progress.counts
+                    const status = { ...lastStatus, ...syntheticNativeFileJobStatus(
+                        { ...lastStatus, kind: 'restore-official-account-snapshot', state: 'running', phase: 'reading-source', activationRevision: activationRevision },
+                        progress.phase === 'checking' ? 'checking-account-assets'
+                            : progress.phase === 'downloading' ? 'downloading-account-assets' : 'finishing-account-restore',
+                        { stageCompleted: counts.required - counts.notAttempted, stageTotal: counts.required, stageUnit: 'items' },
+                    ), activationRevision }
+                    status.officialAssets = progress
+                    lastStatus = status
+                    options.onStatus?.(status)
+                },
+            })
+            if (assets?.state === 'cancelled') throw options.signal?.reason ?? new DOMException('Account asset download stopped', 'AbortError')
+            if (assets?.state === 'failed') throw new NativeFileJobError(`official-assets-${assets.reason ?? 'files'}`, 'Account asset download is incomplete')
+            missingAssets = !!assets?.counts.missing
+        } catch (error) {
+            failed = true
+            originalError = error
+        }
+        try {
+            await dependencies.flushMetadata()
+        } catch (error) {
+            if (!failed) { failed = true; originalError = error }
+        }
+        if (!failed && !missingAssets) {
+            failureCode = 'activation-committed-refresh-failed'
+            try {
+                options.onStatus?.({ ...lastStatus, ...syntheticNativeFileJobStatus(
+                    { ...lastStatus, kind: 'restore-official-account-snapshot', state: 'running', phase: 'reading-source' }, 'restarting-app',
+                ) })
+                await dependencies.restart()
+            } catch (error) {
+                failed = true
+                originalError = error
+            }
+        }
+        options.onBlockingChange?.(false)
+        if (failed) throw new NativeFileJobActivationCommittedError(activationRevision, originalError, failureCode)
+        }
     const flow: NativeOfficialAccountFlow = {
         login(input) {
             return serialize(() => login(input))
@@ -209,10 +271,15 @@ export function createNativeOfficialAccountFlowService(
                 await dependencies.flushPendingData('native-official-restore')
                 throwIfAborted(options.signal)
                 await dependencies.prepareRestoreAssets?.(credential.id)
+                let lastStatus: NativeFileJobStatus | undefined
+                const onStatus = (status: NativeFileJobStatus) => {
+                    lastStatus = status
+                    options.onStatus?.(status.state === 'succeeded' ? { ...status, state: 'running' } : status)
+                }
                 let result: OfficialPullResult
                 try {
                     const nativeResult = dependencies.nativeRestore
-                        ? await dependencies.nativeRestore(credential, options)
+                        ? await dependencies.nativeRestore(credential, { ...options, onStatus })
                         : await dependencies.adapter.pull(options.signal)
                     result = nativeResult.kind === 'compatibility-fallback'
                         ? await dependencies.adapter.pull(options.signal)
@@ -225,39 +292,30 @@ export function createNativeOfficialAccountFlowService(
                     throw error
                 }
                 if (result.kind === 'activated') {
-                    options.onBlockingChange?.(true)
-                    let failed = false
-                    let originalError: unknown
-                    try {
-                        await dependencies.completeRestoreAssets?.(credential.id, (completed, total) => {
-                            options.onStatus?.(syntheticNativeFileJobStatus(
-                                { kind: 'restore-official-account-snapshot' }, 'refreshing-app',
-                                { stageCompleted: completed, stageTotal: total, stageUnit: 'items' },
-                            ))
-                        })
-                    } catch (error) {
-                        failed = true
-                        originalError = error
-                    }
-                    try {
-                        await dependencies.flushMetadata()
-                    } catch (error) {
-                        if (!failed) { failed = true; originalError = error }
-                    }
-                    try {
-                        await dependencies.restart()
-                    } catch (error) {
-                        if (!failed) {
-                            failed = true
-                            originalError = error
-                        }
-                    }
-                    options.onBlockingChange?.(false)
-                    if (failed) throw new NativeFileJobActivationCommittedError(result.revision, originalError)
+                    await finishAssets(credential.id, options, result.revision, lastStatus, () => dependencies.bindRestoreAssets?.(credential!.id, lastStatus) ?? Promise.resolve())
                 } else {
                     await dependencies.clearRestoreAssets?.()
                 }
                 return result
+            })
+        },
+        inspectAssets() {
+            return serialize(async () => credential && dependencies.inspectRestoreAssets
+                ? dependencies.inspectRestoreAssets(credential.id) : { kind: 'none' as const })
+        },
+        async stopAssets(operationId) {
+            if (credential) await dependencies.stopRestoreAssets?.(credential.id, operationId)
+        },
+        resumeAssets(options = {}) {
+            return serialize(async () => {
+                if (!credential) throw new Error('Native official account login is required')
+                throwIfAborted(options.signal)
+                await dependencies.flushPendingData('native-official-assets')
+                if (options.currentLibrary) {
+                    await dependencies.prepareRestoreAssets?.(credential.id)
+                    await dependencies.bindRestoreAssets?.(credential.id)
+                }
+                await finishAssets(credential.id, options, dependencies.getRevision())
             })
         },
         publish(signal, onProgress, onStatus) {

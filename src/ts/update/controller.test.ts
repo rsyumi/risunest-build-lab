@@ -163,14 +163,14 @@ describe('app update controller', () => {
         expect(get(appUpdateState)).toMatchObject({ phase: 'error', popupVisible: true })
     })
 
-    it('waits six hours before retrying a sustained automatic failure', async () => {
+    it('checks at every start and waits six hours before retrying a sustained failure', async () => {
         vi.useFakeTimers()
         vi.setSystemTime(UPDATE_CHECK_INTERVAL_MS + 1_000)
         vi.stubGlobal('requestIdleCallback', (callback: IdleRequestCallback) => {
             callback({ didTimeout: false, timeRemaining: () => 50 })
             return 1
         })
-        updateAppUpdateSettings({ autoUpdateCheck: true, skippedVersion: '', lastCheckedAt: 0 })
+        updateAppUpdateSettings({ autoUpdateCheck: true, skippedVersion: '', lastCheckedAt: Date.now() - 1_000 })
         nativeMocks.check.mockRejectedValue(new Error('synthetic network failure'))
 
         await startAppUpdateChecks()
@@ -196,6 +196,8 @@ describe('app update controller', () => {
         })
         updateAppUpdateSettings({ autoUpdateCheck: true, skippedVersion: '', lastCheckedAt: Date.now() })
         await startAppUpdateChecks()
+        await vi.advanceTimersByTimeAsync(0)
+        expect(nativeMocks.check).toHaveBeenCalledTimes(1)
 
         const fixture = dependencies()
         let finish!: () => void
@@ -219,17 +221,17 @@ describe('app update controller', () => {
         updateAppUpdateSettings({ skippedVersion: '' })
         expect(vi.getTimerCount()).toBe(0)
         await vi.advanceTimersByTimeAsync(UPDATE_CHECK_INTERVAL_MS + 1)
-        expect(nativeMocks.check).not.toHaveBeenCalled()
+        expect(nativeMocks.check).toHaveBeenCalledTimes(1)
 
         finish()
         await pending
         expect(get(appUpdateState).phase).toBe(outcome === 'staged' ? 'staged' : outcome === 'cancelled' ? 'available' : 'error')
         await vi.advanceTimersByTimeAsync(0)
-        expect(nativeMocks.check).toHaveBeenCalledTimes(1)
-        await vi.advanceTimersByTimeAsync(UPDATE_CHECK_INTERVAL_MS - 1)
-        expect(nativeMocks.check).toHaveBeenCalledTimes(1)
-        await vi.advanceTimersByTimeAsync(1)
         expect(nativeMocks.check).toHaveBeenCalledTimes(2)
+        await vi.advanceTimersByTimeAsync(UPDATE_CHECK_INTERVAL_MS - 1)
+        expect(nativeMocks.check).toHaveBeenCalledTimes(2)
+        await vi.advanceTimersByTimeAsync(1)
+        expect(nativeMocks.check).toHaveBeenCalledTimes(3)
     })
 
     it.each(['disabled', 'stopped'] as const)('does not resume automatic checks if %s during a download', async (action) => {
@@ -238,6 +240,7 @@ describe('app update controller', () => {
         updateAppUpdateSettings({ autoUpdateCheck: true, lastCheckedAt: Date.now() })
         await startAppUpdateChecks()
         await vi.advanceTimersByTimeAsync(0)
+        expect(nativeMocks.check).toHaveBeenCalledTimes(1)
         const fixture = dependencies()
         let fail!: () => void
         fixture.value.stageDeb = vi.fn(() => new Promise<StagedDebUpdate>((_, reject) => {
@@ -251,7 +254,7 @@ describe('app update controller', () => {
         fail()
         await pending
         expect(vi.getTimerCount()).toBe(0)
-        expect(nativeMocks.check).not.toHaveBeenCalled()
+        expect(nativeMocks.check).toHaveBeenCalledTimes(1)
     })
 
     it('awaits local persistence and retains the fence through installation and restart', async () => {

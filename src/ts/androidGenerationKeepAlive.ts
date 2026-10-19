@@ -1,10 +1,7 @@
 import './androidNativeControl'
-import { getDeviceSettings } from './storage/deviceSettings'
 import { isTauriAndroid } from './platform'
 
 export interface AndroidGenerationKeepAliveBridge {
-    begin(): boolean | Promise<boolean>
-    end(): boolean | void | Promise<boolean | void>
     notificationsEnabled(): boolean | Promise<boolean>
     requestNotifications(): void | Promise<void>
     openNotificationSettings(): boolean | void | Promise<boolean | void>
@@ -19,24 +16,6 @@ declare global {
 
 function bridge(): AndroidGenerationKeepAliveBridge | undefined {
     return typeof window === 'undefined' ? undefined : window.RisuGenerationKeepAlive
-}
-
-export async function beginAndroidGenerationKeepAlive(enabled = getDeviceSettings().androidKeepAliveDuringGeneration): Promise<boolean> {
-    if (!isTauriAndroid || !enabled) return false
-    try {
-        return await bridge()?.begin() === true
-    } catch {
-        return false
-    }
-}
-
-export async function endAndroidGenerationKeepAlive(acquired: boolean): Promise<void> {
-    if (!isTauriAndroid || !acquired) return
-    try {
-        await bridge()?.end()
-    } catch {
-        // Ending is best effort. The Android service timeout is the final cleanup path.
-    }
 }
 
 export async function requestAndroidGenerationNotifications(): Promise<void> {

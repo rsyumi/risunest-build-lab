@@ -1,3 +1,4 @@
+import { imageFixture } from '../../../../../tests/support/imageFixtures'
 import { alertToast } from 'src/ts/alert'
 import { language } from 'src/lang'
 vi.mock('src/ts/alert', () => ({ alertToast: vi.fn() }))
@@ -233,7 +234,7 @@ describe('native inlay fresh-install boundary', () => {
     })
 
     test('native file image posts send original source bytes directly to the optimizer', async () => {
-        const source = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
+        const source = imageFixture('png')
         const createObjectURL = vi.spyOn(URL, 'createObjectURL')
 
         await expect(postInlayAsset({ name: 'upload.png', data: source })).resolves.toBe('native-test-id')

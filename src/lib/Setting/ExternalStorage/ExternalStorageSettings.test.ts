@@ -63,6 +63,7 @@ vi.mock('src/ts/storage/sync/external/production', () => ({
     requestExternalStorageResolveConflict: vi.fn(),
     requestExternalStorageRestore: vi.fn(),
     requestExternalStorageDeleteHistory: vi.fn(async () => {}),
+    startExternalStorageMaintenanceJob: vi.fn((request: unknown) => state.startJob(request)),
     stopExternalStorageRestore: vi.fn(async () => {}),
 }))
 vi.mock('src/ts/storage/sync/external/bridge', () => ({

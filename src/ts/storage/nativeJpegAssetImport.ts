@@ -1,3 +1,4 @@
+import { imageFormatForName } from '../media/imageFormats'
 import { invoke } from '@tauri-apps/api/core'
 
 import {
@@ -53,12 +54,12 @@ function abortError(): DOMException {
     return new DOMException('Native JPEG asset import was cancelled', 'AbortError')
 }
 
-function jpegExtension(displayName: string): 'jpg' | 'jpeg' {
+function jpegExtension(displayName: string): 'jpg' {
     const extension = displayName.split('.').at(-1)?.toLocaleLowerCase('en-US')
     if (extension !== 'jpg' && extension !== 'jpeg') {
         throw new TypeError('Native JPEG asset import requires a .jpg or .jpeg display name')
     }
-    return extension
+    return imageFormatForName(displayName)!.ext as 'jpg'
 }
 
 export async function importNativeJpegAsset(

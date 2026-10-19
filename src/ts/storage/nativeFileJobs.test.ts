@@ -1064,7 +1064,7 @@ describe('native file jobs', () => {
         expect(JSON.stringify(calls)).not.toContain('Uint8Array')
     })
 
-    it('hands a managed character CharX export to Android SAF and cleans the native source', async () => {
+    it('hands a managed character CharX export to Android SAF under a hold taken after the picker', async () => {
         const events: string[] = []
         const handoffPath =
             'C:\\app\\native-file-jobs\\handoffs\\risu-charx-123e4567-e89b-42d3-a456-426614174002.charx'
@@ -1111,7 +1111,11 @@ describe('native file jobs', () => {
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => undefined,
-                reserveAndroidDestination: androidSafReservationFixture().reserve,
+                reserveAndroidDestination: androidSafReservationFixture(() => events.push('picker')).reserve,
+                holdExport: async (operation, signal) => {
+                    events.push('hold')
+                    try { return await operation(signal) } finally { events.push('release') }
+                },
                 copyToAndroidSaf: async (request) => {
                     events.push(
                         `saf:${request.sourcePath}:${request.suggestedName}`,
@@ -1127,11 +1131,14 @@ describe('native file jobs', () => {
         expect(result.handoffPath).toBeUndefined()
         expect(result.warningCodes).toEqual(['android-saf-provider-not-atomic'])
         expect(events).toEqual([
+            'picker',
+            'hold',
             'native_file_job_start:{"request":{"kind":"export-character-charx","expectedRevision":31,"characterId":"character-id","card":{"spec":"chara_card_v3"},"module":{}}}',
             'native_file_job_status:{"jobId":"character-export"}',
             `saf:${handoffPath}:Leased.charx`,
             `native_character_charx_handoff_cleanup:{"path":"${handoffPath.replaceAll('\\', '\\\\')}"}`,
             'native_file_job_forget:{"jobId":"character-export"}',
+            'release',
         ])
     })
 

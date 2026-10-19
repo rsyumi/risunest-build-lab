@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-const mock = vi.hoisted(() => ({ invoke: vi.fn(), begin: vi.fn(), selectedIndex: 0 }))
+const mock = vi.hoisted(() => ({ invoke: vi.fn(), begin: vi.fn(), beginDeferred: vi.fn(), selectedIndex: 0 }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mock.invoke, Channel: class { onmessage = (_value: unknown) => {} } }))
-vi.mock('../../mobileBackgroundTask', () => ({ beginMobileBackgroundTask: mock.begin }))
+vi.mock('../../mobileBackgroundTask', async () => ({ ...(await import('../../mobileBackgroundTask.testSupport')).mobileBackgroundTaskModule(), beginMobileBackgroundTask: mock.begin, beginDeferredMobileBackgroundTask: mock.beginDeferred }))
 vi.mock('src/ts/stores.svelte', () => ({ selectedCharID: { subscribe: (run: (value: number) => void) => { run(mock.selectedIndex); return () => {} } } }))
 vi.mock('../database.svelte', () => ({ getDatabase: () => ({ characters: [{ chaId: 'selected-policy-character' }] }) }))
 import { cancelLocalAssetCleanup, countConnectionOnlyAssets, downloadRemoteAssets, evictLocalAssets, getAssetResidencyStatus, setAssetResidencyPolicy } from './serverAssetResidency'
@@ -161,9 +161,21 @@ describe('asset residency mobile lifetime', () => {
         mock.begin.mockResolvedValue({ dispose, progress })
         mock.invoke.mockResolvedValue(status)
         await (kind === 'full' ? setAssetResidencyPolicy('full') : evictLocalAssets())
-        expect(mock.begin).toHaveBeenCalledExactlyOnceWith('sync')
+        expect(mock.begin).toHaveBeenCalledExactlyOnceWith(kind === 'full' ? 'sync' : 'maintenance', undefined, true)
         expect(progress).toHaveBeenCalledExactlyOnceWith(null)
         expect(dispose).toHaveBeenCalledOnce()
+    })
+    it('holds a routine download only once the app leaves the screen and a requested download at once', async () => {
+        const task = { dispose: vi.fn(async () => {}), progress: vi.fn() }
+        mock.begin.mockResolvedValue(task)
+        mock.beginDeferred.mockResolvedValue(task)
+        mock.invoke.mockResolvedValue(status)
+        await downloadRemoteAssets(undefined, { routine: true })
+        expect(mock.beginDeferred).toHaveBeenCalledExactlyOnceWith('sync')
+        expect(mock.begin).not.toHaveBeenCalled()
+        await downloadRemoteAssets('receiver')
+        expect(mock.begin).toHaveBeenCalledExactlyOnceWith('sync', undefined, true)
+        expect(task.dispose).toHaveBeenCalledTimes(2)
     })
     it('downloads one connection or every holder without a policy, keeping the selected character first', async () => {
         const dispose = vi.fn(async () => {})

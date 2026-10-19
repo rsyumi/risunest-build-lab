@@ -1740,6 +1740,12 @@ export const languageKorean = {
     nanoGPTManualInput: "수동 입력",
     nanoGPTManualModelSelect: "수동 모델 선택",
     risuNest: {
+        backgroundWorkMayStop: '앱 화면을 벗어날 경우 작업이 중단될 수 있습니다.',
+        imageFormats: {
+            unsupported: '지원하지 않는 이미지 형식입니다. PNG, JPEG, GIF, WebP, AVIF 이미지만 사용할 수 있습니다.',
+            damaged: '이미지 파일이 손상되어 열 수 없습니다.',
+            portraitExportFailed: '초상화 이미지를 읽을 수 없어 내보낼 수 없습니다.',
+        },
         pluginStartup: {
             delayLabel: '동기화 후 플러그인 불러오기',
             delayHelp: '앱을 실행하면 동기화가 완료될 때까지 플러그인을 불러오지 않습니다. 체크를 해제하는 경우 플러그인 데이터가 이전 값으로 덮어씌워질 수 있습니다.',
@@ -1970,7 +1976,7 @@ export const languageKorean = {
 
             title: '앱 업데이트',
             automatic: '자동으로 확인',
-            automaticHelp: '6시간마다 자동으로 확인합니다.',
+            automaticHelp: '앱을 시작할 때와 실행 중 6시간마다 자동으로 확인합니다.',
             currentVersion: '현재 버전',
             installMethod: '설치 방식',
             lastChecked: '마지막 확인',
@@ -2576,6 +2582,7 @@ export const languageKorean = {
                 'RisuAI 계정 서버에 백업을 올리거나 내려받습니다. 채팅 첨부 파일은 포함되지 않습니다.',
             officialPublish: '백업 만들기',
             officialRestore: '백업 복원',
+            downloadMissingAccountAssets: '누락 에셋 다운로드',
             officialRestoreInlayWarning:
                 '공식 계정 백업에는 별도로 저장된 채팅 첨부가 포함되지 않습니다. 연결된 이미지, 오디오, 동영상, 서명은 복원되지 않을 수 있습니다. 백업을 복원한 뒤 앱이 다시 시작됩니다. 계속하시겠습니까?',
             officialMissing:
@@ -2611,6 +2618,29 @@ export const languageKorean = {
             overall: '{0} / {1}',
             preparing: '준비 중',
             stageCopyingSource: '파일 복사 중',
+            stageDownloadingAccountBackup: '계정 백업 다운로드 중',
+            stageCheckingAccountAssets: '에셋 확인 중',
+            stageDownloadingAccountAssets: '에셋 다운로드 중',
+            stageFinishingAccountRestore: '복원 마무리 중',
+            stageCleaningTemporary: '임시 파일 정리 중',
+            accountAssetsRequired: '필요한 에셋',
+            accountTransferredBytes: '다운로드 용량',
+            accountTransferRate: '다운로드 속도',
+            accountActiveTransfers: '진행 중',
+            accountRetryWait: '재시도 대기',
+            accountAssetsPresent: '기기에 있음',
+            accountAssetsInstalled: '다운로드 완료',
+            accountAssetsMissing: '계정에 없음',
+            accountAssetsFailed: '실패',
+            accountAssetsNotAttempted: '남은 항목',
+            stopAccountAssets: '다운로드 중단',
+            resultAccountAssetsStopped: '에셋 다운로드가 중단되었습니다. 백업은 이미 복원되었으므로, 나중에 에셋 다운로드만 다시 시도할 수 있습니다.',
+            resultAccountAssetsIncomplete: '백업을 복원했지만 일부 에셋을 다운로드하지 못했습니다.',
+            reasonAccountAssetService: '계정 서버가 다운로드 요청을 처리하지 못했습니다. 잠시 후 다시 시도해주세요.',
+            reasonAccountAssetAuthentication: '계정 인증에 실패했습니다. 다시 로그인해주세요.',
+            reasonAccountAssetAccountChanged: '연결된 계정이 변경되어 다운로드를 중단했습니다.',
+            reasonAccountAssetLibraryChanged: '복원한 데이터가 교체되어 다운로드를 중단했습니다.',
+            reasonAccountAssetLocal: '에셋을 저장하지 못했습니다.',
             stageReadingArchive: '백업 파일 읽는 중',
             stagePreparingAttachments: '첨부 파일 준비 중',
             stageReadingDatabase: '데이터베이스 읽는 중',
@@ -2670,6 +2700,7 @@ export const languageKorean = {
             reasonTooLarge: '{0} 크기가 너무 커서 가져오지 못했습니다.',
             reasonExportTooLarge: '{0} 크기가 너무 커서 내보내지 못했습니다.',
             reasonCompatibleDatabaseTooLarge: '데이터 크기가 너무 커서 호환 백업으로 내보내지 못했습니다. RisuNest 백업을 사용하세요.',
+            reasonCompatibleUnsupportedValue: '대상 앱이 지원하지 않는 값이 있어 호환 백업으로 내보내지 못했습니다. RisuNest 백업을 사용하세요.',
             tooLargeItems: {
                 root: '설정', preset: '프리셋', character: '캐릭터', conversation: '대화', message: '메시지', 'plugin-value': '플러그인 데이터',
                 record: '데이터 항목', backup: '백업 데이터', 'backup-entry': '백업 항목', card: '캐릭터 카드', module: '모듈', content: '카드 또는 모듈', 'owner-manifest': '추가 에셋 목록', 'compatible-database': '데이터',
@@ -2769,8 +2800,8 @@ export const languageKorean = {
             keepAlive: '응답 생성 중 앱 유지',
             keepAliveHelp:
                 '알림을 사용해 백그라운드에서도 생성을 이어가도록 돕습니다. Android가 앱을 일시 중지하거나 종료할 수 있습니다.',
-            keepAliveNeedsNotifications:
-                '알림이 꺼져 있으면 이 기능이 동작하지 않습니다.',
+            keepAliveWithoutNotification:
+                '알림이 꺼져 있으면 알림 없이 동작합니다.',
             operatingSystem: '운영체제',
             webView: 'WebView',
             refreshScreen: '화면 새로고침',

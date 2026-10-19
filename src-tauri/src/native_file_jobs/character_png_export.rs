@@ -243,6 +243,7 @@ pub(crate) fn export_character_png(
     handoff_directory: &Path,
     destination_path: Option<&Path>,
     job: &JobControl,
+    rendition: Option<&super::portrait_rendition::PortraitRendition>,
 ) -> Result<JobResultSummary, NativeJobError> {
     export_character_png_with_release(
         prepared,
@@ -254,6 +255,7 @@ pub(crate) fn export_character_png(
         job,
         PngCardLimits::default(),
         PreparedRisuSaveExport::release_reader,
+        rendition,
     )
 }
 
@@ -268,6 +270,7 @@ fn export_character_png_with_release<F>(
     job: &JobControl,
     limits: PngCardLimits,
     release_reader: F,
+    rendition: Option<&super::portrait_rendition::PortraitRendition>,
 ) -> Result<JobResultSummary, NativeJobError>
 where
     F: FnOnce(&mut PreparedRisuSaveExport) -> StoreResult<()>,
@@ -298,6 +301,7 @@ where
                 &repository,
             )?;
             let portrait = portrait_bytes(&projected.value, reader, &repository, job)?;
+            let portrait = super::portrait_rendition::apply(portrait, rendition)?;
             (portrait, sources)
         };
         let assets = metadata
@@ -1033,6 +1037,7 @@ mod tests {
                         message: "injected checkpoint failure".to_owned(),
                     })
                 },
+                None,
             )
             .unwrap_err();
 
@@ -1070,6 +1075,7 @@ mod tests {
             &directory.path().join("handoffs"),
             Some(&destination),
             &job,
+            None,
         )
         .unwrap_err();
         assert_eq!(error.code, "cancelled");
@@ -1136,6 +1142,7 @@ mod tests {
                 &owned, &directory.path().join("handoffs"), Some(&destination),
                 &JobRegistry::default().create(JobKind::ExportCharacterCard).unwrap(),
                 refused_limits, PreparedRisuSaveExport::release_reader,
+                None,
             ).unwrap_err();
             assert_eq!(refused.code, "payload-too-large");
             assert!(!destination.exists());
@@ -1150,6 +1157,7 @@ mod tests {
             &job,
             limits,
             PreparedRisuSaveExport::release_reader,
+            None,
         )
         .unwrap();
         let parse_root = directory.path().join("parse");
@@ -1197,6 +1205,7 @@ mod tests {
             &directory.path().join("handoffs"),
             Some(&destination),
             &job,
+            None,
         )
         .unwrap();
         let parsed = parse_png_card(
