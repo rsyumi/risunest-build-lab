@@ -180,7 +180,6 @@ describe('SqlitePersistentDataStore', () => {
 
         await store.open()
         await store.readRoot()
-        await store.readRevision()
         await store.queryPresets()
         await store.readPreset('1')
         await store.queryCharacters(characterQuery)
@@ -203,7 +202,6 @@ describe('SqlitePersistentDataStore', () => {
         expect(mocks.invoke.mock.calls).toEqual([
             ['pds_open'],
             ['pds_read_root', {}],
-            ['pds_read_revision', {}],
             ['pds_query_presets', {}],
             ['pds_read_preset', { id: '1' }],
             ['pds_query_characters', { query: characterQuery }],

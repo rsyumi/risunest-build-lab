@@ -271,20 +271,18 @@ fn copy_verified(
     if bytes != expected || hex::encode(digest.finalize()) != hash {
         return Err(invalid_source("attachment object hash or length mismatch"));
     }
-    // Staging files live only for this job and are discarded on restart; the finished
-    // archive and its destination copy are synced instead.
-    Ok(())
+    output.sync_all().map_err(io_job_error)
 }
 
 fn write_json(path: &Path, value: &Value) -> Result<(), NativeJobError> {
-    let bytes = serde_json::to_vec(value)
-        .map_err(|_| invalid_source("attachment metadata cannot be serialized"))?;
-    std::fs::OpenOptions::new()
+    let mut file = std::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(path)
-        .and_then(|mut file| file.write_all(&bytes))
-        .map_err(io_job_error)
+        .map_err(io_job_error)?;
+    serde_json::to_writer(&mut file, value)
+        .map_err(|_| invalid_source("attachment metadata cannot be serialized"))?;
+    file.sync_all().map_err(io_job_error)
 }
 
 fn provenance(alias: &AssetAlias) -> Option<Value> {

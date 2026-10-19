@@ -46,7 +46,6 @@ const storeMembers = {
     lwwDrainDeferred: 'optional',
     open: 'method',
     readRoot: 'method',
-    readRevision: 'optional',
     queryPresets: 'method',
     readPreset: 'method',
     queryCharacters: 'method',

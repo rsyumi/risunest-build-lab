@@ -248,18 +248,13 @@ function canonicalValuesEqual(left: unknown, right: unknown): boolean {
     return canonicalJson({ value: left }) === canonicalJson({ value: right })
 }
 
-/** Captures keep unchanged messages as the same object, so identity settles most comparisons. */
-function messagesEqual(left: unknown, right: unknown): boolean {
-    return left === right || canonicalValuesEqual(left, right)
-}
-
 export function messageReplaceRange<T>(
     baseline: readonly T[],
     current: readonly T[],
 ): { start: number; deleteCount: number; messages: T[] } {
     let start = 0
     const sharedLength = Math.min(baseline.length, current.length)
-    while (start < sharedLength && messagesEqual(baseline[start], current[start])) {
+    while (start < sharedLength && canonicalValuesEqual(baseline[start], current[start])) {
         start++
     }
 
@@ -268,7 +263,7 @@ export function messageReplaceRange<T>(
     while (
         baselineEnd > start &&
         currentEnd > start &&
-        messagesEqual(baseline[baselineEnd - 1], current[currentEnd - 1])
+        canonicalValuesEqual(baseline[baselineEnd - 1], current[currentEnd - 1])
     ) {
         baselineEnd--
         currentEnd--

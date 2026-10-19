@@ -16,7 +16,6 @@ import type {
     PersistentDataStore,
     PersistentRevisionReader,
 } from './persistentDataStore'
-import { readCurrentRevision } from './persistentDataStore'
 import {
     createConversationSummaryFromMetadata,
     createConversationSummaryStub,
@@ -1142,7 +1141,8 @@ export class ActiveWorkingSet {
 
     async initializeActiveWorkingSet(database: Database): Promise<void> {
         await this.dependencies.store.open()
-        this.installCommittedWorkingSet(database, await readCurrentRevision(this.dependencies.store))
+        const root = await this.dependencies.store.readRoot()
+        this.installCommittedWorkingSet(database, root.revision)
     }
 
     installCommittedWorkingSet(database: Database, revision: DataRevision, metadata?: PersistentConversationMetadata): void {

@@ -6,7 +6,6 @@ import type { LLMModel } from './model/modellist';
 import { get } from 'svelte/store';
 import { CurrentTriggerIdStore } from './stores.svelte';
 import { getHistoryWindowStart, historyLength, resolveHistoryWindowChat } from './process/historyWindowIndex';
-import { findCharacterIndexById } from './process/scriptCharacterLookup';
 
 export const defaultCBSRegisterArg: CBSRegisterArg = {
     registerFunction: () => { throw new Error('registerFunction not implemented') },
@@ -160,11 +159,12 @@ export function registerCBS(arg:CBSRegisterArg) {
     const getDatabase = (): Database => currentMatcher?.db ?? getDefaultDatabase()
     const getSelectedCharID = (): number => {
         const selectedCharacterId = currentMatcher?.selectedCharacterId
-        const selectedCharID = currentMatcher?.selectedCharID ?? getDefaultSelectedCharID()
         if (selectedCharacterId !== undefined) {
-            return findCharacterIndexById(getDatabase().characters, selectedCharacterId, selectedCharID)
+            return getDatabase().characters.findIndex(
+                (character) => character.chaId === selectedCharacterId,
+            )
         }
-        return selectedCharID
+        return currentMatcher?.selectedCharID ?? getDefaultSelectedCharID()
     }
     // While a send builds from a history window, a metadata-only conversation reads as the window.
     const historyChat = (character: character | undefined) => currentMatcher?.historyAccess

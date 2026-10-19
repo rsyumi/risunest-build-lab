@@ -393,7 +393,6 @@ export async function scanPinnedBackupRecords(
 
     for await (const character of iteratePinnedCharacters(reader)) {
         accumulator.visitCharacter(character)
-        if (mode !== 'full') continue
         for await (const conversation of iteratePinnedConversations(
             reader,
             character.summary.id,

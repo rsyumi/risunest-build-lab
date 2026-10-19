@@ -10,7 +10,7 @@ use crate::{
     trust_boundary::is_link_like,
 };
 use rusqlite::{params, OptionalExtension};
-use std::{collections::HashSet, fs, path::Path};
+use std::{fs, path::Path};
 
 const ROOTS: &[&str] = &["assets/objects"];
 
@@ -28,7 +28,6 @@ impl Catalog {
     ) -> Result<()> {
         self.db.execute_batch("CREATE TEMP TABLE physical_inventory (path TEXT PRIMARY KEY, object_hash BLOB NOT NULL, byte_length INTEGER NOT NULL)")?;
         self.capture_preserved_sources(store.repository_root(), probe)?;
-        let owner_manifests = self.owner_manifest_hashes()?;
         for root in ROOTS {
             let mut path = store.repository_root().to_path_buf();
             let mut absent = false;
@@ -55,7 +54,6 @@ impl Catalog {
                     &path,
                     cas,
                     pins,
-                    &owner_manifests,
                     preserving,
                     probe,
                 )?;
@@ -144,31 +142,12 @@ impl Catalog {
         Ok(())
     }
 
-    /// Every text `manifest_hash` in the captured owner heads, the values a
-    /// `manifest_hash=?` lookup can match. Reading them once keeps classifying each CAS
-    /// object from scanning the unindexed owner table.
-    pub(super) fn owner_manifest_hashes(&self) -> Result<HashSet<String>> {
-        let mut statement = self.db.prepare("SELECT manifest_hash FROM asset_owner_heads")?;
-        let mut rows = statement.query([])?;
-        let mut hashes = HashSet::new();
-        while let Some(row) = rows.next()? {
-            if let rusqlite::types::ValueRef::Text(text) = row.get_ref(0)? {
-                if let Ok(text) = std::str::from_utf8(text) {
-                    hashes.insert(text.to_owned());
-                }
-            }
-        }
-        Ok(hashes)
-    }
-
-    #[allow(clippy::too_many_arguments)]
     fn capture_directory(
         &self,
         root: &Path,
         path: &Path,
         cas: &PayloadCas,
         pins: &mut DurableCasJob,
-        owner_manifests: &HashSet<String>,
         preserving: bool,
         probe: &dyn CancellationProbe,
     ) -> Result<()> {
@@ -181,7 +160,7 @@ impl Catalog {
                 return Err(Error::Invalid("linked backup source file"));
             }
             if before.is_dir() {
-                self.capture_directory(root, &path, cas, pins, owner_manifests, preserving, probe)?;
+                self.capture_directory(root, &path, cas, pins, preserving, probe)?;
                 continue;
             }
             if !before.is_file() {
@@ -203,7 +182,11 @@ impl Catalog {
             if let Some(expected) = cas_hash {
                 // Pin before opening immutable CAS bytes. Pin role must match all uses of the
                 // same object, including owner manifests which are also unreferenced files.
-                let owner = owner_manifests.contains(&expected);
+                let owner: bool = self.db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM asset_owner_heads WHERE manifest_hash=?1)",
+                    [&expected],
+                    |r| r.get(0),
+                )?;
                 pins.pin_existing(
                     cas,
                     &expected,

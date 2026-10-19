@@ -467,9 +467,7 @@ impl Cache {
         if size > limit as u64 {
             return Err(too_large(size, limit));
         }
-        // The stored size, already within the limit, sizes the buffer so a
-        // large body is not read into one grown by doubling.
-        let mut bytes = Vec::with_capacity(size as usize);
+        let mut bytes = Vec::new();
         body.take((limit as u64).saturating_add(1))
             .read_to_end(&mut bytes)?;
         if bytes.len() > limit {
@@ -1028,9 +1026,7 @@ mod tests {
         assert!(cache.cas.stat_object(&large_hash).unwrap().is_some());
         for (hash, bytes) in [(&small_hash, &small), (&large_hash, &large)] {
             assert_eq!(cache.stat_derived(hash).unwrap(), Some(bytes.len() as u64));
-            let read = cache.read(hash, bytes.len()).unwrap();
-            assert_eq!(&read, bytes);
-            assert!(read.capacity() < bytes.len() + bytes.len() / 8);
+            assert_eq!(&cache.read(hash, bytes.len()).unwrap(), bytes);
             assert!(cache.read(hash, bytes.len() - 1).is_err());
             cache.verify(hash, || Ok(())).unwrap();
         }

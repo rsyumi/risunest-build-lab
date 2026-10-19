@@ -50,7 +50,6 @@ import {
 } from './scriptConversationAccess';
 import { requestScriptDisplayRefresh } from './scriptDisplayRefresh';
 import { beginDisplayScriptRun, noticeScriptTimeout } from './scriptTimeoutNotice';
-import { findCharacterById, findCharacterIndexById } from './scriptCharacterLookup';
 
 /** Deadline for each synchronous Lua segment of a listener. */
 const LUA_LISTENER_TIMEOUT_MS = 2_000
@@ -156,9 +155,11 @@ export async function runScripted(code:string, arg:{
     const char = arg.char ?? getCurrentCharacter()
     const selectedCharacterId = arg.operationContext?.characterId ?? char?.chaId
     const capturedDatabase = DBState.db
-    const capturedCharacter = selectedCharacterId === undefined || !capturedDatabase.characters
+    const capturedCharacter = selectedCharacterId === undefined
         ? undefined
-        : findCharacterById(capturedDatabase.characters, selectedCharacterId, get(selectedCharID))
+        : capturedDatabase.characters?.find(
+            (candidate) => candidate.chaId === selectedCharacterId,
+        )
     const capturedCharacterOwner: CapturedCharacterOwner|undefined = capturedCharacter
         ? {
             database: capturedDatabase,
@@ -293,10 +294,8 @@ export async function runScripted(code:string, arg:{
             const getScriptingDatabase = () => ScriptingEngineState.readDatabase?.() ?? getDatabase()
             const getScriptingCharacterIndex = (db: Database) => {
                 if (ScriptingEngineState.selectedCharacterId !== undefined) {
-                    return findCharacterIndexById(
-                        db.characters,
-                        ScriptingEngineState.selectedCharacterId,
-                        get(selectedCharID),
+                    return db.characters.findIndex(
+                        (candidate) => candidate.chaId === ScriptingEngineState.selectedCharacterId,
                     )
                 }
                 return get(selectedCharID)

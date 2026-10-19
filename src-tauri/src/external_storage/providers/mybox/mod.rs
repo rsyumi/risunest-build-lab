@@ -138,13 +138,6 @@ impl Context {
         listed.generation += 1;
         listed.files.insert(name.to_owned(), entry);
     }
-    /// A confirmed deletion leaves the rest of the folder's listing as it was.
-    fn remove(&self, folder: &str, name: &str) {
-        let mut entries = self.entries.lock().unwrap();
-        let listed = entries.entry(folder.to_owned()).or_default();
-        listed.generation += 1;
-        listed.files.remove(name);
-    }
     fn forget(&self, folder: &str) {
         let mut entries = self.entries.lock().unwrap();
         let listed = entries.entry(folder.to_owned()).or_default();
@@ -1173,19 +1166,14 @@ impl Provider for Mybox {
                     cancel,
                 )
                 .await?;
+            context.forget(folder);
             match response.status {
-                200 | 204 | 404 => {
-                    context.remove(folder, name);
-                    Ok(())
-                }
-                status => {
-                    context.forget(folder);
-                    Err(api::classify(
-                        status,
-                        &response.headers,
-                        self.deps.clock.now_ms(),
-                    ))
-                }
+                200 | 204 | 404 => Ok(()),
+                status => Err(api::classify(
+                    status,
+                    &response.headers,
+                    self.deps.clock.now_ms(),
+                )),
             }
         })
     }

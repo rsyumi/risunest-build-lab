@@ -134,7 +134,7 @@ export async function loadRisuAccountBackup() {
             if(done){
                 break
             }
-            alertWait("Downloading backup: " + buf.length())
+            alertWait("Downloading backup: " + buf.buffer.byteLength)
             buf.append(value)
         }
 
