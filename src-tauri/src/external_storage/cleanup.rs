@@ -1394,6 +1394,38 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn a_recheck_names_a_backup_point_by_the_receipt_listed_now() {
+        runtime().block_on(async {
+            use super::super::lww_tests::CycleFixture;
+            let mut f=CycleFixture::new();let cancel=Cancellation::default();
+            f.a.commit(&crate::persistent_store::WorkingSetCommit{expected_revision:f.a.revision().unwrap(),unit_mutations:Some(vec![
+                crate::persistent_store::lww::UnitMutation::Set{key:risunest_sync_wire::unit::UnitKey::new(&["root","language"]).unwrap(),value:serde_json::json!("en")},
+            ]),..Default::default()}).unwrap();
+            f.publish_a().await;
+            let directory=tempfile::tempdir().unwrap();
+            let (connected,backup_id,backup)=ordinary_backup(&f,directory.path(),&cancel).await;
+            let mut journal=TransferJournal::open(&directory.path().join("point-journal"),JobIdentity{
+                job_id:"keep".into(),connection_id:"sender".into(),repository_id:connected.handle.repository_id.clone(),capture_id:backup_id,
+                capture:CaptureIdentity{store_id:"store".into(),library_epoch:"epoch".into(),generation:"generation".into(),selection_epoch:"selection".into(),revision:1},
+            }).unwrap();
+            let document=control::BackupPointDocument::single(&connected.stored.descriptor,"kept".into(),control::BackupPointKind::Manual,1000,backup.reference.clone()).unwrap();
+            let point=control::upload_backup_point(&connected.stored.descriptor,&connected.root_key,document,&mut journal,
+                connected.provider.as_ref(),&connected.handle,&cancel).await.unwrap();
+            let cache=directory.path().join("cache");let scratch=directory.path().join("probe");
+            let sender_store=std::sync::Mutex::new(f.a.open_native_job_store().unwrap());
+            let view=LwwRepositoryView::new(&f.sender,&sender_store,ConnectedRepositoryView{connected:&connected,writer_id:"collector",policy:RetentionPolicy::DEFAULT,
+                now_ms:1000,unfinished:vec![],cache_root:&cache,reads:Default::default()},ConnectedDocuments{connected:&connected,cancel:&cancel,scratch:&scratch});
+            let first=view.roots(&cancel).await.unwrap().points["kept"].receipt.clone();
+            // The same name listed again under another version is a point this view has not read.
+            f.provider.seed(&point.object_id,ObjectRole::BackupPoint,f.provider.contents(&point.object_id).unwrap());
+            let listed=connected.provider.list_objects(&connected.handle,Collection::BackupPoints,None,100,&cancel).await.unwrap()
+                .objects.into_iter().find(|receipt|receipt.locator==first.locator).unwrap();
+            assert_ne!(listed,first);
+            assert_eq!(view.roots(&cancel).await.unwrap().points["kept"].receipt,listed);
+        });
+    }
+
+    #[test]
     fn lww_gc_retires_native_body_before_its_signed_discovery_parent() {
         for repository_id in super::super::lww_tests::representative_repository_ids() {
         runtime().block_on(async {

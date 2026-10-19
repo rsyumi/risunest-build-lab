@@ -85,6 +85,9 @@ export function sharedCargoTarget(commonGitDirectory, configuredTarget, root) {
   return target
 }
 
+// The app crate under test compiles unoptimized; its dependencies keep the release optimization.
+export const appTestProfile = ['--config', 'profile.release.package.risunest.opt-level=0']
+
 export function nativeCommands(group, platform = process.platform) {
   if (!['protocol', 'host', 'harness'].includes(group)) throw new Error('Expected protocol, host or harness')
   if (group === 'harness') {
@@ -98,11 +101,11 @@ export function nativeCommands(group, platform = process.platform) {
   const commands = []
   for (const manifest of group === 'protocol' ? protocolManifests : hostManifests) {
     if (manifest === 'src-tauri/Cargo.toml' && platform === 'linux') {
-      commands.push(['dbus-run-session', '--', 'bash', 'scripts/linux-native-tests.sh', '--release'])
+      commands.push(['dbus-run-session', '--', 'bash', 'scripts/linux-native-tests.sh', '--release', ...appTestProfile])
     } else if (manifest === 'crates/network-log/Cargo.toml') {
       commands.push(['cargo', 'test', '--manifest-path', manifest, '--features', 'reqwest', '--release', '--locked'])
     } else {
-      commands.push(['cargo', 'test', '--manifest-path', manifest, '--release', '--locked'])
+      commands.push(['cargo', 'test', '--manifest-path', manifest, '--release', '--locked', ...(manifest === 'src-tauri/Cargo.toml' ? appTestProfile : [])])
     }
   }
   if (group === 'host') {

@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
-import { embeddedCrateTests, hostManifests, nativeCommands, packageCrateTests, protocolManifests, sharedCargoTarget, standaloneRustCommands, standaloneRustTests } from '../scripts/testNative.mjs'
+import { appTestProfile, embeddedCrateTests, hostManifests, nativeCommands, packageCrateTests, protocolManifests, sharedCargoTarget, standaloneRustCommands, standaloneRustTests } from '../scripts/testNative.mjs'
 
 test('the Sync server runs as one plain cargo test and its source observer only through --harness', () => {
   const base = ['cargo', 'test', '--manifest-path', 'server/sync/Cargo.toml', '--release', '--locked']
@@ -17,6 +17,16 @@ test('the Sync server runs as one plain cargo test and its source observer only 
   assert.deepEqual(nativeCommands('harness'), [
     [...base, '--lib', '--features', 'source-observer', '--', '--skip', 'source_observer::small_object_store::tests'],
   ])
+})
+
+test('host runs compile only the app crate under test unoptimized', () => {
+  assert.deepEqual(appTestProfile, ['--config', 'profile.release.package.risunest.opt-level=0'])
+  for (const platform of ['win32', 'linux', 'darwin']) {
+    const [app, ...others] = nativeCommands('host', platform)
+    assert(app.includes(platform === 'linux' ? 'scripts/linux-native-tests.sh' : 'src-tauri/Cargo.toml'))
+    assert.deepEqual(app.slice(-2), appTestProfile)
+    for (const command of [...others, ...nativeCommands('protocol', platform)]) assert(!command.includes('--config'), command.join(' '))
+  }
 })
 
 test('host mode compiles and runs the std-only Android response body tests as their own test binary', () => {

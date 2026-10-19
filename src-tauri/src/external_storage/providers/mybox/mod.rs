@@ -1174,8 +1174,14 @@ impl Provider for Mybox {
                 )
                 .await?;
             match response.status {
-                200 | 204 | 404 => {
+                200 | 204 => {
                     context.remove(folder, name);
+                    Ok(())
+                }
+                // Only the cached resource id is known to be gone: another
+                // device may have stored the name again under a new id.
+                404 => {
+                    context.forget(folder);
                     Ok(())
                 }
                 status => {

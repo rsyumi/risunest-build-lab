@@ -3471,8 +3471,8 @@
     {
       "path": "scripts/ios-native-tests.sh",
       "mode": "100644",
-      "bytes": 3328,
-      "sha256": "b698a6e8e398f0925f63400a0dce50fb181c0f446b35c2e629dd6d3187aea11e"
+      "bytes": 3514,
+      "sha256": "1e378a40af1f75f506a4109772999da8089454b2828f6f36a9849bbe6b4cf310"
     },
     {
       "path": "scripts/linux-native-tests.sh",
@@ -3705,8 +3705,8 @@
     {
       "path": "scripts/testNative.mjs",
       "mode": "100644",
-      "bytes": 6437,
-      "sha256": "58ab20f975a68b82cc1f861f7744de77eb99906b683abf20edc09edd19c9c7ca"
+      "bytes": 6710,
+      "sha256": "6fabae72ce7a4924795fc316e763b4b22c9b2846f58acdfd82cb61cae09494a4"
     },
     {
       "path": "server/endpoint-registry/.gitattributes",
@@ -6111,8 +6111,8 @@
     {
       "path": "src-tauri/src/external_storage/cleanup.rs",
       "mode": "100644",
-      "bytes": 139041,
-      "sha256": "128580bc3b3e70bff8633e1c0db6cea167b2b81a3d7b4b52a5c46ba489b51dbc"
+      "bytes": 141855,
+      "sha256": "741473a33103dad38b4126dd880d81908a3e683ad7ef863d294bbb4ec269b3e3"
     },
     {
       "path": "src-tauri/src/external_storage/connection.rs",
@@ -6483,14 +6483,14 @@
     {
       "path": "src-tauri/src/external_storage/providers/mybox/mod.rs",
       "mode": "100644",
-      "bytes": 54394,
-      "sha256": "8377e46b7db97e6c56a16caba06dbf32981d7f0a4158f9a6f687ec6e56a510ab"
+      "bytes": 54651,
+      "sha256": "5700d4c4fe65f8f2cb08ac32fbdac390fb0fb9817598d8b6800aebd17cdaaaf7"
     },
     {
       "path": "src-tauri/src/external_storage/providers/mybox/tests.rs",
       "mode": "100644",
-      "bytes": 61869,
-      "sha256": "8596f248ce7a449911e76d179fee417a83755920b5f37d979a9e5db86358cb44"
+      "bytes": 63251,
+      "sha256": "9c36ac9cb36b7041bec2f4b8d312efb4b027863f913e7e7e8699e844ed10eef8"
     },
     {
       "path": "src-tauri/src/external_storage/providers/onedrive/config.rs",
@@ -7305,8 +7305,8 @@
     {
       "path": "src-tauri/src/native_media/tests.rs",
       "mode": "100644",
-      "bytes": 31972,
-      "sha256": "1383fb0847b1cb10dc316a1efa4b14c77bafa5ab330f04d3dda659ca6d8a4658"
+      "bytes": 32362,
+      "sha256": "62d812616b5a88303419ab5f22e92b5ccb80ce5240d0197ac48f14ec2abdcfc6"
     },
     {
       "path": "src-tauri/src/native_tokenizer.rs",
@@ -7353,8 +7353,8 @@
     {
       "path": "src-tauri/src/persistent_store/archive.rs",
       "mode": "100644",
-      "bytes": 48193,
-      "sha256": "89628c2c9b01d25c625fd75727e701e2ac62a6235a73b8258eab6a74cf32dc46"
+      "bytes": 48701,
+      "sha256": "d5464fce5b54021b6160133ed3578a53bb21d65019984d957ab7c39519d7097c"
     },
     {
       "path": "src-tauri/src/persistent_store/asset_object_catalog.rs",
@@ -7395,14 +7395,14 @@
     {
       "path": "src-tauri/src/persistent_store/commands/data_health.rs",
       "mode": "100644",
-      "bytes": 22694,
-      "sha256": "43220fe15afc64582704bf50cc17f33e94a813c4f35287c3ca9e1a0faa79bd1e"
+      "bytes": 23341,
+      "sha256": "51df829af698c26003772be7fab5bc56742301bb52b211b0803b71211d91817a"
     },
     {
       "path": "src-tauri/src/persistent_store/commands/data_health/tests.rs",
       "mode": "100644",
-      "bytes": 24775,
-      "sha256": "dff709c198822fefe4e15af94c3b035086a260352a7ffb0dd967d4aa0c3b98c5"
+      "bytes": 26311,
+      "sha256": "a5eddf5f4aee3e813d2175c5d6232626bfda3ae630a470a9602a932d66f503ca"
     },
     {
       "path": "src-tauri/src/persistent_store/commands/hypa.rs",
@@ -8689,10 +8689,16 @@
       "sha256": "c4317fc33c5e6076922098ecd0b3a206ca75bd69e472cc018eab9a4fd2a90a62"
     },
     {
+      "path": "src/lib/ChatScreens/ChatBody.liveTranslation.svelte.test.ts",
+      "mode": "100644",
+      "bytes": 5789,
+      "sha256": "7319ef4d9044f05c03705c28f413ec6b2bd523fa4a561d6305a14c05a250885f"
+    },
+    {
       "path": "src/lib/ChatScreens/ChatBody.svelte",
       "mode": "100644",
-      "bytes": 33128,
-      "sha256": "223273511ea2a215dbab699ae8f75a2bd7a538e1be753d44f54174d715c6707f"
+      "bytes": 34171,
+      "sha256": "f7d07086a6a207f6594b1b45707682c079c0b5b07d9f0a1f417e0c6a103a07ff"
     },
     {
       "path": "src/lib/ChatScreens/ChatBodyCaptureProbe.test.svelte",
@@ -15855,14 +15861,14 @@
     {
       "path": "src/ts/storage/nativeMediaIpc.test.ts",
       "mode": "100644",
-      "bytes": 12006,
-      "sha256": "18b8a5da91253fedbc6051e11ec063ee3c6893826f79f5aefc0dcd06cf0e65ae"
+      "bytes": 12157,
+      "sha256": "6dd73e21498b0170d449010cb98c3794f481e22ace447ec7d6e477a0c1de3267"
     },
     {
       "path": "src/ts/storage/nativeMediaIpc.ts",
       "mode": "100644",
-      "bytes": 6943,
-      "sha256": "037f7b3b3482e718405266ff9631abcbefeeef11a3df1735458bda499dc262c9"
+      "bytes": 6988,
+      "sha256": "384b2b33ef72d4f91d9cb867450b44b5b9011ae00ef7c829afe4b67b74886b63"
     },
     {
       "path": "src/ts/storage/nativeModuleContentActivation.test.ts",
@@ -17727,8 +17733,8 @@
     {
       "path": "src/ts/translator/inputTranslation.test.ts",
       "mode": "100644",
-      "bytes": 5447,
-      "sha256": "65ece10e9f21d7c91af4398fb2882da90835c1016b47fb82007dbe6e5c812c2f"
+      "bytes": 7642,
+      "sha256": "816e9d693b9aea89d57fee4df988c20e236f87dc1d2583e4125f2ef1c86c0ca9"
     },
     {
       "path": "src/ts/translator/llmCacheKey.test.ts",
@@ -17751,8 +17757,8 @@
     {
       "path": "src/ts/translator/translator.ts",
       "mode": "100644",
-      "bytes": 31876,
-      "sha256": "b9f62a79eaf2be1d1e0a94d9694dc45ff8529a582d9bf07b113d653a7b6711fd"
+      "bytes": 32854,
+      "sha256": "a4a3077527f84b780bd2c568d394adaffedc7cba84162da020514db5e6083bc6"
     },
     {
       "path": "src/ts/ui/chatScreenState.svelte.test.ts",
@@ -18477,8 +18483,8 @@
     {
       "path": "tests/native/run.mjs",
       "mode": "100644",
-      "bytes": 7521,
-      "sha256": "270362794bc4c818c0c6b6607f42c26f7f1932d4a7dd201ad3ea68e8c614c02f"
+      "bytes": 8247,
+      "sha256": "4b81526c514e30d90b2a302ccb7016359ce654b93eee3e159e8ff942319f8115"
     },
     {
       "path": "tests/native/vite.config.ts",
@@ -18507,8 +18513,8 @@
     {
       "path": "tests/nativeCommands.node-test.mjs",
       "mode": "100644",
-      "bytes": 7094,
-      "sha256": "4c79daedc50a1386381b5710fd554429a7821638211f9b92935d460fa6e96f29"
+      "bytes": 7705,
+      "sha256": "996168dee91ad9ac9a9035ca6df85047bcbbc08aad481ec52e16a308f63af4b5"
     },
     {
       "path": "tests/pathBoundary.node-test.mjs",
@@ -18929,8 +18935,8 @@
     {
       "path": ".github/workflows/release.yml",
       "mode": "100644",
-      "bytes": 66136,
-      "sha256": "b39b1399791aee6239cf9b68a0a25422a77bb07361a41940ddbb573a9c4388aa",
+      "bytes": 66391,
+      "sha256": "a3cebed3bf50547dae7ce1dd427107c9b31c2026da2aa75ad2bf9c5b47903c6c",
       "reason": "private-control-or-generated"
     },
     {

@@ -525,6 +525,20 @@ fn preserves_an_animation_with_more_frames_than_the_limit_allows() {
 }
 
 #[test]
+fn the_frame_limit_counts_frames_a_scaled_and_capped_timeline_folds_away() {
+    let source = animated_gif_fixture(&vec![20u32; 601], 8, 8);
+
+    let refused = super::decode_inlay_animation(
+        &source,
+        super::InlayAnimation::Gif,
+        &animation_options(4, 10),
+    )
+    .err();
+
+    assert_eq!(refused.as_deref(), Some("Inlay animation has too many frames"));
+}
+
+#[test]
 fn preserves_an_animation_the_settings_ask_to_keep_as_it_is() {
     let source = animated_gif_fixture(&[30, 30, 30], 64, 64);
 

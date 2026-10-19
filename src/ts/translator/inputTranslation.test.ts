@@ -1,10 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const f = vi.hoisted(() => ({ fetch: vi.fn(), request: vi.fn(), alert: vi.fn(), translatorType: 'deepl', translator: 'ko' }))
+const f = vi.hoisted(() => ({ fetch: vi.fn(), request: vi.fn(), alert: vi.fn(), translatorType: 'deepl', translator: 'ko', deeplXUrl: 'https://deeplx-a.invalid' }))
 vi.mock('../storage/database.svelte', () => ({
     getDatabase: () => ({
         characters: [], presetRegex: [], translator: f.translator, translatorInputLanguage: 'en', aiModel: 'gpt',
         translatorType: f.translatorType, deeplOptions: { freeApi: true, key: 'synthetic' },
+        deeplXOptions: { url: f.deeplXUrl, token: '' }, noWaitForTranslate: true,
     }) as ReturnType<typeof import('../storage/database.svelte').getDatabase>,
     getCurrentCharacter: () => undefined,
     getCurrentChat: () => undefined,
@@ -16,7 +17,8 @@ vi.mock('localforage', async () => (await import('../plugins/localforage.testSup
 
 import { getDatabase } from '../storage/database.svelte'
 import { setRuntimePerformanceProfile } from '../runtimePerformanceProfile'
-import { translate, type TranslateHTMLContext } from './translator'
+import { doingChat } from '../process/generationState'
+import { translate, translateHTML, type TranslateHTMLContext } from './translator'
 
 function liveRowContext(): TranslateHTMLContext {
     return {
@@ -33,8 +35,13 @@ beforeEach(() => {
     vi.clearAllMocks()
     f.translatorType = 'deepl'
     f.translator = 'ko'
+    f.deeplXUrl = 'https://deeplx-a.invalid'
     f.fetch.mockResolvedValue({ ok: false, data: 'synthetic unavailable' })
     f.request.mockResolvedValue({ type: 'fail', result: 'synthetic unavailable' })
+})
+
+afterEach(() => {
+    doingChat.set(false)
 })
 
 describe('translation error ownership', () => {
@@ -71,6 +78,23 @@ describe('live chat rows', () => {
         await expect(translate(text, false, liveRowContext())).resolves.toBe('Live translated')
         expect(f.fetch).toHaveBeenCalledOnce()
     })
+    it('leaves a live row untranslated while a reply is generated', async () => {
+        f.fetch.mockResolvedValue({ ok: true, data: { translations: [{ text: 'Streaming translated' }] } })
+        doingChat.set(true)
+        await expect(translateHTML('<p>streaming reply</p>', false, '', 0, false, liveRowContext())).resolves.toBe('<p>streaming reply</p>')
+        expect(f.fetch).not.toHaveBeenCalled()
+    })
+    it('keeps the translations made earlier for a live row while a reply is generated', async () => {
+        f.fetch.mockImplementation(async (_url: string, init: { body: { text: string[] } }) => (
+            { ok: true, data: { translations: [{ text: `KO ${init.body.text[0]}` }] } }
+        ))
+        await expect(translateHTML('<p>earlier reply</p>', false, '', 0, false, liveRowContext())).resolves.toBe('<p>KO earlier reply</p>')
+        doingChat.set(true)
+        await expect(translateHTML('<p>earlier reply</p>', false, '', 0, false, liveRowContext())).resolves.toBe('<p>KO earlier reply</p>')
+        await expect(translateHTML('<p>earlier reply</p><p>newer reply</p>', false, '', 0, false, liveRowContext()))
+            .resolves.toBe('<p>earlier reply</p><p>newer reply</p>')
+        expect(f.fetch).toHaveBeenCalledOnce()
+    })
     it('translates the same text again for another target language', async () => {
         f.fetch.mockImplementation(async (_url: string, init: { body: { target_lang: string } }) => (
             { ok: true, data: { translations: [{ text: `in ${init.body.target_lang}` }] } }
@@ -81,6 +105,15 @@ describe('live chat rows', () => {
         f.translator = 'ja'
         await expect(translate(text, false)).resolves.toBe('in JA')
         expect(f.fetch).toHaveBeenCalledTimes(2)
+    })
+    it('translates a live row again after the DeepLX server changes', async () => {
+        f.translatorType = 'deeplX'
+        f.fetch.mockImplementation(async (url: string) => (
+            { ok: true, data: { data: url.startsWith('https://deeplx-a.invalid') ? 'from server A' : 'from server B' } }
+        ))
+        await expect(translateHTML('<p>live row text</p>', false, '', 0, false, liveRowContext())).resolves.toBe('<p>from server A</p>')
+        f.deeplXUrl = 'https://deeplx-b.invalid'
+        await expect(translateHTML('<p>live row text</p>', false, '', 0, false, liveRowContext())).resolves.toBe('<p>from server B</p>')
     })
     it('keeps translations within the memory budget of the device profile', async () => {
         f.fetch.mockResolvedValue({ ok: true, data: { translations: [{ text: 'Long translated' }] } })

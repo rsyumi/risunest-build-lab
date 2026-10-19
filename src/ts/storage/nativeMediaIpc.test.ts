@@ -234,6 +234,8 @@ describe('native media IPC', () => {
     it.each([
         ['bytes that arrive with it', { data: [1, 2, 3] }, Uint8Array.of(1, 2, 3)],
         ['an output transfer', { outputId: 'output-id' }, Uint8Array.of(1, 2, 3)],
+        ['an empty output id', { outputId: '' }, Uint8Array.of(1, 2, 3)],
+        ['a non-string output id', { outputId: 7 }, Uint8Array.of(1, 2, 3)],
         ['a different size', {}, Uint8Array.of(1, 2)],
         ['no source to keep', {}, undefined],
     ] as const)('rejects a kept source with %s', async (_, fields, source) => {

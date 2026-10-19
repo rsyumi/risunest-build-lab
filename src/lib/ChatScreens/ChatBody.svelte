@@ -5,7 +5,9 @@
     import { sleep } from "src/ts/util"
     import { alertError } from "../../ts/alert"
     import { addMetadataToElement, getDistance, ParseMarkdown, postTranslationParse, trimMarkdown, type CbsConditions, type simpleCharacterArgument } from "../../ts/parser/parser.svelte"
-    import { getLLMCache, translateHTML, type TranslateHTMLContext } from "../../ts/translator/translator"
+    import { getLLMCache, isExpTranslator, translateHTML, type TranslateHTMLContext } from "../../ts/translator/translator"
+    import { doingChat } from 'src/ts/process/generationState'
+    import { get } from 'svelte/store'
     import { getModuleAssets } from "src/ts/process/modules";
     import { getCurrentCharacter } from "src/ts/storage/database.svelte";
     import { getFileSrc } from "src/ts/globalApi.svelte";
@@ -107,6 +109,7 @@
         releaseObjectUrls: () => void
         thoughtExpansion: BoundedThoughtExpansion | null
         reads?: DisplayReadRecord
+        translatedDuringGeneration: boolean
     }
 
     let activeParseJob: ChatBodyParseJob|null = null
@@ -123,6 +126,18 @@
 
     let parseGeneration = 0
     let lastRenderedRevision: number | null = null
+    // The translator leaves a live row untranslated while a reply is generated,
+    // so a row translated then parses again once the generation ends.
+    let generationEndRevision = $state(0)
+    let generating = false
+    const unsubscribeGeneration = doingChat.subscribe((busy) => {
+        if (generating && !busy && activeParseJob?.translatedDuringGeneration) generationEndRevision += 1
+        generating = busy
+    })
+
+    function noteGenerationTranslation(job: ChatBodyParseJob) {
+        if (!captureContext && get(doingChat) && isExpTranslator(DBState.db)) job.translatedDuringGeneration = true
+    }
 
     function parserChara(): string | CharacterRecord {
         const parserCharacter = captureContext?.parserContext.character
@@ -390,6 +405,7 @@
                 if(settings.translatorType === 'llm' && settings.translateBeforeHTMLFormatting){
                     await sleep(100)
                     translating = true
+                    noteGenerationTranslation(job)
                     data = await translateHTML(
                         data,
                         false,
@@ -408,6 +424,7 @@
                 else if(!settings.legacyTranslation){
                     const marked = await parseForRender(data, 'pretranslate')
                     translating = true
+                    noteGenerationTranslation(job)
                     const translated = await postTranslationParse(await translateHTML(
                         marked,
                         false,
@@ -425,6 +442,7 @@
                 else{
                     const marked = await parseForRender(data, mode)
                     translating = true
+                    noteGenerationTranslation(job)
                     const translated = await translateHTML(
                         marked,
                         false,
@@ -589,6 +607,7 @@
             releaseObjectUrls: () => {},
             thoughtExpansion: null,
             reads,
+            translatedDuringGeneration: false,
         }
         job.promise = markParsing(msgDisplay, character, idx, job)
         return job
@@ -608,6 +627,7 @@
 
     let markParsingResult = $derived.by(() => {
         void reloadRevision
+        void generationEndRevision
         return currentThoughtPreview || shouldRenderRawStreaming
             ? null
             : startParsing(renderRevision)
@@ -726,6 +746,7 @@
 
     onDestroy(() => {
         destroyed = true
+        unsubscribeGeneration()
         disposeParseJob(activeParseJob)
         disposeParseJob(displayedParseJob)
     })
