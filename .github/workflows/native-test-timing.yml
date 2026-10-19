@@ -57,7 +57,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - name: Compile test binary
-        run: cargo test --manifest-path src-tauri/Cargo.toml --release --locked --target ${{ matrix.target }} --lib --no-run --message-format=json > artifacts/build.jsonl
+        run: cargo test --manifest-path src-tauri/Cargo.toml --release --locked --config profile.release.package.risunest.opt-level=0 --target ${{ matrix.target }} --lib --no-run --message-format=json > artifacts/build.jsonl
       - name: Compare bounded storage tests with one and four workers
         run: |
           binary=$(python -c 'import json; from pathlib import Path; rows=[json.loads(x) for x in Path("artifacts/build.jsonl").read_text().splitlines()]; matches=[x["executable"] for x in rows if x.get("reason")=="compiler-artifact" and x.get("profile",{}).get("test") and x.get("target",{}).get("name")=="risunest_lib" and x.get("executable")]; assert len(matches)==1,matches; print(matches[0])')

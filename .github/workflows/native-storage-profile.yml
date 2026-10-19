@@ -106,7 +106,7 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libwebkit2gtk-4.1-dev libssl-dev libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev gnome-keyring dbus-x11 xvfb
       - name: Compile the instrumented test binary
-        run: cargo test --manifest-path src-tauri/Cargo.toml --release --locked --target ${{ matrix.target }} --lib --no-run --message-format=json > artifacts/build.jsonl
+        run: cargo test --manifest-path src-tauri/Cargo.toml --release --locked --config profile.release.package.risunest.opt-level=0 --target ${{ matrix.target }} --lib --no-run --message-format=json > artifacts/build.jsonl
       - name: Compare exact test with isolated temporary roots
         env:
           PROFILE_TARGET: ${{ matrix.target }}

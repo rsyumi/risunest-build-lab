@@ -48,7 +48,7 @@ jobs:
           gnome-keyring-daemon --version
           ulimit -l
           set +e
-          dbus-run-session -- bash scripts/linux-native-tests.sh --release 2>&1 | tee artifacts/native.log
+          dbus-run-session -- bash scripts/linux-native-tests.sh --release --config profile.release.package.risunest.opt-level=0 2>&1 | tee artifacts/native.log
           result=${PIPESTATUS[0]}
           sudo journalctl --since "$started" --no-pager --grep='gnome-keyring|Out of memory|Killed process|segfault' > artifacts/services.log
           cat artifacts/services.log
