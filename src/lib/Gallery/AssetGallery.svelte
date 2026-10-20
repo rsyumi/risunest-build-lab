@@ -322,7 +322,7 @@
         {#snippet info()}
             <dl class="asset-info">
                 <dt>{text.name}</dt><dd>{target.portrait ? text.currentIcon : target.name}{#if !target.portrait}<button class="g-button small quiet" disabled={busy} onclick={() => startRename(target)}>{text.rename}</button>{/if}</dd>
-                <dt>{text.extension}</dt><dd>{target.ext}</dd>
+                <dt>{text.extension}</dt><dd>{target.ext.toUpperCase()}</dd>
                 {#if viewerMetadata.width && viewerMetadata.height}<dt>{text.resolution}</dt><dd>{viewerMetadata.width} × {viewerMetadata.height}</dd>{/if}
                 {#if viewerMetadata.size !== undefined}<dt>{text.size}</dt><dd>{galleryBytes(viewerMetadata.size)}</dd>{/if}
             </dl>
@@ -352,20 +352,21 @@
 <style>
     .asset-overlay { position:fixed; inset:0; z-index:130; background:rgba(0,0,0,.6); display:flex; align-items:center; justify-content:center; padding:1.25rem; color:var(--risu-theme-textcolor); }
     .asset-panel { width:min(72rem,100%); height:90dvh; display:flex; flex-direction:column; overflow:hidden; background:var(--risu-theme-bgcolor); border:1px solid var(--risu-theme-darkborderc); border-radius:.75rem; }
-    .asset-header { display:flex; align-items:center; justify-content:space-between; gap:.75rem; padding:.875rem 1rem 0; flex:none; }
+    .asset-header { display:flex; align-items:center; justify-content:space-between; gap:.75rem; padding:.875rem .75rem 0; flex:none; }
     .asset-header h2 { flex:1; min-width:0; font-size:1.125rem; font-weight:700; margin:0; overflow-wrap:anywhere; }
     .asset-header small { margin-left:.375rem; color:var(--risu-theme-textcolor2); font-size:13px; font-weight:400; }
     .asset-close { display:inline-flex; width:2.25rem; height:2.25rem; align-items:center; justify-content:center; border:0; border-radius:.375rem; background:transparent; color:var(--risu-theme-textcolor2); }
     .asset-close:hover { color:var(--risu-theme-textcolor); background:var(--risu-theme-selected); }
     .asset-close:focus-visible { outline:2px solid var(--risu-theme-borderc); outline-offset:2px; }
-    .asset-tabs { padding:0 1rem; }
-    .asset-tabs :global(.g-tabs) { margin-top:.75rem; }
+    .asset-tabs { padding:0 .75rem; border-bottom:1px solid var(--risu-theme-darkborderc); }
+    .asset-tabs :global(.g-tabs) { margin-top:.75rem; border-bottom:0; }
     .asset-body { min-height:0; flex:1; overflow:auto; }
     .asset-body :global(.g-toolbar) { position:sticky; top:0; z-index:5; background:var(--risu-theme-bgcolor); }
     .asset-empty { text-align:center; padding:3rem 1rem; color:var(--risu-theme-textcolor2); }
     .asset-info { display:grid; grid-template-columns:auto minmax(0,1fr); gap:.375rem 1rem; font-size:13px; margin:0; }
     .asset-info dt { color:var(--risu-theme-textcolor2); }
-    .asset-info dd { margin:0; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; }
+    .asset-info dd { margin:0; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; display:flex; align-items:center; gap:.5rem .625rem; flex-wrap:wrap; }
+    .asset-info dd .g-button.quiet { margin-left:-.625rem; }
     .asset-exclude { display:flex; align-items:center; gap:.5rem; margin-top:1rem; font-size:.85rem; }
     .rename-overlay { position:fixed; inset:0; z-index:170; background:rgba(0,0,0,.5); display:flex; align-items:center; justify-content:center; padding:1rem; color:var(--risu-theme-textcolor); }
     .rename-dialog { width:100%; max-width:32rem; max-height:100%; overflow-y:auto; display:flex; flex-direction:column; gap:1rem; padding:1rem; border:0; border-radius:.375rem; background:var(--risu-theme-darkbg); }
@@ -377,5 +378,5 @@
     .rename-error { font-size:13px; color:var(--risu-theme-danger-400); }
     .rename-error:empty { display:none; }
     .rename-buttons { display:grid; grid-template-columns:1fr 1fr; gap:.5rem; }
-    @media(max-width:640px) { .asset-overlay { padding:0; } .asset-panel { width:100%; height:100dvh; border:0; border-radius:0; } .asset-header { padding:.75rem 1rem 0; } }
+    @media(max-width:640px) { .asset-overlay { padding:0; } .asset-panel { width:100%; height:100dvh; border:0; border-radius:0; } .asset-header { padding:.75rem .75rem 0; } }
 </style>

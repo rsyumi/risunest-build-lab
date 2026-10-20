@@ -25,6 +25,7 @@ struct Session {
     identity: Option<Vec<u8>>,
     dependencies: Option<Dependencies>,
     fresh_after: Instant,
+    clock_refresh_attempted: bool,
     cancel: Cancellation,
     /// Ids of the receive pages the last listing produced, in order.
     receive_pages: VecDeque<String>,
@@ -37,6 +38,7 @@ impl Session {
             identity: None,
             dependencies: None,
             fresh_after: Instant::now(),
+            clock_refresh_attempted: false,
             cancel: Cancellation::default(),
             receive_pages: VecDeque::new(),
         }
@@ -171,37 +173,51 @@ async fn connect_with(
 }
 async fn open(app: &AppHandle, id: &str, session: &mut Session) -> Result<()> {
     connect(app, id, session).await?;
+    session.clock_refresh_attempted = false;
     admit_clock(session).await
 }
 async fn admit_clock(session: &mut Session) -> Result<()> {
     let engine = session.engine.as_mut().ok_or_else(lww_segment::corrupt)?;
-    if engine.admitted_upper().is_err() {
-        let requests = &session
-            .dependencies
-            .as_ref()
-            .ok_or_else(lww_segment::corrupt)?
-            .requests;
-        let mut sample =
-            requests.clock_sample_after(&engine.repository.account, session.fresh_after)?
-                .filter(|sample| sample.observed_at.elapsed() <= std::time::Duration::from_secs(15 * 60));
-        if sample.is_none() {
-            session.fresh_after = Instant::now();
-            engine
-                .provider
-                .list_objects(
-                    &engine.repository,
-                    Collection::Segments,
-                    None,
-                    1,
-                    &session.cancel,
-                )
-                .await?;
-            sample =
-                requests.clock_sample_after(&engine.repository.account, session.fresh_after)?;
-        }
-        engine.admit(&sample.ok_or_else(|| ProviderError::new(ErrorKind::ClockSkew))?)?;
+    if engine.admitted_upper().is_ok() {
+        return Ok(());
     }
-    Ok(())
+    let requests = &session.dependencies.as_ref().ok_or_else(lww_segment::corrupt)?.requests;
+    let cached = requests.require_clock_sample_after(&engine.repository.account, session.fresh_after)
+        .and_then(|sample| { engine.admit(&sample)?; engine.admitted_upper().map(|_| ()) });
+    match cached {
+        Ok(()) => return Ok(()),
+        Err(error) if error.kind != ErrorKind::ClockSkew => return Err(error),
+        Err(_) => {}
+    }
+    refresh_clock(session).await
+}
+async fn refresh_clock(session: &mut Session) -> Result<()> {
+    session.cancel.check()?;
+    session.clock_refresh_attempted = true;
+    let engine = session.engine.as_mut().ok_or_else(lww_segment::corrupt)?;
+    let requests = &session.dependencies.as_ref().ok_or_else(lww_segment::corrupt)?.requests;
+    engine.invalidate_clock();
+    session.fresh_after = Instant::now();
+    let refreshed = async {
+        engine.provider.list_objects(&engine.repository, Collection::Segments, None, 1, &session.cancel).await?;
+        let sample = requests.require_clock_sample_after(&engine.repository.account, session.fresh_after)?;
+        engine.admit(&sample)?;
+        engine.admitted_upper().map(|_| ())
+    }.await;
+    if refreshed.is_err() { engine.invalidate_clock(); }
+    refreshed.map_err(super::clock::after_refresh)
+}
+async fn retry_clock_failure(session: &mut Session, error: ProviderError) -> Result<()> {
+    if error.kind != ErrorKind::ClockSkew {
+        return Err(error);
+    }
+    if session.clock_refresh_attempted {
+        return Err(super::clock::after_refresh(error));
+    }
+    if session.engine.as_ref().ok_or_else(lww_segment::corrupt)?.admitted_upper().is_ok() {
+        return Err(error);
+    }
+    refresh_clock(session).await
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -388,14 +404,16 @@ pub(crate) async fn external_lww_stage_binding(
         {
             return Err(lww_segment::corrupt());
         }
-        let stage = session.progress.scope(engine
-            .stage_binding(
-                &mut store,
-                &request.request.header,
-                &request.inspection_id,
-                &session.cancel,
-            ))
-            .await?;
+        let stage = loop {
+            let engine = session.engine.as_ref().ok_or_else(lww_segment::corrupt)?;
+            let result = session.progress.scope(engine.stage_binding(
+                &mut store, &request.request.header, &request.inspection_id, &session.cancel,
+            )).await;
+            match result {
+                Ok(stage) => break stage,
+                Err(error) => retry_clock_failure(&mut session, error).await?,
+            }
+        };
         Ok(Staged {
             target_id: request.target_id,
             library_id: request.library_id,
@@ -434,14 +452,12 @@ pub(crate) async fn external_lww_publish(
                 .lww_finish_initial_publication(&request.header)
                 .map_err(runtime::local_error)?;
         }
-        let Session { engine, cancel, .. } = &mut *session;
         let result = publish_round(
-            engine.as_mut().ok_or_else(lww_segment::corrupt)?,
+            &mut session,
             &mut store,
             request.header.binding_authority,
             &request.generating,
             request.turn_limit,
-            cancel,
         )
         .await?;
         if result.segments.0 > 0 {
@@ -476,15 +492,12 @@ pub(crate) async fn external_lww_receive(
         let _progress = session.progress.begin(progress.map(|channel| channel.channel_on(webview)));
         open(&app, &request.connection_id, &mut session).await?;
         let mut store = check(&app, &request, true)?;
-        let Session { engine, receive_pages, cancel, .. } = &mut *session;
         let (page, _) = receive_page(
             &mut store,
-            engine.as_ref().ok_or_else(lww_segment::corrupt)?,
-            receive_pages,
+            &mut session,
             &context.checkpoints,
             request.header.binding_authority,
             request.complete_available,
-            cancel,
         )
         .await?;
         let own = store.lww_clock_state().map_err(runtime::local_error)?.writer_id;
@@ -506,16 +519,22 @@ fn record_sync_round(engine: &ExternalLwwEngine) {
 }
 
 async fn publish_round(
-    engine: &mut ExternalLwwEngine,
+    session: &mut Session,
     store: &mut crate::persistent_store::PersistentStore,
     authority: risunest_sync_wire::stamp::DecimalU64,
     generating: &[MessageLocator],
     turn_limit: Option<u32>,
-    cancel: &Cancellation,
 ) -> Result<PublicationResult> {
-    let result = engine.publish_limited(store, authority, generating, turn_limit, cancel).await?;
+    let mut result = PublicationResult::default();
+    loop {
+        let engine = session.engine.as_mut().ok_or_else(lww_segment::corrupt)?;
+        match engine.publish_accumulating(store, authority, generating, turn_limit, &session.cancel, &mut result).await {
+            Ok(()) => break,
+            Err(error) => retry_clock_failure(session, error).await?,
+        }
+    }
     if result.segments.0 > 0 {
-        record_sync_round(engine);
+        record_sync_round(session.engine.as_ref().ok_or_else(lww_segment::corrupt)?);
     }
     Ok(result)
 }
@@ -527,26 +546,34 @@ async fn publish_round(
 /// the sync time.
 async fn receive_page(
     store: &mut crate::persistent_store::PersistentStore,
-    engine: &ExternalLwwEngine,
-    queue: &mut VecDeque<String>,
+    session: &mut Session,
     checkpoints: &tokio::sync::Mutex<super::lww_compaction::CheckpointSummaries>,
     authority: risunest_sync_wire::stamp::DecimalU64,
     complete_available: bool,
-    cancel: &Cancellation,
 ) -> Result<(Option<StageReceive>, bool)> {
     let mut finished = 0;
-    let mut page = next_receive_page(store, queue, authority, &mut finished)?;
-    if page.is_none() && (finished == 0 || complete_available) {
-        *queue = engine.receive_requests_cached(store, authority, checkpoints, cancel).await?.into();
-        page = next_receive_page(store, queue, authority, &mut finished)?;
+    loop {
+        let Session { engine, receive_pages: queue, cancel, .. } = session;
+        let engine = engine.as_ref().ok_or_else(lww_segment::corrupt)?;
+        let result = async {
+            let mut page = next_receive_page(store, queue, authority, &mut finished)?;
+            if page.is_none() && (finished == 0 || complete_available) {
+                *queue = engine.receive_requests_cached(store, authority, checkpoints, cancel).await?.into();
+                page = next_receive_page(store, queue, authority, &mut finished)?;
+            }
+            if finished > 0 {
+                record_sync_round(engine);
+            }
+            if let Some(page) = &page {
+                ExternalLwwEngine::prepare_archive_bodies(store, page, cancel).await?;
+            }
+            Ok((page, finished > 0))
+        }.await;
+        match result {
+            Ok(value) => return Ok(value),
+            Err(error) => retry_clock_failure(session, error).await?,
+        }
     }
-    if finished > 0 {
-        record_sync_round(engine);
-    }
-    if let Some(page) = &page {
-        ExternalLwwEngine::prepare_archive_bodies(store, page, cancel).await?;
-    }
-    Ok((page, finished > 0))
 }
 
 /// The first unfinished page in `queue`, dropping finished ones and counting
@@ -584,9 +611,17 @@ pub(crate) async fn external_lww_maintenance(app:AppHandle,request:Request)->Res
 /// cancellation or an expired clock admission takes a fresh clock sample, and
 /// a changed connection or any failure connects again.
 async fn maintain(app:&AppHandle,request:&Request,context:&Context,session:&mut Session,cancel:&Cancellation)->Result<Option<serde_json::Value>> {
-    let root=runtime::root(app)?;
     session.use_cancellation(cancel);
     open(app,&request.connection_id,session).await?;
+    loop {
+        match maintain_round(app,request,context,session,cancel).await {
+            Ok(result)=>return Ok(result),
+            Err(error)=>retry_clock_failure(session,error).await?,
+        }
+    }
+}
+async fn maintain_round(app:&AppHandle,request:&Request,context:&Context,session:&Session,cancel:&Cancellation)->Result<Option<serde_json::Value>> {
+    let root=runtime::root(app)?;
     let mut store=check(app,request,true)?;
     let writer=store.lww_clock_state().map_err(runtime::local_error)?.writer_id;
     let engine=session.engine.as_ref().ok_or_else(lww_segment::corrupt)?;
@@ -902,7 +937,7 @@ mod tests {
             connect_with(root.path(), &stored, &mut session, open_fixture(&stored, &opens)).await.unwrap();
             let now = runtime::now_ms();
             let mut skewed = super::super::lww_engine::Admission::synthetic(now);
-            skewed.set_reading_for_test(now + 1001, 0);
+            skewed.set_reading_for_test(now + 5001, 0);
             session.engine.as_mut().unwrap().admission = Some(skewed);
             let cancel = session.cancel.clone();
             session.use_cancellation(&cancel);
@@ -1001,9 +1036,11 @@ mod tests {
             ConnectionStore::open(f.directory_a.path()).unwrap().insert(&sender).unwrap();
             ConnectionStore::open(f.directory_b.path()).unwrap().insert(&receiver).unwrap();
             let last_sync = |root: &std::path::Path, id: &str| ConnectionStore::open(root).unwrap().read(id).unwrap().last_sync_at_ms;
-            let cancel = Cancellation::default();
-
-            assert_eq!(publish_round(&mut f.sender, &mut f.a, DecimalU64(0), &[], None, &cancel).await.unwrap().segments.0, 0);
+            let mut sender = Session::new();
+            sender.engine = Some(f.sender);
+            let mut receiver = Session::new();
+            receiver.engine = Some(f.receiver);
+            assert_eq!(publish_round(&mut sender, &mut f.a, DecimalU64(0), &[], None).await.unwrap().segments.0, 0);
             assert_eq!(last_sync(f.directory_a.path(), "sender"), None);
             f.a.commit(&WorkingSetCommit {
                 expected_revision: f.a.revision().unwrap(),
@@ -1012,16 +1049,15 @@ mod tests {
                 }]),
                 ..Default::default()
             }).unwrap();
-            assert_eq!(publish_round(&mut f.sender, &mut f.a, DecimalU64(0), &[], None, &cancel).await.unwrap().segments.0, 1);
+            assert_eq!(publish_round(&mut sender, &mut f.a, DecimalU64(0), &[], None).await.unwrap().segments.0, 1);
             assert!(last_sync(f.directory_a.path(), "sender").is_some());
 
-            let mut queue = VecDeque::new();
             let checkpoints = Default::default();
-            let (page, recorded) = receive_page(&mut f.b, &f.receiver, &mut queue, &checkpoints, DecimalU64(0), false, &cancel).await.unwrap();
+            let (page, recorded) = receive_page(&mut f.b, &mut receiver, &checkpoints, DecimalU64(0), false).await.unwrap();
             let page = page.expect("the published segment is offered");
             assert!(!recorded);
             assert_eq!(last_sync(f.directory_b.path(), "receiver"), None);
-            let (unfinished, recorded) = receive_page(&mut f.b, &f.receiver, &mut queue, &checkpoints, DecimalU64(0), false, &cancel).await.unwrap();
+            let (unfinished, recorded) = receive_page(&mut f.b, &mut receiver, &checkpoints, DecimalU64(0), false).await.unwrap();
             assert_eq!(unfinished.map(|page| page.header.request_id), Some(page.header.request_id.clone()));
             assert!(!recorded);
             f.b.lww_stage_receive(&page).unwrap();
@@ -1034,12 +1070,12 @@ mod tests {
                 }]),
                 ..Default::default()
             }).unwrap();
-            publish_round(&mut f.sender, &mut f.a, DecimalU64(0), &[], None, &cancel).await.unwrap();
-            let (next, recorded) = receive_page(&mut f.b, &f.receiver, &mut queue, &checkpoints, DecimalU64(0), false, &cancel).await.unwrap();
+            publish_round(&mut sender, &mut f.a, DecimalU64(0), &[], None).await.unwrap();
+            let (next, recorded) = receive_page(&mut f.b, &mut receiver, &checkpoints, DecimalU64(0), false).await.unwrap();
             assert!(next.is_none());
             assert!(recorded);
             let recorded_at = last_sync(f.directory_b.path(), "receiver").expect("a finished page records the sync time");
-            let (following, recorded) = receive_page(&mut f.b, &f.receiver, &mut queue, &checkpoints, DecimalU64(0), false, &cancel).await.unwrap();
+            let (following, recorded) = receive_page(&mut f.b, &mut receiver, &checkpoints, DecimalU64(0), false).await.unwrap();
             assert!(following.is_some(), "the next round receives arrivals after the captured listing");
             assert!(!recorded);
             assert_eq!(last_sync(f.directory_b.path(), "receiver"), Some(recorded_at));
@@ -1059,14 +1095,14 @@ mod tests {
                 }]),
                 ..Default::default()
             }).unwrap();
-            publish_round(&mut f.sender, &mut f.a, DecimalU64(0), &[], None, &cancel).await.unwrap();
-            let (latest, recorded) = receive_page(&mut f.b, &f.receiver, &mut queue, &checkpoints, DecimalU64(0), true, &cancel).await.unwrap();
+            publish_round(&mut sender, &mut f.a, DecimalU64(0), &[], None).await.unwrap();
+            let (latest, recorded) = receive_page(&mut f.b, &mut receiver, &checkpoints, DecimalU64(0), true).await.unwrap();
             let latest = latest.expect("a complete receive lists again once the listed pages are finished");
             assert!(recorded);
             f.b.lww_stage_receive(&latest).unwrap();
             f.b.lww_apply_receive(&ApplyReceive { header: latest.header.clone(), generating: Vec::new() }).unwrap();
             f.b.lww_finish_receive(&latest.header).unwrap();
-            let (exhausted, recorded) = receive_page(&mut f.b, &f.receiver, &mut queue, &checkpoints, DecimalU64(0), true, &cancel).await.unwrap();
+            let (exhausted, recorded) = receive_page(&mut f.b, &mut receiver, &checkpoints, DecimalU64(0), true).await.unwrap();
             assert!(exhausted.is_none());
             assert!(recorded);
         });

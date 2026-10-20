@@ -80,6 +80,7 @@ pub fn issue_stamp(wall_ms: u64, writer_id: &str, last: Option<&Stamp>, observed
 }
 
 pub const MAX_CLOCK_SKEW_MS: u64 = 300_000;
+pub const MAX_CLOCK_DISCONTINUITY_MS: u64 = 5_000;
 pub const CLOCK_SAMPLE_LIFETIME_MS: u64 = 900_000;
 
 /// Times are captured around one successful, fresh target response.
@@ -105,12 +106,15 @@ impl ClockSample {
     pub fn admit(&self) -> Result<AdmittedClock> {
         if self.target_id.is_empty() || !self.successful || self.cached_or_aged { return Err(WireError("clock-sample-invalid")); }
         let elapsed = self.response_monotonic_ms.checked_sub(self.request_monotonic_ms).ok_or(WireError("clock-discontinuity"))?;
-        let wall_elapsed = self.response_wall_ms.checked_sub(self.request_wall_ms).ok_or(WireError("clock-discontinuity"))?;
-        if elapsed.abs_diff(wall_elapsed) > 1000 { return Err(WireError("clock-discontinuity")); }
-        let midpoint = self.request_wall_ms.checked_add(wall_elapsed / 2).ok_or(WireError("clock-overflow"))?;
+        let movement = i128::from(self.response_wall_ms) - i128::from(self.request_wall_ms) - i128::from(elapsed);
+        if movement.abs() > i128::from(MAX_CLOCK_DISCONTINUITY_MS) { return Err(WireError("clock-discontinuity")); }
+        let midpoint = (i128::from(self.request_wall_ms) + i128::from(self.response_wall_ms)) / 2;
         let uncertainty = elapsed / 2 + elapsed % 2;
         let uncertainty = uncertainty.checked_add(self.precision_ms).ok_or(WireError("clock-overflow"))?;
-        if midpoint.abs_diff(self.target_ms).checked_add(uncertainty).ok_or(WireError("clock-overflow"))? > MAX_CLOCK_SKEW_MS {
+        // A local correction widens the offset proof, not the server-derived incoming bound.
+        let offset_bound = (midpoint - i128::from(self.target_ms)).abs()
+            + i128::from(uncertainty) + (movement.abs() + 1) / 2;
+        if offset_bound > i128::from(MAX_CLOCK_SKEW_MS) {
             return Err(WireError("clock-skew"));
         }
         Ok(AdmittedClock { target_id: self.target_id.clone(), sampled_monotonic_ms: self.response_monotonic_ms,

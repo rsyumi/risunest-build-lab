@@ -170,6 +170,41 @@ describe('mobile background task lifetime', () => {
         expect(bridge.end).toHaveBeenCalledExactlyOnceWith(id())
     })
 
+    it('begins a picker-first file operation hold only once its picker returns', async () => {
+        await expect(runSharedNativeFileOperation('import', 'synthetic-picker-cancel', async () => null, {
+            format: 'content', protectAfterPicker: true,
+        })).resolves.toBeNull()
+        expect(bridge.begin).not.toHaveBeenCalled()
+
+        const picker = deferred<void>()
+        const finish = deferred<void>()
+        let signal: AbortSignal | undefined
+        const writing = (completedBytes: number): NativeFileJobStatus => ({
+            jobId: 'synthetic', kind: 'export-dataset', state: 'running', phase: 'writing-export',
+            progress: { completedBytes, totalBytes: 100, completedItems: 0 },
+        })
+        const operation = runSharedNativeFileOperation('export', 'synthetic-dataset', async context => {
+            signal = context.signal
+            await picker.promise
+            context.protect()
+            context.protect()
+            context.onStatus(writing(25))
+            await finish.promise
+            if (context.signal.aborted) throw new DOMException('Native file job was cancelled', 'AbortError')
+        }, { format: 'dataset', protectAfterPicker: true })
+        await vi.waitFor(() => expect(signal).toBeDefined())
+        expect(bridge.begin).not.toHaveBeenCalled()
+        expect(hasMobileBackgroundTasks()).toBe(false)
+        picker.resolve()
+        await vi.waitFor(() => expect(bridge.progress).toHaveBeenCalledWith(id(), 25))
+        expect(bridge.begin).toHaveBeenCalledExactlyOnceWith(id(), 'export', false, true)
+        window.dispatchEvent(new CustomEvent('risunest-background-expired', { detail: id() }))
+        expect(signal?.aborted).toBe(true)
+        finish.resolve()
+        await expect(operation).rejects.toBeInstanceOf(BackgroundExecutionExpiredError)
+        expect(bridge.end).toHaveBeenCalledExactlyOnceWith(id())
+    })
+
     it('reports the current restore phase and clears completed source bytes while work remains', async () => {
         const copying = (stageCompleted: number, stageTotal?: number) => syntheticNativeFileJobStatus(
             { jobId: 'source', kind: 'restore-legacy-local-backup' }, 'copying-source',

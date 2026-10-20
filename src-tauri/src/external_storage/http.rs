@@ -339,6 +339,7 @@ fn has_cache_bypass(headers: &BTreeMap<String, String>) -> bool {
 #[derive(Clone, Debug)]
 pub(crate) struct HttpClockSample {
     pub date_ms: Option<u64>,
+    pub date_present: bool,
     pub local_before_ms: u64,
     pub local_after_ms: u64,
     pub round_trip_ms: u64,
@@ -351,22 +352,34 @@ pub(crate) struct HttpClockSample {
 }
 impl HttpClockSample {
     pub(crate) fn usable(&self) -> bool {
-        self.cache_bypass && !self.cache_hit && self.age_seconds.is_none_or(|age| age == 0)
-            && (200..300).contains(&self.http_status)
-            && self.date_ms.is_some_and(|date| clock_sample_within_five_minutes(
-                date, self.local_before_ms, self.local_after_ms, self.round_trip_ms,
-            ))
+        self.validate().is_ok()
+    }
+    pub(crate) fn validate(&self) -> Result<()> {
+        let reason = if self.date_ms.is_none() {
+            Some(if self.date_present { "date-invalid" } else { "date-missing" })
+        } else if self.cache_hit || self.age_seconds.is_some_and(|age| age > 0) {
+            Some("sample-cached")
+        } else if !self.cache_bypass {
+            Some("cache-policy-invalid")
+        } else if !(200..300).contains(&self.http_status) {
+            Some("sample-status")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            return Err(super::clock::failure("sample", reason, format_args!(
+                "http_status={} cache_bypass={} cache_hit={} age_seconds={} rtt_ms={}",
+                self.http_status, self.cache_bypass, self.cache_hit,
+                self.age_seconds.map_or_else(|| "none".into(), |age| age.to_string()), self.round_trip_ms)));
+        }
+        super::clock::validate_sample(self.date_ms.unwrap(), self.local_before_ms,
+            self.local_after_ms, self.round_trip_ms)
     }
 }
 
-pub(crate) fn clock_sample_within_five_minutes(date_ms: u64, local_before_ms: u64, local_after_ms: u64, rtt_ms: u64) -> bool {
-    if local_after_ms < local_before_ms { return false; }
-    let wall_elapsed = i128::from(local_after_ms - local_before_ms);
-    if (wall_elapsed - i128::from(rtt_ms)).abs() > 1_000 { return false; }
-    let local_mid = (i128::from(local_before_ms) + i128::from(local_after_ms)) / 2;
-    let server_mid = i128::from(date_ms) + 500;
-    let uncertainty = (i128::from(rtt_ms) + 1) / 2 + 500;
-    (server_mid - local_mid).abs() + uncertainty <= 5 * 60_000
+#[cfg(test)]
+fn clock_sample_within_five_minutes(date_ms: u64, local_before_ms: u64, local_after_ms: u64, rtt_ms: u64) -> bool {
+    super::clock::validate_sample(date_ms, local_before_ms, local_after_ms, rtt_ms).is_ok()
 }
 
 #[derive(Default)]
@@ -383,6 +396,17 @@ impl RequestState {
     pub fn clock_sample_after(&self, account: &AccountKey, not_before: Instant) -> Result<Option<HttpClockSample>> {
         let samples = self.samples.lock().map_err(|_| ProviderError::new(ErrorKind::Transient))?;
         Ok(samples.get(account).filter(|sample| sample.observed_at >= not_before && sample.usable()).cloned())
+    }
+    pub fn require_clock_sample_after(&self, account: &AccountKey, not_before: Instant) -> Result<HttpClockSample> {
+        let samples = self.samples.lock().map_err(|_| ProviderError::new(ErrorKind::Transient))?;
+        let sample = samples.get(account)
+            .ok_or_else(|| super::clock::failure("sample", "sample-missing", ""))?;
+        if sample.observed_at < not_before {
+            return Err(super::clock::failure("sample", "sample-expired",
+                format_args!("sample_age_ms={}", sample.observed_at.elapsed().as_millis())));
+        }
+        sample.validate()?;
+        Ok(sample.clone())
     }
     pub fn resolve_pending(&self, pending: &AccountKey, account: &AccountKey) -> Result<()> {
         self.backoff.resolve_pending(pending, account)?;
@@ -451,7 +475,8 @@ impl RequestState {
         let round_trip_ms = u64::try_from(observed_at.saturating_duration_since(started).as_millis()).unwrap_or(u64::MAX);
         let cache_bypass = bypass && (age_header.is_none() || age_seconds.is_some());
         let sample = HttpClockSample {
-            date_ms, local_before_ms: before, local_after_ms: after,
+            date_ms, date_present: header(&response.headers, "date").is_some(),
+            local_before_ms: before, local_after_ms: after,
             round_trip_ms, cache_bypass,
             age_seconds, cache_hit, http_status: response.status, observed_at,
         };
@@ -612,7 +637,8 @@ async fn dispatch_ready(
     };
     let retry_after = super::providers::common::retry_after_ms(&response.headers, after)
         .map(|until| Duration::from_millis(until.saturating_sub(after)));
-    if (200..300).contains(&response.status) && response.headers.get("content-type")
+    // Creation acknowledgements may contain HTML; 204 responses have no content.
+    if !matches!(response.status, 201 | 204) && (200..300).contains(&response.status) && response.headers.get("content-type")
         .is_some_and(|value| value.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("text/html")) {
         return Err(super::providers::common::error(ErrorKind::EndpointRejected, response.status)
             .caused("The server returned an HTML page instead of storage data (Content-Type: text/html)"));
@@ -841,10 +867,37 @@ mod tests {
         assert!(clock_sample_within_five_minutes(1_000_000, 1_000_000, 1_000_100, 100));
         assert!(clock_sample_within_five_minutes(299_000, 0, 0, 0));
         assert!(!clock_sample_within_five_minutes(299_001, 0, 0, 0));
-        assert!(!clock_sample_within_five_minutes(0, 10, 9, 0));
-        assert!(!clock_sample_within_five_minutes(0, 0, 1001, 0));
+        assert!(clock_sample_within_five_minutes(0, 10, 9, 0));
+        assert!(clock_sample_within_five_minutes(0, 0, 1001, 0));
         assert!(!clock_sample_within_five_minutes(300_000, 0, 600_001, 600_001));
         assert!(clock_sample_within_five_minutes(u64::MAX, u64::MAX, u64::MAX, 0));
+        let base = 1_700_000_000_000_u64;
+        for offset in [-539_i64, 539] {
+            for phase in [0, 499, 999] {
+                for rtt in [0, 100, 800] {
+                    let before = (base as i64 + phase as i64 + offset) as u64;
+                    let date = base + (phase + rtt / 2) / 1000 * 1000;
+                    assert!(clock_sample_within_five_minutes(date, before, before + rtt, rtt));
+                }
+            }
+        }
+        for delta in [-5001_i64, -5000, -4999, -539, 539, 4999, 5000, 5001] {
+            let before = base + 20_000;
+            let after = (before as i64 + 100 + delta) as u64;
+            let result = super::super::clock::validate_sample(base, before, after, 100);
+            assert_eq!(result.is_ok(), delta.abs() <= 5000, "{delta}");
+            if let Err(error) = result {
+                let detail = error.cause.0.unwrap();
+                assert!(detail.contains("reason=wall-clock-jump"));
+                assert!(detail.contains(&format!("delta_ms={delta}")));
+                assert!(detail.contains("limit_ms=5000"));
+            }
+        }
+        for (before, after) in [(299_000, 300_000), (300_000, 299_000)] {
+            assert!(clock_sample_within_five_minutes(base, base + before, base + after, 0));
+            let error = super::super::clock::validate_sample(base, base + before + 1, base + after + 1, 0).unwrap_err();
+            assert!(error.cause.0.unwrap().contains("reason=server-offset"));
+        }
     }
 
     #[test]
@@ -854,24 +907,36 @@ mod tests {
         let started = Instant::now();
         let now = 1_700_000_000_000;
         let date = httpdate::fmt_http_date(std::time::UNIX_EPOCH + Duration::from_millis(now));
-        for (status, extra, bypass) in [
-            (200, Some(("age", "1")), true), (200, Some(("age", "invalid")), true),
-            (200, Some(("x-cache", "HIT")), true), (200, Some(("cf-cache-status", "REVALIDATED")), true),
-            (304, None, true), (403, None, true), (200, None, false),
+        for (status, extra, bypass, reason) in [
+            (200, Some(("age", "1")), true, "sample-cached"), (200, Some(("age", "invalid")), true, "cache-policy-invalid"),
+            (200, Some(("x-cache", "HIT")), true, "sample-cached"), (200, Some(("cf-cache-status", "REVALIDATED")), true, "sample-cached"),
+            (304, None, true, "sample-status"), (403, None, true, "sample-status"), (200, None, false, "cache-policy-invalid"),
         ] {
             let mut headers = BTreeMap::from([("date".into(), date.clone())]);
             if let Some((key, value)) = extra { headers.insert(key.into(), value.into()); }
             let response = HttpResponse { status, headers, body: Box::pin(std::io::Cursor::new(Vec::new())) };
             state.observe(&account, &response, bypass, now, now, started, Instant::now()).unwrap();
             assert!(state.clock_sample_after(&account, started).unwrap().is_none());
+            let error = state.require_clock_sample_after(&account, started).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::ClockSkew);
+            assert!(error.cause.0.unwrap().contains(&format!("reason={reason}")));
         }
         let mut response = HttpResponse { status: 200, headers: BTreeMap::new(), body: Box::pin(std::io::Cursor::new(Vec::new())) };
         state.observe(&account, &response, true, now, now, started, Instant::now()).unwrap();
         assert!(state.clock_sample_after(&account, started).unwrap().is_none());
+        assert!(state.require_clock_sample_after(&account, started).unwrap_err().cause.0.unwrap().contains("reason=date-missing"));
+        response.headers.insert("date".into(), "synthetic-private-invalid-date".into());
+        state.observe(&account, &response, true, now, now, started, Instant::now()).unwrap();
+        let error = state.require_clock_sample_after(&account, started).unwrap_err();
+        let detail = error.cause.0.unwrap();
+        assert!(detail.contains("reason=date-invalid"));
+        assert!(!detail.contains("synthetic-private"));
         response.headers.insert("date".into(), date);
         state.observe(&account, &response, true, now, now, started, Instant::now()).unwrap();
         assert!(state.clock_sample_after(&account, started).unwrap().is_some());
         assert!(state.clock_sample_after(&account, Instant::now() + Duration::from_millis(1)).unwrap().is_none());
+        assert!(state.require_clock_sample_after(&account, Instant::now() + Duration::from_millis(1))
+            .unwrap_err().cause.0.unwrap().contains("reason=sample-expired"));
     }
 
     #[test]
@@ -1040,11 +1105,11 @@ mod tests {
             std::task::Poll::Ready(Ok(()))
         }
     }
-    struct SyntheticResponse { html: bool }
+    struct SyntheticResponse { status: u16, html: bool }
     impl HttpTransport for SyntheticResponse {
         fn send<'a>(&'a self, _: HttpRequest, _: &'a Cancellation) -> ProviderFuture<'a, HttpResponse> {
             Box::pin(async move { Ok(HttpResponse {
-                status: 200,
+                status: self.status,
                 headers: if self.html { BTreeMap::from([("content-type".into(), "text/html; charset=utf-8".into())]) } else { BTreeMap::new() },
                 body: Box::pin(SlowResponseBody { wait: Box::pin(tokio::time::sleep(Duration::from_secs(50))) }),
             }) })
@@ -1058,13 +1123,15 @@ mod tests {
             let cancel = Cancellation::default();
             let mut download = request("onedrive", "synthetic");
             download.operation = ProviderOperation::DownloadUrl;
-            let mut response = dispatch_ready(&SyntheticResponse { html: false }, &boundary, &RequestState::default(), download, &cancel, Some(Instant::now() + CONTROL_REQUEST_TIMEOUT)).await.unwrap();
+            let mut response = dispatch_ready(&SyntheticResponse { status: 200, html: false }, &boundary, &RequestState::default(), download, &cancel, Some(Instant::now() + CONTROL_REQUEST_TIMEOUT)).await.unwrap();
             for _ in 0..6 {
                 assert_eq!(response.body.read(&mut [0]).await.unwrap(), 1);
             }
-            let error = dispatch_ready(&SyntheticResponse { html: true }, &boundary, &RequestState::default(), request("webdav", "synthetic"), &cancel, None).await.err().unwrap();
-            assert_eq!(error.kind, ErrorKind::EndpointRejected);
-            assert_eq!(error.http_status, Some(200));
+            for status in [200, 206] {
+                let error = dispatch_ready(&SyntheticResponse { status, html: true }, &boundary, &RequestState::default(), request("webdav", "synthetic"), &cancel, None).await.err().unwrap();
+                assert_eq!(error.kind, ErrorKind::EndpointRejected);
+                assert_eq!(error.http_status, Some(status));
+            }
         });
     }
     #[test]

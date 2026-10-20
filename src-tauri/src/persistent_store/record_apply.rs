@@ -625,18 +625,7 @@ pub(super) fn apply_record_rows(
                 ..
             },
         ) => {
-            transaction
-                .execute(
-                    "DELETE FROM messages WHERE generation = ?1 AND character_id = ?2",
-                    params![generation, character_id],
-                )
-                .map_err(sql_error)?;
-            transaction
-                .execute(
-                    "DELETE FROM conversations WHERE generation = ?1 AND character_id = ?2",
-                    params![generation, character_id],
-                )
-                .map_err(sql_error)?;
+            super::commit::delete_character_contents(transaction, generation, character_id)?;
             let archived = super::archive::ArchivedObject {
                 shared_object_hash: shared_archive_object_hash.clone(),
                 object_hash: archive_object_hash.clone(),

@@ -43,16 +43,26 @@ fn limited_publish_settles_exact_uncertain_predecessor_and_retains_newer_edit() 
         assert!(pending.dispatched);
         set(&mut f.a, "new");
         f.restart_a();
-        let result = f.sender.publish_limited(&mut f.a, 0.into(), &[], Some(1), &cancel).await.unwrap();
+        let mut result = PublicationResult::default();
+        f.sender.publish_accumulating(&mut f.a, 0.into(), &[], Some(1), &cancel, &mut result).await.unwrap();
         assert_eq!(result.segments.0, 1);
         assert!(result.more);
         assert_eq!(f.provider.contents(&pending.object_id).unwrap(), bytes);
         assert_eq!(f.provider.upload_attempts(&pending.object_id), 1);
         assert_eq!(f.a.external_lww_next_sequence(&f.sender.target_scope(), &writer).unwrap(), 2);
         assert_eq!(f.a.lww_read_outbox(0.into(), 1).unwrap().entries.len(), 1);
-        let drained = f.sender.publish(&mut f.a, 0.into(), &[], &cancel).await.unwrap();
-        assert_eq!(drained.segments.0, 1);
-        assert!(!drained.more);
+        let first_bytes = result.bytes.0;
+        f.sender.invalidate_clock();
+        assert_eq!(f.sender.publish_accumulating(&mut f.a, 0.into(), &[], Some(2), &cancel, &mut result)
+            .await.unwrap_err().kind, ErrorKind::ClockSkew);
+        assert_eq!((result.segments.0, result.bytes.0), (1, first_bytes));
+        f.sender.admission = Some(Admission::synthetic(f.now_ms()));
+        f.sender.publish_accumulating(&mut f.a, 0.into(), &[], Some(2), &cancel, &mut result).await.unwrap();
+        assert_eq!(result.segments.0, 2);
+        assert!(result.bytes.0 > first_bytes);
+        assert!(!result.more);
+        assert_eq!(f.provider.contents(&pending.object_id).unwrap(), bytes);
+        assert_eq!(f.provider.upload_attempts(&pending.object_id), 1);
         f.receive_b().await;
         assert_eq!(f.b.read_root(None).unwrap().value["language"], "new");
     });
@@ -129,6 +139,10 @@ fn only_held_segments_still_fail_clock_admission_without_progress() {
         f.provider.seed(&segment_object_id(writer, seq, &segment::digest(&sealed)).unwrap(), ObjectRole::Segment, sealed);
         let error = f.receiver.receive_requests_limited(&mut f.b, 0.into(), &Default::default(), 1, &Cancellation::default()).await.unwrap_err();
         assert_eq!(error.kind, ErrorKind::ClockSkew);
+        let detail = error.cause.0.as_deref().unwrap();
+        assert!(detail.starts_with("stage=receive reason=future-change excess_ms="));
+        assert!(detail.rsplit_once('=').unwrap().1.parse::<u64>().unwrap() > 0);
+        assert!(!detail.contains(writer));
         assert!(f.b.lww_receive_progress(0.into()).unwrap().is_empty());
     });
 }

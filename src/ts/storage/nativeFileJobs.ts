@@ -556,6 +556,8 @@ export interface NativeFileJobOptions {
     signal?: AbortSignal
     pollIntervalMs?: number
     onStatus?(status: NativeFileJobStatus): void
+    /** Called when an export's destination has been chosen, before the export work starts. */
+    onDestinationChosen?(): void
 }
 
 export interface PreparedNativeContentActivationLifecycle {
@@ -2252,6 +2254,7 @@ async function runNativeManagedExport(
     const run = (signal = options.signal) =>
         runNativeManagedExportToDestination(spec, { ...options, signal }, dependencies, reservation)
     // The destination is chosen by now, so the picker never holds the background task.
+    options.onDestinationChosen?.()
     const work = () => spec.holdsBackground && dependencies.holdExport ? dependencies.holdExport(run, options.signal) : run()
     return owned ? withAndroidSafDestination(reservation, work) : work()
 }
@@ -2654,6 +2657,7 @@ export async function runNativeArchiveExport(
         ? await dependencies.reserveAndroidDestination?.(destination.suggestedName, 'risuSave', options.signal)
         : undefined
     if (destination.type === 'androidSaf' && !reservation) throw new NativeFileJobError('unsupported', 'Android SAF destination reservation is unavailable')
+    options.onDestinationChosen?.()
     return withAndroidSafDestination(reservation, () =>
         withPausedNativeExport(runtime, 'native-portable-export', options,
             (revision, observed) => runNativeArchiveExportAtRevision(runtime, revision, destination, selection, {...options, ...observed}, dependencies, reservation)))

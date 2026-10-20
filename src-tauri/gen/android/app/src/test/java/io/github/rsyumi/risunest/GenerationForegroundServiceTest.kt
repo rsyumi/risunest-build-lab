@@ -190,28 +190,49 @@ class GenerationForegroundServiceTest {
   }
 
   @Test
-  fun `every document clears previous holds before the already ready early return`() {
-    val source = File("src/main/java/io/github/rsyumi/risunest/MainActivity.kt").readText()
-    val ready = source.substringAfter("private fun onFrontendReady() {").substringBefore("private suspend fun dispatchControl")
-    val reset = ready.indexOf("GenerationForegroundService.stopAll(this)")
-    assertTrue(reset >= 0)
-    assertTrue(reset < ready.indexOf("if (!frontendReady.markReady()) return"))
-
+  fun `new documents clear previous holds while repeated readiness preserves current work`() {
     val host = Hosted()
+    val ready = AndroidFrontendReady()
+    val documents = AndroidDocumentReadyGate()
+    fun announce(document: Any): Boolean {
+      if (!documents.admit(document)) return false
+      return ready.onDocumentReady {
+        host.registry.clearAll()
+        host.lifecycle.stopAll { host.stops++; true }
+      }
+    }
+    val first = Any()
+    val next = Any()
     host.begin(taskId(1), "sync", deferred = true)
     host.begin(taskId(2), "backup")
-    host.registry.clearAll()
-    host.lifecycle.stopAll { host.stops++; true }
+    assertTrue(announce(first))
+    assertTrue(ready.isReady)
+    assertTrue(host.registry.snapshot().isEmpty())
+    assertEquals(1, host.stops)
     host.registry.promote(host.start)
     host.registry.demote(host.stop)
     host.registry.promote(host.start)
     assertEquals(1, host.starts)
-    assertTrue(host.registry.snapshot().isEmpty())
     assertFalse(host.end(taskId(1)))
+
     host.begin(taskId(3), "sync", deferred = true)
+    assertFalse(announce(first))
     assertEquals(2, host.starts)
+    assertEquals(1, host.stops)
     assertEquals(listOf(BackgroundTaskStatus("sync")), host.registry.snapshot())
-    assertTrue(host.end(taskId(3)))
+
+    assertFalse(announce(next))
+    assertTrue(ready.isReady)
+    assertTrue(host.registry.snapshot().isEmpty())
+    assertEquals(2, host.stops)
+    assertFalse(host.end(taskId(3)))
+    host.begin(taskId(4), "backup")
+    assertFalse(announce(first))
+    assertFalse(announce(next))
+    assertEquals(3, host.starts)
+    assertEquals(2, host.stops)
+    assertEquals(listOf(BackgroundTaskStatus("backup")), host.registry.snapshot())
+    assertTrue(host.end(taskId(4)))
   }
 
   @Test

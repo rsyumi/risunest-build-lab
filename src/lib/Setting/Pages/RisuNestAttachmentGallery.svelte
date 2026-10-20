@@ -377,9 +377,9 @@
     <div class="attachment-toolbar" data-gallery-toolbar>
         {#if selected.size}
             <GalleryToolbar selectedCount={selected.size} {total} onselectall={selectAll} onclear={clearSelection}>
-                {#if isTauri}<button class="g-button" disabled={disabled || downloadRunning} onclick={() => download([...selected])}>{text.download}</button>{/if}
-                <button class="g-button" disabled={disabled} onclick={optimize}>{text.optimize}</button>
-                <button class="g-button danger" disabled={disabled} onclick={() => remove([...selected])}>{text.remove}</button>
+                {#if isTauri}<button class="g-button small" disabled={disabled || downloadRunning} onclick={() => download([...selected])}>{text.download}</button>{/if}
+                <button class="g-button small" disabled={disabled} onclick={optimize}>{text.optimize}</button>
+                <button class="g-button small danger" disabled={disabled} onclick={() => remove([...selected])}>{text.remove}</button>
             </GalleryToolbar>
         {:else}
             <div class="g-toolbar attachment-filters">

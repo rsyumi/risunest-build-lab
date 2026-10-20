@@ -200,14 +200,18 @@ async function runWithTask<T>(
         success = !task.signal?.aborted && result !== null
         return result
     } catch (error) {
-        if (signal?.aborted && isBackgroundExpiryReason(error)) {
-            throw new DOMException('Operation cancelled', 'AbortError')
-        }
-        if (error instanceof Error && error.name === 'AbortError' && task.expired?.() && !signal?.aborted) {
-            throw new BackgroundExecutionExpiredError()
-        }
-        throw error
+        throw heldOperationError(error, task, signal)
     } finally { await task.dispose(success) }
+}
+
+function heldOperationError(error: unknown, task: MobileBackgroundTask | undefined, signal?: AbortSignal): unknown {
+    if (signal?.aborted && isBackgroundExpiryReason(error)) {
+        return new DOMException('Operation cancelled', 'AbortError')
+    }
+    if (error instanceof Error && error.name === 'AbortError' && task?.expired?.() && !signal?.aborted) {
+        return new BackgroundExecutionExpiredError()
+    }
+    return error
 }
 
 export function runWithMobileBackgroundTask<T>(
@@ -227,4 +231,57 @@ export function runWithDeferredMobileBackgroundTask<T>(
 ): Promise<T> {
     if (!isTauriAndroid && !isTauriIOS) return operation({ signal, progress() {}, async dispose() {} })
     return runWithTask(beginDeferredMobileBackgroundTask(kind, signal), operation, signal)
+}
+
+export interface MobileBackgroundTaskAfterPicker extends MobileBackgroundTask {
+    /** Begins the hold once the picker has returned; later calls do nothing. */
+    protect(): void
+}
+
+/**
+ * Runs user-started work that opens a system picker first, so the picker never holds a task or shows the
+ * Android notification. The work's signal also ends when the hold it began expires.
+ */
+export async function runWithMobileBackgroundTaskAfterPicker<T>(
+    kind: MobileTaskKind,
+    operation: (task: MobileBackgroundTaskAfterPicker) => Promise<T>,
+    signal?: AbortSignal,
+): Promise<T> {
+    if (!isTauriAndroid && !isTauriIOS) return operation({ signal, progress() {}, async dispose() {}, protect() {} })
+    const controller = new AbortController()
+    const follow = (source: AbortSignal | undefined) => {
+        if (source?.aborted) controller.abort(source.reason)
+        else source?.addEventListener('abort', () => controller.abort(source.reason), { once: true })
+    }
+    follow(signal)
+    let task: MobileBackgroundTask | undefined
+    let begun: Promise<void> | undefined
+    let reported: number | null | undefined
+    let success = false
+    try {
+        const result = await operation({
+            signal: controller.signal,
+            progress: percent => {
+                reported = percent
+                task?.progress(percent)
+            },
+            async dispose() {},
+            protect() {
+                begun ??= Promise.resolve(beginMobileBackgroundTask(kind, signal, true)).then(held => {
+                    task = held
+                    follow(held.signal)
+                    // Progress reported while native admitted the hold reaches it now.
+                    if (reported !== undefined) held.progress(reported)
+                })
+            },
+        })
+        success = !controller.signal.aborted && result !== null
+        return result
+    } catch (error) {
+        await begun
+        throw heldOperationError(error, task, signal)
+    } finally {
+        await begun
+        await task?.dispose(success)
+    }
 }

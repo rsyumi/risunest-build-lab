@@ -1955,6 +1955,12 @@ fn forbidden_with_large_server_clock_difference_reports_clock_skew() {
                     provider.list_objects(&handle, Collection::Snapshots, None, 30, &Cancellation::default()).await.err().unwrap()
                 };
                 assert_eq!(error.kind, expected);
+                if expected == ErrorKind::ClockSkew {
+                    use crate::native_log::CommandFailure;
+                    assert_eq!(error.detail().as_deref(), Some(
+                        "stage=provider reason=server-offset offset_ms=1200000 limit_ms=840000; http 403"));
+                    assert_eq!(error.http_status, Some(403));
+                }
                 if head { assert_eq!(header(&server.requests.lock().unwrap()[1], "x-amz-checksum-mode").as_deref(), Some("ENABLED")); }
             }
         }

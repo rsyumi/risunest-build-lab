@@ -1174,26 +1174,33 @@ fn invalid_snapshot_candidates_preserve_current_data_and_operation_state() {
 
 #[test]
 fn exact_schema_snapshot_with_forged_message_cache_is_rejected_before_activation() {
-    let (_directory, mut store, _) = open_fixture();
-    for table in ["messages", "message_page_manifests", "message_page_indexes", "message_page_proofs", "message_page_verified_objects"] {
-        let count:i64=store.connection.query_row(&format!("SELECT COUNT(*) FROM {table}"),[],|r|r.get(0)).unwrap();
-        assert!(count>0,"fixture must contain actual {table} before forgery");
+    for forged_hash in [true, false] {
+        let (_directory, mut store, _) = open_fixture();
+        for table in ["messages", "message_page_manifests", "message_page_indexes", "message_page_proofs", "message_page_verified_objects"] {
+            let count:i64=store.connection.query_row(&format!("SELECT COUNT(*) FROM {table}"),[],|r|r.get(0)).unwrap();
+            assert!(count>0,"fixture must contain actual {table} before forgery");
+        }
+        if forged_hash {
+            store.connection.execute("UPDATE messages SET canonical_hash=?1,canonical_size=1",["0".repeat(64)]).unwrap();
+        } else {
+            store.connection.execute("UPDATE messages SET value=json_set(value,'$.data','changed synthetic message'),canonical_hash='',canonical_size=0",[]).unwrap();
+        }
+        let snapshot = store.snapshot_create("forged-cache").unwrap();
+        store.commit(&WorkingSetCommit {
+            root: Some(json!({"username":"keep-current"})),
+            ..empty_working_set_commit(1)
+        }).unwrap();
+        let revision = store.revision().unwrap();
+        let clock = serde_json::to_value(store.lww_clock_state().unwrap()).unwrap();
+        let generation = active_generation(&store.connection).unwrap();
+        let error = store.snapshot_restore_stage(&snapshot.id,"forged-snapshot").unwrap_err();
+        let expected = if forged_hash { "identity mismatch" } else { "copied message manifest differs from native messages" };
+        assert!(error.to_string().contains(expected), "{error}");
+        assert_eq!(store.read_root(None).unwrap().value["username"],"keep-current");
+        assert_eq!(store.revision().unwrap(),revision);
+        assert_eq!(active_generation(&store.connection).unwrap(),generation);
+        assert_eq!(serde_json::to_value(store.lww_clock_state().unwrap()).unwrap(),clock);
     }
-    store.connection.execute("UPDATE messages SET canonical_hash=?1,canonical_size=1",["0".repeat(64)]).unwrap();
-    let snapshot = store.snapshot_create("forged-cache").unwrap();
-    store.commit(&WorkingSetCommit {
-        root: Some(json!({"username":"keep-current"})),
-        ..empty_working_set_commit(1)
-    }).unwrap();
-    let revision = store.revision().unwrap();
-    let clock = serde_json::to_value(store.lww_clock_state().unwrap()).unwrap();
-    let generation = active_generation(&store.connection).unwrap();
-    let error = store.snapshot_restore_stage(&snapshot.id,"forged-snapshot").unwrap_err();
-    assert!(error.to_string().contains("identity mismatch"));
-    assert_eq!(store.read_root(None).unwrap().value["username"],"keep-current");
-    assert_eq!(store.revision().unwrap(),revision);
-    assert_eq!(active_generation(&store.connection).unwrap(),generation);
-    assert_eq!(serde_json::to_value(store.lww_clock_state().unwrap()).unwrap(),clock);
 }
 
 #[test]
@@ -1216,23 +1223,54 @@ fn exact_schema_snapshot_with_forged_page_index_is_rejected_before_activation() 
 
 #[test]
 fn live_snapshot_restore_recertifies_then_reopens_without_replaying() {
-    let (directory, mut store, _) = open_fixture();
-    let snapshot = store.snapshot_create("manual").unwrap();
-    let stage = store.snapshot_restore_stage(&snapshot.id,"live-snapshot").unwrap();
-    let writer = store.lww_clock_state().unwrap().writer_id;
-    let authority = store.lww_binding_authority().unwrap();
-    let revision = store.revision().unwrap();
-    let activated = store.snapshot_restore_activate(&stage.staging_id,revision,authority.clone()).unwrap();
-    assert!(activated.revision>revision);
-    assert_eq!(store.lww_clock_state().unwrap().writer_id,writer);
-    assert_eq!(store.lww_binding_authority().unwrap(),authority);
-    let verified:i64 = store.connection.query_row("SELECT COUNT(*) FROM message_page_verified_objects",[],|r|r.get(0)).unwrap();
-    assert!(verified>0);
-    drop(store);
-    let mut reopened = PersistentStore::open(directory.path()).unwrap();
-    let replay = reopened.snapshot_restore_activate(&stage.staging_id,revision,authority).unwrap();
-    assert_eq!(replay.revision,activated.revision);
-    assert_eq!(reopened.revision().unwrap(),activated.revision);
-    assert_eq!(reopened.lww_clock_state().unwrap().writer_id,writer);
-    assert!(reopened.snapshot_list().unwrap().iter().all(|entry|entry.reason!="pre-restore"));
+    for legacy in ["none", "populated", "empty"] {
+        let (directory, mut store, _) = open_fixture();
+        if legacy != "none" {
+            if legacy == "empty" {
+                store.commit(&WorkingSetCommit {
+                    conversations: Some(vec![ConversationMutation::ReplaceRange {
+                        character_id: "char-a".into(), conversation_id: "conv-short".into(),
+                        start: 0, delete_count: 2, messages: vec![],
+                        conversation: None, configured_index: None,
+                    }]),
+                    ..empty_working_set_commit(store.revision().unwrap())
+                }).unwrap();
+            }
+            // Preserve the derived rows that released versions left behind after deletion.
+            store.connection.execute_batch("CREATE TEMP TABLE legacy_manifests AS
+                SELECT * FROM message_page_manifests WHERE character_id='char-a' AND conversation_id='conv-short';
+                CREATE TEMP TABLE legacy_indexes AS
+                SELECT * FROM message_page_indexes WHERE character_id='char-a' AND conversation_id='conv-short';").unwrap();
+            store.commit(&WorkingSetCommit {
+                conversations: Some(vec![ConversationMutation::Delete {
+                    character_id: "char-a".into(), conversation_id: "conv-short".into(),
+                }]),
+                ..empty_working_set_commit(store.revision().unwrap())
+            }).unwrap();
+            store.connection.execute_batch("INSERT OR REPLACE INTO message_page_manifests SELECT * FROM legacy_manifests;
+                INSERT OR REPLACE INTO message_page_indexes SELECT * FROM legacy_indexes;").unwrap();
+        }
+        let expected = store.materialize(None).unwrap();
+        let snapshot = store.snapshot_create("manual").unwrap();
+        let stage = store.snapshot_restore_stage(&snapshot.id,"live-snapshot")
+            .unwrap_or_else(|error| panic!("{legacy}: {error}"));
+        let writer = store.lww_clock_state().unwrap().writer_id;
+        let authority = store.lww_binding_authority().unwrap();
+        let revision = store.revision().unwrap();
+        let activated = store.snapshot_restore_activate(&stage.staging_id,revision,authority.clone()).unwrap();
+        assert!(activated.revision>revision);
+        assert_eq!(store.lww_clock_state().unwrap().writer_id,writer);
+        assert_eq!(store.lww_binding_authority().unwrap(),authority);
+        let verified:i64 = store.connection.query_row("SELECT COUNT(*) FROM message_page_verified_objects",[],|r|r.get(0)).unwrap();
+        assert!(verified>0);
+        assert_eq!(store.materialize(None).unwrap(),expected);
+        drop(store);
+        let mut reopened = PersistentStore::open(directory.path()).unwrap();
+        let replay = reopened.snapshot_restore_activate(&stage.staging_id,revision,authority).unwrap();
+        assert_eq!(replay.revision,activated.revision);
+        assert_eq!(reopened.revision().unwrap(),activated.revision);
+        assert_eq!(reopened.lww_clock_state().unwrap().writer_id,writer);
+        assert_eq!(reopened.materialize(None).unwrap(),expected);
+        assert!(reopened.snapshot_list().unwrap().iter().all(|entry|entry.reason!="pre-restore"));
+    }
 }

@@ -1082,14 +1082,7 @@ pub(super) fn archive_character_with_limit(
         },
         |transaction, generation, ()| {
             ensure_not_cancelled(is_cancelled)?;
-            transaction.execute(
-                "DELETE FROM messages WHERE generation = ?1 AND character_id = ?2",
-                params![generation, character_id],
-            )?;
-            transaction.execute(
-                "DELETE FROM conversations WHERE generation = ?1 AND character_id = ?2",
-                params![generation, character_id],
-            )?;
+            super::commit::delete_character_contents(transaction, generation, character_id)?;
             let updated = transaction.execute(
                 "UPDATE characters
                  SET detail = ?3, archived_object = ?4, conversation_count = 0

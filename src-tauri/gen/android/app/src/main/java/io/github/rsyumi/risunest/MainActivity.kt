@@ -1002,9 +1002,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
 
   private fun onFrontendReady() {
     val webView = lifecycleWebView ?: return
-    // Each document announces itself before registering its own background work.
-    GenerationForegroundService.stopAll(this)
-    if (!frontendReady.markReady()) return
+    if (!frontendReady.onDocumentReady { GenerationForegroundService.stopAll(this) }) return
     safScope.launch {
       val replay = withContext(Dispatchers.IO) {
         replayLegacyOpenedFiles(File(cacheDir, "opened_files"), deliveredLegacyPaths)

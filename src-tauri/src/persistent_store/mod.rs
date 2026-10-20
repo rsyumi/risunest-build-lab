@@ -1652,6 +1652,8 @@ impl PersistentStore {
                 params![active, "{}"],
             )?;
         }
+        let active = active_generation(&transaction)?;
+        message_pages::forget_orphaned_pages(&transaction, Some(&active))?;
         transaction.commit()?;
         export::sweep_abandoned(&snapshots_dir)?;
         #[cfg(feature = "native-kei-upload-pilot")]

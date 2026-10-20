@@ -27,7 +27,9 @@ export function importAndroidContentFromPicker(
                     sourceBytes = file.bytes
                     context.setSource({ name: displayName, bytes: file.bytes })
                 },
-                onProgress: (progress) =>
+                onProgress: (progress) => {
+                    // Copying starts once the picker returns, so the copy is the first protected work.
+                    context.protect()
                     context.onStatus(
                         syntheticNativeFileJobStatus(
                             { kind: 'prepare-content-import' },
@@ -38,9 +40,11 @@ export function importAndroidContentFromPicker(
                                 stageTotal: progress.totalBytes ?? undefined,
                             },
                         ),
-                    ),
+                    )
+                },
             })
             if (!source || source.type !== 'androidSpool') return null
+            context.protect()
             return consumeAndroidContentSpool(
                 {
                     token: source.token,
@@ -52,7 +56,7 @@ export function importAndroidContentFromPicker(
                 context,
             )
         },
-        { presentation: 'dialog', format: 'content' },
+        { presentation: 'dialog', format: 'content', protectAfterPicker: true },
     )
 }
 

@@ -2392,7 +2392,7 @@ export const languageKorean = {
             inventoryEmpty: '저장된 첨부 파일이 없습니다',
             inventoryLoadFailed: '저장된 첨부 파일을 불러오지 못했습니다.',
             inventoryImages: '이미지',
-            inventoryOthers: '소리·영상·서명',
+            inventoryOthers: '오디오·비디오·서명',
             inventoryExtension: '확장자',
             inventoryCount: '개수',
             inventorySize: '용량',

@@ -421,7 +421,13 @@ fn create_refuses_an_occupied_root_and_existing_requires_the_descriptor_collecti
 fn create_builds_the_root_and_every_role_collection_without_touching_ancestors() {
     runtime().block_on(async {
         let mut replies = vec![reply(404, &[], b"")];
-        replies.extend((0..9).map(|_| reply(201, &[], b"")));
+        replies.extend((0..9).map(|_| {
+            reply(
+                201,
+                &[("Content-Type", "text/html; charset=ISO-8859-1")],
+                b"<html><body>Collection created.</body></html>",
+            )
+        }));
         let harness = Harness::start(replies);
         harness.open(OpenMode::Create).await.unwrap();
         assert_eq!(harness.count(), 10);
@@ -588,7 +594,14 @@ fn immutable_create_converges_on_retry_and_refuses_a_different_length() {
         );
         let harness = Harness::start(vec![
             established_root(),
-            reply(201, &[("ETag", "\"pack-v1\"")], b""),
+            reply(
+                201,
+                &[
+                    ("ETag", "\"pack-v1\""),
+                    ("Content-Type", "text/html; charset=ISO-8859-1"),
+                ],
+                b"<html><body>Resource created.</body></html>",
+            ),
             reply(412, &[], b""),
             multistatus_reply(&[object_response(&object, 512, Some("\"pack-v1\""))]),
             reply(200, &[("ETag", "\"pack-v1\"")], &bytes),
@@ -820,10 +833,22 @@ fn head_writes_send_one_conditional_request_and_read_back_the_same_bytes() {
         let head_path = format!("{}/head", encoded_root());
         let harness = Harness::start(vec![
             established_root(),
-            reply(201, &[("ETag", "\"head-1\"")], b""),
+            reply(
+                201,
+                &[
+                    ("ETag", "\"head-1\""),
+                    ("Content-Type", "text/html; charset=UTF-8"),
+                ],
+                b"",
+            ),
             reply(412, &[], b""),
             reply(204, &[("ETag", "\"head-2\"")], b""),
             reply(200, &[("ETag", "\"head-2\"")], head().as_bytes()),
+            reply(
+                200,
+                &[("Content-Type", "text/html; charset=UTF-8")],
+                b"<html><body>Sign in</body></html>",
+            ),
         ]);
         let repository = harness.opened().await;
         let target = locator(&repository, None, HEAD_OBJECT);
@@ -901,7 +926,15 @@ fn head_writes_send_one_conditional_request_and_read_back_the_same_bytes() {
             risunest_sync_wire::hash(head().as_bytes())
         );
         assert!(staging.is_verified());
-        assert_eq!(harness.count(), 5);
+
+        let rejected = harness
+            .provider
+            .replace_head(&repository, &target, &head(), &Cancellation::default())
+            .await
+            .unwrap_err();
+        assert_eq!(rejected.kind, ErrorKind::EndpointRejected);
+        assert_eq!(rejected.http_status, Some(200));
+        assert_eq!(harness.count(), 6);
     });
 }
 

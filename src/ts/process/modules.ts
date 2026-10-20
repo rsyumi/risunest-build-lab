@@ -315,15 +315,23 @@ export async function readModule(buf:Buffer):Promise<RisuModule> {
 }
 
 export async function importModule() {
-    if (isTauriIOS) {
-        const { importIOSContentFromPicker } = await import('../storage/iosContentPicker')
-        return await importIOSContentFromPicker('module')
-    }
-    if (isTauriAndroid) {
-        const { importAndroidContentFromPicker } = await import(
-            '../storage/androidContentPicker'
-        )
-        return await importAndroidContentFromPicker('module')
+    const callStartedAt = Date.now()
+    try {
+        if (isTauriIOS) {
+            const { importIOSContentFromPicker } = await import('../storage/iosContentPicker')
+            return await importIOSContentFromPicker('module')
+        }
+        if (isTauriAndroid) {
+            const { importAndroidContentFromPicker } = await import(
+                '../storage/androidContentPicker'
+            )
+            return await importAndroidContentFromPicker('module')
+        }
+    } catch (error) {
+        // The picker import shows how it ended, so only a failure to start is reported here.
+        const { presentFileOperationError } = await import('../storage/fileOperationErrorPresentation')
+        presentFileOperationError('import', error, callStartedAt)
+        return null
     }
     let desktopFile: { name: string; data: Uint8Array } | undefined
     if (isTauriDesktop) {
@@ -344,12 +352,15 @@ export async function importModule() {
                 displayName.split('.').at(-1)?.toLocaleLowerCase('en-US') ?? '',
             )
         ) {
+            const { fileOperationErrorWasPresented } = await import('../storage/fileOperationErrorPresentation')
             const result = await importDesktopNativeModulePath(
                 selected,
                 importPreparedNativeModuleContent,
                 {},
                 (error) => {
                     console.error(error)
+                    // The shared import dialog already shows a failure after the import started.
+                    if (fileOperationErrorWasPresented('import', callStartedAt)) return
                     alertError(error instanceof Error ? error : String(error))
                 },
             )

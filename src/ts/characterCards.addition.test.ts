@@ -162,8 +162,12 @@ import {
 import {
     dismissNativeFileOperationOutcome,
     nativeFileOperationOutcome,
+    NativeFileOperationBusyError,
+    runSharedNativeFileOperation,
     type NativeFileOperationOutcome,
 } from './storage/nativeFileJobManager'
+import { get } from 'svelte/store'
+import { language } from 'src/lang'
 
 describe('character card additions', () => {
     beforeEach(() => {
@@ -195,6 +199,23 @@ describe('character card additions', () => {
         expect(platform === 'ios' ? mocks.importIOS : mocks.importAndroid).toHaveBeenCalledWith('character')
         expect(platform === 'ios' ? mocks.importAndroid : mocks.importIOS).not.toHaveBeenCalled()
         expect(mocks.openDesktopPicker).not.toHaveBeenCalled()
+    })
+
+    it.each(['ios', 'android'] as const)('leaves a failed %s picker import to its dialog and reports a refused start', async platform => {
+        mocks.platform = platform
+        const picker = platform === 'ios' ? mocks.importIOS : mocks.importAndroid
+        dismissNativeFileOperationOutcome()
+        picker.mockImplementationOnce(() => runSharedNativeFileOperation('import', 'content-picker', async () => {
+            throw new Error('synthetic invalid card')
+        }, { presentation: 'dialog', format: 'content' }))
+        await expect(importCharacter()).resolves.toBeNull()
+        expect(get(nativeFileOperationOutcome)).toMatchObject({ kind: 'import', state: 'failed' })
+        expect(mocks.alertError).not.toHaveBeenCalled()
+
+        dismissNativeFileOperationOutcome()
+        picker.mockRejectedValueOnce(new NativeFileOperationBusyError())
+        await expect(importCharacter()).resolves.toBeNull()
+        expect(mocks.alertError).toHaveBeenCalledExactlyOnceWith(language.risuNest.backup.fileBusy)
     })
 
     it('commits a complete detached legacy card before returning its stable index', async () => {

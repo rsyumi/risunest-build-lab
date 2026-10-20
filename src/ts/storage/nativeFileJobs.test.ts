@@ -21,15 +21,16 @@ beforeEach(() => {
     startupPlugins.restart.mockReset().mockResolvedValue(undefined)
 })
 
-it.each(['failed', 'cancelled'])('selects the Android destination first and preserves a %s preparation when release fails', async outcome => {
+it.each(['failed', 'cancelled'])('selects the Android destination first, reports it before preparing, and preserves a %s preparation when release fails', async outcome => {
     const picker = androidSafReservationFixture()
     picker.failRelease()
     picker.bridge.reserveExport.mockImplementation(() => {})
     const failure = outcome === 'cancelled' ? new DOMException('cancelled', 'AbortError') : Object.assign(new Error('synthetic preparation failure'), {code: 'store-error'})
     const flushPendingData = vi.fn(async () => {throw failure})
     const invoke = vi.fn(async () => {throw new Error('No native job may start')})
+    const chosen = vi.fn()
     const exporting = runNativeCompatibleLocalBackupExport(
-        {revision: 3, flushPendingData}, 'risuai', {type: 'androidSaf', suggestedName: 'synthetic.bin'}, {},
+        {revision: 3, flushPendingData}, 'risuai', {type: 'androidSaf', suggestedName: 'synthetic.bin'}, {onDestinationChosen: chosen},
         {isTauri: () => true, invoke, wait: async () => {}, reserveAndroidDestination: picker.reserve,
             copyToAndroidSaf: async () => {throw new Error('No handoff exists')}},
     )
@@ -37,10 +38,13 @@ it.each(['failed', 'cancelled'])('selects the Android destination first and pres
     await vi.waitFor(() => expect(picker.bridge.reserveExport).toHaveBeenCalled())
     expect(flushPendingData).not.toHaveBeenCalled()
     expect(invoke).not.toHaveBeenCalled()
+    expect(chosen).not.toHaveBeenCalled()
     picker.select(picker.bridge.reserveExport.mock.calls[0][0])
     await rejected
     expect(failure).toMatchObject({warningCodes: ['partial-destination-may-remain']})
     expect(flushPendingData).toHaveBeenCalled()
+    expect(chosen).toHaveBeenCalledOnce()
+    expect(chosen.mock.invocationCallOrder[0]).toBeLessThan(flushPendingData.mock.invocationCallOrder[0])
     expect(invoke).not.toHaveBeenCalled()
     expect(picker.bridge.releaseExport).toHaveBeenCalled()
 })
@@ -81,16 +85,26 @@ it.each(['portable', 'block'] as const)('holds the write pause until the actual 
     await expect(operation).resolves.toEqual(result)
 })
 
-it('preserves portable archive preparation failure when the Android reservation release also fails', async () => {
+it('reports the chosen Android archive destination before capture and preserves capture failure when release also fails', async () => {
     const picker = androidSafReservationFixture()
     picker.failRelease()
+    picker.bridge.reserveExport.mockImplementation(() => {})
     const failure = Object.assign(new Error('capture failed'), {code: 'store-error'})
+    const chosen = vi.fn()
     const runtime = {...restoreRuntime(3), revision: 3, flushPendingData: async () => {},
-        withPausedPersistentWrites: async () => {throw failure}}
-    await expect(runNativeArchiveExport(runtime, {type: 'androidSaf', suggestedName: 'synthetic.risunest'},
-        {library: true, deviceSections: []}, {}, {isTauri: () => true, invoke: async () => {throw new Error('No job')},
+        withPausedPersistentWrites: async () => {
+            expect(chosen).toHaveBeenCalledOnce()
+            throw failure
+        }}
+    const exporting = runNativeArchiveExport(runtime, {type: 'androidSaf', suggestedName: 'synthetic.risunest'},
+        {library: true, deviceSections: []}, {onDestinationChosen: chosen}, {isTauri: () => true, invoke: async () => {throw new Error('No job')},
             wait: async () => {}, reserveAndroidDestination: picker.reserve,
-            copyToAndroidSaf: async () => {throw new Error('No handoff')}})).rejects.toBe(failure)
+            copyToAndroidSaf: async () => {throw new Error('No handoff')}})
+    const rejected = expect(exporting).rejects.toBe(failure)
+    await vi.waitFor(() => expect(picker.bridge.reserveExport).toHaveBeenCalled())
+    expect(chosen).not.toHaveBeenCalled()
+    picker.select(picker.bridge.reserveExport.mock.calls[0][0])
+    await rejected
     expect(failure).toMatchObject({code: 'store-error', warningCodes: ['partial-destination-may-remain']})
 })
 

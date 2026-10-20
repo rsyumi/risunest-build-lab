@@ -1,10 +1,12 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
+const nativePlatform = vi.hoisted(() => ({ android: false }))
 vi.mock('@tauri-apps/api/path', () => ({
     downloadDir: vi.fn(async () => 'C:\\Users\\me\\Downloads'),
     join: vi.fn(async (...parts: string[]) => parts.join('\\')),
 }))
-vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule(() =>
+    nativePlatform.android ? { runtime: 'tauri', os: 'android' } : { runtime: 'web', os: 'windows' }))
 vi.mock('./persistentDataRuntime.svelte', () => ({
     getPersistentDataRuntime: vi.fn(),
 }))
@@ -43,6 +45,23 @@ function dependencies(platform: 'desktop' | 'android' | 'ios' | 'web', calls: un
         },
     }
 }
+
+/** Runs the background holds as the Android app does, recording when native begins and ends each one. */
+function holdOnAndroid(calls: unknown[]) {
+    nativePlatform.android = true
+    window.RisuBackgroundTasks = {
+        begin: async (_id, kind, deferred, userInitiated) => {
+            calls.push(['hold', kind, deferred, userInitiated])
+            return 'active'
+        },
+        progress: async () => undefined,
+        end: async () => { calls.push(['end hold']) },
+    }
+}
+afterEach(() => {
+    nativePlatform.android = false
+    delete window.RisuBackgroundTasks
+})
 
 describe('native dataset export route', () => {
     it('admits before flush and joins rapid clicks through destination publication', async () => {
@@ -91,6 +110,7 @@ describe('native dataset export route', () => {
     })
     it('ends without an outcome when the Android save picker is backed out of', async () => {
         const calls: unknown[] = []
+        holdOnAndroid(calls)
         const deps = { ...dependencies('android', calls), reserveAndroidDestination: async () => {
             calls.push(['reserve'])
             throw new DOMException('Android SAF export was cancelled', 'AbortError')
@@ -121,19 +141,22 @@ describe('native dataset export route', () => {
         ['ios', 'iosFiles'],
     ] as const)('hands the %s dataset to the platform export picker', async (platform, type) => {
         const calls: unknown[] = []
+        const reserved = platform === 'android'
+        if (reserved) holdOnAndroid(calls)
 
         await exportNativeDataset({}, dependencies(platform, calls))
 
-        // Android picks the destination before the flush and releases it once the export ends.
-        const reserved = platform === 'android'
+        // Android picks the destination before the flush, holds the background task only once the picker
+        // has returned, and releases the destination once the export ends.
         expect(calls).toEqual([
             ...(reserved ? [['reserve', 'dataset.json']] : []),
             ['flush', 'native-dataset-export'],
+            ...(reserved ? [['hold', 'export', false, true]] : []),
             ['runExport', {
                 destination: { type, suggestedName: 'dataset.json', ...(reserved ? { reservation: expect.anything() } : {}) },
                 expectedRevision: 4,
             }],
-            ...(reserved ? [['release']] : []),
+            ...(reserved ? [['release'], ['end hold']] : []),
         ])
     })
 

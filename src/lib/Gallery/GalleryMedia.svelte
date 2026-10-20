@@ -101,6 +101,6 @@
     .actual img { display:block; max-width:none; max-height:none; border-radius:0; width:auto; height:auto; }
     .placeholder { background:color-mix(in srgb,var(--risu-theme-selected) 25%,transparent); max-width:100%; max-height:100%; width:70%; height:70%; border-radius:.1875rem; }
     .icon { display:flex; flex-direction:column; align-items:center; gap:.25rem; color:var(--risu-theme-textcolor2); font-size:12px; }
-    .unavailable { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:.5rem; color:var(--risu-theme-textcolor2); font-size:12px; text-align:center; padding:.5rem; }
+    .unavailable { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:.5rem; color:var(--risu-theme-textcolor2); font-size:12px; text-align:center; word-break:keep-all; overflow-wrap:anywhere; padding:.5rem; }
     .badge { position:absolute; left:.375rem; bottom:.375rem; display:flex; align-items:center; gap:.25rem; border-radius:999px; background:var(--risu-theme-darkbg); color:var(--risu-theme-textcolor); padding:.125rem .4rem; font-size:11px; line-height:1; }
 </style>

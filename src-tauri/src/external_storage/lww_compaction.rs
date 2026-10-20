@@ -530,7 +530,7 @@ impl ExternalLwwEngine {
             if segment::digest(&bytes)!=hash { return Err(segment::corrupt()); }
             let mut payload=segment::open(&bytes,&self.library,&writer,seq,&self.root_key)?;
             drop(bytes);
-            for change in &payload.changes { if change.stamp.physical_ms.0>upper { return Err(ProviderError::new(ErrorKind::ClockSkew)); } history.merge(change)?; }
+            for change in &payload.changes { if change.stamp.physical_ms.0>upper { return Err(super::clock::future_change("compaction",change.stamp.physical_ms.0,upper)); } history.merge(change)?; }
             if catalog.include_segment(&payload)? {
                 for (hash,bytes) in &payload.message_pages { body_spool.push(hash,&URL_SAFE_NO_PAD.decode(bytes).map_err(error)?,crate::persistent_store::external_capture::BackupBodyRole::Control).map_err(error)?; }
                 let controls=super::snapshot_restore::download_control_catalogs(&payload.data_catalogs,

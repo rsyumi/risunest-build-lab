@@ -245,7 +245,7 @@ fn corrupt_original_and_wrong_declared_size_are_refused() {
     let root = TempDir::new().unwrap();
     let source = image_bytes(16, 16, 1);
     let hash = stored(root.path(), &source);
-    let cache = ThumbnailCache::new(root.path().join("cache"));
+    let mut cache = ThumbnailCache::new(root.path().join("cache"));
     assert!(cache.get(root.path(), &hash, source.len() as u64 + 1).is_err());
     let path = PayloadCas::new(root.path()).unwrap().object_path(&hash).unwrap().unwrap();
     let replaced = (2..=255).map(|seed| image_bytes(16, 16, seed))
@@ -254,7 +254,11 @@ fn corrupt_original_and_wrong_declared_size_are_refused() {
     assert!(cache.get(root.path(), &hash, source.len() as u64).is_err());
     assert_eq!(fs::read_dir(&cache.directory).unwrap().count(), 0);
     fs::write(path, &source).unwrap();
-    assert!(cache.get(root.path(), &hash, source.len() as u64).is_ok());
+    cache.max_bytes = 0;
+    assert!(cache.get(root.path(), &hash, source.len() as u64).is_err());
+    cache.max_bytes = DISK_BYTES;
+    let preview = read(cache.get(root.path(), &hash, source.len() as u64).unwrap());
+    assert_eq!(image::load_from_memory(&preview).unwrap().width(), 16);
 }
 
 #[test]
@@ -300,23 +304,48 @@ fn cached_corruption_is_regenerated_and_orphan_staging_is_removed_on_restart() {
 
 #[test]
 fn same_hash_requests_publish_one_shared_derivative() {
-    let root = TempDir::new().unwrap();
-    let source = image_bytes(64, 32, 1);
-    let hash = stored(root.path(), &source);
-    let cache = std::sync::Arc::new(ThumbnailCache::new(root.path().join("cache")));
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(5));
-    let received = std::thread::scope(|scope| {
-        let threads = (0..4).map(|_| {
-            let cache = cache.clone(); let barrier = barrier.clone(); let hash = hash.clone();
-            let root = root.path(); let size = source.len() as u64;
-            scope.spawn(move || { barrier.wait(); read(cache.get(root, &hash, size).unwrap()) })
-        }).collect::<Vec<_>>();
-        barrier.wait();
-        threads.into_iter().map(|thread| thread.join().unwrap()).collect::<Vec<_>>()
-    });
-    assert!(received.iter().all(|bytes| bytes == &received[0]));
-    assert_eq!(fs::read_dir(&cache.directory).unwrap().count(), 1);
-    assert_eq!(cache.index.lock().unwrap().bytes, received[0].len() as u64);
+    use crate::server_sync::residency::test_remote;
+    for remote in [false, true] {
+        let root = TempDir::new().unwrap();
+        let source = image_bytes(64, 32, 1);
+        let size = source.len() as u64;
+        let hash = if remote {
+            let _store = crate::persistent_store::PersistentStore::open(root.path()).unwrap();
+            let hash = hex::encode(Sha256::digest(&source));
+            test_remote::hold(root.path(), &[(&hash, size)]);
+            test_remote::serve(root.path(), &hash, source);
+            hash
+        } else { stored(root.path(), &source) };
+        let cache = std::sync::Arc::new(ThumbnailCache::new(root.path().join("cache")));
+        cache.cached(&hash).unwrap();
+        let generation = remote.then(|| cache.generation.lock().unwrap());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(5));
+        let received = std::thread::scope(|scope| {
+            let threads = (0..4).map(|_| {
+                let cache = cache.clone(); let barrier = barrier.clone(); let hash = hash.clone();
+                let root = root.path();
+                scope.spawn(move || { barrier.wait(); read(cache.get(root, &hash, size).unwrap()) })
+            }).collect::<Vec<_>>();
+            barrier.wait();
+            if remote {
+                // Keep the derivative absent while concurrent callers enter the source path.
+                let started = std::time::Instant::now();
+                while cache.waiting.load(Ordering::Acquire) < 3 && test_remote::fetched(root.path()) < 4 && started.elapsed() < Duration::from_secs(5) {
+                    std::thread::yield_now();
+                }
+            }
+            drop(generation);
+            threads.into_iter().map(|thread| thread.join().unwrap()).collect::<Vec<_>>()
+        });
+        assert!(received.iter().all(|bytes| bytes == &received[0]));
+        assert_eq!(fs::read_dir(&cache.directory).unwrap().count(), 1);
+        assert_eq!(cache.index.lock().unwrap().bytes, received[0].len() as u64);
+        assert!(cache.index.lock().unwrap().active.is_empty(), "finished requests must release active ownership");
+        if remote {
+            assert_eq!(test_remote::fetched(root.path()), 1, "concurrent previews must share one remote download");
+            assert!(PayloadCas::new(root.path()).unwrap().object_lengths().unwrap().is_empty());
+        }
+    }
 }
 
 #[test]
@@ -333,6 +362,49 @@ fn cleanup_fences_pending_generation_and_late_publication() {
         drop(generation);
         assert!(waiting.join().unwrap().is_err());
     });
+    {
+        use crate::server_sync::residency::test_remote;
+        let remote_root = TempDir::new().unwrap();
+        let _store = crate::persistent_store::PersistentStore::open(remote_root.path()).unwrap();
+        let hash = hex::encode(Sha256::digest(&source));
+        let size = source.len() as u64;
+        test_remote::hold(remote_root.path(), &[(&hash, size)]);
+        test_remote::serve(remote_root.path(), &hash, source.clone());
+        let pending = ThumbnailCache::new(remote_root.path().join("cache"));
+        pending.cached(&hash).unwrap();
+        let generation = pending.generation.lock().unwrap();
+        let (finished, completion) = std::sync::mpsc::channel();
+        let ready = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let owner = scope.spawn(|| pending.get(remote_root.path(), &hash, size));
+            let started = std::time::Instant::now();
+            while pending.decoder_waiting.load(Ordering::Acquire) == 0 && started.elapsed() < Duration::from_secs(5) {
+                std::thread::yield_now();
+            }
+            let owner_waiting = pending.decoder_waiting.load(Ordering::Acquire) == 1;
+            let waiter = scope.spawn(|| {
+                ready.wait();
+                let result = pending.get(remote_root.path(), &hash, size);
+                finished.send(result.is_err()).unwrap();
+            });
+            ready.wait();
+            let started = std::time::Instant::now();
+            while pending.waiting.load(Ordering::Acquire) == 0 && started.elapsed() < Duration::from_secs(5) {
+                std::thread::yield_now();
+            }
+            let entered_wait = pending.waiting.load(Ordering::Acquire) == 1;
+            pending.close();
+            let waiter_cancelled = completion.recv_timeout(Duration::from_secs(5));
+            // Release the decoder even on a regression, so failed assertions cannot strand a worker.
+            drop(generation);
+            assert!(owner.join().unwrap().is_err());
+            waiter.join().unwrap();
+            assert!(owner_waiting, "the owner must wait for the decoder before cleanup");
+            assert!(entered_wait, "the second request must enter the same-hash wait before cleanup");
+            assert_eq!(waiter_cancelled.ok(), Some(true), "close must release same-hash waiters before the decoder becomes available");
+        });
+        assert!(!pending.path(&hash).exists());
+    }
     fs::remove_dir_all(&cache.directory).unwrap();
     assert!(cache.publish(&hash, &encode(&source).unwrap()).is_err());
     assert!(!cache.directory.exists());
@@ -383,25 +455,35 @@ fn remote_spooling_progresses_while_another_request_owns_the_decoder() {
     use crate::server_sync::residency::test_remote;
     let root = TempDir::new().unwrap();
     let _store = crate::persistent_store::PersistentStore::open(root.path()).unwrap();
-    let source = image_bytes(32, 16, 1);
-    let hash = hex::encode(Sha256::digest(&source));
-    let size = source.len() as u64;
-    test_remote::hold(root.path(), &[(&hash, size)]);
-    test_remote::serve(root.path(), &hash, source);
+    let sources = [1, 2].map(|seed| {
+        let source = image_bytes(32, 16, seed);
+        let hash = hex::encode(Sha256::digest(&source));
+        let size = source.len() as u64;
+        test_remote::serve(root.path(), &hash, source);
+        (hash, size)
+    });
+    let proofs = sources.iter().map(|(hash, size)| (hash.as_str(), *size)).collect::<Vec<_>>();
+    test_remote::hold(root.path(), &proofs);
     let cache = ThumbnailCache::new(root.path().join("cache"));
-    cache.cached(&hash).unwrap();
+    cache.cached(&sources[0].0).unwrap();
     let generation = cache.generation.lock().unwrap();
     std::thread::scope(|scope| {
-        let waiting = scope.spawn(|| cache.get(root.path(), &hash, size));
+        let waiting = sources.iter().map(|(hash, size)| {
+            let cache = &cache; let root = root.path();
+            scope.spawn(move || cache.get(root, hash, *size))
+        }).collect::<Vec<_>>();
         let started = std::time::Instant::now();
-        while test_remote::fetched(root.path()) == 0 && started.elapsed() < Duration::from_secs(5) {
+        while cache.decoder_waiting.load(Ordering::Acquire) < 2 && started.elapsed() < Duration::from_secs(5) {
             std::thread::yield_now();
         }
-        let fetched_while_decoder_busy = test_remote::fetched(root.path()) > 0;
+        let fetched_while_decoder_busy = cache.decoder_waiting.load(Ordering::Acquire) == 2;
         drop(generation);
-        let preview = read(waiting.join().unwrap().unwrap());
-        assert_eq!(image::load_from_memory(&preview).unwrap().width(), 32);
-        assert!(fetched_while_decoder_busy);
+        for thread in waiting {
+            let preview = read(thread.join().unwrap().unwrap());
+            assert_eq!(image::load_from_memory(&preview).unwrap().width(), 32);
+        }
+        assert!(fetched_while_decoder_busy, "different hashes must finish spooling independently of the decoder");
+        assert_eq!(test_remote::fetched(root.path()), 2);
     });
 }
 

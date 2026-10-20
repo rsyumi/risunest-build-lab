@@ -3,11 +3,11 @@ use crate::trust_boundary::{is_link_like, is_lower_hex_256, open_regular_source}
 use image::{metadata::Orientation, DynamicImage, ImageDecoder, ImageReader};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, File},
     io::{self, BufReader, Cursor, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex},
+    sync::{atomic::{AtomicBool, Ordering}, Arc, Condvar, Mutex},
     time::{Duration, SystemTime},
 };
 use tauri::http::{Request, Response, StatusCode};
@@ -48,6 +48,7 @@ struct Index {
     bytes: u64,
     clock: u64,
     fallbacks: HashMap<String, u64>,
+    active: HashSet<String>,
 }
 
 enum Source {
@@ -77,10 +78,28 @@ pub(super) struct ThumbnailCache {
     directory: PathBuf,
     index: Mutex<Index>,
     generation: Mutex<()>,
+    changed: Condvar,
+    #[cfg(test)]
+    waiting: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    decoder_waiting: std::sync::atomic::AtomicUsize,
     closed: Arc<AtomicBool>,
     max_bytes: u64,
     max_entries: usize,
     decode_bytes: u64,
+}
+
+struct GenerationOwner<'a> {
+    cache: &'a ThumbnailCache,
+    hash: &'a str,
+}
+
+impl Drop for GenerationOwner<'_> {
+    fn drop(&mut self) {
+        let mut index = self.cache.index.lock().unwrap_or_else(|error| error.into_inner());
+        index.active.remove(self.hash);
+        self.cache.changed.notify_all();
+    }
 }
 
 fn unavailable() -> io::Error {
@@ -93,6 +112,11 @@ impl ThumbnailCache {
             directory: cache_root.join("native-media").join(VARIANT),
             index: Mutex::new(Index::default()),
             generation: Mutex::new(()),
+            changed: Condvar::new(),
+            #[cfg(test)]
+            waiting: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            decoder_waiting: std::sync::atomic::AtomicUsize::new(0),
             closed: Arc::new(AtomicBool::new(false)),
             max_bytes: DISK_BYTES,
             max_entries: DISK_ENTRIES,
@@ -103,6 +127,7 @@ impl ThumbnailCache {
     pub(super) fn close(&self) {
         let _index = self.index.lock();
         self.closed.store(true, Ordering::Release);
+        self.changed.notify_all();
     }
 
     fn check(&self) -> io::Result<()> {
@@ -202,9 +227,31 @@ impl ThumbnailCache {
         Ok(Some((file, expected)))
     }
 
+    fn claim<'a>(&'a self, hash: &'a str) -> io::Result<GenerationOwner<'a>> {
+        let mut index = self.index.lock().map_err(|_| unavailable())?;
+        loop {
+            self.check()?;
+            if !index.active.contains(hash) {
+                index.active.insert(hash.to_owned());
+                return Ok(GenerationOwner { cache: self, hash });
+            }
+            #[cfg(test)]
+            self.waiting.fetch_add(1, Ordering::Release);
+            let waited = self.changed.wait(index);
+            #[cfg(test)]
+            self.waiting.fetch_sub(1, Ordering::Release);
+            index = waited.map_err(|_| unavailable())?;
+        }
+    }
+
     fn get(&self, root: &Path, hash: &str, size: u64) -> Result<(File, u64), ThumbnailError> {
         if !is_lower_hex_256(hash) { return Err(ThumbnailError::Unavailable); }
         self.check()?;
+        if let Some(file) = self.cached(hash)? { return Ok(file); }
+        if self.is_fallback(hash, size)? { return Err(ThumbnailError::Fallback); }
+        // Share the source transfer and derivative by hash without serializing
+        // unrelated transfers. Ownership is removed on every return path.
+        let _owner = self.claim(hash)?;
         if let Some(file) = self.cached(hash)? { return Ok(file); }
         if self.is_fallback(hash, size)? { return Err(ThumbnailError::Fallback); }
         let check = || self.check().map_err(|_| crate::server_sync::SyncError::new("cancelled", 409));
@@ -224,7 +271,12 @@ impl ThumbnailCache {
         if source.len()? != size { return Err(ThumbnailError::Unavailable); }
         // Remote spooling owns a bounded media-transfer slot, but must not hold
         // the decoder lock while unrelated local previews are ready to decode.
-        let _generation = self.generation.lock().map_err(|_| unavailable())?;
+        #[cfg(test)]
+        self.decoder_waiting.fetch_add(1, Ordering::Release);
+        let generation = self.generation.lock();
+        #[cfg(test)]
+        self.decoder_waiting.fetch_sub(1, Ordering::Release);
+        let _generation = generation.map_err(|_| unavailable())?;
         self.check()?;
         if let Some(file) = self.cached(hash)? { return Ok(file); }
         if self.is_fallback(hash, size)? { return Err(ThumbnailError::Fallback); }

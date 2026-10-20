@@ -193,8 +193,14 @@ describe('server LWW foreground scheduler', () => {
         expect(f.disconnect).toHaveBeenCalledOnce()
         f.scheduler.dispose()
     })
-    it.each([false, true])('reconnects after returning while the hidden notification stop is pending (old start pending: %s)', async pendingStart => {
+    it.each([
+        { pendingStart: false, stopFails: false },
+        { pendingStart: true, stopFails: false },
+        { pendingStart: false, stopFails: true },
+        { pendingStart: true, stopFails: true },
+    ])('reconnects after returning while the hidden notification stop is pending (old start pending: $pendingStart, stop fails: $stopFails)', async ({ pendingStart, stopFails }) => {
         const f = fixture()
+        const stopFailure = new Error('notification stop failed')
         let stopped!: () => void
         let started: (() => void) | undefined
         let notificationsRunning = false
@@ -203,18 +209,19 @@ describe('server LWW foreground scheduler', () => {
             started = () => { notificationsRunning = true; resolve() }
         }))
         f.stopNotifications.mockImplementation(async () => { notificationsRunning = false })
-        f.stopNotifications.mockImplementationOnce(() => new Promise<void>(resolve => {
-            stopped = () => { notificationsRunning = false; resolve() }
+        f.stopNotifications.mockImplementationOnce(() => new Promise<void>((resolve, reject) => {
+            stopped = () => { notificationsRunning = false; if (stopFails) reject(stopFailure); else resolve() }
         }))
         await f.scheduler.foreground(true)
         await vi.advanceTimersByTimeAsync(0)
-        const hidden = f.scheduler.foreground(false)
+        const hidden = f.scheduler.foreground(false).catch(error => error)
         await vi.advanceTimersByTimeAsync(0)
         const returned = f.scheduler.foreground(true)
         await vi.advanceTimersByTimeAsync(0)
         stopped()
         started?.()
-        await Promise.all([hidden, returned])
+        expect(await hidden).toBe(stopFails ? stopFailure : undefined)
+        await returned
         await vi.advanceTimersByTimeAsync(0)
         expect(notificationsRunning).toBe(true)
         f.scheduler.dispose()

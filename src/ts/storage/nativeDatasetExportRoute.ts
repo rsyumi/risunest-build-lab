@@ -75,6 +75,8 @@ export async function exportNativeDataset(
                     if (dependencies.isDesktop()) throw new Error('The Downloads folder is unavailable')
                     return null
                 }
+                // The save picker has returned, so only the export holds the background task.
+                context.protect()
                 return await withNativeContentExportDestination(flow.destination, () => dependencies.runExport({
                     destination: flow.destination,
                     expectedRevision: flow.expectedRevision,
@@ -82,7 +84,7 @@ export async function exportNativeDataset(
             } finally {
                 for (const source of signals) source.removeEventListener('abort', abort)
             }
-        }, { format: 'dataset', presentation: 'dialog' })
+        }, { format: 'dataset', presentation: 'dialog', protectAfterPicker: true })
     } catch (error) {
         if (error instanceof NativeFileOperationBusyError ||
             error instanceof NativeFileJobError && error.code === 'generation-active') throw error

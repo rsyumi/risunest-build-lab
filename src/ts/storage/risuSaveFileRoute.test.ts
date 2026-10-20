@@ -125,7 +125,7 @@ describe('RisuSave picker route', () => {
         })
     }
 
-    it('does not capture or write RisuSave before Android destination selection completes', async () => {
+    it('does not report, capture or write RisuSave before Android destination selection completes', async () => {
         const picker = androidSafReservationFixture()
         picker.bridge.reserveExport.mockImplementation(() => {})
         const deps = dependencies('native-desktop')
@@ -136,11 +136,16 @@ describe('RisuSave picker route', () => {
             requestId: picker.bridge.reserveExport.mock.calls[0][0], state: 'cancelled',
             warningCodes: ['partial-destination-may-remain'],
         }) : null)
-        deps.withFlushedExport = vi.fn(async () => {throw failure})
-        const output = exportRisuSaveFromPicker({}, deps)
+        const chosen = vi.fn()
+        deps.withFlushedExport = vi.fn(async () => {
+            expect(chosen).toHaveBeenCalledOnce()
+            throw failure
+        })
+        const output = exportRisuSaveFromPicker({ onDestinationChosen: chosen }, deps)
         const rejected = expect(output).rejects.toBe(failure)
         await vi.waitFor(() => expect(picker.bridge.reserveExport).toHaveBeenCalled())
         expect(deps.withFlushedExport).not.toHaveBeenCalled()
+        expect(chosen).not.toHaveBeenCalled()
         picker.select(picker.bridge.reserveExport.mock.calls[0][0])
         await rejected
         expect(failure).toMatchObject({warningCodes: ['partial-destination-may-remain']})
@@ -672,9 +677,13 @@ describe('RisuSave picker route', () => {
 
     it('publishes desktop export through the native job with omit-account unchanged', async () => {
         const deps = dependencies('native-desktop')
+        const chosen = vi.fn()
 
-        const result = await exportRisuSaveFromPicker({ omitAccount: true }, deps)
+        const result = await exportRisuSaveFromPicker({ omitAccount: true, onDestinationChosen: chosen }, deps)
 
+        expect(chosen).toHaveBeenCalledOnce()
+        expect(chosen.mock.invocationCallOrder[0]).toBeGreaterThan(vi.mocked(deps.chooseNativeExport).mock.invocationCallOrder[0])
+        expect(chosen.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(deps.runNativeExport).mock.invocationCallOrder[0])
         expect(result?.mode).toBe('native')
         expect(deps.runNativeExport).toHaveBeenCalledWith(
             expect.objectContaining({ revision: 4 }),
@@ -803,10 +812,25 @@ describe('RisuSave picker route', () => {
         const deps = dependencies('native-desktop')
         vi.mocked(deps.chooseNativeImport).mockResolvedValueOnce(null)
         vi.mocked(deps.chooseNativeExport).mockResolvedValueOnce(null)
+        const chosen = vi.fn()
 
         await expect(importRisuSaveFromPicker({}, deps)).resolves.toBeNull()
-        await expect(exportRisuSaveFromPicker({}, deps)).resolves.toBeNull()
+        await expect(exportRisuSaveFromPicker({ onDestinationChosen: chosen }, deps)).resolves.toBeNull()
         expect(deps.runNativeImport).not.toHaveBeenCalled()
         expect(deps.runNativeExport).not.toHaveBeenCalled()
+        expect(chosen).not.toHaveBeenCalled()
+
+        // Backing out of the Android save picker ends the same way, while a cancelled export still rejects.
+        const picker = androidSafReservationFixture()
+        picker.bridge.reserveExport.mockImplementation((requestId: string) => { picker.backOut(requestId) })
+        deps.platform = () => 'native-android'
+        deps.reserveAndroidDestination = picker.reserve
+        deps.withFlushedExport = vi.fn()
+        await expect(exportRisuSaveFromPicker({ onDestinationChosen: chosen }, deps)).resolves.toBeNull()
+        expect(picker.bridge.reserveExport).toHaveBeenCalledOnce()
+        expect(deps.withFlushedExport).not.toHaveBeenCalled()
+        expect(chosen).not.toHaveBeenCalled()
+        await expect(exportRisuSaveFromPicker({ signal: AbortSignal.abort() }, deps))
+            .rejects.toMatchObject({ name: 'AbortError' })
     })
 })

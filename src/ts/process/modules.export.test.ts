@@ -17,6 +17,7 @@ vi.mock('../storage/iosContentPicker', () => ({ importIOSContentFromPicker: mock
 vi.mock('../storage/androidContentPicker', () => ({ importAndroidContentFromPicker: mocks.importAndroid }))
 vi.mock('../storage/nativeModuleFileRoute', () => ({ importDesktopNativeModulePath: mocks.importDesktop }))
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: mocks.open }))
+vi.mock('../mobileBackgroundTask', async () => (await import('../mobileBackgroundTask.testSupport')).mobileBackgroundTaskModule())
 
 vi.mock('../alert', () => ({
     alertClear: vi.fn(),
@@ -68,8 +69,16 @@ vi.mock('../characterCards', () => ({
     importCharacterProcess: vi.fn(),
 }))
 
+import { get } from 'svelte/store'
+import { language } from 'src/lang'
 import { exportModuleLegacy, importModule, importModuleData, readModule, type RisuModule } from './modules'
 import { DBState } from '../stores.svelte'
+import {
+    dismissNativeFileOperationOutcome,
+    nativeFileOperationOutcome,
+    NativeFileOperationBusyError,
+    runSharedNativeFileOperation,
+} from '../storage/nativeFileJobManager'
 import { alertConfirm, alertError, alertNormal } from '../alert'
 import { StdioModuleImportError } from './mcp/moduleImport'
 import { convertExternalLorebook } from './lorebook.svelte'
@@ -78,6 +87,7 @@ describe('legacy module export', () => {
     beforeEach(() => {
         vi.clearAllMocks()
         mocks.platform = 'web'
+        dismissNativeFileOperationOutcome()
         DBState.db.modules = []
         const rpackMap = readFileSync('src/ts/rpack/rpack_map.bin')
         vi.stubGlobal('fetch', vi.fn(async () => ({
@@ -164,7 +174,23 @@ describe('legacy module export', () => {
         if (platform === 'android') expect(mocks.importAndroid).toHaveBeenCalledWith('module')
     })
 
-    it('preserves the desktop native import error instead of reporting missing data', async () => {
+    it.each(['ios', 'android'] as const)('leaves a failed %s picker import to its dialog and reports a refused start', async platform => {
+        mocks.platform = platform
+        const picker = platform === 'ios' ? mocks.importIOS : mocks.importAndroid
+        picker.mockImplementationOnce(() => runSharedNativeFileOperation('import', 'content-picker', async () => {
+            throw new Error('synthetic invalid module')
+        }, { presentation: 'dialog', format: 'content' }))
+        await expect(importModule()).resolves.toBeNull()
+        expect(get(nativeFileOperationOutcome)).toMatchObject({ kind: 'import', state: 'failed' })
+        expect(alertError).not.toHaveBeenCalled()
+
+        dismissNativeFileOperationOutcome()
+        picker.mockRejectedValueOnce(new NativeFileOperationBusyError())
+        await expect(importModule()).resolves.toBeNull()
+        expect(alertError).toHaveBeenCalledExactlyOnceWith(language.risuNest.backup.fileBusy)
+    })
+
+    it('preserves the desktop native import error and leaves a started import failure to its dialog', async () => {
         mocks.platform = 'desktop'
         mocks.open.mockResolvedValue('C:/synthetic/module.risum')
         const failure = Object.assign(new Error('Another library operation is running'), { code: 'library-operation-busy' })
@@ -174,6 +200,17 @@ describe('legacy module export', () => {
         })
         await importModule()
         expect(alertError).toHaveBeenCalledExactlyOnceWith(failure)
+
+        vi.mocked(alertError).mockClear()
+        mocks.importDesktop.mockImplementationOnce(async (_path, _import, _options, report) => {
+            await runSharedNativeFileOperation('import', 'content:module.risum', async () => {
+                throw new Error('synthetic invalid module')
+            }, { presentation: 'dialog', format: 'content' }).catch(report)
+            return { kind: 'failed' }
+        })
+        await importModule()
+        expect(get(nativeFileOperationOutcome)).toMatchObject({ kind: 'import', state: 'failed' })
+        expect(alertError).not.toHaveBeenCalled()
     })
 
     it('roundtrips ordinary asset bytes and preserves asset metadata exactly', async () => {

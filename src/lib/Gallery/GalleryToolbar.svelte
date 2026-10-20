@@ -21,7 +21,7 @@
     <span class="count">{galleryFormat(text.selected, selectedCount)}</span>
     <div class="g-grow"></div>
     {#if children}{@render children()}{/if}
-    <button type="button" class="g-button quiet" onclick={onclear}>{text.clear}</button>
+    <button type="button" class="g-button small quiet" onclick={onclear}>{text.clear}</button>
 </div>
 <style>
     .select-all { display:flex; align-items:center; gap:.5rem; font-size:.875rem; cursor:pointer; }

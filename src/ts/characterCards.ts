@@ -105,6 +105,7 @@ export async function importPreparedNativeCharacterContent(
 }
 
 export async function importCharacter() {
+    const callStartedAt = Date.now()
     let lastImportedCharacterId: string | null = null
     try {
         if (isTauriIOS) {
@@ -176,7 +177,11 @@ export async function importCharacter() {
         }
         return lastImportedCharacterId
     } catch (error) {
-        alertError(error)
+        if (isTauriIOS || isTauriAndroid) {
+            // The picker import shows how it ended, so only a failure to start is reported here.
+            const { presentFileOperationError } = await import('./storage/fileOperationErrorPresentation')
+            presentFileOperationError('import', error, callStartedAt)
+        } else alertError(error)
         return null
     }
 }

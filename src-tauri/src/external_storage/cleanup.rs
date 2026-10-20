@@ -1054,7 +1054,7 @@ impl<'a> LwwRepositoryView<'a> {
     }
     fn referenced_node(&self,receipt:&ObjectReceipt,name:&str,hash:&str,document:&crate::persistent_store::external_lww::SegmentReferences)->Result<(RemoteObject,DocumentNode)> {
         let upper=self.engine.admitted_upper()?.checked_add(300_000).ok_or_else(||ProviderError::new(ErrorKind::Corrupt))?;
-        if document.newest_physical_ms>upper {return Err(ProviderError::new(ErrorKind::ClockSkew))}
+        if document.newest_physical_ms>upper {return Err(super::clock::future_change("cleanup",document.newest_physical_ms,upper))}
         let object=RemoteObject{repository_id:self.engine.repository.repository_id.clone(),object_id:name.into(),role:ObjectRole::Segment,
             receipt:receipt.clone(),ciphertext_sha256:hash.into(),plaintext_length:document.plaintext_length,
             plaintext_sha256:document.plaintext_sha256.clone()};
