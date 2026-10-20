@@ -24,6 +24,12 @@ import {
     preservedInlayOutput,
 } from "./inlayImageEncoding";
 import { isTauri } from "../../platform";
+import { captureSelectedConversationTarget } from "../../storage/persistentDataRuntime.svelte";
+
+function newInlayMetadata(): Record<string, unknown> {
+    const target = captureSelectedConversationTarget()
+    return { createdAt: Date.now(), ...(target ? { charId: target.characterId, chatId: target.conversationId } : {}) }
+}
 
 export type InlayAsset = {
     data: string | Blob
@@ -156,10 +162,11 @@ function imageReadiness(imgObj: HTMLImageElement, sourceUrl?: string): Promise<v
 
 export async function writeInlayImage(
     imgObj: HTMLImageElement,
-    arg: { name?: string, ext?: string, id?: string, data?: Uint8Array } = {},
+    arg: { name?: string, ext?: string, id?: string, data?: Uint8Array, metadata?: Record<string, unknown> } = {},
     sourceUrl?: string,
 ) {
     const imgid = inlayWriteId(arg.id)
+    const provenance = arg.metadata ?? newInlayMetadata()
     const source = sourceUrl || imgObj.currentSrc || imgObj.src
     if (!source) throw new Error('Inlay image source is unavailable')
     const data = arg.data ?? await (async () => {
@@ -173,7 +180,7 @@ export async function writeInlayImage(
         // The native encoder decides what it can improve and keeps the rest as it is.
         const blobStore = await resolveBlobStore()
         if (!blobStore.putNewInlayImage) throw new Error('Native Inlay image writer is unavailable')
-        const metadata = await blobStore.putNewInlayImage(imgid, data, { name: arg.name ?? imgid, options })
+        const metadata = await blobStore.putNewInlayImage(imgid, data, { name: arg.name ?? imgid, options, metadata: provenance })
         if (metadata.preservationReason === 'animation-cost') alertToast(language.risuNest.inlay.animationPreserved)
         return imgid
     }
@@ -192,7 +199,7 @@ export async function writeInlayImage(
     if (!decoded || options.format === 'original' || keepsBrowserOriginal(data)) {
         const output = preservedInlayOutput(data, arg.ext ?? arg.name ?? '')
         await (await resolveBlobStore()).put(imgid, data, {
-            kind: 'inlay', inlayType: 'image', mime: output.mime,
+            kind: 'inlay', inlayType: 'image', metadata: provenance, mime: output.mime,
             name: arg.name ?? imgid, ext: output.ext,
             ...(decoded ? { height: drawHeight, width: drawWidth } : {}),
         })
@@ -201,7 +208,7 @@ export async function writeInlayImage(
     if (options.format === 'webp' && options.skipReencode && inlayImageSignature(data)?.mime === 'image/webp'
         && (options.maxDimension === 0 || Math.max(drawWidth, drawHeight) <= options.maxDimension)) {
         await (await resolveBlobStore()).put(imgid, data, {
-            kind: 'inlay', inlayType: 'image', mime: 'image/webp',
+            kind: 'inlay', inlayType: 'image', metadata: provenance, mime: 'image/webp',
             name: arg.name ?? imgid, ext: 'webp', height: drawHeight, width: drawWidth,
         })
         return `${imgid}`
@@ -209,7 +216,7 @@ export async function writeInlayImage(
     const encoded = await encodeInlayImageWithCanvas(imgObj, drawWidth, drawHeight, options)
 
     await (await resolveBlobStore()).put(imgid, encoded.data, {
-        kind: 'inlay', inlayType: 'image', mime: encoded.mime,
+        kind: 'inlay', inlayType: 'image', metadata: provenance, mime: encoded.mime,
         name: arg.name ?? imgid, ext: encoded.ext, height: encoded.height, width: encoded.width,
     })
 
@@ -367,19 +374,20 @@ function validateNewInlayInput(data: Uint8Array): void {
 
 export async function setInlayAsset(id: string, img: InlayAsset): Promise<string> {
     const inlayId = inlayWriteId(id)
+    const provenance = newInlayMetadata()
     const { bytes, mime } = await inlayBytes(img)
     const blobStore = await resolveBlobStore()
     validateNewInlayInput(bytes)
     if (isTauri && img.type === 'image') {
         if (!blobStore.putNewInlayImage) throw new Error('Native Inlay image writer is unavailable')
-        const metadata = await blobStore.putNewInlayImage(inlayId, bytes, { name: img.name, options: getInlayEncodeOptions() })
+        const metadata = await blobStore.putNewInlayImage(inlayId, bytes, { name: img.name, options: getInlayEncodeOptions(), metadata: provenance })
         if (metadata.preservationReason === 'animation-cost') alertToast(language.risuNest.inlay.animationPreserved)
         return inlayId
     }
     if (img.type === 'image') {
         const sourceUrl = URL.createObjectURL(new Blob([asBuffer(bytes)], { type: mime }))
         try {
-            await writeInlayImage(new Image(), { id: inlayId, name: img.name, ext: img.ext, data: bytes }, sourceUrl)
+            await writeInlayImage(new Image(), { id: inlayId, name: img.name, ext: img.ext, data: bytes, metadata: provenance }, sourceUrl)
         } finally {
             URL.revokeObjectURL(sourceUrl)
         }
@@ -388,6 +396,7 @@ export async function setInlayAsset(id: string, img: InlayAsset): Promise<string
     await blobStore.put(inlayId, bytes, {
         kind: 'inlay',
         inlayType: img.type,
+        metadata: provenance,
         mime,
         name: img.name,
         ext: img.ext,

@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const f = vi.hoisted(() => ({ fetch: vi.fn(), request: vi.fn(), alert: vi.fn(), translatorType: 'deepl', translator: 'ko', deeplXUrl: 'https://deeplx-a.invalid' }))
+const f = vi.hoisted(() => ({ fetch: vi.fn(), request: vi.fn(), alert: vi.fn(), translatorType: 'deepl', translator: 'ko', deeplXUrl: 'https://deeplx-a.invalid', experimentalGoogle: false }))
 vi.mock('../storage/database.svelte', () => ({
     getDatabase: () => ({
         characters: [], presetRegex: [], translator: f.translator, translatorInputLanguage: 'en', aiModel: 'gpt',
         translatorType: f.translatorType, deeplOptions: { freeApi: true, key: 'synthetic' },
         deeplXOptions: { url: f.deeplXUrl, token: '' }, noWaitForTranslate: true,
+        useExperimentalGoogleTranslator: f.experimentalGoogle,
     }) as ReturnType<typeof import('../storage/database.svelte').getDatabase>,
     getCurrentCharacter: () => undefined,
     getCurrentChat: () => undefined,
@@ -36,12 +37,14 @@ beforeEach(() => {
     f.translatorType = 'deepl'
     f.translator = 'ko'
     f.deeplXUrl = 'https://deeplx-a.invalid'
+    f.experimentalGoogle = false
     f.fetch.mockResolvedValue({ ok: false, data: 'synthetic unavailable' })
     f.request.mockResolvedValue({ type: 'fail', result: 'synthetic unavailable' })
 })
 
 afterEach(() => {
     doingChat.set(false)
+    vi.unstubAllGlobals()
 })
 
 describe('translation error ownership', () => {
@@ -114,6 +117,18 @@ describe('live chat rows', () => {
         await expect(translateHTML('<p>live row text</p>', false, '', 0, false, liveRowContext())).resolves.toBe('<p>from server A</p>')
         f.deeplXUrl = 'https://deeplx-b.invalid'
         await expect(translateHTML('<p>live row text</p>', false, '', 0, false, liveRowContext())).resolves.toBe('<p>from server B</p>')
+    })
+    it('translates a live row again after experimental Google translation is enabled', async () => {
+        f.translatorType = 'google'
+        vi.stubGlobal('userScriptFetch', true)
+        vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify([[['standard Google']]]))))
+        f.fetch.mockResolvedValue({ ok: true, data: '<div class="result-container">experimental Google</div>' })
+        const html = '<p>Google setting cache fixture</p>'
+        await expect(translateHTML(html, false, '', 0, false, liveRowContext())).resolves.toBe('<p>standard Google</p>')
+        f.experimentalGoogle = true
+        await expect(translateHTML(html, false, '', 0, false, liveRowContext())).resolves.toBe('<p>experimental Google</p>')
+        f.experimentalGoogle = false
+        await expect(translateHTML(html, false, '', 0, false, liveRowContext())).resolves.toBe('<p>standard Google</p>')
     })
     it('keeps translations within the memory budget of the device profile', async () => {
         f.fetch.mockResolvedValue({ ok: true, data: { translations: [{ text: 'Long translated' }] } })

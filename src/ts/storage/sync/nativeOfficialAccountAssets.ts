@@ -1,5 +1,6 @@
 import type { AccountStorage } from '../accountStorage'
 import type { BlobStore } from '../blobStore'
+import { AssetAliasSizeMismatchError } from '../assetRepository'
 import type { NativeDeviceSettings } from '../nativeDeviceSettings'
 import type { PersistentDataStore } from '../persistentDataStore'
 import type { OfficialAssetLedger } from './officialAssetLedger'
@@ -30,8 +31,17 @@ export function createNativeOfficialAccountAssets(dependencies: {
             lastPhase = phase; lastReportAt = Date.now()
             options.onProgress?.({ ...outcome, counts: { ...counts } })
         }
-        const receipt = await continuation.load(accountId, options.operationId)
-        if (!receipt) throw new OfficialAssetOwnershipError('receipt')
+        let receipt: NonNullable<Awaited<ReturnType<typeof continuation.load>>>
+        try {
+            const loaded = await continuation.load(accountId, options.operationId)
+            if (!loaded) throw new OfficialAssetOwnershipError('receipt')
+            receipt = loaded
+        } catch (error) {
+            outcome.state = 'failed'
+            outcome.reason = error instanceof OfficialAssetOwnershipError ? error.reason : 'checking'
+            report()
+            throw error
+        }
         outcome.operationId = receipt.operationId
         options.onRestoreStatus?.(receipt.status)
         const failedBefore = new Set([...receipt.failedKeys, ...options.previousFailedKeys ?? []])
@@ -50,7 +60,22 @@ export function createNativeOfficialAccountAssets(dependencies: {
             for (let offset = 0; offset < assets.length; offset += 512) {
                 if (options.signal?.aborted) { outcome.state = 'cancelled'; return outcome }
                 await continuation.guard(receipt)
-                const batch = await blobs.statMany(assets.slice(offset, offset + 512))
+                const keys = assets.slice(offset, offset + 512)
+                const damaged = new Set<string>()
+                let batch: Awaited<ReturnType<NonNullable<BlobStore['statMany']>>>
+                while (true) {
+                    if (options.signal?.aborted) { outcome.state = 'cancelled'; return outcome }
+                    const checking = keys.filter(key => !damaged.has(key))
+                    try {
+                        const available = await blobs.statMany(checking)
+                        let index = 0
+                        batch = keys.map(key => damaged.has(key) ? null : available[index++])
+                        break
+                    } catch (error) {
+                        if (!(error instanceof AssetAliasSizeMismatchError) || !checking.includes(error.key)) throw error
+                        damaged.add(error.key)
+                    }
+                }
                 present.push(...batch)
                 batch.forEach((value, index) => { if (value) { counts.alreadyPresent++; counts.notAttempted--; stillFailed.delete(assets[offset + index]) } })
                 report()
@@ -80,7 +105,7 @@ export function createNativeOfficialAccountAssets(dependencies: {
             })
             outcome.reason = result.reason
             if (result.cancelled) outcome.state = 'cancelled'
-        } catch (error) { outcome.reason = error instanceof OfficialAssetOwnershipError && error.reason !== 'receipt' ? error.reason : 'local' }
+        } catch (error) { outcome.reason = error instanceof OfficialAssetOwnershipError ? error.reason : outcome.phase === 'checking' ? 'checking' : 'local' }
         finally {
             outcome.phase = 'finishing'
             report()
@@ -92,8 +117,8 @@ export function createNativeOfficialAccountAssets(dependencies: {
                 if (counts.failed && !outcome.reason) outcome.reason = 'files'
             }
             outcome.failedKeys = [...stillFailed]
-            try { await continuation.settle(receipt, outcome) }
-            catch (error) { outcome.state = 'failed'; outcome.reason = error instanceof OfficialAssetOwnershipError && error.reason !== 'receipt' ? error.reason : 'local' }
+            try { await continuation.settle(receipt, outcome, options.signal) }
+            catch (error) { outcome.state = 'failed'; outcome.reason = error instanceof OfficialAssetOwnershipError ? error.reason : 'local' }
             report()
         }
         return outcome

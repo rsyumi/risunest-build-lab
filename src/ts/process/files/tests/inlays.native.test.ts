@@ -1,4 +1,8 @@
 import { imageFixture } from '../../../../../tests/support/imageFixtures'
+const selection = vi.hoisted(() => ({ target: null as { characterId: string, conversationId: string } | null }))
+vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({
+    captureSelectedConversationTarget: () => selection.target,
+}))
 import { alertToast } from 'src/ts/alert'
 import { language } from 'src/lang'
 vi.mock('src/ts/alert', () => ({ alertToast: vi.fn() }))
@@ -29,7 +33,7 @@ const nativeStore = {
         native.payloads.set(key, data)
         return metadata
     },
-    async putNewInlayImage(key: string, data: Uint8Array, input: { name: string }) {
+    async putNewInlayImage(key: string, data: Uint8Array, input: { name: string, metadata?: Record<string, unknown> }) {
         const png = data.length >= 8 && data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4e && data[3] === 0x47
         const jpeg = data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff
         const webp = data.length >= 12 && new TextDecoder().decode(data.subarray(0, 4)) === 'RIFF'
@@ -39,7 +43,7 @@ const nativeStore = {
             // The native encoder keeps what it cannot improve, instead of refusing it.
             const bmp = data.length >= 2 && data[0] === 0x42 && data[1] === 0x4d
             const preserved: InlayBlobMetadata = {
-                key, kind: 'inlay', size: data.byteLength, mime: bmp ? 'image/bmp' : 'application/octet-stream',
+                metadata: input.metadata, key, kind: 'inlay', size: data.byteLength, mime: bmp ? 'image/bmp' : 'application/octet-stream',
                 name: input.name, ext: bmp ? 'bmp' : '', inlayType: 'image', preservationReason: native.preservationReason,
             }
             native.metadata.set(key, preserved)
@@ -47,7 +51,7 @@ const nativeStore = {
             return preserved
         }
         const metadata: InlayBlobMetadata = {
-            key, kind: 'inlay', size: 3, mime: 'image/webp', name: input.name,
+            metadata: input.metadata, key, kind: 'inlay', size: 3, mime: 'image/webp', name: input.name,
             ext: 'webp', inlayType: 'image', width: 6, height: 4,
         }
         native.metadata.set(key, metadata)
@@ -72,7 +76,7 @@ const nativeStore = {
         return native.metadata.has(key) ? `http://asset.local/${key}` : null
     },
 } satisfies BlobStore & {
-    putNewInlayImage(key: string, data: Uint8Array, input: { name: string }): Promise<InlayBlobMetadata>
+    putNewInlayImage(key: string, data: Uint8Array, input: { name: string, metadata?: Record<string, unknown> }): Promise<InlayBlobMetadata>
 }
 
 vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'tauri', os: 'windows' }))
@@ -136,6 +140,7 @@ function expectNoLegacyAccess(): void {
 
 describe('native inlay fresh-install boundary', () => {
     beforeEach(() => {
+    selection.target = null
         native.preservationReason = undefined
         vi.mocked(alertToast).mockClear()
         native.metadata.clear()
@@ -247,9 +252,13 @@ describe('native inlay fresh-install boundary', () => {
 
     test('native generated images fetch their source bytes without a canvas round trip', async () => {
         const source = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
-        const fetchSource = vi.fn(async () => new Response(source, {
-            headers: { 'Content-Type': 'image/png' },
-        }))
+        selection.target = { characterId: 'native-character', conversationId: 'native-chat' }
+        const clock = vi.spyOn(Date, 'now').mockReturnValue(123)
+        const fetchSource = vi.fn(async () => {
+            selection.target = null
+            clock.mockReturnValue(456)
+            return new Response(source, { headers: { 'Content-Type': 'image/png' } })
+        })
         vi.stubGlobal('fetch', fetchSource)
         const image = {
             src: 'data:image/png;base64,BQQDAg==',
@@ -259,6 +268,10 @@ describe('native inlay fresh-install boundary', () => {
         await expect(writeInlayImage(image, { id: 'generated', name: 'generated.png' }))
             .resolves.toBe('generated')
 
+        expect((await getInlayAssetMetadata('generated'))?.metadata).toEqual({
+            createdAt: 123, charId: 'native-character', chatId: 'native-chat',
+        })
+        clock.mockRestore()
         expect(fetchSource).toHaveBeenCalledWith(image.src)
         expect(native.optimizedWrites).toEqual([{
             key: 'generated', data: source, name: 'generated.png',

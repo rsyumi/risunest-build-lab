@@ -54,7 +54,7 @@ export function createReferenceHarness(target) {
     "storage/database.svelte.ts",
     "bootstrap.ts",
     "globalApi.svelte.ts",
-    ...(target === "risuai" ? ["drive/backuplocal.ts"] : []),
+    ...(target === "risuai" ? ["drive/backuplocal.ts"] : ["process/files/inlayMeta.ts"]),
   ].map((p) => path.join(directory, "src/ts", p));
   if (target === "pocket")
     entryPaths.push(path.join(directory, "server/node/server.cjs"));
@@ -165,6 +165,9 @@ export function createReferenceHarness(target) {
     uuidv4: () => "00000000-0000-4000-8000-000000000001",
     changeLanguage() {},
     forageStorage: storage,
+    NodeStorage: class {
+      getItem(key) { return storage.getItem(key); }
+    },
     localforage: { createInstance: () => storage },
     // These are UI/cache effects, not database normalization. No real drafts,
     // storage, network, language bundles or app data are loaded in this harness.
@@ -331,6 +334,7 @@ export function createReferenceHarness(target) {
           "encodeColdStorageCanonicalBuffer",
           "restoreColdStorageCharactersInDb",
           "restoreColdStorageChat",
+          "getInlayMeta",
           "readInlayInfoPayload",
           "readInlayAssetPayload",
         ]),
@@ -368,6 +372,7 @@ export function createReferenceHarness(target) {
       target === "pocket"
         ? JSON.parse((await context.readInlayAssetPayload(id)).toString("utf8"))
         : forbidden(),
+    readInlayMeta: (id) => target === "pocket" ? context.getInlayMeta(id) : forbidden(),
     readInlayInfo: async (id) =>
       target === "pocket"
         ? JSON.parse((await context.readInlayInfoPayload(id)).toString("utf8"))
@@ -657,6 +662,30 @@ if (
       await harness.decode(harness.lastSourceDatabase ?? database),
       result.resaved,
     );
+    let provenanceRecords = 0;
+    if (target === "pocket") {
+      for (const [key, bytes] of harness.storage) {
+        if (!key.startsWith("inlay_meta/")) continue;
+        const id = key.slice("inlay_meta/".length);
+        const expected = JSON.parse(bytes.toString("utf8"));
+        const actual = await harness.readInlayMeta(id);
+        for (const field of ["charId", "chatId"])
+          if (actual?.[field] !== expected[field])
+            throw new Error(`Native provenance ${field} changed in Pocket reader`);
+        const createdAt = expected.createdAt ?? 0;
+        if (actual?.createdAt !== createdAt)
+          throw new Error("Native provenance createdAt changed in Pocket reader");
+        if (actual.updatedAt !== (expected.updatedAt ?? createdAt))
+          throw new Error("Native provenance updatedAt fallback changed in Pocket reader");
+        const sourceCharacter = (result.decoded.characters ?? []).find(char => char.chaId === expected.charId);
+        if (sourceCharacter?.chats?.some(chat => chat.id === expected.chatId)) {
+          const resavedCharacter = (result.resaved.characters ?? []).find(char => char.chaId === expected.charId);
+          if (!resavedCharacter?.chats?.some(chat => chat.id === expected.chatId))
+            throw new Error("Native provenance origin was lost during Pocket re-save");
+        }
+        provenanceRecords++;
+      }
+    }
     const characters = result.resaved.characters ?? [];
     console.log(
       JSON.stringify({
@@ -664,6 +693,7 @@ if (
         archiveBytes: bytes.length,
         storageEntries: harness.storage.size,
         assetVerification,
+        provenanceRecords,
         characters: characters.length,
         chats: characters.reduce(
           (sum, char) => sum + (char.chats?.length ?? 0),

@@ -39,6 +39,21 @@ function dependencies(statuses: unknown[]): NativeJpegAssetImportDependencies {
 }
 
 describe('native JPEG asset import', () => {
+    it('refuses a changed portrait after fencing and before starting the native import', async () => {
+        const deps = dependencies([])
+        let fenced = false
+        const acquire = deps.acquireFence
+        deps.acquireFence = async token => { const fence = await acquire(token); fenced = true; return fence }
+        const error = new Error('Synthetic stale portrait')
+        await expect(importNativeJpegAsset({
+            source: {type: 'desktopPath', path: 'C:\\chosen\\portrait.jpg'}, displayName: 'portrait.jpg',
+            destination: {kind: 'current-character-image', characterId: 'synthetic-owner'},
+        }, {beforeStart: async () => { expect(fenced).toBe(true); throw error }}, deps)).rejects.toBe(error)
+        expect(deps.invoke).not.toHaveBeenCalled()
+        const fence = await vi.mocked(acquire).mock.results[0].value
+        expect(fence.release).toHaveBeenCalledWith({verifyStoreRevision: true})
+    })
+
     it('sends an explicit current-character destination and refreshes the committed revision', async () => {
         const deps = dependencies([{
             jobId: 'jpeg-job',

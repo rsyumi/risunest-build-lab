@@ -7,6 +7,8 @@ import { nativeOfficialAccountKeys } from './nativeOfficialAccountFlow'
 import type { NativeDeviceSettings } from '../nativeDeviceSettings'
 import type { AccountStorage } from '../accountStorage'
 import { AccountReadError } from '../accountReadError'
+import { BackgroundExecutionExpiredError } from '../../iosNative'
+import { AssetAliasSizeMismatchError } from '../assetRepository'
 
 vi.mock('../database.svelte', () => ({
     getDatabase: () => { throw new Error('Asset recovery must use the pinned store') },
@@ -55,6 +57,51 @@ function harness(extra = 0, concurrency: 1 | 2 = 1) {
 }
 
 describe('native restored account assets', () => {
+    it('preserves legacy backslash keys through recovery and installation', async () => {
+        const h = harness()
+        h.lease.readRoot = async () => ({ revision: 7, value: { userIcon: 'assets\\legacy.gif' } as PersistentRoot })
+        await h.assets.prepare('account'); await h.assets.bind('account')
+        expect(await h.assets.inspect('account')).toMatchObject({ kind: 'interrupted' })
+        expect(await h.assets.complete('account')).toMatchObject({ state: 'succeeded', counts: { installed: 1 } })
+        expect(h.values.get('assets\\legacy.gif')).toEqual(Uint8Array.of(1, 2, 3))
+    })
+
+    it('keeps background expiry resumable instead of persisting a user stop', async () => {
+        const h = harness()
+        await h.assets.prepare('account'); await h.assets.bind('account')
+        const controller = new AbortController()
+        controller.abort(new BackgroundExecutionExpiredError())
+        expect(await h.assets.complete('account', { signal: controller.signal })).toMatchObject({ state: 'cancelled' })
+        expect(await h.assets.inspect('account')).toMatchObject({ kind: 'interrupted' })
+    })
+
+    it('reports receipt mismatch separately from a local presence-check failure', async () => {
+        const h = harness()
+        await h.assets.prepare('account'); await h.assets.bind('account')
+        const onProgress = vi.fn()
+        await expect(h.assets.complete('account', { operationId: 'obsolete', onProgress })).rejects.toMatchObject({ reason: 'receipt' })
+        expect(onProgress.mock.calls.at(-1)?.[0]).toMatchObject({ state: 'failed', reason: 'receipt' })
+        vi.mocked(h.blobs.statMany!).mockRejectedValueOnce(new Error('Synthetic presence-check failure'))
+        expect(await h.assets.complete('account')).toMatchObject({ state: 'failed', reason: 'checking' })
+    })
+
+    it('redownloads a size-mismatched alias while retaining healthy local assets', async () => {
+        const h = harness()
+        h.values.set('assets/avatar', Uint8Array.of(9))
+        h.values.set('assets/background', Uint8Array.of(8))
+        const stat = vi.mocked(h.blobs.statMany!).getMockImplementation()!
+        vi.mocked(h.blobs.statMany!).mockImplementation(async keys => {
+            if (keys.includes('assets/avatar')) throw new AssetAliasSizeMismatchError('assets/avatar')
+            return stat(keys)
+        })
+        await h.assets.prepare('account'); await h.assets.bind('account')
+        expect(await h.assets.complete('account')).toMatchObject({ state: 'succeeded', counts: {
+            alreadyPresent: 1, installed: 2, missing: 1,
+        } })
+        expect(h.values.get('assets/avatar')).toEqual(Uint8Array.of(1, 2, 3))
+        expect(h.values.get('assets/background')).toEqual(Uint8Array.of(8))
+    })
+
     it('keeps in-flight interrupted objects out of the persisted failed set', async () => {
         const h = harness(0, 2)
         await h.assets.prepare('account'); await h.assets.bind('account')

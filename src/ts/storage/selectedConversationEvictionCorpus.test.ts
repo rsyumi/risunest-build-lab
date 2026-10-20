@@ -27,6 +27,7 @@ import {
 } from './persistentDataRuntime'
 import { createPluginDatabaseAccess } from '../plugins/pluginDatabaseAccess'
 import { createEvictionFixture, makeConversation, VIEWPORT_ROW_BUDGET } from './tests/selectedConversationEvictionFixture'
+import * as selectedConversationLifecycle from './selectedConversationLifecycle'
 
 const INITIAL_MESSAGE_COUNT = CONVERSATION_RANGE_MAX_LIMIT + 1
 const DUPLICATE_POSITIONS = [100, 3_000]
@@ -44,6 +45,7 @@ const interfaceMockModules = [
     '../process/memory/hanuraiMemory', '../process/memory/hypav2', '../process/memory/hypav3',
     '../process/scriptings', '../plugins/plugins.svelte', '../process/presetChain',
     '../model/modellist',
+    './selectedConversationLifecycle',
 ]
 
 afterEach(() => {
@@ -128,6 +130,9 @@ async function waitForWindowed(
 
 describe('selected conversation eviction correctness corpus', () => {
     it('matches a complete-owner oracle across forced demotion cycles longer than one range page', async () => {
+        // The fixture remains alive across dependency resets. Retain its real
+        // lifecycle module so later consumers recognize the same branded shells.
+        vi.doMock('./selectedConversationLifecycle', () => selectedConversationLifecycle)
         const initialConversation = makeConversation(INITIAL_MESSAGE_COUNT, DUPLICATE_POSITIONS)
         const oracle = structuredClone(initialConversation)
         const fixture = await createEvictionFixture(initialConversation)

@@ -28,8 +28,23 @@ export default mergeConfig(sharedVitestConfig(), defineConfig({
     projects: [
       {
         extends: true,
+        optimizeDeps: {
+          // Exercise the tokenizer's WebView WASM path in happy-dom.
+          rolldownOptions: {
+            transform: { define: { 'process.versions.node': 'undefined' } },
+          },
+        },
         test: {
           name: 'app',
+          deps: {
+            optimizer: {
+              // Bundle the UMD tokenizer so its named exports are available.
+              client: {
+                enabled: true,
+                include: ['@mlc-ai/web-tokenizers'],
+              },
+            },
+          },
           include: appTestIncludes,
           exclude: [...extendedAppTests, ...nodeAppTests, ...harnessVitestTests, ...separateRunnerPaths],
         },

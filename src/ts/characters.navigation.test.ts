@@ -182,6 +182,21 @@ function deferred<T>() {
 }
 
 describe('runtime chat identity', () => {
+    it('keeps a newer portrait when the gallery selection changed while the picker was open', async () => {
+        const character = {type: 'character', chaId: 'synthetic-gallery-owner', image: 'assets/old.png', emotionImages: [], chats: []}
+        mocks.database.characters = [character]
+        const chosen = deferred<any>()
+        mocks.selectSingleFile.mockReturnValueOnce(chosen.promise)
+        const pending = selectCharImg(0, current => {
+            if (current.image !== 'assets/old.png') throw new Error('Synthetic stale portrait')
+        })
+        character.image = 'assets/newer.png'
+        chosen.resolve({name: 'replacement.png', data: new Uint8Array([1])})
+        await expect(pending).rejects.toThrow('Synthetic stale portrait')
+        expect(character.image).toBe('assets/newer.png')
+        expect(character).not.toHaveProperty('ccAssets')
+    })
+
     it.each(['portrait', 'emotion'] as const)('applies a pending %s import to its original character after reordering', async (kind) => {
         const first = { type: 'character', chaId: 'first', image: 'assets/old.png', emotionImages: [], chats: [] }
         const second = { type: 'character', chaId: 'second', image: '', emotionImages: [], chats: [] }

@@ -29,6 +29,10 @@ function dependencies(platform: 'desktop' | 'android' | 'ios' | 'web', calls: un
                 revision = 4
             },
         }),
+        reserveAndroidDestination: async (suggestedName: string) => {
+            calls.push(['reserve', suggestedName])
+            return { requestId: 'synthetic-request', bind: async () => undefined, release: async () => { calls.push(['release']) } }
+        },
         desktopDestination: async (fileName: string) => {
             calls.push(['desktopDestination', fileName])
             return `C:\\Users\\me\\Downloads\\${fileName}`
@@ -60,7 +64,7 @@ describe('native dataset export route', () => {
         const second = exportNativeDataset({}, { ...deps, runExport })
         await preparing
         expect(runExport).toHaveBeenCalledOnce()
-        expect(calls).toEqual([['flush', 'native-dataset-export']])
+        expect(calls).toEqual([['reserve', 'dataset.json'], ['flush', 'native-dataset-export']])
         expect(get(nativeFileOperationOutcome)).toBeNull()
         await expect(runSharedNativeFileOperation('import', 'other', async () => undefined)).rejects.toMatchObject({ name: 'NativeFileOperationBusyError' })
         finish()
@@ -83,6 +87,18 @@ describe('native dataset export route', () => {
         const deps = { ...dependencies('android', calls), runExport: async () => { throw new Error('synthetic destination failure') } }
         await expect(exportNativeDataset({}, deps)).resolves.toBeNull()
         expect(get(nativeFileOperationOutcome)).toMatchObject({ state: 'failed', format: 'dataset' })
+        expect(isLibraryFileOperationReserved()).toBe(false)
+    })
+    it('ends without an outcome when the Android save picker is backed out of', async () => {
+        const calls: unknown[] = []
+        const deps = { ...dependencies('android', calls), reserveAndroidDestination: async () => {
+            calls.push(['reserve'])
+            throw new DOMException('Android SAF export was cancelled', 'AbortError')
+        } }
+        dismissNativeFileOperationOutcome()
+        await expect(exportNativeDataset({}, deps)).resolves.toBeNull()
+        expect(calls).toEqual([['reserve']])
+        expect(get(nativeFileOperationOutcome)).toBeNull()
         expect(isLibraryFileOperationReserved()).toBe(false)
     })
     it('writes the desktop dataset into Downloads after flushing pending edits', async () => {
@@ -108,12 +124,16 @@ describe('native dataset export route', () => {
 
         await exportNativeDataset({}, dependencies(platform, calls))
 
+        // Android picks the destination before the flush and releases it once the export ends.
+        const reserved = platform === 'android'
         expect(calls).toEqual([
+            ...(reserved ? [['reserve', 'dataset.json']] : []),
             ['flush', 'native-dataset-export'],
             ['runExport', {
-                destination: { type, suggestedName: 'dataset.json' },
+                destination: { type, suggestedName: 'dataset.json', ...(reserved ? { reservation: expect.anything() } : {}) },
                 expectedRevision: 4,
             }],
+            ...(reserved ? [['release']] : []),
         ])
     })
 

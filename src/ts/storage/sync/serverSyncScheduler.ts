@@ -71,14 +71,22 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
         }, outageUntil - Date.now())
     }
     const failedLanes = new Set<Lane>()
+    let disconnectingFully = false
     const disconnect = (stop = dependencies.disconnect) => {
-        if (!disconnecting) disconnecting = (async () => {
+        const fully = stop === dependencies.disconnect
+        // A cancel requested while hiding stops only the notification channel still runs after it.
+        if (disconnecting && (disconnectingFully || !fully)) return disconnecting
+        const previous = disconnecting
+        disconnectingFully = fully
+        const current: Promise<void> = (async () => {
+            if (previous) await previous.catch(() => {})
             await stop()
             const started = connecting
             // A start that was already running may finish after the stop, so stop again once it settles.
             if (started) { await started; await stop() }
-        })().finally(() => { disconnecting = undefined })
-        return disconnecting
+        })().finally(() => { if (disconnecting === current) { disconnecting = undefined; disconnectingFully = false } })
+        disconnecting = current
+        return current
     }
     const code = serverSyncErrorCode
     const succeeded = (lane: Lane, epoch: number) => {
@@ -152,7 +160,10 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
     }
     const connect = () => {
         if (waiting()) { scheduleOutage(); return }
-        if (!foreground || blocked || connecting || !available()) return
+        if (!foreground || blocked || !available()) return
+        // A stop from the previous hidden session must finish before the new channel starts.
+        if (disconnecting) { void disconnecting.then(connect, () => {}); return }
+        if (connecting) return
         const epoch = outageEpoch
         const attempt: Promise<void> = dependencies.connect(notificationOperationId ??= crypto.randomUUID()).then(() => succeeded('connect', epoch), error => { fail(error, 'connect'); socket(false) })
             .finally(() => { if (connecting === attempt) connecting = undefined })

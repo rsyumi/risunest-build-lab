@@ -108,55 +108,93 @@ describe('native character CharX export route', () => {
         })).resolves.toBeNull()
     })
 
-    it('routes Android directly to the SAF handoff without opening a desktop picker', async () => {
+    it('pins the Android export to the revision after the save picker returns', async () => {
         const calls: unknown[] = []
         const leasedCharacter = { name: 'Android character', desc: 'leased' }
+        let revision = 12
+        const reservation = {
+            requestId: 'synthetic-request',
+            bind: async () => undefined,
+            release: async () => { calls.push(['release']) },
+        }
+        const dependencies = {
+            isDesktop: () => false,
+            isAndroid: () => true,
+            chooseDestination: async (): Promise<string | null> => {
+                throw new Error('desktop picker must not run')
+            },
+            reserveAndroidDestination: async (name: string, kind: string) => {
+                calls.push(['pick', name, kind])
+                // A streaming response commits while the save picker is open.
+                revision = 13
+                return reservation
+            },
+            runtime: () => ({
+                get revision() { return revision },
+                flushPendingData: async (reason: string) => { calls.push(['flush', reason]) },
+            }),
+            readCharacter: async (_characterId: string, pinned: number) => {
+                calls.push(['read', pinned])
+                return leasedCharacter as never
+            },
+            runExport: async (input: unknown) => {
+                calls.push(['export', input])
+                return {
+                    revision: 13,
+                    sourceBytes: 10,
+                    sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'a'.repeat(64),
+                    characterCount: 1,
+                    presetCount: 0,
+                    warningCodes: [],
+                }
+            },
+        }
+        const input = {
+            characterId: 'android-character',
+            suggestedName: 'Android character.charx',
+            projectCharacter: (character: Record<string, unknown>) => ({
+                card: { spec: 'chara_card_v3', data: { ...character } },
+                module: {},
+            }),
+        }
 
-        await exportNativeCharacterCharxFromPicker(
-            {
-                characterId: 'android-character',
-                suggestedName: 'Android character.charx',
-                projectCharacter: (character) => ({
-                    card: { spec: 'chara_card_v3', data: { ...character } },
-                    module: {},
-                }),
-            },
-            {},
-            {
-                isDesktop: () => false,
-                isAndroid: () => true,
-                chooseDestination: async () => {
-                    throw new Error('desktop picker must not run')
-                },
-                runtime: () => ({
-                    revision: 12,
-                    flushPendingData: async (reason) => { calls.push(['flush', reason]) },
-                }),
-                readCharacter: async () => leasedCharacter as never,
-                runExport: async (input) => {
-                    calls.push(['export', input])
-                    return {
-                        revision: 12,
-                        sourceBytes: 10,
-                        sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'a'.repeat(64),
-                        characterCount: 1,
-                        presetCount: 0,
-                        warningCodes: [],
-                    }
-                },
-            },
-        )
+        await exportNativeCharacterCharxFromPicker(input, {}, dependencies)
 
         expect(calls).toEqual([
+            ['pick', 'Android character.charx', 'risuSave'],
             ['flush', 'native-character-charx-export'],
+            ['read', 13],
             ['export', {
                 characterId: 'android-character',
-                destination: { type: 'androidSaf', suggestedName: 'Android character.charx' },
-                expectedRevision: 12,
+                destination: { type: 'androidSaf', suggestedName: 'Android character.charx', reservation },
+                expectedRevision: 13,
                 card: { spec: 'chara_card_v3', data: leasedCharacter },
                 module: {},
             }],
+            ['release'],
         ])
+
+        // A failure after the picker still releases the picked destination.
+        calls.length = 0
+        await expect(exportNativeCharacterCharxFromPicker(input, {}, {
+            ...dependencies,
+            runtime: () => ({ revision, flushPendingData: async () => { throw new Error('flush failed') } }),
+        })).rejects.toThrow('flush failed')
+        expect(calls).toEqual([['pick', 'Android character.charx', 'risuSave'], ['release']])
+
+        // Backing out of the save picker ends the export without an error, while a cancelled job still rejects.
+        const backedOut = {
+            ...dependencies,
+            reserveAndroidDestination: async (name: string, kind: string) => {
+                calls.push(['pick', name, kind])
+                throw new DOMException('Android SAF export was cancelled', 'AbortError')
+            },
+        }
+        calls.length = 0
+        await expect(exportNativeCharacterCharxFromPicker(input, {}, backedOut)).resolves.toBeNull()
+        expect(calls).toEqual([['pick', 'Android character.charx', 'risuSave']])
+        await expect(exportNativeCharacterCharxFromPicker(input, { signal: AbortSignal.abort() }, backedOut))
+            .rejects.toMatchObject({ name: 'AbortError' })
     })
 
     it('matches the desktop dialog filter to the requested container', async () => {
@@ -199,6 +237,7 @@ describe('native character CharX export route', () => {
         const dependencies = {
             isDesktop: () => false,
             isAndroid: () => true,
+            reserveAndroidDestination: async () => ({ requestId: 'synthetic-request', bind: async () => undefined, release: async () => undefined }),
             chooseDestination: async () => null,
             runtime: () => ({ revision: 7, flushPendingData: async () => undefined }),
             readCharacter: async () => ({ name: 'Current' }) as never,

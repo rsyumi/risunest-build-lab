@@ -104,6 +104,20 @@ describe('portrait rendition preparation through native IPC', () => {
         expect(staging.size).toBe(0)
     })
 
+    it.each([
+        ['BMP', new Uint8Array([0x42, 0x4d, 0, 0, 0, 0])],
+        ['HEIC', new Uint8Array([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63])],
+    ])('offers a pinned legacy %s portrait to the WebView decoder', async (_format, bytes) => {
+        source = bytes as Uint8Array
+        sourceHash = createHash('sha256').update(source).digest('hex')
+        const result = await prepareCharacterPortraitRendition(character, 7, 'png-card')
+        expect(result?.descriptor.sourceHash).toBe(sourceHash)
+        expect(staging.get(result!.descriptor.path)).toEqual(png)
+        expect(leases.size).toBe(0)
+        await result!.release()
+        expect(staging.size).toBe(0)
+    })
+
     it.each(['hash', 'stale', 'decode', 'append', 'ack', 'cancel'])('leaves no lease or staged file after %s failure', async mode => {
         failure = mode
         if (mode === 'hash') sourceHash = '0'.repeat(64)

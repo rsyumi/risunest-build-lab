@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
+    diagnosticEvents: [] as Record<string, unknown>[],
+    acknowledge: vi.fn(async () => undefined),
     session: null as any,
     currentCharacter: null as any,
     modelRequests: [] as any[],
@@ -29,6 +31,16 @@ const mocks = vi.hoisted(() => ({
     alertError: vi.fn(),
     onModelRequest: null as null | (() => void),
 }))
+
+vi.mock('../generationDiagnostics', async (importOriginal) =>
+    (await import('./tests/sendChatTestHarness')).generationDiagnosticsModule(
+        await importOriginal<typeof import('../generationDiagnostics')>(),
+        async (_command, args) => {
+            const event = args.event as Record<string, unknown>
+            if (event.kind === 'document-start') return 1
+            mocks.diagnosticEvents.push(event)
+        },
+    ))
 
 vi.mock('../iosNative', async () => (await import('./tests/sendChatTestHarness')).iosNativeModule())
 vi.mock('../tokenizer', async () => (await import('./tests/sendChatTestHarness')).tokenizerModule({
@@ -86,6 +98,7 @@ vi.mock('../plugins/pluginDatabaseAccess', async (importOriginal) => (await impo
 vi.mock('./presetChain', () => ({ activatePresetChainForRequest: vi.fn(async () => undefined) }))
 vi.mock('../storage/deviceSettings', () => ({ getDeviceSettings: () => mocks.deviceSettings }))
 vi.mock('../storage/persistentDataRuntime.svelte', async () => (await import('./tests/sendChatTestHarness')).persistentRuntimeModule({
+    acknowledgeGenerationCompletion: mocks.acknowledge,
     captureSelectedConversationTarget: () => mocks.selectedTarget,
     captureSelectedConversationAuthority: () => mocks.selectedAuthority,
     captureWindowedConversationMutationController: (...args: any[]) => mocks.windowedController?.(...args) ?? null,
@@ -286,6 +299,8 @@ const promptContents = () => (mocks.modelRequests.at(-1)?.formated ?? []).map((c
 
 describe('sendChat with the history window', () => {
     beforeEach(() => {
+        mocks.diagnosticEvents.length = 0
+        mocks.acknowledge.mockReset().mockResolvedValue(undefined)
         vi.spyOn(console, 'log').mockImplementation(() => undefined)
         vi.spyOn(console, 'debug').mockImplementation(() => undefined)
         doingChat.set(false)
@@ -327,8 +342,18 @@ describe('sendChat with the history window', () => {
         const stored = messages(1000)
         const before = structuredClone(stored.slice(0, 900))
         const { bodyReads, mutations } = installWindowed(stored)
+        mocks.acknowledge.mockImplementation(async () => { mocks.selectedAuthority.storeRevision = 2 })
 
         await expect(sendChat({ historyLimit: true })).resolves.toBe(true)
+        expect(mocks.diagnosticEvents.filter(event => event.kind === 'admission').at(-1)).toMatchObject({
+            route: 'history-window', admittedMessages: 100, totalMessages: 1000,
+        })
+        expect(mocks.diagnosticEvents).toContainEqual(expect.objectContaining({
+            kind: 'persistence', boundary: 'final', savePath: 'windowed', acknowledgedRevision: 2,
+        }))
+        expect(mocks.diagnosticEvents).toContainEqual(expect.objectContaining({
+            phase: 'settled', edge: 'exit', outcome: 'ok', savePath: 'windowed',
+        }))
 
         // maxContext 500 times 2 at ten tokens per message keeps a hundred messages.
         expect(promptContents()).toEqual(range(900, 1000))

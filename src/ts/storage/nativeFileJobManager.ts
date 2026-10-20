@@ -92,6 +92,7 @@ export interface SharedNativeFileOperationContext {
 
 export interface SharedNativeFileOperationOptions {
     beforeSettlement?(signal: AbortSignal): Promise<void>
+    onProgress?(percent: number | null): void
     userInitiated?: boolean
     presentation?: NativeFileOperationPresentation
     format?: NativeFileOperationFormat
@@ -393,7 +394,9 @@ function runSharedNativeFileOperationWithAdmission<T>(
                     signal: task.signal ?? context.signal,
                     onStatus: status => {
                         context.onStatus(status)
-                        task.progress(backgroundTaskPercent(status))
+                        const percent = backgroundTaskPercent(status)
+                        task.progress(percent)
+                        options.onProgress?.(percent)
                     },
                 })
             } finally { await finalize() }

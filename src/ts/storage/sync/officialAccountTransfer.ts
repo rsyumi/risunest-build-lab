@@ -3,7 +3,7 @@ import { AccountReadError, OfficialAssetOwnershipError } from '../accountReadErr
 import { createRateMeter } from './transferRate'
 import type { OfficialAccountAssetProgress } from './officialAccountAssetOutcome'
 
-interface Pause { epoch: number; until: number; paused: boolean; probe: symbol | null; cap: number; transient: number; episodes: number }
+interface Pause { epoch: number; until: number; paused: boolean; probe: symbol | null; cap: number; transient: number; episodes: number; healthy: number }
 const pauses = new Map<string, Pause>()
 
 export function accountRetryDeadline(value: string | undefined, now: number): number | undefined {
@@ -33,8 +33,8 @@ export async function transferOfficialAccountAssets(options: {
 }) {
     const nominal = options.concurrency ?? 2
     const pauseKey = JSON.stringify([options.accountId, options.origin])
-    const pause = pauses.get(pauseKey) ?? { epoch: 0, until: 0, paused: false, probe: null, cap: nominal, transient: 0, episodes: 0 }
-    if (!pause.paused) { pause.cap = nominal; pause.transient = 0; pause.episodes = 0 }
+    const pause = pauses.get(pauseKey) ?? { epoch: 0, until: 0, paused: false, probe: null, cap: nominal, transient: 0, episodes: 0, healthy: 0 }
+    if (!pause.paused) { pause.cap = nominal; pause.transient = 0; pause.episodes = 0; pause.healthy = 0 }
     pauses.set(pauseKey, pause)
     let limit = Math.min(nominal, pause.cap)
     const retries: { key: string; attempts: number; ready: number }[] = []
@@ -59,6 +59,7 @@ export async function transferOfficialAccountAssets(options: {
         const fresh = ticket === pause.epoch
         if (fresh) {
             pause.epoch++; pause.cap = Math.max(1, Math.floor(limit / 2)); pause.episodes++
+            pause.healthy = 0
             pause.paused = true; pause.probe = null
         }
         limit = Math.min(limit, pause.cap)
@@ -77,7 +78,7 @@ export async function transferOfficialAccountAssets(options: {
                 } })
             } catch (error) {
                 if (controller.signal.aborted) return
-                if (error instanceof OfficialAssetOwnershipError) { options.settled(item.key, 'failed'); stop(error.reason === 'receipt' ? 'local' : error.reason); return }
+                if (error instanceof OfficialAssetOwnershipError) { options.settled(item.key, 'failed'); stop(error.reason); return }
                 if (!(error instanceof AccountReadError)) { options.settled(item.key, 'failed'); stop('local'); return }
                 if (error.kind === 'local') { options.settled(item.key, 'failed'); stop('local'); return }
                 if (error.kind === 'account-changed' || error.status === 401 || error.status === 403) {
@@ -99,7 +100,15 @@ export async function transferOfficialAccountAssets(options: {
             }
             if (ticket === pause.epoch) {
                 serviceFailures = 0; pause.transient = 0
-                if (probe && pause.probe === token) { pause.paused = false; pause.probe = null; pause.until = 0 }
+                if (probe && pause.probe === token) {
+                    pause.paused = false; pause.probe = null; pause.until = 0
+                    pause.episodes = Math.max(0, pause.episodes - 1)
+                } else if (!pause.paused && ++pause.healthy >= limit * 2) {
+                    pause.cap = Math.min(nominal, pause.cap + 1)
+                    limit = Math.min(nominal, pause.cap)
+                    pause.healthy = 0
+                    pause.episodes = Math.max(0, pause.episodes - 1)
+                }
             }
             if (result.kind === 'missing') { options.settled(item.key, 'missing'); return }
             try {
@@ -113,7 +122,7 @@ export async function transferOfficialAccountAssets(options: {
             } catch (error) {
                 if (!controller.signal.aborted) {
                     options.settled(item.key, 'failed')
-                    stop(error instanceof OfficialAssetOwnershipError && error.reason !== 'receipt' ? error.reason : 'local')
+                    stop(error instanceof OfficialAssetOwnershipError ? error.reason : 'local')
                 }
             }
         })().finally(() => { active.delete(task); notify(); progress() })

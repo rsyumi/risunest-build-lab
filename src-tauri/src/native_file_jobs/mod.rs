@@ -6,6 +6,7 @@ mod character_png_export;
 pub mod charx;
 mod content;
 mod dataset_export;
+mod gallery_export;
 pub(crate) mod download_handoff;
 mod error;
 mod jpeg_asset;
@@ -345,6 +346,16 @@ pub(crate) enum NativeFileJobStartRequest {
     ExportDataset {
         destination: Option<String>,
         expected_revision: i64,
+    },
+    ExportGalleryFile {
+        destination: Option<String>,
+        expected_revision: i64,
+        selection: gallery_export::GallerySelection,
+    },
+    ExportGalleryZip {
+        destination: Option<String>,
+        expected_revision: i64,
+        selection: gallery_export::GallerySelection,
     },
     PrepareContentImport {
         source: JobSource,
@@ -1800,6 +1811,26 @@ impl NativeFileJobState {
                     prepared,
                 }
             }
+            request @ (NativeFileJobStartRequest::ExportGalleryFile { .. }
+                | NativeFileJobStartRequest::ExportGalleryZip { .. }) => {
+                let archive = matches!(&request, NativeFileJobStartRequest::ExportGalleryZip { .. });
+                let (destination, expected_revision, selection) = match request {
+                    NativeFileJobStartRequest::ExportGalleryFile { destination, expected_revision, selection }
+                    | NativeFileJobStartRequest::ExportGalleryZip { destination, expected_revision, selection } => (destination, expected_revision, selection),
+                    _ => unreachable!(),
+                };
+                selection.validate(archive)?;
+                let destination = destination.map(PathBuf::from);
+                if let Some(path) = destination.as_deref() { validate_desktop_destination(path)?; }
+                let selected_alias = if archive { None } else { Some(selection.single_alias()?) };
+                let prepared = crate::persistent_store::commands::with_store_mut(app.state(), |store| {
+                    match selected_alias {
+                        Some((kind, key)) => store.prepare_gallery_file_export(expected_revision, kind, key),
+                        None => store.prepare_risu_save_export(expected_revision),
+                    }
+                }).map_err(native_store_error)?;
+                NativeFileJobTask::ExportGallery { destination, prepared, selection, archive }
+            }
             request @ NativeFileJobStartRequest::PrepareContentImport { .. } => {
                 return self.start_content(request);
             }
@@ -2459,6 +2490,9 @@ impl NativeFileJobState {
                         destination.as_deref(),
                         &job,
                     ),
+                    NativeFileJobTask::ExportGallery { destination, prepared, selection, archive } =>
+                        gallery_export::export_gallery(prepared, selection, archive, &owned_directory,
+                            &root.join("handoffs"), destination.as_deref(), &job),
                     NativeFileJobTask::ExportDataset {
                         destination,
                         prepared,
@@ -2862,6 +2896,12 @@ enum NativeFileJobTask {
         destination: Option<PathBuf>,
         prepared: crate::persistent_store::PreparedRisuSaveExport,
     },
+    ExportGallery {
+        destination: Option<PathBuf>,
+        prepared: crate::persistent_store::PreparedRisuSaveExport,
+        selection: gallery_export::GallerySelection,
+        archive: bool,
+    },
     ImportJpegAsset {
         opened_source: Option<OpenedJobSource>,
         source: JobSource,
@@ -2897,6 +2937,7 @@ impl NativeFileJobTask {
             Self::ExportCharacterCard { .. } => JobKind::ExportCharacterCard,
             Self::ExportRisuModule { .. } => JobKind::ExportRisuModule,
             Self::ExportDataset { .. } => JobKind::ExportDataset,
+            Self::ExportGallery { archive, .. } => if *archive { JobKind::ExportGalleryZip } else { JobKind::ExportGalleryFile },
             Self::ImportJpegAsset { .. } => JobKind::ImportJpegAsset,
             #[cfg(feature = "native-kei-upload-pilot")]
             Self::KeiBackup { .. } => JobKind::KeiBackupUpload,
@@ -2938,7 +2979,8 @@ impl NativeFileJobTask {
             Self::ExportCharacterCharx { prepared, .. }
             | Self::ExportCharacterCard { prepared, .. }
             | Self::ExportRisuModule { prepared, .. }
-            | Self::ExportDataset { prepared, .. } => Some(prepared.revision),
+            | Self::ExportDataset { prepared, .. }
+            | Self::ExportGallery { prepared, .. } => Some(prepared.revision),
             #[cfg(feature = "native-kei-upload-pilot")]
             Self::KeiBackup { prepared } => Some(prepared.revision()),
             #[cfg(feature = "native-official-publication")]
@@ -3664,6 +3706,8 @@ pub(crate) enum JobKind {
     ExportCharacterCard,
     ExportRisuModule,
     ExportDataset,
+    ExportGalleryFile,
+    ExportGalleryZip,
     PrepareContentImport,
     ImportJpegAsset,
     KeiBackupUpload,
@@ -4796,7 +4840,7 @@ impl JobControl {
             || (status.kind == JobKind::ExportCharacterCharx && status.state.is_terminal())
             || (status.kind == JobKind::ExportCharacterCard && status.state.is_terminal())
             || (status.kind == JobKind::ExportRisuModule && status.state.is_terminal())
-            || (status.kind == JobKind::ExportDataset && status.state.is_terminal())
+            || (matches!(status.kind, JobKind::ExportDataset | JobKind::ExportGalleryFile | JobKind::ExportGalleryZip) && status.state.is_terminal())
             || (status.kind == JobKind::ExportPortableBackup && status.state.is_terminal())
             || (status.kind == JobKind::SnapshotBodies && status.state.is_terminal())
             || (status.kind == JobKind::ExportCompatibleLocalBackup && status.state.is_terminal())
@@ -5126,7 +5170,7 @@ impl JobControl {
             JobKind::ExportCharacterCharx => JobPhase::WritingExport,
             JobKind::ExportCharacterCard => JobPhase::WritingExport,
             JobKind::ExportRisuModule => JobPhase::WritingExport,
-            JobKind::ExportDataset => JobPhase::WritingExport,
+            JobKind::ExportDataset | JobKind::ExportGalleryFile | JobKind::ExportGalleryZip => JobPhase::WritingExport,
             JobKind::PrepareContentImport => JobPhase::ReadingSource,
             JobKind::ImportJpegAsset => JobPhase::ReadingSource,
             JobKind::KeiBackupUpload => JobPhase::WritingExport,

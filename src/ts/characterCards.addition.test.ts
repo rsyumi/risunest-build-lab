@@ -29,6 +29,7 @@ const mocks = vi.hoisted(() => ({
     exportNativeCharacterCharxFromPicker: vi.fn(),
     exportNativeCharacterCardFromPicker: vi.fn(),
     nextId: 0,
+    destinationChosen: true,
 }))
 
 vi.mock('uuid', () => ({ v4: () => `card-id-${++mocks.nextId}` }))
@@ -72,7 +73,9 @@ vi.mock('./globalApi.svelte', () => ({
     }),
     forageStorage: {},
     loadAsset: vi.fn(),
-    LocalWriter: class {},
+    LocalWriter: class {
+        async init() { return mocks.destinationChosen }
+    },
     openURL: vi.fn(),
     readImage: mocks.readImage,
     saveAsset: mocks.saveAsset,
@@ -141,6 +144,7 @@ vi.mock('./process/modules', () => ({
 vi.mock('@tauri-apps/plugin-fs', () => ({ readFile: vi.fn() }))
 vi.mock('@tauri-apps/plugin-deep-link', () => ({ getCurrent: vi.fn(), onOpenUrl: vi.fn() }))
 vi.mock('./storage/accountStorage', () => ({ AccountStorage: class {} }))
+vi.mock('./mobileBackgroundTask', async () => (await import('./mobileBackgroundTask.testSupport')).mobileBackgroundTaskModule())
 vi.mock('./media', () => ({
     getImageType: vi.fn(() => 'Unknown'),
 }))
@@ -627,6 +631,16 @@ describe('character card additions', () => {
 
         const payload = mocks.charxWrites.find((entry) => entry.key.endsWith('/exact.bin'))
         expect(Array.from(payload?.data ?? [])).toEqual([1, 2, 3, 4])
+    })
+
+    it('holds a card export in the background only once a destination is chosen', async () => {
+        const { beginMobileBackgroundTask } = await import('./mobileBackgroundTask')
+        const character = { type: 'character', name: 'Held card', image: 'assets/avatar.png', emotionImages: [], additionalAssets: [], ccAssets: [], extentions: {} } as any
+        for (const chosen of [false, true]) {
+            mocks.destinationChosen = chosen
+            await exportCharacterCard({ ...character }, 'png', { spec: 'v3' })
+        }
+        expect(beginMobileBackgroundTask).toHaveBeenCalledExactlyOnceWith('export', undefined, true)
     })
 
     it('routes the selected desktop CCv3 CharX through the native leased exporter', async () => {

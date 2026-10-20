@@ -4435,6 +4435,7 @@ dependencies = [
  "notify-rust",
  "oauth2",
  "percent-encoding",
+ "png 0.18.1",
  "quick-xml",
  "rcgen",
  "regex",
@@ -4493,6 +4494,7 @@ dependencies = [
  "wry",
  "zeroize",
  "zip 0.6.6",
+ "zune-jpeg",
 ]
 
 [[package]]

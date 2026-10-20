@@ -59,8 +59,9 @@ function createHarness(loggedIn = false, useNativeRestore = false) {
     const prepareRestoreAssets = async (accountId: string) => { pendingRestoreAccount = accountId }
     const clearRestoreAssets = vi.fn(async () => { pendingRestoreAccount = null })
     const inspectRestoreAssets = vi.fn<NonNullable<NativeOfficialAccountFlowDependencies['inspectRestoreAssets']>>(async () => ({ kind: 'none' }))
+    const bindRestoreAssets = vi.fn<NonNullable<NativeOfficialAccountFlowDependencies['bindRestoreAssets']>>(async () => {})
     const flow = createNativeOfficialAccountFlow({
-        prepareRestoreAssets, completeRestoreAssets, clearRestoreAssets, inspectRestoreAssets,
+        prepareRestoreAssets, completeRestoreAssets, clearRestoreAssets, inspectRestoreAssets, bindRestoreAssets,
         credentialVault: vault,
         adapter,
         initialCredential: loggedIn ? {
@@ -80,7 +81,7 @@ function createHarness(loggedIn = false, useNativeRestore = false) {
     })
     return {
         get pendingRestoreAccount() { return pendingRestoreAccount },
-        completeRestoreAssets, clearRestoreAssets, inspectRestoreAssets,
+        completeRestoreAssets, clearRestoreAssets, inspectRestoreAssets, bindRestoreAssets,
         adapter,
         clearLegacyFallback,
         clearMetadata,
@@ -532,6 +533,13 @@ describe('explicit native official account flow', () => {
         await expect(harness.flow.restore()).rejects.toBeInstanceOf(NativeFileJobActivationCommittedError)
     })
 
+    it('finishes standalone asset recovery without restarting the running library', async () => {
+        const h = createHarness(true, true)
+        await h.flow.resumeAssets({ operationId: 'receipt' })
+        expect(h.flushMetadata).toHaveBeenCalledOnce()
+        expect(h.restart).not.toHaveBeenCalled()
+    })
+
     it('preserves database counters and activation identity while asset status remains independently cancellable', async () => {
         const h = createHarness(true, true)
         const native = syntheticNativeFileJobStatus({ kind: 'restore-official-account-snapshot', jobId: 'database-job',
@@ -615,6 +623,9 @@ describe('explicit native official account flow', () => {
         expect(harness.pendingRestoreAccount).toBe(pendingAccount)
         expect(harness.completeRestoreAssets).not.toHaveBeenCalled()
         expect(harness.restart).not.toHaveBeenCalled()
+        if (error instanceof NativeFileJobActivationCommittedError) {
+            expect(harness.bindRestoreAssets).toHaveBeenCalledWith('account-1', expect.objectContaining({ activationRevision: 8 }))
+        } else expect(harness.bindRestoreAssets).not.toHaveBeenCalled()
     })
 
     it('exposes only the current authenticated account identity through login and logout', async () => {

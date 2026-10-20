@@ -184,10 +184,11 @@ export function createSelectedConversationLiveParserProjectionResolver(
                         }) : captureResidentCbsHistory(current.conversation.message, plan, chatID, historyDependencies)
                     } catch (error) {
                         // A later pass can depend on a row that changed before it was read,
-                        // which greeting refreshes skipped, so the greeting has to prepare again.
-                        // Notify after this parse call stack, which may be inside a derived.
+                        // which greeting refreshes skipped, and a storage-only commit advances
+                        // the revision without changing a row, so the greeting has to prepare
+                        // again. Notify after this parse call stack, which may be inside a derived.
                         const requested = () => !input.signal?.aborted && input.isCurrent?.() !== false
-                        if (requested() && historyChanged()) queueMicrotask(() => {
+                        if (requested() && (historyChanged() || error instanceof ChatParserHistoryProjectionStaleError)) queueMicrotask(() => {
                             if (requested()) input.onStale?.()
                         })
                         throw error
@@ -307,17 +308,18 @@ export function createSelectedConversationLiveParserProjectionResolver(
                 )) throw new ChatParserHistoryProjectionStaleError()
                 const historyChanged = resident?.historyChanged
                 const prepareHistory = projection.context.parserContext.prepareHistory
-                if (historyChanged && prepareHistory) projection.context.parserContext.prepareHistory = async (text, chatID, complete) => {
+                if (prepareHistory) projection.context.parserContext.prepareHistory = async (text, chatID, complete) => {
                     try {
                         return await prepareHistory(text, chatID, complete)
                     } catch (error) {
                         // A later pass can depend on a row that changed after the resident
-                        // rows were captured, which row refreshes skipped, so the row has to
-                        // prepare again. The owner's own check also fails when its baseline
+                        // rows were captured, which row refreshes skipped, and a storage-only
+                        // commit advances the revision without changing a row, so the row has
+                        // to prepare again. The owner's own check also fails when its baseline
                         // predates the edit, so only cancellation stops the notification.
                         // Being past an await, this already runs outside the parse call
                         // stack, which may be inside a derived.
-                        if (!input.signal?.aborted && historyChanged()) input.onStale?.()
+                        if (!input.signal?.aborted && (historyChanged?.() || error instanceof ChatParserHistoryProjectionStaleError)) input.onStale?.()
                         throw error
                     }
                 }

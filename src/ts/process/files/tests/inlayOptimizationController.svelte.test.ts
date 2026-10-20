@@ -1,7 +1,7 @@
 import { describe, expect, test, vi } from 'vitest'
 vi.mock('../../../mobileBackgroundTask', async () => (await import('../../../mobileBackgroundTask.testSupport')).mobileBackgroundTaskModule())
 import { InlayOptimizationController } from '../inlayOptimizationController.svelte'
-import { measuredTaskPercent, runWithMobileBackgroundTask } from '../../../mobileBackgroundTask'
+import { runWithMobileBackgroundTask } from '../../../mobileBackgroundTask'
 import { defaultInlayEncodeOptions, type InlayBlobMetadata } from '../../../storage/blobStore'
 
 describe('shared optimization ownership', () => {
@@ -55,8 +55,7 @@ describe('shared optimization ownership', () => {
         expect(encodeNewInlayImage).toHaveBeenCalledOnce()
         expect(deps.write).not.toHaveBeenCalled()
         // The hold shows the share of the two images scanned so far.
-        expect(measuredTaskPercent).toHaveBeenLastCalledWith(expect.any(Number), 2)
-        expect(progress).toHaveBeenCalled()
+        expect(progress).toHaveBeenLastCalledWith(50)
     })
 
 })

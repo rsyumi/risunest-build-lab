@@ -1568,6 +1568,38 @@ test('records the synthetic LLM Promise await result in a supported listener mod
   }, 'model')
 })
 
+test('passes API results to Lua as plain tables without JS constructors', async () => {
+  vi.mocked(requestChatData).mockReset()
+  vi.mocked(requestChatData).mockResolvedValueOnce({ type: 'success', result: 'synthetic response' } as never)
+  const result = await runScripted(`onStart = async(function(id)
+      local response = simpleLLM(id, 'prompt'):await()
+      return { type = type(response), hasConstructor = response.constructor ~= nil }
+    end)`, {
+    char: { chaId: 'lua-api-result-boundary' } as never,
+    chat: { message: [] } as never,
+    lowLevelAccess: true,
+    mode: 'start',
+  })
+
+  expect(result.res).toEqual({ type: 'table', hasConstructor: false })
+})
+
+test('passes host errors to Lua without JS constructors', async () => {
+  const result = await runScripted(`
+    function onInput(id)
+      local ok, failure = pcall(getChatVar, id, 'synthetic')
+      return { ok = ok, constructorHidden = failure.constructor == null }
+    end
+  `, {
+    char: { chaId: 'lua-host-error-boundary' } as never,
+    chat: { message: [] } as never,
+    getVar: () => { throw new Error('synthetic host failure') },
+    mode: 'input',
+  })
+
+  expect(result.res).toEqual({ ok: false, constructorHidden: true })
+})
+
 test.each([
   ['listener', 2_000],
   ['button', 60_000],
@@ -1598,10 +1630,10 @@ test.each([
     await runTrigger(char, 'manual', { chat: char.chats[0], manualName: 'manualAction' })
   }
 
-  expect(createdLuaEngineOptions.at(-1)).toEqual({ injectObjects: true, functionTimeout })
+  expect(createdLuaEngineOptions.at(-1)).toEqual({ injectObjects: true, enableProxy: false, functionTimeout })
 })
 
-test.each(['timeout', 'ordinary'] as const)('classifies the actual Wasmoon instruction-hook timeout without changing ordinary diagnostics (%s)', async (kind) => {
+test.each(['timeout', 'ordinary'] as const)('distinguishes the actual Wasmoon instruction-hook timeout from ordinary errors (%s)', async (kind) => {
   let now = Date.now()
   const failure = new Error('synthetic ordinary listener failure')
   diagnosticEngineSetup.next = (engine) => {
@@ -1635,10 +1667,10 @@ test.each(['timeout', 'ordinary'] as const)('classifies the actual Wasmoon instr
       expect(errors).toHaveBeenCalledOnce()
       expect(errors.mock.calls[0]).toHaveLength(1)
       expect(errors.mock.calls[0][0]).toBeInstanceOf(Error)
-      expect(errors.mock.calls[0][0].message.split('\n', 1)[0]).toBe(String(failure))
+      expect(errors.mock.calls[0][0].message.split('\n', 1)[0]).toBe(failure.message)
       expect(errors.mock.calls[0][0]).not.toHaveProperty('code')
     }
-    expect(createdLuaEngineOptions.at(-1)).toEqual({ injectObjects: true, functionTimeout: 2_000 })
+    expect(createdLuaEngineOptions.at(-1)).toEqual({ injectObjects: true, enableProxy: false, functionTimeout: 2_000 })
   } finally {
     diagnosticEngineSetup.next = null
     elapsedClock.mockRestore()

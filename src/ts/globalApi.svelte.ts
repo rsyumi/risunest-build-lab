@@ -974,10 +974,10 @@ export function getFetchLogs() {
  */
 export function openURL(url: string) {
     if (isTauriMobile) {
-        void openUrl(url).catch((error) => alertError(String(error)))
+        void openUrl(url).catch(() => alertError(language.errors.urlOpenFailed))
     }
     else if (isTauri) {
-        void open(url).catch((error) => alertError(String(error)))
+        void open(url).catch(() => alertError(language.errors.urlOpenFailed))
     }
     else {
         window.open(url, "_blank")

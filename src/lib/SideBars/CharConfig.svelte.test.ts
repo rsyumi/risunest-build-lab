@@ -37,6 +37,7 @@ vi.mock('./Toggles.svelte', () => ({ default: () => {} }))
 vi.mock('../UI/GUI/TextAreaInput.svelte', () => ({ default: () => {} }))
 vi.mock('../UI/GUI/MultiLangInput.svelte', () => ({ default: () => {} }))
 vi.mock('../Others/Help.svelte', () => ({ default: () => {} }))
+vi.mock('src/lib/Gallery/AssetGallery.svelte', () => ({ default: () => {} }))
 
 let instance: ReturnType<typeof mount> | undefined
 function deferred<T>() {

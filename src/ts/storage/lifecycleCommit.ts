@@ -1,5 +1,6 @@
 import { flushPendingData } from './persistentDataRuntime.svelte'
 import { isTauri } from '../platform'
+import { generationDiagnostics } from '../generationDiagnostics'
 import { checkpointNativePersistentStore } from './nativePersistentMaintenance'
 import type { SyncExitDisposition } from './syncExitCoordinator'
 
@@ -220,6 +221,7 @@ export function registerLifecycleCommitListeners(
         const detail = (event as CustomEvent<NativeLifecycleDetail>).detail
         const reason = detail?.reason
         if (reason !== 'stop' && reason !== 'trim-memory' && reason !== 'exit') return
+        generationDiagnostics.lifecycle(reason)
         const ackToken = typeof detail?.ackToken === 'string' ? detail.ackToken : undefined
         if (reason === 'exit' && ackToken !== undefined) {
             requestExitFlush(ackToken)

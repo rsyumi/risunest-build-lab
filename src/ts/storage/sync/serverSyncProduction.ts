@@ -8,6 +8,7 @@ import { withPausedPersistentWrites, beginActivatedLibraryGuard, refreshActivate
 import type { PersistentMutationToken } from '../saveCoordinator'
 import { RevisionConflictError, type LwwStageReceive, type LwwRemoteChange } from '../persistentDataStore'
 import { beginDeferredMobileBackgroundTask, runWithDeferredMobileBackgroundTask, runWithMobileBackgroundTask, type MobileBackgroundTask } from '../../mobileBackgroundTask'
+import { isBackgroundExpiryReason } from '../../iosNative'
 import { fencePluginExecutionForAuthorityReplacement, invalidatePluginCachesAfterAuthorityReplacement, restartPluginsAfterAuthorityReplacement } from 'src/ts/plugins/apiV3/v3.svelte'
 import { registerSyncBindingTransport, resumeCurrentSyncBinding } from './bindingRegistry'
 import type { SyncBindingTransport, BindingContext, BindingOutcome, SyncBindingOptions, StagedSyncTarget } from './bindingFlow'
@@ -85,12 +86,22 @@ const halt = () => { foreground = false; continuing = false }
 type Hold = MobileBackgroundTask | Promise<MobileBackgroundTask>
 const releaseHold = (hold: Hold | undefined) => { if (hold) void Promise.resolve(hold).then(task => task.dispose()) }
 // Routine sync takes service time only if the app leaves the screen while it runs.
+const holdRoutineSync = (): Hold => {
+    const hold = beginDeferredMobileBackgroundTask('sync')
+    // When the platform's time runs out, routine sync stops where it stands; returning to the screen resumes it.
+    void Promise.resolve(hold).then(task => task.signal?.addEventListener('abort', () => {
+        if (!isBackgroundExpiryReason(task.signal?.reason)) return
+        halt(); if (hydrating) hydrationPending = true
+        void scheduler.fence()
+    }, { once: true }))
+    return hold
+}
 let attemptHold: Hold | undefined
 let pendingHold: Hold | undefined
 let localChanges = 0
 const noteLocalChange = () => {
     localChanges++
-    if (foreground && !pendingHold) pendingHold = beginDeferredMobileBackgroundTask('sync')
+    if (foreground && !pendingHold) pendingHold = holdRoutineSync()
 }
 let heldForCommittedRestore = false
 let replacing = false
@@ -192,7 +203,7 @@ const watchSamples = () => {
 async function during<T>(stage: ServerSyncStage, operation: () => Promise<T>, countsAsSync = true): Promise<T> {
     // Connecting and downloading every asset show their steps; a routine attempt they join becomes one of them.
     const mode = binding || operations ? 'full' : 'routine'
-    if (!attempt) { attempt = { mode, startedAt: Date.now(), stages: [], active: [], current: stage }; attemptFailed = false; attemptCountsAsSync = false; baseline = undefined; remaining.reset(); clearFinished(); watchSamples(); attemptHold ??= beginDeferredMobileBackgroundTask('sync') }
+    if (!attempt) { attempt = { mode, startedAt: Date.now(), stages: [], active: [], current: stage }; attemptFailed = false; attemptCountsAsSync = false; baseline = undefined; remaining.reset(); clearFinished(); watchSamples(); attemptHold ??= holdRoutineSync() }
     else if (mode === 'full') attempt.mode = mode
     attemptCountsAsSync ||= countsAsSync
     const entered = attempt
@@ -296,7 +307,10 @@ async function updateForeground(visible: boolean): Promise<void> {
     continuing = !visible && usable && (foreground || continuing)
     foreground = visible && usable
     if (!active() && hydrating) hydrationPending = true
-    await scheduler.foreground(foreground, !visible)
+    // Work in flight hands its protection to the hide-time publication without a moment unheld.
+    const bridge = !visible && (attemptHold || pendingHold) ? holdRoutineSync() : undefined
+    try { await scheduler.foreground(foreground, !visible) }
+    finally { releaseHold(bridge) }
     // Changes still unpublished after the hide-time publication wait for the next visible transition.
     if (!visible) { releaseHold(pendingHold); pendingHold = undefined }
     continueHydration()

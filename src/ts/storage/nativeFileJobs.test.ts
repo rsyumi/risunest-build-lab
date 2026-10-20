@@ -181,6 +181,7 @@ import {
     runNativeCharacterCardExport,
     runNativeRisuModuleExport,
     runNativeDatasetExport,
+    runNativeGalleryExport,
     runNativeOfficialPublicationAttempt,
     resumeNativeOfficialPublication,
     type NativeFileJobStatus,
@@ -5256,4 +5257,72 @@ describe('native snapshot restore', () => {
         await retryCommittedWorkingSetRefreshWithContinuation(runtime)
         expect(events).toEqual(['status-read', 'bodies:stage:12:1', 'forgotten'])
     })
+})
+
+it.each([
+    ['androidSaf', false], ['androidSaf', true], ['iosFiles', false], ['iosFiles', true],
+] as const)('publishes gallery downloads through %s (archive=%s) under a background hold and cleans their handoff', async (platform, archive) => {
+    const kind = archive ? 'export-gallery-zip' : 'export-gallery-file'
+    const handoffPath = '/synthetic/native-file-jobs/handoffs/risu-download-123e4567-e89b-42d3-a456-426614174004.bin'
+    let published = false
+    let cleaned = false
+    let holding = false
+    const selection = {kind: 'inlay' as const, keys: ['selected-inlay']}
+    const publish = async (request: {sourcePath: string; suggestedName: string}) => {
+        expect(request.sourcePath).toBe(handoffPath)
+        expect(request.suggestedName).toBe(archive ? 'images.zip' : 'photo.png')
+        expect(holding).toBe(true)
+        published = true
+        return {bytes: 10, warningCodes: []}
+    }
+    const result = await runNativeGalleryExport({destination: {type: platform, suggestedName: archive ? 'images.zip' : 'photo.png'},
+        expectedRevision: 42, archive, selection}, {}, {
+        isTauri: () => true,
+        invoke: async (command, args) => {
+            if (command === 'native_file_job_start') {
+                expect(args?.request).toEqual({kind, expectedRevision: 42, selection})
+                expect(holding).toBe(true)
+                return {jobId: 'gallery'}
+            }
+            if (command === 'native_file_job_status') return {jobId: 'gallery', kind, state: 'succeeded', phase: 'complete',
+                progress: {completedBytes: 10, completedItems: 1}, result: {revision: 42, sourceBytes: 10,
+                    sourceFingerprintKind: 'whole-file-sha256', sourceSha256: 'a'.repeat(64), characterCount: 0,
+                    presetCount: 0, warningCodes: [], handoffPath}}
+            if (command === 'native_download_handoff_cleanup') { expect(published).toBe(true); cleaned = true; return true }
+            if (command === 'native_file_job_forget') { expect(cleaned).toBe(true); return true }
+            throw new Error(command)
+        },
+        wait: async () => {},
+        reserveAndroidDestination: androidSafReservationFixture().reserve,
+        holdExport: async (operation, signal) => {
+            holding = true
+            try { return await operation(signal) } finally { holding = false }
+        },
+        copyToAndroidSaf: publish,
+        copyToIOSFiles: publish,
+    })
+    expect(published).toBe(true)
+    expect(cleaned).toBe(true)
+    expect(holding).toBe(false)
+    expect(result.handoffPath).toBeUndefined()
+})
+
+it('neither reopens nor releases an Android destination its caller reserved', async () => {
+    const picker = androidSafReservationFixture()
+    const reservation = await picker.reserve('photo.png', 'download')
+    const input = {destination: {type: 'androidSaf' as const, suggestedName: 'photo.png', reservation},
+        expectedRevision: 42, archive: false, selection: {kind: 'inlay' as const, keys: ['selected-inlay']}}
+    const dependencies = {
+        isTauri: () => true,
+        invoke: async () => { throw new Error('expected data revision 42, but current revision is 43') },
+        wait: async () => {},
+        reserveAndroidDestination: picker.reserve,
+        copyToAndroidSaf: async () => { throw new Error('A failed export publishes nothing') },
+    }
+    // A gallery retry after a revision conflict publishes to the destination the user already picked.
+    for (let attempt = 0; attempt < 2; attempt++) {
+        await expect(runNativeGalleryExport(input, {}, dependencies)).rejects.toThrow('current revision is 43')
+    }
+    expect(picker.bridge.reserveExport).toHaveBeenCalledOnce()
+    expect(picker.bridge.releaseExport).not.toHaveBeenCalled()
 })

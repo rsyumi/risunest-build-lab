@@ -4,6 +4,7 @@ import { registerGeneratingConversation } from '../storage/generatingConversatio
 import { openGenerationRequestPhase } from './generationRequestPhase'
 import { noteGenerationMessage, noteGenerationStarted } from './generationEnd'
 import { boundedGenerationFallbackReason } from './boundedGenerationAdmission'
+import { generationDiagnostics, type GenerationDiagnosticAdmission, type GenerationDiagnosticFallback, type GenerationDiagnosticOutcome, type GenerationDiagnosticPhase, type GenerationDiagnosticPhaseDetails, type GenerationDiagnosticTrace, type GenerationSavePath } from '../generationDiagnostics'
 import { get, writable } from "svelte/store";
 import { type character, type MessageGenerationInfo, type Chat, type MessagePresetInfo, activatePresetOverride, setCurrentChat, type Message } from "../storage/database.svelte";
 import { DBState } from '../stores.svelte';
@@ -76,7 +77,7 @@ import {
     createLivePromptHistoryCompatibilitySnapshot,
     ensurePromptHistoryEntryId,
     ensurePromptHistoryMessageId,
-    iteratePromptHistory,
+    iteratePromptHistoryTargets,
     selectPromptHistory,
     type PromptHistoryCompatibilitySnapshot,
 } from './promptHistory'
@@ -220,6 +221,65 @@ interface GenerationCompletionLifecycle {
     reroll: boolean
     responseApplied: boolean
     acknowledgementAttempted: boolean
+    diagnostics: GenerationDiagnosticTrace
+    admission: GenerationDiagnosticAdmission
+    diagnosticOutcome?: GenerationDiagnosticOutcome
+    enterDiagnosticPhase(phase: GenerationDiagnosticPhase, details?: GenerationDiagnosticPhaseDetails): void
+    finishDiagnosticPhase(outcome?: GenerationDiagnosticOutcome): void
+    savePath(): GenerationSavePath
+}
+
+function diagnosticFallback(reason: string | null): GenerationDiagnosticFallback {
+    switch (reason) {
+        case null: return 'none'
+        case 'selected-conversation-unavailable':
+        case 'standard-hypa-v3-disabled':
+        case 'selected-conversation-not-windowed':
+        case 'custom-or-remote-tokenizer':
+        case 'experimental-hypa-v3':
+        case 'plugin-editprocess':
+        case 'plugin-editoutput':
+        case 'plugin-chat-output':
+        case 'generation-trigger':
+        case 'history-regex':
+        case 'old-history-lorebook-consumer':
+        case 'additional-text-consumer':
+        case 'inlay-view-consumer':
+        case 'dynamic-history-indirection':
+        case 'explicit-history-reference': return reason
+        default: return 'unknown'
+    }
+}
+
+async function acknowledgeGenerationWithDiagnostics(lifecycle: GenerationCompletionLifecycle): Promise<void> {
+    let savePath: GenerationSavePath = 'unknown'
+    try {
+        lifecycle.finishDiagnosticPhase()
+        savePath = lifecycle.savePath()
+        lifecycle.diagnostics.phase('final-acknowledgement', 'enter', { savePath })
+    } catch {}
+    let outcome: GenerationDiagnosticOutcome = 'failed'
+    try {
+        await acknowledgeGenerationCompletion(lifecycle.authorityEpoch)
+        outcome = 'ok'
+    } finally {
+        try {
+            lifecycle.diagnostics.phase('final-acknowledgement', 'exit', { outcome, savePath })
+            const session = getActiveConversationSession()
+            const matchingSession = session?.isActive
+                && session.characterId === lifecycle.generationTarget?.characterId
+                && session.conversationId === lifecycle.generationTarget?.conversationId
+            const authorityCurrent = outcome === 'ok' && lifecycle.isTargetCurrent()
+            const authority = authorityCurrent && !matchingSession ? captureSelectedConversationAuthority() : null
+            const matchingAuthority = authority?.characterId === lifecycle.generationTarget?.characterId
+                && authority?.conversationId === lifecycle.generationTarget?.conversationId
+            lifecycle.diagnostics.persistence({
+                boundary: 'final', savePath,
+                acknowledgedRevision: !authorityCurrent ? undefined : matchingSession ? session.storeRevision
+                    : matchingAuthority ? authority?.storeRevision : undefined,
+            })
+        } catch {}
+    }
 }
 
 export async function notifyGenerationCompletion(result: string): Promise<void> {
@@ -250,6 +310,7 @@ interface GenerationConversationResources {
 }
 
 interface GenerationHistoryWindow {
+    totalMessages: number
     start: number
     endedAtAllBefore: boolean
     hypaPlan: HistoryWindowHypaPlan | null
@@ -477,6 +538,7 @@ async function prepareGenerationHistoryWindow(
     attachHistoryWindow(chat, start)
     return {
         start,
+        totalMessages: prepared.selection.totalMessages,
         endedAtAllBefore: prepared.selection.endedAtAllBefore,
         hypaPlan: prepared.hypaPlan,
         chat,
@@ -664,6 +726,9 @@ export async function sendChat(arg:{
         windowedController: null,
         unbindWindowedController: null,
     }
+    const diagnostics = generationDiagnostics.generation()
+    const deviceSettings = getDeviceSettings()
+    let activeDiagnosticPhase: GenerationDiagnosticPhase | null = null
     const lifecycle: GenerationCompletionLifecycle = {
         generationTarget: characterId && conversationId ? { characterId, conversationId } : undefined,
         authorityEpoch,
@@ -674,13 +739,47 @@ export async function sendChat(arg:{
         ]?.rerollRecovery,
         responseApplied: false,
         acknowledgementAttempted: false,
+        diagnostics,
+        admission: {
+            intent: arg.continue ? 'continue' : initialConversation?.rerollRecovery ? 'reroll' : 'normal',
+            displayMode: DBState.db.streamingDisplayOptimizationMode === 'balanced' ? 'normal'
+                : DBState.db.streamingDisplayOptimizationMode === 'strong' ? 'strong' : 'off',
+            profile: deviceSettings.performanceProfile === 'low-spec' ? 'low-spec' : 'normal',
+            historyLimitEnabled: arg.historyLimit === true && deviceSettings.generationHistoryLimitEnabled,
+            historyLimitMultiplier: deviceSettings.generationHistoryLimitMultiplier,
+            route: 'unknown',
+            totalMessages: initialConversation && !isMetadataOnlySelectedConversation(initialConversation)
+                ? initialConversation.message.length : undefined,
+        },
+        enterDiagnosticPhase(phase, details) {
+            lifecycle.finishDiagnosticPhase()
+            activeDiagnosticPhase = phase
+            diagnostics.phase(phase, 'enter', details)
+        },
+        finishDiagnosticPhase(outcome = 'ok') {
+            if (activeDiagnosticPhase) diagnostics.phase(activeDiagnosticPhase, 'exit', { outcome })
+            activeDiagnosticPhase = null
+        },
+        savePath() {
+            const session = getActiveConversationSession()
+            if (session?.isActive && session.characterId === characterId && session.conversationId === conversationId) {
+                return session.residencyFallbackActive ? 'fallback' : 'complete'
+            }
+            if (conversationResources.windowedController
+                && initialConversation && isMetadataOnlySelectedConversation(initialConversation)) return 'windowed'
+            return 'unknown'
+        },
     }
+    diagnostics.phase('send-admitted', 'enter')
+    diagnostics.admission(lifecycle.admission)
+    diagnostics.phase('send-admitted', 'exit', { outcome: 'ok' })
     let releaseGeneration: (() => void) | null = null
     let enteredGeneration = false
     let generationReturned = false
     const background = reservation.background
     let generationSignal: ReturnType<typeof joinGenerationSignal> | undefined
     try {
+        lifecycle.enterDiagnosticPhase('history-materialization')
         const initialTarget = captureSelectedConversationTarget()
         const mayUseBoundedHistory = (DBState.db.hypaV3 || getHistoryWindowMemoryMode(arg.historyLimit) !== null)
             && initialTarget !== null
@@ -693,7 +792,7 @@ export async function sendChat(arg:{
                     initialTarget,
                 )
             } catch (error) {
-                if (error instanceof SelectedConversationPromotionStaleError) return false
+                if (error instanceof SelectedConversationPromotionStaleError) { lifecycle.diagnosticOutcome = 'stale'; return false }
                 throw error
             }
         }
@@ -710,6 +809,7 @@ export async function sendChat(arg:{
           conversationResources,
         );
         generationReturned = true
+        lifecycle.diagnosticOutcome ??= result ? 'ok' : 'failed'
         return lifecycle.isTargetCurrent() && result
     } catch (error) {
         if (generationSignal?.signal?.aborted || arg.signal?.aborted) {
@@ -726,35 +826,51 @@ export async function sendChat(arg:{
         }
         throw error
     } finally {
-        releaseGeneration?.()
-        // Receives held for the registered conversation are drained even when the
-        // selection moved away during generation.
-        if (lifecycle.generationTarget && !lifecycle.acknowledgementAttempted &&
-            isAuthorityCurrent()) {
-            try {
-                if (lifecycle.responseApplied) {
-                    lifecycle.acknowledgementAttempted = true
-                    await acknowledgeGenerationCompletion(lifecycle.authorityEpoch)
-                    lifecycle.onProgress?.(3)
-                } else {
-                    await drainDeferredLwwReceives(lifecycle.authorityEpoch)
+        let settledSavePath: GenerationSavePath = 'unknown'
+        try {
+            settledSavePath = lifecycle.savePath()
+            lifecycle.finishDiagnosticPhase(generationSignal?.signal?.aborted || arg.signal?.aborted ? 'aborted'
+                : !lifecycle.isTargetCurrent() ? 'stale' : lifecycle.diagnosticOutcome ?? 'failed')
+        } catch {}
+        try {
+            releaseGeneration?.()
+            // Receives held for the registered conversation are drained even when the
+            // selection moved away during generation.
+            if (lifecycle.generationTarget && !lifecycle.acknowledgementAttempted &&
+                isAuthorityCurrent()) {
+                try {
+                    if (lifecycle.responseApplied) {
+                        lifecycle.acknowledgementAttempted = true
+                        await acknowledgeGenerationWithDiagnostics(lifecycle)
+                        lifecycle.onProgress?.(3)
+                    } else {
+                        await drainDeferredLwwReceives(lifecycle.authorityEpoch)
+                    }
+                } catch (acknowledgeError) {
+                    console.error(acknowledgeError)
                 }
-            } catch (acknowledgeError) {
-                console.error(acknowledgeError)
             }
+            conversationResources.unbindWindowedController?.()
+            conversationResources.windowedController?.release()
+            await conversationResources.preparation?.release()
+            conversationResources.completeLease?.release()
+            generationSignal?.release()
+            background?.settle(generationReturned && lifecycle.responseCompleted && !generationSignal?.signal?.aborted)
+            if (background?.takeExpiry() && !arg.signal?.aborted) {
+                alertNormal(language.generationInterruptedInBackground)
+            }
+            ownedReservation?.release({
+                preserveBusy: enteredGeneration && !generationReturned,
+            })
+        } finally {
+            try {
+                const outcome = generationSignal?.signal?.aborted || arg.signal?.aborted ? 'aborted'
+                    : !lifecycle.isTargetCurrent() ? 'stale' : lifecycle.diagnosticOutcome ?? 'failed'
+                lifecycle.finishDiagnosticPhase(outcome)
+                diagnostics.phase('settled', 'enter')
+                diagnostics.phase('settled', 'exit', { outcome, savePath: settledSavePath })
+            } catch {}
         }
-        conversationResources.unbindWindowedController?.()
-        conversationResources.windowedController?.release()
-        await conversationResources.preparation?.release()
-        conversationResources.completeLease?.release()
-        generationSignal?.release()
-        background?.settle(generationReturned && lifecycle.responseCompleted && !generationSignal?.signal?.aborted)
-        if (background?.takeExpiry() && !arg.signal?.aborted) {
-            alertNormal(language.generationInterruptedInBackground)
-        }
-        ownedReservation?.release({
-            preserveBusy: enteredGeneration && !generationReturned,
-        })
     }
 }
 
@@ -937,6 +1053,8 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             ? getSelectedBoundedGenerationFallbackReason()
             : 'history-window'
         const boundedAdmission = boundedFallbackReason === null
+        lifecycle.admission.fallback = historyWindowMemory !== null ? 'none' : diagnosticFallback(boundedFallbackReason)
+        if (authority) lifecycle.admission.totalMessages = authority.totalMessages
         if (historyWindowMemory !== null) {
             try {
                 historyWindow = await prepareGenerationHistoryWindow(
@@ -967,6 +1085,8 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
                 unbind()
             }
             boundedChat = historyWindow.chat
+            lifecycle.admission.route = 'history-window'
+            lifecycle.admission.totalMessages = historyWindow.totalMessages
             console.debug('[Generation history] window', {
                 start: historyWindow.start,
                 messages: historyWindow.chat.message.length,
@@ -1023,9 +1143,11 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
                     bindWindowedGenerationController(decision.preparation.chat, controller)
                 boundedChat = decision.preparation.chat
                 summaryAwareHistoryPlan = decision.preparation.plan
+                lifecycle.admission.route = 'summary-aware'
                 console.debug('[Generation history] bounded summary-aware', decision.preparation.metrics)
                 }
             } else {
+                lifecycle.admission.fallback = 'compatibility'
                 console.debug('[Generation history] complete materialization', {
                     reason: decision.reason,
                 })
@@ -1042,12 +1164,21 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
                     target,
                 )
             } catch (error) {
-                if (error instanceof SelectedConversationPromotionStaleError) return false
+                if (error instanceof SelectedConversationPromotionStaleError) { lifecycle.diagnosticOutcome = 'stale'; return false }
                 throw error
             }
         }
     }
     if (!lifecycle.isTargetCurrent()) return false
+
+    const admittedConversation = boundedChat ?? DBState.db.characters[get(selectedCharID)]?.chats[
+        DBState.db.characters[get(selectedCharID)]?.chatPage
+    ]
+    if (!boundedChat) lifecycle.admission.route = 'complete'
+    lifecycle.admission.admittedMessages = admittedConversation?.message.length
+    if (!boundedChat) lifecycle.admission.totalMessages = admittedConversation?.message.length
+    lifecycle.diagnostics.admission(lifecycle.admission)
+    lifecycle.enterDiagnosticPhase('prompt-preparation')
 
     DBState.db.statics.messages += 1
     selectedChar = get(selectedCharID)
@@ -1124,7 +1255,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
 
     let chatAdditonalTokens = arg.chatAdditonalTokens ?? caculatedChatTokens
     const tokenizer = new ChatTokenizer(chatAdditonalTokens, DBState.db.aiModel.startsWith('gpt') ? 'noName' : 'name',
-        nowChatroom.supaMemory && DBState.db.hypaV3 && !DBState.db.hypav2 && !DBState.db.hanuraiEnable)
+        true)
     let currentChat = runCurrentChatFunction(selectedConversation)
     if (!boundedChat) nowChatroom.chats[selectedChat] = currentChat
     let maxContextTokens = DBState.db.maxContext
@@ -1743,12 +1874,12 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
                 }
                 : promptHistorySelection,
         )).entries
-        : iteratePromptHistory(promptHistory, promptHistorySelection)
+        : iteratePromptHistoryTargets(promptHistory, promptHistorySelection)
     for(const entry of promptHistoryEntries){
         promptScriptOperationScope.assertOwnerCurrent()
         const { relativeIndex: index } = entry
         let msg: Message
-        if (requiresLivePromptCompatibility) {
+        if ('message' in entry) {
             ensurePromptHistoryMessageId(entry.message, v4)
             msg = entry.message
         } else {
@@ -1952,7 +2083,6 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     if (historyWindow && !historyWindow.controller.reconcileMetadata()) {
         throw new PersistentMutationFencedError()
     }
-    console.log(JSON.stringify(chats, null, 2))
 
     const depthPrompts = lorepmt.actives.filter(v => {
         return (v.pos === 'depth' && v.depth > 0) || v.pos === 'reverse_depth'
@@ -2601,6 +2731,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
         },
     })
     let req: Awaited<ReturnType<typeof requestChatData>>
+    lifecycle.enterDiagnosticPhase('awaiting-provider')
     try {
         req = await requestChatData({
             formated: formated,
@@ -2615,10 +2746,17 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             escape: nowChatroom.escapeOutput,
             rememberToolUsage: DBState.db.rememberToolUsage,
         }, 'model', abortSignal)
+        lifecycle.finishDiagnosticPhase(abortSignal.aborted ? 'aborted' : req.type === 'fail' ? 'failed' : 'ok')
+        const resultKind = req.type === 'success' ? 'buffered' : req.type === 'fail' ? 'failed' : req.type
+        lifecycle.enterDiagnosticPhase('host-response', { resultKind })
     } finally {
         await closeRequestPhase()
     }
-    if(!isRequestSourceCurrent()){
+    const requestSourceCurrent = isRequestSourceCurrent()
+    lifecycle.finishDiagnosticPhase(abortSignal.aborted ? 'aborted'
+        : !requestSourceCurrent ? 'stale' : req.type === 'fail' ? 'failed' : 'ok')
+    if(!requestSourceCurrent){
+        lifecycle.diagnosticOutcome = 'stale'
         return false
     }
 
@@ -2650,11 +2788,12 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
         if (!lifecycle.isTargetCurrent()) throw new PersistentMutationFencedError()
         lifecycle.acknowledgementAttempted = true
         lifecycle.releaseGeneration?.()
-        await acknowledgeGenerationCompletion(lifecycle.authorityEpoch)
+        await acknowledgeGenerationWithDiagnostics(lifecycle)
         lifecycle.onProgress?.(3)
     }
     
     const responseApplication = await applyGenerationResponse({
+        diagnostics: lifecycle.diagnostics,
         response: req,
         abortSignal,
         continueGeneration: arg.continue === true,
@@ -2740,20 +2879,26 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             onProviderFailure: throwError,
         },
     })
-    if (!responseApplication) return false
+    if (!responseApplication) {
+        lifecycle.diagnosticOutcome = abortSignal.aborted ? 'aborted' : req.type === 'fail' ? 'failed' : 'stale'
+        return false
+    }
     lifecycle.responseCompleted = true
     lifecycle.onProgress?.(2)
     result = responseApplication.result
     emoChanged = responseApplication.emoChanged
     resendChat = responseApplication.resendChat
+    lifecycle.enterDiagnosticPhase('completion-processing')
 
     try {
     if(!responseApplication.hasOutputOwnership()){
+        lifecycle.diagnosticOutcome = 'stale'
         return false
     }
     let needsAutoContinue = false
     const resultTokens = await tokenize(result) + (arg.usedContinueTokens || 0)
     if(!responseApplication.hasOutputOwnership()){
+        lifecycle.diagnosticOutcome = 'stale'
         return false
     }
     if(DBState.db.autoContinueMinTokens > 0 && resultTokens < DBState.db.autoContinueMinTokens){
@@ -2790,6 +2935,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             ...message,
             data: message.data + rq,
         }))){
+            lifecycle.diagnosticOutcome = 'stale'
             return false
         }
     }
@@ -2804,6 +2950,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
 
     if(resendChat){
         if(!responseApplication.hasOutputOwnership()){
+            lifecycle.diagnosticOutcome = 'stale'
             return false
         }
         stageTimings.stage4Duration = Date.now() - stageTimings.stage4Start
@@ -2820,6 +2967,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             ...message,
             generationInfo,
         }))) {
+            lifecycle.diagnosticOutcome = 'stale'
             return false
         }
 
@@ -3066,6 +3214,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     }
     
     if(!responseApplication.hasOutputOwnership()){
+        lifecycle.diagnosticOutcome = 'stale'
         return false
     }
     const currentOutput = responseApplication.readOutput()
@@ -3073,6 +3222,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
         ...message,
         generationInfo,
     }))) {
+        lifecycle.diagnosticOutcome = 'stale'
         return false
     }
 

@@ -142,7 +142,12 @@ export function scanNativeDataHealth(): Promise<DataHealthResult> {
 }
 
 export function deepScanNativeDataHealth(resume: boolean): Promise<DataHealthResult> {
-    return runUserMaintenance('pds_data_health_deep_scan', { resume })
+    return invoke('pds_data_health_deep_scan', { resume })
+}
+
+/** A deep scan runs page by page under one hold, so it keeps running off screen between pages. */
+export function holdNativeDataHealthScan<T>(operation: (signal?: AbortSignal) => Promise<T>): Promise<T> {
+    return runWithMobileBackgroundTask('maintenance', task => operation(task.signal), undefined, true)
 }
 
 export function getNativeDataHealthResult(): Promise<DataHealthResult | null> {
@@ -209,7 +214,7 @@ export function snapshotBodyReceipt(status: NativeFileJobStatus): NativeSnapshot
         activationRevision: String(status.activationRevision), bindingAuthority: status.activationAuthority}
 }
 
-export async function attachNativeSnapshotRestoreBodies(receipt: NativeSnapshotBodiesStarted): Promise<NativeSnapshotBodyResult> {
+export async function attachNativeSnapshotRestoreBodies(receipt: NativeSnapshotBodiesStarted, onProgress?: (percent: number | null) => void): Promise<NativeSnapshotBodyResult> {
     return runSharedNativeFileOperation('import', `snapshot-bodies:${receipt.stagingId}`, async context => {
         let cancelled = false
         while (true) {
@@ -236,7 +241,7 @@ export async function attachNativeSnapshotRestoreBodies(receipt: NativeSnapshotB
             }
             await new Promise(resolve => setTimeout(resolve, 100))
         }
-    }, {presentation: 'dialog', format: 'library-backup', snapshotBodyOwner: receipt})
+    }, {presentation: 'dialog', format: 'library-backup', snapshotBodyOwner: receipt, onProgress})
 }
 
 const reattachedSnapshotJobs = new Set<string>()
@@ -262,7 +267,7 @@ export async function reattachNativeSnapshotRestoreBodies(jobs: NativeFileJobSta
     }
 }
 
-export async function completeNativeSnapshotRestoreBodies(stagingId: string, activationRevision: number, bindingAuthority: string, previousJobId?: string): Promise<NativeSnapshotBodyResult> {
+export async function completeNativeSnapshotRestoreBodies(stagingId: string, activationRevision: number, bindingAuthority: string, previousJobId?: string, onProgress?: (percent: number | null) => void): Promise<NativeSnapshotBodyResult> {
     const identity = {stagingId, activationRevision: String(activationRevision), bindingAuthority}
     let receipt: NativeSnapshotBodiesStarted
     try { receipt = await invoke<NativeSnapshotBodiesStarted>('native_snapshot_restore_bodies_start', {...identity, ...(previousJobId ? {previousJobId} : {})}) }
@@ -278,7 +283,7 @@ export async function completeNativeSnapshotRestoreBodies(stagingId: string, act
         || receipt.activationRevision !== identity.activationRevision || receipt.bindingAuthority !== bindingAuthority) {
         throw new NativeSnapshotBodiesCommittedError(identity, undefined, 'snapshot-body-receipt-mismatch', 'Snapshot library is restored, but the body transfer receipt differs')
     }
-    return attachNativeSnapshotRestoreBodies(receipt)
+    return attachNativeSnapshotRestoreBodies(receipt, onProgress)
 }
 
 export async function retrySnapshotRestoreBodiesFromOutcome(): Promise<NativeSnapshotBodyResult> {
@@ -293,11 +298,12 @@ export async function retrySnapshotRestoreBodiesFromOutcome(): Promise<NativeSna
 export async function requestNativePersistentSnapshotRestore(id: string): Promise<boolean> {
     const {getPersistentDataRuntime} = await import('./persistentDataRuntime.svelte')
     const runtime = getPersistentDataRuntime()
-    const copyBodies = async (activation: NativeSnapshotRestoreActivation): Promise<void> => {
-        await completeNativeSnapshotRestoreBodies(activation.stagingId, activation.activationRevision, activation.bindingAuthority)
-    }
     // One hold spans both phases, so the body copy still starts after the app leaves the screen.
-    return runWithMobileBackgroundTask('restore', async () => {
+    return runWithMobileBackgroundTask('restore', async task => {
+        const copyBodies = async (activation: NativeSnapshotRestoreActivation): Promise<void> => {
+            task.progress(null)
+            await completeNativeSnapshotRestoreBodies(activation.stagingId, activation.activationRevision, activation.bindingAuthority, undefined, task.progress)
+        }
         let activation: NativeSnapshotRestoreActivation
         try {
             activation = await runSharedNativeFileOperation('import', `snapshot-restore:${id}`, context => runNativeSnapshotRestore(runtime, {snapshotId: id}, {
@@ -305,7 +311,7 @@ export async function requestNativePersistentSnapshotRestore(id: string): Promis
                 onStatus: context.onStatus,
                 onBlockingChange: context.setBlocking,
                 afterActivationRecovery: copyBodies,
-            }), {presentation: 'dialog', format: 'library-backup'})
+            }), {presentation: 'dialog', format: 'library-backup', onProgress: task.progress})
         } catch (error) {
             // The operation dialog already shows how an admitted restore ended.
             if ((error instanceof DOMException && error.name === 'AbortError') || nativeFileOperationOutcomeShown('import')) return false

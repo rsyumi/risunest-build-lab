@@ -7,6 +7,8 @@ import { publishNativeOfficialAccountBackup, restoreNativeOfficialAccountBackup,
 import { syntheticNativeFileJobStatus } from '../nativeFileJobs'
 import { emptyOfficialAccountAssetCounts } from './officialAccountAssetOutcome'
 import { runWithDeferredMobileBackgroundTask, runWithMobileBackgroundTask } from '../../mobileBackgroundTask'
+import { BackgroundExecutionExpiredError } from '../../iosNative'
+import { unprotectedMobileTask } from '../../mobileBackgroundTask.testSupport'
 
 const mocks = vi.hoisted(() => ({ restore: vi.fn(), publish: vi.fn(), assertAvailable: vi.fn(), resumeAssets: vi.fn(), inspectAssets: vi.fn(), stopAssets: vi.fn() }))
 vi.mock('./nativeOfficialAccountFlow', () => ({ getNativeOfficialAccountFlow: () => mocks }))
@@ -16,6 +18,18 @@ vi.mock('../../mobileBackgroundTask', async () => (await import('../../mobileBac
 beforeEach(() => { vi.clearAllMocks(); dismissNativeFileOperationOutcome(); doingChat.set(false) })
 
 describe('shared official account operations', () => {
+    it('does not turn expired background recovery into a deliberate stop', async () => {
+        const controller = new AbortController()
+        vi.mocked(runWithDeferredMobileBackgroundTask).mockImplementationOnce(async (_kind, operation) =>
+            operation(unprotectedMobileTask(controller.signal)))
+        mocks.resumeAssets.mockImplementationOnce(async options => {
+            controller.abort(new BackgroundExecutionExpiredError())
+            throw options.signal.reason
+        })
+        await expect(resumeNativeOfficialAccountAssets({ operationId: 'expired' }, false)).rejects.toMatchObject({ name: 'AbortError' })
+        expect(mocks.stopAssets).not.toHaveBeenCalled()
+        expect(get(nativeFileOperationOutcome)).toMatchObject({ interruption: 'background-expired' })
+    })
     it.each(['none', 'retry', 'current-library'])('does not auto-run a %s continuation', async kind => {
         mocks.inspectAssets.mockResolvedValue({ kind })
         await recoverNativeOfficialAccountAssets()

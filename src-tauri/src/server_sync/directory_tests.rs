@@ -458,6 +458,42 @@ fn recovered_binding_endpoints_survive_reactivation_without_replacing_credential
 }
 
 #[test]
+fn a_successful_push_survives_endpoint_persistence_failure() {
+    use crate::server_sync::{binding, commands::with_lww_client, credentials::StoredConfig, lww_client::OperationLog, lww_tests::{header, local, save, LocalServerFixture}};
+    let server = LocalServerFixture::new();
+    seed_binding_server(&server);
+    let (root, mut store) = local();
+    let (mut config, _) = server.candidate(&store);
+    let mut directory = directory();
+    let registry = ResponseServer::new(risunest_sync_connect::seal_endpoint(&directory.uuid, &directory.key, &server.endpoint).unwrap(), 200);
+    directory.base_url = registry.endpoint.clone();
+    config.directory = Some(directory);
+    let expected = StoredConfig::persist(root.path(), &config).unwrap();
+    OperationLog::open(root.path()).unwrap().save_config("candidate", &expected).unwrap();
+    binding::first_binding_cycle(&mut store, Arc::new(TestIoCounters::default()), |_| {}).unwrap();
+    let retired = ResponseServer::new(String::new(), 503);
+    let mut outdated = expected.clone();
+    outdated.endpoint = retired.endpoint.clone();
+    install_binding_config(&store, &outdated);
+    save(&mut store, &["root", "language"], serde_json::json!("fr"));
+    let request = header(&store);
+    with_lww_client(&mut store, None, |core, store| {
+        core.client.retry_budget = tests::no_sleep_budget();
+        core.log.0.execute_batch(
+            "CREATE TEMP TRIGGER refuse_endpoint_save BEFORE UPDATE ON configurations
+             BEGIN SELECT RAISE(FAIL, 'synthetic endpoint persistence failure'); END;"
+        )?;
+        core.push(store, &request, &[])
+    }).unwrap().expect("the successful publication returns its receipt");
+    assert_binding_config(&store, &outdated);
+    with_lww_client(&mut store, None, |core, _| {
+        core.client.retry_budget = tests::no_sleep_budget();
+        core.client.resolve_identity()
+    }).unwrap();
+    assert_binding_config(&store, &expected);
+}
+
+#[test]
 fn late_endpoint_recovery_cannot_overwrite_a_newer_endpoint_or_credential() {
     use crate::server_sync::{binding, credentials::StoredConfig, lww_client::LwwClient, lww_tests::{local, LocalServerFixture}};
     let server = LocalServerFixture::new();

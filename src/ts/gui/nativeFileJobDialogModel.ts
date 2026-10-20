@@ -849,7 +849,9 @@ export function buildNativeFileJobDialogModel(
             summary = copy.resultFailed
             reason = failureReason(outcome.error?.code ?? '', 'import', outcome.error?.itemKind)
         }
-        if (outcome.status?.officialAssets && outcome.status.officialAssets.state !== 'succeeded' && outcome.state !== 'succeeded') {
+        if (outcome.status?.officialAssets?.state === 'succeeded' && outcome.status.officialAssets.counts.missing > 0 && outcome.state === 'succeeded') {
+            summary = copy.resultAccountAssetsMissing
+        } else if (outcome.status?.officialAssets && outcome.status.officialAssets.state !== 'succeeded' && outcome.state !== 'succeeded') {
             summary = outcome.state === 'cancelled' ? copy.resultAccountAssetsStopped : copy.resultAccountAssetsIncomplete
             const assetReason = outcome.status.officialAssets.reason
             reason = outcome.state === 'cancelled' ? ''
@@ -857,6 +859,8 @@ export function buildNativeFileJobDialogModel(
                 : assetReason === 'authentication' ? copy.reasonAccountAssetAuthentication
                 : assetReason === 'account-changed' ? copy.reasonAccountAssetAccountChanged
                 : assetReason === 'library-changed' ? copy.reasonAccountAssetLibraryChanged
+                : assetReason === 'receipt' ? copy.reasonAccountAssetReceipt
+                : assetReason === 'checking' ? copy.reasonAccountAssetChecking
                 : assetReason === 'local' ? copy.reasonAccountAssetLocal : ''
         }
         if (outcome.interruption === 'background-expired') {

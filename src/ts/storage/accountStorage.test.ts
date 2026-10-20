@@ -1824,11 +1824,30 @@ describe('AccountStorage structured wire contract', () => {
         await expect(new AccountStorage(options).readItem('assets/failure')).rejects.toMatchObject({ kind: 'account-changed' })
     })
 
-    it.each([429, 503, 404])('preserves HTTP %s and Retry-After in a native asset failure', async status => {
+    it.each([429, 503, 404].flatMap(status => ['assets/failure', 'assets\\failure'].map(key => ({ status, key }))))('preserves HTTP $status and Retry-After for $key', async ({ status, key }) => {
         const { options } = nativeReauthenticationFixture()
         mocks.fetchProtectedResource.mockResolvedValueOnce(response('synthetic error', status, { 'Retry-After': '120' }))
         const { AccountStorage } = await loadStorage()
-        await expect(new AccountStorage(options).readItem('assets/failure')).rejects.toMatchObject({ kind: 'http', status, retryAfter: '120' })
+        await expect(new AccountStorage(options).readItem(key)).rejects.toMatchObject({ kind: 'http', status, retryAfter: '120' })
+    })
+    it('caches and measures a legacy asset read without changing its server key', async () => {
+        const { options } = nativeReauthenticationFixture()
+        const key = 'assets\\legacy.gif'
+        const bytes = Uint8Array.of(1, 2, 3)
+        const cached = new Map<string, ArrayBuffer>()
+        const assetCache = {
+            getItem: async (key: string) => cached.get(key) ?? null,
+            setItem: async (key: string, value: ArrayBuffer) => { cached.set(key, value) },
+        }
+        mocks.fetchProtectedResource.mockResolvedValueOnce(response(bytes))
+        const { AccountStorage } = await loadStorage()
+        const onBytes = vi.fn()
+        const storage = new AccountStorage({ ...options, assetCache })
+        expect(await storage.readItem(key, { onBytes })).toEqual({ kind: 'value', bytes })
+        expect(new Uint8Array(cached.get(key)!)).toEqual(bytes)
+        expect(onBytes.mock.calls.flat()).toEqual([3])
+        expect(mocks.fetchProtectedResource.mock.calls[0]?.[1]?.headers).toMatchObject({ 'x-risu-key': key })
+        expect(await storage.readItem(key)).toEqual({ kind: 'value', bytes })
     })
     it.each(['get', 'set'])('classifies a native asset cache %s failure as local storage failure', async action => {
         const { options } = nativeReauthenticationFixture()

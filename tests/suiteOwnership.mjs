@@ -28,6 +28,7 @@ export const nodeAppTests = [
   'src/lib/SideBars/sideChatListRows.test.ts',
   'src/lib/scopedClassNames.test.ts',
   'src/lib/workingSetNavigation.test.ts',
+  'src/ts/abortSignals.test.ts',
   'src/ts/alertQueue.test.ts',
   'src/ts/arrayRange.test.ts',
   'src/ts/autoSuggestionMetadata.test.ts',

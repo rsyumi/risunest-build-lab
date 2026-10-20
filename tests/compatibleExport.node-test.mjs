@@ -652,7 +652,8 @@ for (const target of ["risuai", "pocket"]) {
                     JSON.stringify({
                       charId: "synthetic-a",
                       chatId: "synthetic-chat",
-                      createdAt: 42,
+                      createdAt: f.type === "signature" ? 0 : 42,
+                      ...(f.type === "image" ? {} : { updatedAt: 43 }),
                     }),
                   ),
                 ),
@@ -685,11 +686,19 @@ for (const target of ["risuai", "pocket"]) {
                   f.bytes,
                 );
               }
-              assert.equal(
-                JSON.parse(
-                  harness.storage.get(`inlay_meta/${f.id}`).toString("utf8"),
-                ).createdAt,
-                42,
+              assert.deepEqual(plain(await harness.readInlayMeta(f.id)), {
+                charId: "synthetic-a",
+                chatId: "synthetic-chat",
+                createdAt: f.type === "signature" ? 0 : 42,
+                updatedAt: f.type === "image" ? 42 : 43,
+              });
+              assert.deepEqual(
+                JSON.parse(harness.transaction.db.kvGet(`inlay_meta/${f.id}`).toString("utf8")),
+                {
+                  charId: "synthetic-a", chatId: "synthetic-chat",
+                  createdAt: f.type === "signature" ? 0 : 42,
+                  ...(f.type === "image" ? {} : { updatedAt: 43 }),
+                },
               );
             }
             // These are container/loader fixtures, not playable audio/video samples.

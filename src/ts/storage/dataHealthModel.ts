@@ -46,6 +46,8 @@ export interface DataHealthDependencies {
     scan(): Promise<DataHealthResult>
     deepScan(resume: boolean): Promise<DataHealthResult>
     cancel(): Promise<void>
+    /** Keeps a deep scan running off screen; the signal aborts when the platform's time runs out. */
+    holdBackground?<T>(operation: (signal?: AbortSignal) => Promise<T>): Promise<T>
     planRepair(): Promise<RepairCandidate[]>
     previewRepair(selection: string[], expectedScannedAt: number): Promise<RepairPreview>
     applyRepair(
@@ -147,17 +149,29 @@ export function createDataHealthModel(deps: DataHealthDependencies) {
         })
     }
 
-    const runDeep = async (resume: boolean): Promise<void> => {
-        let next = resume
-        for (;;) {
-            const result = await deps.deepScan(next)
-            if (result.deep?.complete || cancelRequested) {
-                await finishScan(result)
-                return
+    const runDeep = (resume: boolean): Promise<void> => {
+        const pages = async (signal?: AbortSignal): Promise<void> => {
+            // Running out of background time stops the scan as a cancel would, so it can be continued.
+            const expire = () => {
+                cancelRequested = true
+                void deps.cancel().catch(() => {})
             }
-            finish(result)
-            next = true
+            if (signal?.aborted) expire()
+            else signal?.addEventListener('abort', expire, { once: true })
+            try {
+                let next = resume
+                for (;;) {
+                    const result = await deps.deepScan(next)
+                    if (result.deep?.complete || cancelRequested) {
+                        await finishScan(result)
+                        return
+                    }
+                    finish(result)
+                    next = true
+                }
+            } finally { signal?.removeEventListener('abort', expire) }
         }
+        return deps.holdBackground ? deps.holdBackground(pages) : pages()
     }
 
     const start = async (

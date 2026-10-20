@@ -5,6 +5,7 @@ import { nativeFileOperationOutcome, runSharedNativeFileOperation, waitForActive
 import { syntheticNativeFileJobStatus } from '../nativeFileJobs'
 import { getServerSyncController } from './serverSyncProduction'
 import { getNativeOfficialAccountFlow, type NativeOfficialAssetResumeOptions } from './nativeOfficialAccountFlow'
+import { isBackgroundExpiryReason } from '../../iosNative'
 
 export function inspectNativeOfficialAccountAssets() {
     return getNativeOfficialAccountFlow().inspectAssets()
@@ -19,7 +20,7 @@ export function resumeNativeOfficialAccountAssets(options: Pick<NativeOfficialAs
         return { completed: true }
     }, { presentation: 'dialog', format: 'library-backup', userInitiated,
         beforeSettlement: async signal => {
-            if (signal.aborted && options.operationId) await getNativeOfficialAccountFlow().stopAssets(options.operationId)
+            if (signal.aborted && !isBackgroundExpiryReason(signal.reason) && options.operationId) await getNativeOfficialAccountFlow().stopAssets(options.operationId)
         },
     })
 }

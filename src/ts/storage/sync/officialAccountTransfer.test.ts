@@ -109,6 +109,39 @@ describe('official account GET scheduling', () => {
         expect(Object.values(h.results)).toEqual(Array(5).fill('failed'))
     })
 
+    it('recovers concurrency after sustained successful exchanges', async () => {
+        vi.useFakeTimers(); vi.setSystemTime(0)
+        const h = setup(20, 4)
+        h.read.mockRejectedValueOnce(new AccountReadError('http', 429, '0'))
+        const limits: number[] = []
+        const run = transferOfficialAccountAssets({ ...h, progress: value => limits.push(value.limit) })
+        await vi.advanceTimersByTimeAsync(100)
+        await run
+        expect(limits).toContain(2)
+        expect(limits.at(-1)).toBe(4)
+        expect(Object.values(h.results)).toEqual(Array(20).fill('installed'))
+    })
+
+    it('decays fallback pauses after successful recovery rather than accumulating unrelated outages', async () => {
+        vi.useFakeTimers(); vi.setSystemTime(0)
+        const h = setup(8, 1)
+        const attempts = new Map<string, number>()
+        const pauses: number[] = []
+        const run = transferOfficialAccountAssets({ ...h,
+            read: async key => {
+                const attempt = attempts.get(key) ?? 0
+                attempts.set(key, attempt + 1)
+                if (attempt === 0) throw new AccountReadError('http', 429)
+                return { kind: 'value', bytes: Uint8Array.of(1) }
+            },
+            progress: value => { if (value.waitingUntil) pauses.push(value.waitingUntil - Date.now()) },
+        })
+        await vi.advanceTimersByTimeAsync(500_000)
+        await run
+        expect(Object.values(h.results)).toEqual(Array(8).fill('installed'))
+        expect(Math.max(...pauses)).toBeLessThanOrEqual(1200)
+    })
+
     it('continues past permanent errors and retries transient failures within three attempts', async () => {
         vi.useFakeTimers()
         const h = setup(10)

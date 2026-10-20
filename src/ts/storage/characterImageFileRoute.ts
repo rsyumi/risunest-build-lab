@@ -2,7 +2,7 @@ import type {
     NativeJpegAssetImportInput,
     NativeJpegAssetImportResult,
 } from './nativeJpegAssetImport'
-import { imageFormatForName, imageFormatFromBytes } from '../media/imageFormats'
+import { imageFormatForName, imageFormatFromBytes, ImageFormatError } from '../media/imageFormats'
 
 interface SelectedLegacyImage {
     name: string
@@ -17,6 +17,7 @@ export interface CharacterImageFileRouteDependencies {
     chooseLegacyFile(): Promise<SelectedLegacyImage | null>
     nativeImport(input: NativeJpegAssetImportInput): Promise<NativeJpegAssetImportResult>
     legacyImport(data: Uint8Array, name: string): Promise<string>
+    onImageError?(message: string): void | Promise<void>
 }
 
 export type CharacterImageFileRouteResult =
@@ -99,9 +100,17 @@ export async function selectCharacterImageFile(
     }
 
     const bytes = await dependencies.readDesktopPath(path)
+    let logicalId: string
+    try {
+        logicalId = await dependencies.legacyImport(bytes, name)
+    } catch (error) {
+        if (!(error instanceof ImageFormatError) || !dependencies.onImageError) throw error
+        await dependencies.onImageError(error.message)
+        return { kind: 'cancelled' }
+    }
     return {
         kind: 'selected',
-        logicalId: await dependencies.legacyImport(bytes, name),
+        logicalId,
         bytes,
         name,
     }

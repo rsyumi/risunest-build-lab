@@ -64,7 +64,7 @@ function jpegExtension(displayName: string): 'jpg' {
 
 export async function importNativeJpegAsset(
     input: NativeJpegAssetImportInput,
-    options: NativeFileJobOptions = {},
+    options: NativeFileJobOptions & { beforeStart?: () => Promise<void> } = {},
     dependencies: NativeJpegAssetImportDependencies = productionDependencies,
 ): Promise<NativeJpegAssetImportResult> {
     const extension = jpegExtension(input.displayName)
@@ -95,6 +95,7 @@ export async function importNativeJpegAsset(
         if (options.signal?.aborted) throw abortError()
         // An earlier refresh can release its fence while its continuation still owns recovery.
         if (hasCommittedWorkingSetContinuation(runtime, runtime.getStorageAuthorityEpoch())) throw new PersistentMutationFencedError()
+        await options.beforeStart?.()
         const started = await dependencies.invoke('native_file_job_start', {
             request: {
                 kind: 'import-jpeg-asset',

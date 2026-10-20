@@ -42,7 +42,6 @@ export async function prepareCharacterPortraitRendition(
         if (alias.size > MAX_BYTES) throw new Error(language.risuNest.imageFormats.portraitExportFailed)
         const bytes = alias.size <= header.length ? header : await cas.readObject(alias.objectHash, alias.size)
         if (!bytes) throw new Error(language.risuNest.imageFormats.portraitExportFailed)
-        if (imageFormatFromBytes(bytes)?.ext !== 'avif') return undefined
         const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new Uint8Array(bytes))), byte => byte.toString(16).padStart(2, '0')).join('')
         if (hash !== alias.objectHash) throw new Error(language.risuNest.imageFormats.portraitExportFailed)
         return { bytes, hash }

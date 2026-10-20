@@ -49,6 +49,8 @@ export const ANDROID_SAF_HANDOFF_ID_PATTERNS: Partial<
         /(?:^|[\\/])risu-character-card-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.(?:json|png)$/,
     'export-risu-module':
         /(?:^|[\\/])risu-module-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.risum$/,
+    'export-gallery-file': /(?:^|[\\/])risu-download-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.bin$/,
+    'export-gallery-zip': /(?:^|[\\/])risu-download-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.bin$/,
     'export-dataset':
         /(?:^|[\\/])risu-dataset-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.json$/,
 }
@@ -143,6 +145,12 @@ async function reconcileExportInBackground(
             })
             retainNativeJob = false
         } else if (
+            (status.kind === 'export-gallery-file' || status.kind === 'export-gallery-zip') && status.result?.handoffPath
+        ) {
+            retainNativeJob = true
+            await dependencies.invoke('native_download_handoff_cleanup', {path: status.result.handoffPath})
+            retainNativeJob = false
+        } else if (
             status.kind === 'export-dataset' &&
             status.result?.handoffPath
         ) {
@@ -235,6 +243,8 @@ export async function reconcileNativeFileJobsBeforeBootstrap(
             case 'export-character-charx':
             case 'export-character-card':
             case 'export-risu-module':
+            case 'export-gallery-file':
+            case 'export-gallery-zip':
             case 'export-dataset':
             case 'kei-backup-upload':
                 void reconcileExportInBackground(job, dependencies).catch(

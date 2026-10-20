@@ -227,7 +227,7 @@ export function createNativeOfficialAccountFlowService(
         } catch (error) {
             if (!failed) { failed = true; originalError = error }
         }
-        if (!failed && !missingAssets) {
+        if (!failed && !missingAssets && initialize) {
             failureCode = 'activation-committed-refresh-failed'
             try {
                 options.onStatus?.({ ...lastStatus, ...syntheticNativeFileJobStatus(
@@ -285,8 +285,15 @@ export function createNativeOfficialAccountFlowService(
                         ? await dependencies.adapter.pull(options.signal)
                         : nativeResult
                 } catch (error) {
-                    if (!(error instanceof NativeFileJobActivationCommittedError)
-                        && !(error instanceof NativeFileJobActivationUnresolvedError)) {
+                    if (error instanceof NativeFileJobActivationCommittedError) {
+                        try {
+                            await dependencies.bindRestoreAssets?.(credential.id, {
+                                ...lastStatus,
+                                ...syntheticNativeFileJobStatus({ ...lastStatus, kind: 'restore-official-account-snapshot' }, 'refreshing-app'),
+                                activationRevision: error.committedRevision,
+                            })
+                        } catch {}
+                    } else if (!(error instanceof NativeFileJobActivationUnresolvedError)) {
                         try { await dependencies.clearRestoreAssets?.() } catch {}
                     }
                     throw error

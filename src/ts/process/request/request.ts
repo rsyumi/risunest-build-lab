@@ -207,7 +207,7 @@ function normalizeOllamaStreamResponse(response: Response): Response {
 }
 
 export async function requestChatData(arg:requestDataArgument, model:ModelModeExtended, abortSignal:AbortSignal=null):Promise<requestDataResponse> {
-    return holdModelCall(() => requestChatDataUnderHold(arg, model, abortSignal), abortSignal)
+    return holdModelCall(signal => requestChatDataUnderHold(arg, model, signal ?? null), abortSignal)
 }
 
 async function requestChatDataUnderHold(arg:requestDataArgument, model:ModelModeExtended, abortSignal:AbortSignal=null):Promise<requestDataResponse> {

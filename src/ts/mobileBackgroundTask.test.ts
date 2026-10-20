@@ -45,9 +45,29 @@ describe('mobile background task lifetime', () => {
         expect(hasMobileBackgroundTasks()).toBe(true)
         await task.dispose(true)
         await task.dispose(true)
-        expect(bridge.begin.mock.calls.map(call => call.slice(1))).toEqual([['backup', false], ['sync', false]])
+        expect(bridge.begin.mock.calls.map(call => call.slice(1))).toEqual([['backup', false, false], ['sync', false, false]])
         expect(id(0)).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
         expect(bridge.end.mock.calls).toEqual([[id(1)], [id(0)]])
+    })
+
+    it('asks native again to end a hold while its control channel is full, a bounded number of times', async () => {
+        vi.useFakeTimers()
+        try {
+            const busy = new Error('android-control-busy')
+            bridge.end.mockRejectedValueOnce(busy).mockRejectedValueOnce(busy)
+            const ended = await beginMobileBackgroundTask('backup')
+            const ending = ended.dispose(true)
+            await vi.runAllTimersAsync()
+            await ending
+            expect(bridge.end.mock.calls).toEqual([[id(0)], [id(0)], [id(0)]])
+            bridge.end.mockReset().mockRejectedValue(busy)
+            const refused = await beginMobileBackgroundTask('backup')
+            const giving = refused.dispose(true)
+            await vi.runAllTimersAsync()
+            await giving
+            expect(bridge.end).toHaveBeenCalledTimes(5)
+            expect(hasMobileBackgroundTasks()).toBe(false)
+        } finally { vi.useRealTimers() }
     })
 
     it.each([
@@ -63,7 +83,7 @@ describe('mobile background task lifetime', () => {
         expect(bridge.end).toHaveBeenCalledExactlyOnceWith(id())
     })
 
-    it('tells the user about refused protection only for user-started work', async () => {
+    it('marks user-started work for native and tells the user only about its refused protection', async () => {
         bridge.begin.mockResolvedValue('background')
         await (await beginMobileBackgroundTask('sync')).dispose()
         await (await beginDeferredMobileBackgroundTask('sync')).dispose()
@@ -71,11 +91,12 @@ describe('mobile background task lifetime', () => {
         expect(mocks.toast).not.toHaveBeenCalled()
         await (await beginMobileBackgroundTask('sync', undefined, true)).dispose()
         await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledExactlyOnceWith(language.risuNest.backgroundWorkMayStop))
+        expect(bridge.begin.mock.calls.map(call => call.slice(1))).toEqual([['sync', false, false], ['sync', true, false], ['sync', false, true]])
     })
 
     it('registers a deferred hold that native protects only once the app leaves the screen', async () => {
         const task = await beginDeferredMobileBackgroundTask('sync')
-        expect(bridge.begin).toHaveBeenCalledExactlyOnceWith(expect.any(String), 'sync', true)
+        expect(bridge.begin).toHaveBeenCalledExactlyOnceWith(expect.any(String), 'sync', true, false)
         expect(task.protection).toEqual({ state: 'deferred' })
         await task.dispose()
         expect(bridge.end).toHaveBeenCalledExactlyOnceWith(id())
@@ -136,7 +157,7 @@ describe('mobile background task lifetime', () => {
             await finish.promise
         }, { format: 'library-backup' })
         await vi.waitFor(() => expect(bridge.progress).toHaveBeenCalledWith(id(), 25))
-        expect(bridge.begin).toHaveBeenCalledWith(id(), 'backup', false)
+        expect(bridge.begin).toHaveBeenCalledWith(id(), 'backup', false, true)
         report(syntheticNativeFileJobStatus({ kind: 'official-publication-upload' }, 'publishing-destination', {
             stageCompleted: 3, stageTotal: 4, stageUnit: 'items',
         }))
@@ -169,7 +190,7 @@ describe('mobile background task lifetime', () => {
                 progress: { completedBytes: 100, totalBytes: 100, completedItems: 0 },
             })
         }, { format: 'library-backup' })
-        expect(bridge.begin).toHaveBeenCalledWith(id(), 'restore', false)
+        expect(bridge.begin).toHaveBeenCalledWith(id(), 'restore', false, true)
         expect(bridge.progress.mock.calls).toEqual([[id(), 25], [id(), -1], [id(), 50], [id(), 75], [id(), -1]])
     })
 

@@ -1245,3 +1245,59 @@ pub(super) fn restore_character_with_cancellation_lww(
         Err(error) => { let _ = cleanup; Err(error) }
     }
 }
+
+// Reuse the restore decoder and its disk-backed staging, without changing the library.
+pub(super) fn visit_gallery_payload(
+    cas: &PayloadCas,
+    archived: &ArchivedObject,
+    character_id: &str,
+    is_cancelled: &dyn Fn() -> bool,
+    visit: &mut dyn FnMut(Option<&str>, Option<&str>, Option<&str>, Option<i64>, &Value) -> StoreResult<()>,
+    conversation_done: &mut dyn FnMut() -> StoreResult<()>,
+) -> StoreResult<()> {
+    let Some(file) = cas.open_object(&archived.object_hash)? else { return validation(ARCHIVE_DATA_MISSING_MESSAGE); };
+    let connection = Connection::open_in_memory()?;
+    let _staging = create_restore_staging(&connection, cas.repository_root())?;
+    let outcome = (|| {
+        let mut payload = stage_payload(&connection, file, is_cancelled)?;
+        let mut owners = Vec::new();
+        for remap in &archived.identity_remap {
+            owners.push(payload.character_id.clone());
+            remap.character(&mut payload.detail);
+            payload.character_id = payload.detail.get("chaId").and_then(Value::as_str)
+                .ok_or_else(|| StoreError::Validation { message: "archived character identity is missing".into() })?.to_owned();
+        }
+        if payload.version != ARCHIVE_PAYLOAD_VERSION || payload.character_id != character_id
+            || payload.conversation_count != archived.conversation_count || payload.message_count != archived.message_count {
+            return validation("archived character payload does not match its catalog");
+        }
+        visit(None, None, None, None, &payload.detail)?;
+        let mut conversations = connection.prepare("SELECT ordinal,conversation_id,name,detail FROM archive_restore.archive_restore_conversations ORDER BY ordinal")?;
+        let mut rows = conversations.query([])?;
+        while let Some(row) = rows.next()? {
+            ensure_not_cancelled(is_cancelled)?;
+            let ordinal: i64 = row.get(0)?;
+            let mut id: String = row.get(1)?;
+            let name: String = row.get(2)?;
+            let mut detail: Value = serde_json::from_str(&row.get::<_, String>(3)?)?;
+            for (remap, owner) in archived.identity_remap.iter().zip(&owners) {
+                id = remap.conversation(owner, &id);
+                remap.chat(owner, &mut detail);
+            }
+            visit(Some(&id), Some(&name), None, None, &detail)?;
+            let mut messages = connection.prepare("SELECT message_index,message_id,value FROM archive_restore.archive_restore_messages WHERE conversation_ordinal=?1 ORDER BY message_index")?;
+            let mut values = messages.query([ordinal])?;
+            while let Some(message) = values.next()? {
+                ensure_not_cancelled(is_cancelled)?;
+                let message_index: i64 = message.get(0)?;
+                let message_id: Option<String> = message.get(1)?;
+                let value: Value = serde_json::from_str(&message.get::<_, String>(2)?)?;
+                visit(Some(&id), Some(&name), message_id.as_deref(), Some(message_index), &value)?;
+            }
+            conversation_done()?;
+        }
+        Ok(())
+    })();
+    let cleanup = clear_restore_staging(&connection);
+    outcome.and(cleanup)
+}

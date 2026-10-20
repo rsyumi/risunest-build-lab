@@ -361,8 +361,10 @@ fn lww_client_cancelled(store:&PersistentStore,cancelled:Option<Arc<AtomicBool>>
 pub(super) fn with_lww_client<T>(store:&mut PersistentStore,cancelled:Option<Arc<AtomicBool>>,operation:impl FnOnce(&mut super::lww_client::LwwClient,&mut PersistentStore)->Result<T>)->Result<T> {
     let mut core=lww_client_cancelled(store,cancelled)?;
     let result=operation(&mut core,store);
-    let persisted=super::binding::persist_resolved_endpoint(store,&core);
-    result.and_then(|value|persisted.map(|()|value))
+    if let Err(error)=super::binding::persist_resolved_endpoint(store,&core) {
+        record_failure("save-resolved-endpoint",&error);
+    }
+    result
 }
 #[tauri::command]
 pub(crate) async fn server_sync_status(app:AppHandle)->Result<LwwStatus> {

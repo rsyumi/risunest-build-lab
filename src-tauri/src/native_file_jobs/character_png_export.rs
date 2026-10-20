@@ -136,12 +136,34 @@ fn prepare_png_portrait(
     if bytes.len() > limits.max_input_bytes {
         return Err(NativeJobError::too_large("card", "character portrait exceeds the PNG input limit"));
     }
+    if bytes.starts_with(PNG_SIGNATURE) {
+        // PNG card export changes metadata only. Validate every image row
+        // without allocating a full decoded surface or limiting its pixel count.
+        parse_chunks(&bytes)?;
+        let mut decoder = png::Decoder::new(Cursor::new(bytes.as_slice()));
+        decoder.set_limits(png::Limits { bytes: (limits.max_alloc / 2) as usize });
+        decoder.set_ignore_text_chunk(true);
+        decoder.set_ignore_iccp_chunk(true);
+        let decode_error = |error: png::DecodingError| match error {
+            png::DecodingError::LimitsExceeded => NativeJobError::too_large("card", "PNG validation exceeds its memory limit"),
+            error => invalid_input(format!("character portrait is invalid: {error}")),
+        };
+        let mut reader = decoder.read_info().map_err(decode_error)?;
+        if reader.output_line_size(reader.info().width).is_none_or(|bytes| bytes as u64 > limits.max_alloc / 4) {
+            return Err(NativeJobError::too_large("card", "PNG row exceeds its memory limit"));
+        }
+        loop {
+            if is_cancelled() { return Err(cancelled("PNG export cancelled during portrait validation")); }
+            if reader.next_row().map_err(decode_error)?.is_none() { break; }
+        }
+        reader.finish().map_err(decode_error)?;
+        drop(reader);
+        return Ok(bytes);
+    }
     let mut reader = image::ImageReader::new(Cursor::new(bytes.as_slice()))
         .with_guessed_format()
         .map_err(|error| invalid_input(format!("character portrait is invalid: {error}")))?;
-    let source_format = reader
-        .format()
-        .ok_or_else(|| invalid_input("character portrait format is unsupported"))?;
+    reader.format().ok_or_else(|| invalid_input("character portrait format is unsupported"))?;
     let mut image_limits = image::Limits::default();
     image_limits.max_image_width = Some(limits.max_dimension);
     image_limits.max_image_height = Some(limits.max_dimension);
@@ -162,11 +184,6 @@ fn prepare_png_portrait(
         .map_err(portrait_decode_error)?;
     if is_cancelled() {
         return Err(cancelled("PNG export cancelled before portrait encoding"));
-    }
-    if source_format == image::ImageFormat::Png {
-        drop(decoded);
-        parse_chunks(&bytes)?;
-        return Ok(bytes);
     }
     let rgba = decoded.to_rgba8();
     let mut png = Vec::new();
@@ -928,9 +945,22 @@ mod tests {
     fn valid_png_portrait_reuses_its_owned_buffer() {
         let png = synthetic_png();
         let pointer = png.as_ptr();
-        let prepared = prepare_png_portrait(png, PngExportLimits::default(), || false).unwrap();
+        let limits = PngExportLimits { max_pixels: 1, max_dimension: 1, ..PngExportLimits::default() };
+        let prepared = prepare_png_portrait(png, limits, || false).unwrap();
         assert_eq!(prepared.as_ptr(), pointer);
         assert!(parse_chunks(&prepared).is_ok());
+    }
+
+    #[test]
+    fn png_row_validation_keeps_memory_and_cancellation_limits() {
+        let checks = std::cell::Cell::new(0);
+        let error = prepare_png_portrait(synthetic_png(), PngExportLimits::default(), || {
+            checks.set(checks.get() + 1);
+            checks.get() > 1
+        }).unwrap_err();
+        assert_eq!(error.code, "cancelled");
+        let limits = PngExportLimits { max_alloc: 1, ..PngExportLimits::default() };
+        assert!(prepare_png_portrait(synthetic_png(), limits, || false).is_err());
     }
 
     #[test]

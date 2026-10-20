@@ -43,6 +43,8 @@ import { isMetadataOnlySelectedConversation } from './storage/selectedConversati
 import { open } from './storage/fileSelection'
 import { readFile, open as openFile } from '@tauri-apps/plugin-fs'
 import { isTauriDesktop } from './platform'
+import { getPersistentDataStore } from './storage/persistentDataStoreFactory'
+import type { CharacterDetail } from './storage/persistentDataStore'
 import {
     archiveCurrentCharacterImage,
     selectCharacterImageFile,
@@ -111,7 +113,7 @@ export async function getCharImage(loc:string, type:'plain'|'css'|'contain'|'lgc
     }
 }
 
-export async function selectCharImg(charIndex:number) {
+export async function selectCharImg(charIndex:number, check?: (character: CharacterDetail) => void) {
     const characterId = DBState.db.characters[charIndex]?.chaId
     if (!characterId) return
     await selectCharacterImageFile(characterId, {
@@ -128,6 +130,7 @@ export async function selectCharImg(charIndex:number) {
             return typeof selected === 'string' ? selected : null
         },
         readDesktopPath: readFile,
+        onImageError: message => { void alertError(message) },
         readDesktopHeader: async path => {
             const file = await openFile(path, { read: true })
             try {
@@ -142,7 +145,14 @@ export async function selectCharImg(charIndex:number) {
             } finally { await file.close() }
         },
         chooseLegacyFile: async () => selectSingleFile(imageAliases, { image: true }),
-        nativeImport: input => runContentImport(input.displayName, {}, options => importNativeJpegAsset(input, options)),
+        nativeImport: input => runContentImport(input.displayName, {}, options => importNativeJpegAsset(input, {
+            ...options,
+            beforeStart: check ? async () => {
+                const current = await getPersistentDataStore().readCharacter(characterId)
+                if (!current) throw new Error('Character is unavailable')
+                check(current.value)
+            } : undefined,
+        })),
         legacyImport: async (img) => {
             const type = imageFormatFromBytes(img)?.ext
             const pngExif: Record<string, string> = {}
@@ -172,6 +182,7 @@ export async function selectCharImg(charIndex:number) {
             }
             const imgp = await saveImage(img)
             await mutatePersistentCharacterDetail(characterId, 'select-character-image', ({ character }) => {
+                check?.(character)
                 archiveCurrentCharacterImage(character)
                 character.image = imgp
                 if (Object.keys(pngExif).length > 0) {

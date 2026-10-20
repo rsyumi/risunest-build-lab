@@ -359,7 +359,8 @@ export class AccountStorage{
         this.checkAuth()
         const expectedAccountId = this.getAccountId()
         let expectedToken = this.auth
-        const nativeAssetRead = key.startsWith('assets/') && !!this.credentialRouting
+        const assetRead = /^assets[/\\]/.test(key)
+        const nativeAssetRead = assetRead && !!this.credentialRouting
         const checkReadOwner = () => {
             if (options.signal?.aborted) throw abortReason(options.signal)
             if (nativeAssetRead && this.getAccountId() !== expectedAccountId) throw new AccountReadError('account-changed')
@@ -373,7 +374,7 @@ export class AccountStorage{
             }
         }
         checkReadOwner()
-        if(key.startsWith('assets/')){
+        if(assetRead){
             const cached = await cacheOperation(this.assetCache.getItem(key))
             if(cached instanceof ArrayBuffer || ArrayBuffer.isView(cached)){
                 checkReadOwner()
@@ -460,7 +461,7 @@ export class AccountStorage{
         if(da.status === 204){
             return { kind: 'missing' }
         }
-        if(key.startsWith('assets/')){
+        if(assetRead){
             let ab: ArrayBuffer
             try { ab = deadline ? (await readAccountBody(da, deadline.signal, deadline.reset, options.onBytes)).buffer as ArrayBuffer : await da.arrayBuffer() }
             catch (error) {

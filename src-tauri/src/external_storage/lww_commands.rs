@@ -222,6 +222,8 @@ pub(crate) struct Request {
     exit_target: Option<ExitTarget>,
     #[serde(default)]
     turn_limit: Option<u32>,
+    #[serde(default)]
+    complete_available: bool,
 }
 impl Request {
     fn check_publish_limit(&self) -> Result<()> {
@@ -352,6 +354,7 @@ impl<'de> Deserialize<'de> for StageRequest {
                 generating: input.generating,
                 exit_target: None,
                 turn_limit: None,
+                complete_available: false,
             },
             inspection_id: input.inspection_id,
             target_id: input.target_id,
@@ -480,6 +483,7 @@ pub(crate) async fn external_lww_receive(
             receive_pages,
             &context.checkpoints,
             request.header.binding_authority,
+            request.complete_available,
             cancel,
         )
         .await?;
@@ -517,19 +521,22 @@ async fn publish_round(
 }
 
 /// One page per call: pages from the last listing come first, and a new
-/// listing runs on the next round after every page is finished. Returns the page
-/// and whether this call found a page finished and recorded the sync time.
+/// listing runs on the next round after every page is finished. With
+/// `complete_available` it runs at once, so no page means none is available.
+/// Returns the page and whether this call found a page finished and recorded
+/// the sync time.
 async fn receive_page(
     store: &mut crate::persistent_store::PersistentStore,
     engine: &ExternalLwwEngine,
     queue: &mut VecDeque<String>,
     checkpoints: &tokio::sync::Mutex<super::lww_compaction::CheckpointSummaries>,
     authority: risunest_sync_wire::stamp::DecimalU64,
+    complete_available: bool,
     cancel: &Cancellation,
 ) -> Result<(Option<StageReceive>, bool)> {
     let mut finished = 0;
     let mut page = next_receive_page(store, queue, authority, &mut finished)?;
-    if page.is_none() && finished == 0 {
+    if page.is_none() && (finished == 0 || complete_available) {
         *queue = engine.receive_requests_cached(store, authority, checkpoints, cancel).await?.into();
         page = next_receive_page(store, queue, authority, &mut finished)?;
     }
@@ -707,6 +714,7 @@ impl<'de> Deserialize<'de> for NewDeviceRequest {
                 generating: input.generating,
                 exit_target: None,
                 turn_limit: None,
+                complete_available: false,
             },
             staging_id: input.staging_id,
         })
@@ -1009,11 +1017,11 @@ mod tests {
 
             let mut queue = VecDeque::new();
             let checkpoints = Default::default();
-            let (page, recorded) = receive_page(&mut f.b, &f.receiver, &mut queue, &checkpoints, DecimalU64(0), &cancel).await.unwrap();
+            let (page, recorded) = receive_page(&mut f.b, &f.receiver, &mut queue, &checkpoints, DecimalU64(0), false, &cancel).await.unwrap();
             let page = page.expect("the published segment is offered");
             assert!(!recorded);
             assert_eq!(last_sync(f.directory_b.path(), "receiver"), None);
-            let (unfinished, recorded) = receive_page(&mut f.b, &f.receiver, &mut queue, &checkpoints, DecimalU64(0), &cancel).await.unwrap();
+            let (unfinished, recorded) = receive_page(&mut f.b, &f.receiver, &mut queue, &checkpoints, DecimalU64(0), false, &cancel).await.unwrap();
             assert_eq!(unfinished.map(|page| page.header.request_id), Some(page.header.request_id.clone()));
             assert!(!recorded);
             f.b.lww_stage_receive(&page).unwrap();
@@ -1027,11 +1035,11 @@ mod tests {
                 ..Default::default()
             }).unwrap();
             publish_round(&mut f.sender, &mut f.a, DecimalU64(0), &[], None, &cancel).await.unwrap();
-            let (next, recorded) = receive_page(&mut f.b, &f.receiver, &mut queue, &checkpoints, DecimalU64(0), &cancel).await.unwrap();
+            let (next, recorded) = receive_page(&mut f.b, &f.receiver, &mut queue, &checkpoints, DecimalU64(0), false, &cancel).await.unwrap();
             assert!(next.is_none());
             assert!(recorded);
             let recorded_at = last_sync(f.directory_b.path(), "receiver").expect("a finished page records the sync time");
-            let (following, recorded) = receive_page(&mut f.b, &f.receiver, &mut queue, &checkpoints, DecimalU64(0), &cancel).await.unwrap();
+            let (following, recorded) = receive_page(&mut f.b, &f.receiver, &mut queue, &checkpoints, DecimalU64(0), false, &cancel).await.unwrap();
             assert!(following.is_some(), "the next round receives arrivals after the captured listing");
             assert!(!recorded);
             assert_eq!(last_sync(f.directory_b.path(), "receiver"), Some(recorded_at));
@@ -1039,6 +1047,28 @@ mod tests {
             let summary = serde_json::to_value(super::super::connection::summary(
                 &ConnectionStore::open(f.directory_b.path()).unwrap().read("receiver").unwrap())).unwrap();
             assert_eq!(summary["lastSyncAtMs"], serde_json::json!(recorded_at.to_string()));
+
+            let following = following.unwrap();
+            f.b.lww_stage_receive(&following).unwrap();
+            f.b.lww_apply_receive(&ApplyReceive { header: following.header.clone(), generating: Vec::new() }).unwrap();
+            f.b.lww_finish_receive(&following.header).unwrap();
+            f.a.commit(&WorkingSetCommit {
+                expected_revision: f.a.revision().unwrap(),
+                unit_mutations: Some(vec![UnitMutation::Set {
+                    key: UnitKey::new(&["root", "language"]).unwrap(), value: serde_json::json!("ja"),
+                }]),
+                ..Default::default()
+            }).unwrap();
+            publish_round(&mut f.sender, &mut f.a, DecimalU64(0), &[], None, &cancel).await.unwrap();
+            let (latest, recorded) = receive_page(&mut f.b, &f.receiver, &mut queue, &checkpoints, DecimalU64(0), true, &cancel).await.unwrap();
+            let latest = latest.expect("a complete receive lists again once the listed pages are finished");
+            assert!(recorded);
+            f.b.lww_stage_receive(&latest).unwrap();
+            f.b.lww_apply_receive(&ApplyReceive { header: latest.header.clone(), generating: Vec::new() }).unwrap();
+            f.b.lww_finish_receive(&latest.header).unwrap();
+            let (exhausted, recorded) = receive_page(&mut f.b, &f.receiver, &mut queue, &checkpoints, DecimalU64(0), true, &cancel).await.unwrap();
+            assert!(exhausted.is_none());
+            assert!(recorded);
         });
     }
 

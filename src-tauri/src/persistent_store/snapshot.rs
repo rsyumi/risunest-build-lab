@@ -131,6 +131,16 @@ impl RevisionReadLease {
             .publish_detached_asset_roots(&self.lease, roots)
     }
 
+    pub(crate) fn publish_detached_gallery_file_root(&self, kind: &str, key: &str) -> StoreResult<()> {
+        let mut roots = AssetRootSet::default();
+        if let Some(alias) = super::query::read_asset_alias(&self.connection, kind, key, &self.target)? {
+            if let Some(hash) = alias.value.object_hash {
+                roots.object_hashes.insert(hash);
+            }
+        }
+        self.active_readers.publish_detached_asset_roots(&self.lease, roots)
+    }
+
     #[cfg(feature = "native-official-publication")]
     pub(crate) fn asset_roots(&self) -> StoreResult<AssetRootSet> {
         collect_asset_roots_for_generation(&self.connection, &self.target.generation)

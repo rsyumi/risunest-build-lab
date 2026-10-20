@@ -1,11 +1,12 @@
 import { language } from 'src/lang'
+import { imageFormatFromBytes } from './imageFormats'
 
 const MAX_BYTES = 50 * 1024 * 1024
 
 export async function renderPortraitPng(data: Uint8Array, format: 'png-card' | 'appended-charx-jpeg', signal?: AbortSignal): Promise<Uint8Array> {
     signal?.throwIfAborted()
     try {
-        const bitmap = await createImageBitmap(new Blob([new Uint8Array(data)], { type: 'image/avif' }))
+        const bitmap = await createImageBitmap(new Blob([new Uint8Array(data)], { type: imageFormatFromBytes(data)?.mime ?? '' }))
         try {
             signal?.throwIfAborted()
             const { width, height } = bitmap

@@ -12,7 +12,11 @@ import {
     type NativeFileJobResult,
 } from './nativeFileJobs'
 import { getPersistentDataRuntime } from './persistentDataRuntime.svelte'
-import { prepareNativeContentExportFromPicker } from './nativeContentExportPicker'
+import {
+    prepareNativeContentExportFromPicker,
+    withNativeContentExportDestination,
+    type NativeContentExportPickerDependencies,
+} from './nativeContentExportPicker'
 
 interface NativeCharacterCardPickerInput {
     characterId: string
@@ -30,6 +34,7 @@ interface NativeCharacterCardExportRouteDependencies {
     isDesktop(): boolean
     isAndroid(): boolean
     isIOS?(): boolean
+    reserveAndroidDestination?: NativeContentExportPickerDependencies['reserveAndroidDestination']
     chooseDestination(
         suggestedName: string,
         format: NativeCharacterCardPickerInput['format'],
@@ -87,19 +92,21 @@ export async function exportNativeCharacterCardFromPicker(
     }, options, dependencies)
     if (flow.kind === 'unsupported') return undefined
     if (flow.kind === 'cancelled') return null
-    const character = await dependencies.readCharacter(input.characterId, flow.expectedRevision)
-    const metadata = input.projectCharacter(character)
-    const rendition = input.format === 'png-card'
-        ? await dependencies.preparePortrait?.(character, flow.expectedRevision, 'png-card', options.signal) : undefined
-    try {
-        options.signal?.throwIfAborted()
-        return await dependencies.runExport({
-            characterId: input.characterId,
-            destination: flow.destination,
-            expectedRevision: flow.expectedRevision,
-            ...(rendition ? { portraitRendition: rendition.descriptor } : {}),
-            format: input.format,
-            metadata,
-        }, options)
-    } finally { await rendition?.release() }
+    return withNativeContentExportDestination(flow.destination, async () => {
+        const character = await dependencies.readCharacter(input.characterId, flow.expectedRevision)
+        const metadata = input.projectCharacter(character)
+        const rendition = input.format === 'png-card'
+            ? await dependencies.preparePortrait?.(character, flow.expectedRevision, 'png-card', options.signal) : undefined
+        try {
+            options.signal?.throwIfAborted()
+            return await dependencies.runExport({
+                characterId: input.characterId,
+                destination: flow.destination,
+                expectedRevision: flow.expectedRevision,
+                ...(rendition ? { portraitRendition: rendition.descriptor } : {}),
+                format: input.format,
+                metadata,
+            }, options)
+        } finally { await rendition?.release() }
+    })
 }

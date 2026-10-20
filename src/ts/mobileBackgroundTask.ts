@@ -1,6 +1,9 @@
 import './androidNativeControl'
 import { isTauriAndroid, isTauriIOS } from './platform'
 import { beginIOSBackgroundTask, BackgroundExecutionExpiredError, isBackgroundExpiryReason } from './iosNative'
+import { measuredTaskPercent } from './taskPercent'
+
+export { measuredTaskPercent }
 
 export type MobileTaskKind = 'backup' | 'restore' | 'sync' | 'import' | 'export' | 'maintenance' | 'generation'
 export type MobileTaskRefusal = 'background' | 'unavailable' | 'timeout' | 'failed'
@@ -17,7 +20,7 @@ export interface MobileBackgroundTask {
 }
 /** Native replies `active`, `deferred`, or the reason it refused; a refused hold stays registered until it ends. */
 export interface AndroidBackgroundTaskBridge {
-    begin(id: string, kind: MobileTaskKind, deferred: boolean): Promise<string>
+    begin(id: string, kind: MobileTaskKind, deferred: boolean, userInitiated: boolean): Promise<string>
     progress(id: string, percent: number): Promise<unknown>
     end(id: string): Promise<unknown>
 }
@@ -32,9 +35,14 @@ export function subscribeMobileBackgroundTasks(listener: () => void): () => void
     return () => listeners.delete(listener)
 }
 function publish() { for (const listener of listeners) listener() }
-export function measuredTaskPercent(completed: number, total?: number): number | null {
-    return Number.isFinite(completed) && Number.isFinite(total) && total! > 0
-        ? Math.max(0, Math.min(100, Math.round(completed * 100 / total!))) : null
+
+/** Register work whose platform assertion is managed by a specialized adapter. */
+export function retainMobileBackgroundActivity(): () => void {
+    if (!isTauriAndroid && !isTauriIOS) return () => {}
+    const owner = {}
+    active.add(owner)
+    publish()
+    return () => { if (active.delete(owner)) publish() }
 }
 
 interface IOSDeferredHold { controller: AbortController; settled: Promise<void> }
@@ -71,10 +79,7 @@ function beginTask(
     })
     if ((!isTauriAndroid && !isTauriIOS) || signal?.aborted) return unprotected('unavailable')
     // Register before awaiting native admission so Home cannot cancel work during acquisition.
-    const owner = {}
-    active.add(owner)
-    publish()
-    const release = () => { if (active.delete(owner)) publish() }
+    const release = retainMobileBackgroundActivity()
     const settle = (task: MobileBackgroundTask): MobileBackgroundTask => {
         if (userInitiated && task.protection?.state === 'refused' && task.protection.reason !== 'unavailable') {
             noticeRefusedProtection()
@@ -131,7 +136,7 @@ function beginTask(
                 window.addEventListener('risunest-background-expired', expired)
                 let status: string
                 try {
-                    status = await bridge.begin(id, kind, deferred)
+                    status = await bridge.begin(id, kind, deferred, userInitiated)
                 } catch (error) {
                     // Native may still admit a request that timed out, so the hold always ends with the work.
                     status = error instanceof Error && error.message === 'android-control-timeout' ? 'timeout' : 'failed'
@@ -154,7 +159,16 @@ function beginTask(
                         window.removeEventListener('risunest-background-expired', expired)
                         signal?.removeEventListener('abort', abort)
                         await pending
-                        await bridge.end(id)
+                        // Native keeps the hold, and its notification, until it hears the end, so a full channel is asked again.
+                        for (let attempt = 1; ; attempt += 1) {
+                            try {
+                                await bridge.end(id)
+                                return
+                            } catch (error) {
+                                if (attempt >= 5 || !(error instanceof Error) || error.message !== 'android-control-busy') throw error
+                            }
+                            await new Promise(resolve => setTimeout(resolve, attempt * 250))
+                        }
                     },
                 }
             }

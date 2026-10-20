@@ -928,6 +928,57 @@ describe('production server LWW composition', () => {
         await vi.advanceTimersByTimeAsync(5000)
         expect(f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_push')).toHaveLength(3)
     })
+    it('keeps routine sync held from a push in flight at hide through the hide-time publication', async () => {
+        const mobile = await import('../../mobileBackgroundTask')
+        let holds = 0, publishing = false, unheld = false
+        vi.mocked(mobile.beginDeferredMobileBackgroundTask).mockImplementation(() => {
+            holds++
+            return { progress() {}, async dispose() { if (--holds === 0 && !publishing) unheld = true } }
+        })
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        let finishPush!: () => void, pushes = 0
+        f.invoke.mockImplementation(async command => {
+            if (command === 'server_sync_lww_push') {
+                if (++pushes === 1) { await new Promise<void>(resolve => { finishPush = resolve }); return null }
+                publishing = true
+                return null
+            }
+            return command === 'server_sync_lww_pull' ? emptyReceive() : null
+        })
+        f.revision!(32, 'edit')
+        await vi.advanceTimersByTimeAsync(2000)
+        expect(pushes).toBe(1)
+        unheld = false
+        visible(false); await settle()
+        finishPush(); await settle()
+        expect(publishing).toBe(true)
+        expect(unheld).toBe(false)
+    })
+    it('stops routine sync where it stands when the platform time runs out and resumes on return', async () => {
+        const mobile = await import('../../mobileBackgroundTask')
+        const { BackgroundExecutionExpiredError } = await import('../../iosNative')
+        const expiry = new AbortController()
+        vi.mocked(mobile.beginDeferredMobileBackgroundTask).mockImplementation(() => ({ signal: expiry.signal, progress() {}, async dispose() {} }))
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        let finishPull!: () => void
+        f.invoke.mockImplementation(async command => command === 'server_sync_lww_pull'
+            ? new Promise(resolve => { finishPull = () => resolve(emptyReceive()) }) : null)
+        f.events.get('risu-server-sync-remote-hint')!({ payload: null })
+        await settle()
+        expect(finishPull).toBeTypeOf('function')
+        visible(false); await settle()
+        expect(f.invoke).not.toHaveBeenCalledWith('server_sync_cancel')
+        expiry.abort(new BackgroundExecutionExpiredError())
+        await settle()
+        expect(f.invoke).toHaveBeenCalledWith('server_sync_cancel')
+        finishPull(); await settle()
+        f.invoke.mockClear()
+        f.invoke.mockImplementation(async command => command === 'server_sync_lww_pull' ? emptyReceive() : null)
+        visible(true); await settle()
+        expect(f.invoke).toHaveBeenCalledWith('server_sync_lww_pull', expect.anything())
+    })
     it('keeps a failed binding visible as a paused connection that 지금 동기화 resumes', async () => {
         const { bindSyncTarget } = await import('./bindingRegistry')
         const state = bindingContext().state

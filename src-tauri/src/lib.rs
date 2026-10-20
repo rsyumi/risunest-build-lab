@@ -42,6 +42,7 @@ mod macos_lifecycle;
 pub mod native_file_jobs;
 pub(crate) mod native_log;
 mod diagnostics;
+mod generation_diagnostics;
 mod network_log;
 mod native_media;
 mod native_tokenizer;
@@ -393,12 +394,15 @@ fn builder_with_main_window(
         builder = builder.on_web_content_process_terminate(|webview| {
             if webview.label() == "main" {
                 crate::nlog!("error", "WebKit web content process ended");
+                generation_diagnostics::renderer_exit(generation_diagnostics::RendererExit::Apple { reason: "unknown" });
+                generation_diagnostics::reload_result("requested");
                 renderer_recovery::renderer_exited(webview.app_handle());
                 // A quit that arrives before the reloaded document is ready no longer waits for it.
                 #[cfg(target_os = "macos")]
                 macos_lifecycle::document_started(webview.app_handle());
             }
             if let Err(error) = webview.reload() {
+                if webview.label() == "main" { generation_diagnostics::reload_result("failed"); }
                 crate::nlog!("error", "Could not reload after the web content process ended: {error}");
             }
         });
@@ -411,6 +415,7 @@ fn builder_with_main_window(
                 if webview.label() == "main"
                     && matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
                 {
+                    generation_diagnostics::document_started();
                     if let Some(state) =
                         webview.try_state::<persistent_store::PersistentStoreState>()
                     {
@@ -464,6 +469,7 @@ fn builder_with_main_window(
             if webview.label() == "main"
                 && matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
             {
+                generation_diagnostics::document_started();
                 renderer_recovery::document_started(webview.app_handle());
                 if let Some(state) = webview.try_state::<persistent_store::PersistentStoreState>() {
                     if let Err(error) = state.reset_renderer_session() {
@@ -513,6 +519,7 @@ fn builder_with_main_window(
             if webview.label() == "main"
                 && matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
             {
+                generation_diagnostics::document_started();
                 #[cfg(target_os = "ios")]
                 ios_lifecycle::main_document_started(webview.app_handle());
                 #[cfg(target_os = "macos")]
@@ -691,6 +698,7 @@ fn builder_with_main_window(
                 server_sync::residency::arm_anchor(&app_data_dir);
                 app.manage(native_media::streaming::MediaServerState::initialize(
                     app_data_dir.clone(),
+                    app.state::<app_paths::AppPaths>().cache.clone(),
                 ));
                 app.manage(
                     native_file_jobs::screenshot_output::ScreenshotOutputState::initialize(
@@ -873,6 +881,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         native_log::native_log_tail,
         diagnostics::diagnostic_device_info,
         native_log::native_log_error,
+        generation_diagnostics::native_generation_diagnostic,
         native_log::native_log_file_path,
         native_log::native_log_set_file_enabled,
         native_tokenizer::tokenize_batch,
@@ -970,6 +979,17 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_read_asset_alias,
         persistent_store::commands::pds_read_asset_aliases_by_keys,
         persistent_store::commands::pds_list_asset_aliases,
+        persistent_store::commands::gallery::pds_gallery_page,
+        persistent_store::commands::gallery::pds_gallery_keys,
+        persistent_store::commands::gallery::pds_gallery_index,
+        persistent_store::commands::gallery::pds_gallery_missing_keys,
+        persistent_store::commands::gallery::pds_gallery_delete,
+        persistent_store::commands::gallery::pds_gallery_scan_start,
+        persistent_store::commands::gallery::pds_gallery_scan_status,
+        persistent_store::commands::gallery::pds_gallery_scan_result,
+        persistent_store::commands::gallery::pds_gallery_scan_cancel,
+        persistent_store::commands::gallery::pds_gallery_locations,
+        persistent_store::commands::gallery::pds_gallery_usage_count,
         persistent_store::commands::pds_read_asset_owner_head,
         persistent_store::commands::pds_commit_asset_alias,
         persistent_store::commands::pds_delete_asset_alias,

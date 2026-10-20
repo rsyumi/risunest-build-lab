@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import ts from 'typescript'
 import { open } from '@tauri-apps/plugin-shell'
 import { openUrl } from '@tauri-apps/plugin-opener'
+import { language } from '../lang'
 
 const native = { invoke: vi.fn().mockResolvedValue(undefined) }
 
@@ -22,8 +23,8 @@ async function loadOpenURL(userAgent: string, tauri = true): Promise<(url: strin
     const body = ts.transpileModule(declaration.getText(source), {
         compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
     }).outputText
-    return new Function('exports', 'isTauri', 'isTauriIOS', 'isTauriMobile', 'open', 'openUrl', 'alertError', 'window', `${body}; return exports.openURL;`)(
-        {}, platform.isTauri, platform.isTauriIOS, platform.isTauriMobile, open, openUrl, (message: string) => errors.push(message), window,
+    return new Function('exports', 'isTauri', 'isTauriIOS', 'isTauriMobile', 'open', 'openUrl', 'alertError', 'window', 'language', `${body}; return exports.openURL;`)(
+        {}, platform.isTauri, platform.isTauriIOS, platform.isTauriMobile, open, openUrl, (message: string) => errors.push(message), window, language,
     )
 }
 
@@ -72,5 +73,6 @@ test.each([
     const openURL = await loadOpenURL(userAgent)
     native.invoke.mockRejectedValueOnce(failure)
     openURL(url)
-    await vi.waitFor(() => expect(errors).toEqual([failure]))
+    await vi.waitFor(() => expect(errors).toEqual([language.errors.urlOpenFailed]))
+    expect(errors).not.toContain(failure)
 })

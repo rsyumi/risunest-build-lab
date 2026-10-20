@@ -1,6 +1,10 @@
 <script lang="ts">
     import { imageAliases, selectedImageFormat } from "src/ts/media/imageFormats"
     import { mapSelectedFiles } from "src/ts/util"
+    import AssetGallery from "src/lib/Gallery/AssetGallery.svelte";
+    import { galleryText } from "src/ts/gallery/strings";
+    import Button from "src/lib/UI/GUI/Button.svelte";
+    let galleryModuleId = $state<string | null>(null)
     import ListPager from "src/lib/UI/GUI/ListPager.svelte"
     import { language } from "src/lang";
     import TextInput from "src/lib/UI/GUI/TextInput.svelte";
@@ -259,6 +263,7 @@
 {/if}
 
 {#if submenu === 5 && (Array.isArray(currentModule.assets))}
+    <div class="flex justify-end mb-2"><Button styled="outlined" size="sm" onclick={() => galleryModuleId = currentModule.id}>{galleryText().gallery}</Button></div>
     <div class="w-full max-w-full border border-selected rounded-md p-2">
         <ListPager bind:page={assetPage} total={allAssets.length} />
         <table class="contain w-full max-w-full tabler mt-2">
@@ -333,4 +338,8 @@
         <Check bind:check={currentModule.lowLevelAccess} name={language.lowLevelAccess}/>
         <span> <Help key="lowLevelAccess" name={language.lowLevelAccess}/></span>
     </div>
+{/if}
+
+{#if galleryModuleId}
+    <AssetGallery owner={{ kind: 'module', id: galleryModuleId }} onclose={() => galleryModuleId = null}/>
 {/if}

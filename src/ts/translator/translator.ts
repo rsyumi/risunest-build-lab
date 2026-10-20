@@ -36,7 +36,7 @@ function cachedTranslations(): ByteBudgetLru<string, string> {
 
 function translationCacheKey(db: Database, from: string, target: string, reverse: boolean, text: string): string {
     const server = db.translatorType === 'deeplX' ? db.deeplXOptions?.url ?? null : null
-    return JSON.stringify([reverse, db.translatorType, db.translatorInputLanguage, from, target, server]) + text
+    return JSON.stringify([reverse, db.translatorType, db.translatorInputLanguage, from, target, server, !!db.useExperimentalGoogleTranslator]) + text
 }
 
 function rememberTranslation(key: string, value: string): void {

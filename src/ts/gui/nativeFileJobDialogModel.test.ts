@@ -48,6 +48,16 @@ it('orders account asset download after refresh and plugins and exposes separate
     expect(finishing.cancelEnabled).toBe(false)
     const stopped = buildNativeFileJobDialogModel(null, outcome({ state: 'cancelled', status: { ...current, officialAssets: { ...current.officialAssets!, state: 'cancelled' } }, observedStages: history }), 2000)
     expect(stopped.terminal?.summary).toBe(copy.resultAccountAssetsStopped)
+    const missing = buildNativeFileJobDialogModel(null, outcome({ state: 'succeeded', status: { ...current, officialAssets: {
+        ...current.officialAssets!, state: 'succeeded', counts: { required: 2, alreadyPresent: 0, installed: 1, missing: 1, failed: 0, notAttempted: 0 },
+    } } }), 2000)
+    expect(missing.terminal?.summary).toBe(copy.resultAccountAssetsMissing)
+    for (const [reason, expected] of [['receipt', copy.reasonAccountAssetReceipt], ['checking', copy.reasonAccountAssetChecking]] as const) {
+        const rejected = buildNativeFileJobDialogModel(null, outcome({ state: 'failed', status: {
+            ...current, officialAssets: { ...current.officialAssets!, state: 'failed', reason },
+        } }), 2000)
+        expect(rejected.terminal?.reason).toBe(expected)
+    }
 })
 
 it('explains that a busy Android destination requires waiting for the current export', () => {

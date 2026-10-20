@@ -4295,6 +4295,7 @@ dependencies = [
  "notify-rust",
  "oauth2",
  "percent-encoding",
+ "png 0.18.1",
  "quick-xml",
  "regex",
  "reqwest 0.12.28",
@@ -4348,6 +4349,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "zeroize",
  "zip 0.6.6",
+ "zune-jpeg",
 ]
 
 [[package]]

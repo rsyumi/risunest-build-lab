@@ -61,10 +61,15 @@ pub(crate) fn init() -> TauriPlugin<Wry> {
                                 if details.ExitCode(&mut value).is_ok() { exit_code = Some(value); }
                             }
                             crate::nlog!("error", "WebView2 process failure: kind={} ({}) reason={reason:?} exit_code={exit_code:?}", failure_name(kind), kind.0);
+                            if response(kind) != Response::Log {
+                                crate::generation_diagnostics::renderer_exit(crate::generation_diagnostics::RendererExit::Windows { kind: kind.0, reason, exit_code });
+                            }
                             match response(kind) {
                                 Response::Reload => {
                                     crate::renderer_recovery::renderer_exited(&failure_app);
+                                    crate::generation_diagnostics::reload_result("requested");
                                     if let Some(Err(error)) = sender.map(|view| view.Reload()) {
+                                        crate::generation_diagnostics::reload_result("failed");
                                         crate::nlog!("error", "Could not reload after the WebView2 renderer exit: {}", error.code().0);
                                     }
                                 }
@@ -79,6 +84,8 @@ pub(crate) fn init() -> TauriPlugin<Wry> {
                                 args.IsSuccess(&mut success)?;
                                 if success.as_bool() {
                                     crate::renderer_recovery::load_succeeded(&navigation_app);
+                                } else {
+                                    crate::generation_diagnostics::reload_result("failed");
                                 }
                             }
                             Ok(())

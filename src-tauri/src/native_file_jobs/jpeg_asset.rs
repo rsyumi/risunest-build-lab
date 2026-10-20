@@ -127,14 +127,56 @@ fn validate_ordinary_jpeg(
             "native JPEG asset import requires an ordinary JPEG source",
         ));
     }
-    let (width, height) = image::ImageReader::with_format(
-        std::io::BufReader::new(&mut source.file), image::ImageFormat::Jpeg,
-    ).into_dimensions().map_err(|_| NativeJobError::new("damaged-image", "JPEG image header is damaged"))?;
-    if width == 0 || height == 0 {
-        return Err(NativeJobError::new("damaged-image", "JPEG image dimensions are invalid"));
-    }
+    jpeg_dimensions(&mut source.file, || job.is_cancel_requested())?;
     source.file.seek(SeekFrom::Start(0)).map_err(|error| NativeJobError::new("store-error", error.to_string()))?;
     Ok(())
+}
+
+fn jpeg_dimensions(
+    reader: &mut (impl Read + Seek),
+    is_cancelled: impl Fn() -> bool,
+) -> Result<(u16, u16), NativeJobError> {
+    let source = JpegHeaderReader { source: std::io::BufReader::new(reader), is_cancelled: &is_cancelled };
+    let mut decoder = zune_jpeg::JpegDecoder::new(source);
+    decoder.set_options(decoder.options().set_strict_mode(false).set_max_width(usize::MAX).set_max_height(usize::MAX));
+    let result = decoder.decode_headers();
+    if is_cancelled() { return Err(NativeJobError::new("cancelled", "native JPEG asset import was cancelled")); }
+    result.map_err(|_| NativeJobError::new("damaged-image", "JPEG image header is damaged"))?;
+    let (width, height) = decoder.dimensions().ok_or_else(|| NativeJobError::new("damaged-image", "JPEG image dimensions are invalid"))?;
+    Ok((width as u16, height as u16))
+}
+
+struct JpegHeaderReader<R, F> {
+    source: R,
+    is_cancelled: F,
+}
+
+impl<R, F: Fn() -> bool> JpegHeaderReader<R, F> {
+    fn check(&self) -> std::io::Result<()> {
+        if (self.is_cancelled)() { Err(std::io::Error::other("JPEG header read cancelled")) } else { Ok(()) }
+    }
+}
+
+impl<R: Read, F: Fn() -> bool> Read for JpegHeaderReader<R, F> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        self.check()?;
+        self.source.read(bytes)
+    }
+}
+
+impl<R: Seek, F: Fn() -> bool> Seek for JpegHeaderReader<R, F> {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        self.check()?;
+        self.source.seek(position)
+    }
+}
+
+impl<R: std::io::BufRead, F: Fn() -> bool> std::io::BufRead for JpegHeaderReader<R, F> {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        self.check()?;
+        self.source.fill_buf()
+    }
+    fn consume(&mut self, bytes: usize) { self.source.consume(bytes); }
 }
 
 fn character_image_extension(uri: &str) -> &'static str {
@@ -391,6 +433,28 @@ fn import_jpeg_asset_with_before_commit(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn jpeg_dimensions_reads_only_marker_headers_and_observes_cancellation() {
+        use std::io::Cursor;
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut bytes)
+            .encode_image(&image::RgbImage::new(32, 24)).unwrap();
+        let sos = bytes.windows(2).position(|bytes| bytes == [0xff, 0xda]).unwrap();
+        let truncated = bytes[..sos].to_vec();
+        bytes.resize(bytes.len() + 1024 * 1024, 0);
+        let mut reader = Cursor::new(bytes);
+        assert_eq!(jpeg_dimensions(&mut reader, || false).unwrap(), (32, 24));
+        assert!(reader.position() <= COPY_BUFFER_BYTES as u64, "dimension checks must not read the full JPEG body");
+        reader.set_position(0);
+        let checks = std::cell::Cell::new(0);
+        assert_eq!(jpeg_dimensions(&mut reader, || {
+            checks.set(checks.get() + 1);
+            checks.get() > 4
+        }).unwrap_err().code, "cancelled");
+        let mut damaged = Cursor::new(truncated);
+        assert_eq!(jpeg_dimensions(&mut damaged, || false).unwrap_err().code, "damaged-image");
+    }
+
     use super::super::{JobKind, JobRegistry};
     use super::*;
     use crate::asset_repository::job_pins::collect_durable_cas_job_roots;

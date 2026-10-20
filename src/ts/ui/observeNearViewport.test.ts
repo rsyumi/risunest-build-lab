@@ -86,6 +86,55 @@ describe('observeNearViewport', () => {
         expect(observer.disconnect).toHaveBeenCalledTimes(1)
     })
 
+    it('isolates scrolling roots and releases each pool after its last pending target', async () => {
+        vi.stubGlobal('IntersectionObserver', TestIntersectionObserver)
+        const { observeNearViewport } = await import('./observeNearViewport')
+        const firstRoot = document.createElement('div'), secondRoot = document.createElement('div')
+        const first = document.createElement('div'), second = document.createElement('div'), third = document.createElement('div')
+        const firstCallback = vi.fn(), secondCallback = vi.fn(), thirdCallback = vi.fn()
+        const stopFirst = observeNearViewport(first, firstCallback, firstRoot)
+        const stopSecond = observeNearViewport(second, secondCallback, firstRoot)
+        const stopThird = observeNearViewport(third, thirdCallback, secondRoot)
+        expect(TestIntersectionObserver.instances).toHaveLength(2)
+        const [firstObserver, secondObserver] = TestIntersectionObserver.instances
+        firstObserver.setVisible(first, third)
+        expect(firstCallback).toHaveBeenCalledOnce()
+        expect(thirdCallback).not.toHaveBeenCalled()
+        expect(firstObserver.observed.has(second)).toBe(true)
+        stopSecond()
+        expect(firstObserver.observed.size).toBe(0)
+        expect(firstObserver.disconnect).toHaveBeenCalledOnce()
+        expect(secondObserver.observed.has(third)).toBe(true)
+        secondObserver.setVisible(third)
+        expect(thirdCallback).toHaveBeenCalledOnce()
+        expect(secondObserver.disconnect).toHaveBeenCalledOnce()
+        stopFirst(); stopThird()
+        const stopAgain = observeNearViewport(first, firstCallback, firstRoot)
+        const nextObserver = TestIntersectionObserver.instances[2]
+        firstObserver.setVisible(first)
+        expect(firstCallback).toHaveBeenCalledOnce()
+        nextObserver.setVisible(first)
+        expect(firstCallback).toHaveBeenCalledTimes(2)
+        stopAgain()
+    })
+
+    it('does not let an old root or cleanup consume a replacement registration', async () => {
+        vi.stubGlobal('IntersectionObserver', TestIntersectionObserver)
+        const { observeNearViewport } = await import('./observeNearViewport')
+        const element = document.createElement('div'), root = document.createElement('div')
+        const callback = vi.fn()
+        const stopOld = observeNearViewport(element, callback)
+        const oldObserver = TestIntersectionObserver.instances[0]
+        const stopNew = observeNearViewport(element, callback, root)
+        const nextObserver = TestIntersectionObserver.instances[1]
+        stopOld(); oldObserver.setVisible(element)
+        expect(callback).not.toHaveBeenCalled()
+        expect(nextObserver.observed.has(element)).toBe(true)
+        nextObserver.setVisible(element)
+        expect(callback).toHaveBeenCalledOnce()
+        stopNew()
+    })
+
     it('loads immediately when IntersectionObserver is unavailable', async () => {
         vi.stubGlobal('IntersectionObserver', undefined)
         const { observeNearViewport } = await import('./observeNearViewport')

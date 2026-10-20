@@ -456,6 +456,8 @@ export interface NativeFileJobStatus {
         | 'export-character-card'
         | 'export-risu-module'
         | 'export-dataset'
+        | 'export-gallery-file'
+        | 'export-gallery-zip'
         | 'restore-legacy-local-backup'
         | 'export-compatible-local-backup'
         | 'export-portable-backup'
@@ -669,7 +671,8 @@ export interface NativeDatasetExportInput {
 
 export type NativeCharacterCharxExportDestination =
     | { type: 'desktopPath'; path: string }
-    | { type: 'androidSaf'; suggestedName: string }
+    /** A destination reserved by the caller stays the caller's to release. */
+    | { type: 'androidSaf'; suggestedName: string; reservation?: AndroidSafDestinationReservation }
     | { type: 'iosFiles'; suggestedName: string }
 
 export type NativeBackupDestination =
@@ -2239,16 +2242,18 @@ async function runNativeManagedExport(
         throw new Error(`${spec.operation} requires Tauri`)
     }
     if (options.signal?.aborted) throw abortError()
-    let reservation = spec.reservation
+    let reservation = spec.reservation ?? (spec.destination.type === 'androidSaf' ? spec.destination.reservation : undefined)
+    let owned = false
     if (spec.destination.type === 'androidSaf' && !reservation) {
         if (!dependencies.reserveAndroidDestination) throw new NativeFileJobError('unsupported', 'Android SAF destination reservation is unavailable')
         reservation = await dependencies.reserveAndroidDestination(spec.destination.suggestedName, spec.androidSourceKind ?? 'risuSave', options.signal)
+        owned = true
     }
     const run = (signal = options.signal) =>
         runNativeManagedExportToDestination(spec, { ...options, signal }, dependencies, reservation)
     // The destination is chosen by now, so the picker never holds the background task.
-    return withAndroidSafDestination(reservation, () => spec.holdsBackground && dependencies.holdExport
-        ? dependencies.holdExport(run, options.signal) : run())
+    const work = () => spec.holdsBackground && dependencies.holdExport ? dependencies.holdExport(run, options.signal) : run()
+    return owned ? withAndroidSafDestination(reservation, work) : work()
 }
 
 async function runNativeManagedExportToDestination(
@@ -3559,4 +3564,33 @@ export async function resumeNativeOfficialPublication(
         },
     )
     return outcome?.kind === 'completed' ? outcome.receipt : null
+}
+
+export interface NativeGalleryExportInput {
+    destination: NativeCharacterCharxExportDestination
+    expectedRevision: number
+    archive: boolean
+    selection: {kind: 'asset'; entries: {key: string; name: string; section: string}[]}
+        | {kind: 'inlay'; keys: string[]}
+}
+
+export function runNativeGalleryExport(
+    input: NativeGalleryExportInput,
+    options: NativeFileJobOptions = {},
+    dependencies: NativeBackupExportDependencies = productionBackupExportDependencies,
+): Promise<NativeFileJobResult> {
+    return runNativeManagedExport({
+        operation: 'Native gallery export',
+        holdsBackground: true,
+        safLengthMismatchLabel: 'gallery download',
+        handoffCleanupCommand: 'native_download_handoff_cleanup',
+        androidSourceKind: 'download',
+        destination: input.destination,
+        prepareRequest: () => ({
+            kind: input.archive ? 'export-gallery-zip' : 'export-gallery-file',
+            ...(input.destination.type === 'desktopPath' ? {destination: input.destination.path} : {}),
+            expectedRevision: input.expectedRevision,
+            selection: input.selection,
+        }),
+    }, options, dependencies)
 }

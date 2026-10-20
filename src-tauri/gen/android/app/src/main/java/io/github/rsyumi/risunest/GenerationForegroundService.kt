@@ -114,11 +114,11 @@ internal class GenerationForegroundLifecycle {
   }
 }
 
-internal data class BackgroundTaskStatus(val kind: String, val percent: Int = -1)
+internal data class BackgroundTaskStatus(val kind: String, val percent: Int = -1, val userInitiated: Boolean = false)
 
 /** Holds owned by the page. A deferred hold takes service time only while promoted, which is while the app is off screen. */
 internal class BackgroundTaskRegistry {
-  private class Entry(val kind: String, val deferred: Boolean, val onExpired: (String) -> Unit) {
+  private class Entry(val kind: String, val deferred: Boolean, val userInitiated: Boolean, val onExpired: (String) -> Unit) {
     var percent = -1
     var holding = false
   }
@@ -131,17 +131,23 @@ internal class BackgroundTaskRegistry {
     id: String,
     kind: String,
     deferred: Boolean,
+    userInitiated: Boolean,
     start: () -> String?,
     onExpired: (String) -> Unit,
     refresh: () -> Unit = {},
   ): String {
     if (kind !in BACKGROUND_TASK_KINDS || !isCanonicalUuidV4(id) || id in tasks) return BACKGROUND_INVALID
-    val entry = Entry(kind, deferred, onExpired)
+    val entry = Entry(kind, deferred, userInitiated, onExpired)
     tasks[id] = entry
     if (deferred && visible) return BACKGROUND_DEFERRED
     // A refused hold stays registered, so the next time the app leaves the screen protects it.
     start()?.let { return it }
     entry.holding = true
+    // Holds a failed start left unprotected join the service this hold started again.
+    for (other in tasks.values.filter { !it.holding && (!it.deferred || !visible) }) {
+      if (start() != null) break
+      other.holding = true
+    }
     runCatching(refresh)
     return BACKGROUND_ACTIVE
   }
@@ -185,7 +191,7 @@ internal class BackgroundTaskRegistry {
   }
 
   fun snapshot(): List<BackgroundTaskStatus> =
-    tasks.values.filter { it.holding }.map { BackgroundTaskStatus(it.kind, it.percent) }
+    tasks.values.filter { it.holding }.map { BackgroundTaskStatus(it.kind, it.percent, it.userInitiated) }
 
   /** Ends the holds the service protected, as when its time runs out or it is destroyed. */
   fun clear(notify: Boolean = false) {
@@ -208,6 +214,7 @@ internal data class BackgroundNotificationContent(
   val lines: List<BackgroundNotificationLine>,
   val percent: Int,
   val icon: BackgroundNotificationIcon,
+  val immediate: Boolean,
 )
 
 private fun meanPercent(tasks: List<BackgroundTaskStatus>): Int =
@@ -219,7 +226,10 @@ private fun backgroundTaskIcon(kind: String): BackgroundNotificationIcon = when 
   else -> BackgroundNotificationIcon.SYNC
 }
 
-/** One line per kind beside generation; the bar is determinate only when every task reports a percent. */
+/**
+ * One line per kind beside generation; the bar is determinate only when every task reports a percent.
+ * Work the user started shows at once instead of after the platform's display delay.
+ */
 internal fun backgroundNotificationContent(tasks: List<BackgroundTaskStatus>): BackgroundNotificationContent {
   val work = tasks.filter { it.kind != "generation" }
   val icons = work.map { backgroundTaskIcon(it.kind) }.toSet()
@@ -232,6 +242,7 @@ internal fun backgroundNotificationContent(tasks: List<BackgroundTaskStatus>): B
       icons.size == 1 -> icons.single()
       else -> BackgroundNotificationIcon.SYNC
     },
+    immediate = work.any { it.userInitiated },
   )
 }
 
@@ -343,6 +354,9 @@ class GenerationForegroundService : Service() {
         .setContentIntent(openAppIntent)
         .setOngoing(true)
         .setOnlyAlertOnce(true)
+    if (content.immediate) {
+      builder.setForegroundServiceBehavior(androidx.core.app.NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+    }
     if (content.lines.isNotEmpty()) {
       val generation = if (content.generation) listOf(getString(R.string.generation_notification_title)) else emptyList()
       val lines = generation + content.lines.map { line ->
@@ -385,8 +399,14 @@ class GenerationForegroundService : Service() {
     private val background = BackgroundTaskRegistry()
     private var instance: GenerationForegroundService? = null
 
-    internal fun beginTask(context: Context, id: String, kind: String, deferred: Boolean, expired: (String) -> Unit): String =
-      background.begin(id, kind, deferred, { start(context) }, expired) { instance?.refreshNotification() }
+    internal fun beginTask(
+      context: Context,
+      id: String,
+      kind: String,
+      deferred: Boolean,
+      userInitiated: Boolean,
+      expired: (String) -> Unit,
+    ): String = background.begin(id, kind, deferred, userInitiated, { start(context) }, expired) { instance?.refreshNotification() }
 
     internal fun taskProgress(id: String, percent: Int): Boolean {
       val updated = background.progress(id, percent)

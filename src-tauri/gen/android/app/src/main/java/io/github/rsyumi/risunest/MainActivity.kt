@@ -549,6 +549,8 @@ private val postNotificationsRequestedInProcess = AtomicBoolean(false)
 class MainActivity : TauriActivity(), RendererRecoveryHost {
   @androidx.annotation.Keep
   private external fun cancelIncompleteBoot()
+  @androidx.annotation.Keep
+  private external fun recordRendererExit(didCrash: Boolean)
 
   private fun finishForUserExit() {
     runCatching { cancelIncompleteBoot() }.onFailure { Log.e(TAG, "Boot cancellation failed", it) }
@@ -716,6 +718,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   }
 
   override fun recoverRenderer(webView: WebView, didCrash: Boolean): Boolean {
+    runCatching { recordRendererExit(didCrash) }
     frontendReady.cancel()
     commitBridge?.close()
     commitBridge = null
@@ -999,6 +1002,8 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
 
   private fun onFrontendReady() {
     val webView = lifecycleWebView ?: return
+    // Each document announces itself before registering its own background work.
+    GenerationForegroundService.stopAll(this)
     if (!frontendReady.markReady()) return
     safScope.launch {
       val replay = withContext(Dispatchers.IO) {
@@ -1038,7 +1043,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
       "lifecycle.requestExit" -> lifecycleCommands.requestExit()
       "lifecycle.requestRestart" -> lifecycleCommands.requestRestart()
       "background.begin", "background.defer" -> GenerationForegroundService.beginTask(
-        this, args[0], args[1], deferred = method == "background.defer",
+        this, args[0], args[1], deferred = method == "background.defer", userInitiated = args.getOrNull(2) == "true",
       ) { id ->
         lifecycleWebView?.evaluateJavascript(
           "window.dispatchEvent(new CustomEvent('risunest-background-expired',{detail:'$id'}));", null,

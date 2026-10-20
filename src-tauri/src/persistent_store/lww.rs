@@ -274,6 +274,10 @@ enum Intent<'a> {
         commit: WorkingSetCommit,
         aliases: Vec<super::AssetAlias>,
     },
+    GuardedGalleryDelete {
+        commit: WorkingSetCommit,
+        aliases: Vec<super::AssetAlias>,
+    },
     PluginClaim {
         owner: String,
         key: String,
@@ -357,7 +361,7 @@ fn quarantine_disposition(library: &Connection, device: &Connection, request_id:
     if let Some((committed_digest, revision, generation)) = receipt {
         if committed_digest != digest || risunest_sync_wire::hash(body.as_bytes()) != digest { return Ok(QuarantineDisposition::Unfinished); }
         return Ok(match serde_json::from_str::<Intent>(body) {
-            Ok(Intent::Commit { .. } | Intent::PluginClaim { .. } | Intent::PluginAssign { .. } | Intent::Archive { .. }) => QuarantineDisposition::Delete,
+            Ok(Intent::Commit { .. } | Intent::GuardedGalleryDelete { .. } | Intent::PluginClaim { .. } | Intent::PluginAssign { .. } | Intent::Archive { .. }) => QuarantineDisposition::Delete,
             Ok(Intent::Replacement { staging_id, base_revision, device_sections: None, .. })
                 if base_revision.checked_add(1) == Some(revision) && generation.as_deref() == Some(staging_id.as_str()) => QuarantineDisposition::KeepReceipt,
             _ => QuarantineDisposition::Unfinished,
@@ -377,6 +381,15 @@ fn quarantine_disposition(library: &Connection, device: &Connection, request_id:
 }
 
 impl Intent<'_> {
+    fn for_commit(input: &WorkingSetCommit, aliases: &[super::AssetAlias]) -> Self {
+        // Older readers ignore unknown commit fields, so guarded deletes need a kind they reject.
+        if input.gallery_pending_fence.is_some() {
+            Self::GuardedGalleryDelete { commit: input.clone(), aliases: aliases.to_vec() }
+        } else {
+            Self::Commit { commit: input.clone(), aliases: aliases.to_vec() }
+        }
+    }
+
     fn device_revision(&self) -> Option<i64> {
         match self {
             Self::Replacement { device_revision, device_sections: Some(_), .. }
@@ -1297,6 +1310,7 @@ impl PersistentStore {
         &mut self,
         input: &WorkingSetCommit,
         aliases: &[super::AssetAlias],
+        committed_revision: &mut Option<i64>,
     ) -> StoreResult<RevisionResult> {
         self.lww_recover_intents()?;
         let header = Header {
@@ -1308,10 +1322,7 @@ impl PersistentStore {
                 .clone()
                 .unwrap_or_else(|| Uuid::new_v4().to_string()),
         };
-        let intent = Intent::Commit {
-            commit: input.clone(),
-            aliases: aliases.to_vec(),
-        };
+        let intent = Intent::for_commit(input, aliases);
         let (stamp, digest) = self.reserve_intent(&header, &intent)?;
         let result = commit::commit_lww(
             &mut self.connection,
@@ -1321,6 +1332,7 @@ impl PersistentStore {
             &stamp,
             &digest,
         );
+        *committed_revision = result.as_ref().ok().map(|value| value.revision);
         if result.is_ok()
             || matches!(
                 result,
@@ -1595,10 +1607,8 @@ impl PersistentStore {
             self.completed_intent(&header, &intent)?;
         }
         match intent {
-            Intent::Commit {
-                commit: input,
-                aliases,
-            } => {
+            Intent::Commit { commit: input, aliases }
+            | Intent::GuardedGalleryDelete { commit: input, aliases } => {
                 commit::commit_lww(
                     &mut self.connection,
                     &input,

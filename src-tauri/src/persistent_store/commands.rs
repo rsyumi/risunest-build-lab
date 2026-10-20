@@ -1,4 +1,5 @@
 pub(crate) mod data_health;
+pub(crate) mod gallery;
 pub(crate) mod image_geometry;
 pub(crate) mod hypa;
 
@@ -77,6 +78,17 @@ struct RendererGateState {
     operations: usize,
     /// Advances whenever renderer maintenance starts.
     epoch: u64,
+    /// Long operations that stop when maintenance starts instead of delaying it.
+    cancellations: Vec<std::sync::Weak<AtomicBool>>,
+}
+
+impl RendererGateState {
+    fn begin_maintenance(&mut self) {
+        self.maintenance_active = true;
+        for cancel in self.cancellations.drain(..) {
+            if let Some(cancel) = cancel.upgrade() { cancel.store(true, Ordering::Release); }
+        }
+    }
 }
 
 /// Covers the entire native side effect, including work outside the SQLite lock.
@@ -173,6 +185,19 @@ impl PersistentStoreState {
             .ok_or_else(renderer_gate_error)
     }
 
+    /// Sets `cancel` when renderer maintenance starts, so an admitted operation
+    /// that may run for minutes does not hold maintenance until it finishes.
+    pub(crate) fn cancel_on_renderer_maintenance(&self, cancel: &Arc<AtomicBool>) -> StoreResult<()> {
+        let mut state = self.renderer_gate.state.lock().map_err(|_| renderer_gate_error())?;
+        if state.maintenance_active {
+            cancel.store(true, Ordering::Release);
+            return Ok(());
+        }
+        state.cancellations.retain(|registered| registered.strong_count() > 0);
+        state.cancellations.push(Arc::downgrade(cancel));
+        Ok(())
+    }
+
     /// The maintenance epoch a command records when it is dispatched, before it
     /// waits for a blocking thread.
     pub(crate) fn renderer_dispatch_epoch(&self) -> StoreResult<u64> {
@@ -235,8 +260,8 @@ impl PersistentStoreState {
         let deadline = std::time::Instant::now() + timeout;
         let mut state = self.renderer_gate.state.lock().map_err(|_| renderer_gate_error())?;
         if state.maintenance_active { return Err(renderer_gate_error()); }
-        state.maintenance_active = true;
         state.epoch += 1;
+        state.begin_maintenance();
         let maintenance = DeviceMaintenanceGuard { gate: Arc::clone(&self.renderer_gate) };
         while state.operations != 0 {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -293,7 +318,7 @@ impl PersistentStoreState {
         if state.maintenance_active {
             return Ok(None);
         }
-        state.maintenance_active = true;
+        state.begin_maintenance();
         let maintenance = DeviceMaintenanceGuard {
             gate: Arc::clone(&self.renderer_gate),
         };
@@ -2744,6 +2769,32 @@ mod tests {
             Some(json!(true))
         );
         drop(native);
+        drop(maintenance);
+    }
+
+    #[test]
+    fn maintenance_cancels_a_registered_long_operation_instead_of_waiting_for_it() {
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let state = Arc::new(PersistentStoreState::default());
+        let operation_guard = state.admit_renderer_operation().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        state.cancel_on_renderer_maintenance(&cancel).unwrap();
+        let operation = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !cancel.load(Ordering::Acquire) {
+                if Instant::now() >= deadline { return false; }
+                thread::yield_now();
+            }
+            drop(operation_guard);
+            true
+        });
+        let maintenance = state.acquire_device_maintenance().unwrap();
+        assert!(operation.join().unwrap(), "maintenance waited for the operation instead of cancelling it");
+        let late = Arc::new(AtomicBool::new(false));
+        state.cancel_on_renderer_maintenance(&late).unwrap();
+        assert!(late.load(Ordering::Acquire));
         drop(maintenance);
     }
 

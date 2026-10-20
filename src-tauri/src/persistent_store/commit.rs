@@ -151,6 +151,11 @@ fn commit_inner(
         connection,
         input.expected_revision,
         |transaction, active| {
+            if let Some(fence) = input.gallery_pending_fence {
+                if super::gallery::pending_fence(transaction)? != fence {
+                    return Err(StoreError::RevisionConflict { expected: input.expected_revision, actual: current_revision(transaction)? });
+                }
+            }
             if input.root.as_ref().is_some_and(|root| root.get("account").is_some()) {
                 return Err(validation("Account credentials are device-local"));
             }

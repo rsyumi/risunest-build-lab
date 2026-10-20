@@ -1,3 +1,4 @@
+import { joinAbortSignals } from '../../../abortSignals'
 import { notifySyncReceiveCompleted } from '../bindingChanges'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
@@ -74,7 +75,8 @@ function createAdapter(connectionId: string): Adapter {
             || !active || active.signal.aborted || !(foregroundAvailable() || continuation && networkAvailable())) return
         const captured = active
         hydrationController = new AbortController()
-        const signal = AbortSignal.any([captured.signal, hydrationController.signal])
+        const joined = joinAbortSignals([captured.signal, hydrationController.signal])
+        const signal = joined.signal
         hydrationPending = false
         // A connection-only download excludes bodies that multiple storage connections hold.
         hydrating = downloadRemoteAssets(undefined, { progressConnectionId: connectionId, signal, showEmpty: false, routine: true }).then(() => {
@@ -90,6 +92,7 @@ function createAdapter(connectionId: string): Adapter {
                 || ['unauthorized', 'reauthRequired', 'deviceVaultUnavailable', 'repositoryKeyUnavailable', 'localStorageFull', 'localPermissionDenied', 'storageFull', 'endpointRejected', 'corrupt', 'repositoryMismatch'].includes(failure?.kind ?? failure?.code ?? '')
             reportOperation('assets', error)
         }).finally(() => {
+            joined.dispose()
             hydrating = undefined
             hydrationController = undefined
             continueHydration(true)
@@ -132,19 +135,21 @@ function createAdapter(connectionId: string): Adapter {
             scheduler.expire()
         }, { once: true }))
     }
-    const context = async (signal?: AbortSignal): Promise<BindingContext> => {
+    const withContext = async <T>(signal: AbortSignal | undefined, run: (binding: BindingContext) => Promise<T>): Promise<T> => {
         const state = await native.state()
         if (state.target.kind !== 'external' || state.target.connectionId !== connectionId) throw new Error('Sync binding changed')
-        return { state, signal: signal ? AbortSignal.any([signal, ...(active ? [active.signal] : [])]) : active?.signal ?? new AbortController().signal }
+        const joined = joinAbortSignals([signal, active?.signal])
+        try { return await run({ state, signal: joined.signal }) } finally { joined.dispose() }
     }
-    // Native code returns one bounded page per call until none remain.
-    const receive = async (binding: BindingContext, turnLimit?: number): Promise<LwwTurn> => {
+    // Native code returns one bounded page per call until the listed batch is done;
+    // with `completeAvailable` it lists again after each batch until nothing is left.
+    const receive = async (binding: BindingContext, turnLimit?: number, completeAvailable = false): Promise<LwwTurn> => {
         const progress = beginExternalProgress(connectionId, 'sync')
         let received = 0
         try {
             for (;;) {
                 binding.signal.throwIfAborted()
-                const request = await progress.invoke<LwwStageReceive | null>('external_lww_receive', { request: header(connectionId, binding) }, binding.state.targetAuthority)
+                const request = await progress.invoke<LwwStageReceive | null>('external_lww_receive', { request: { ...header(connectionId, binding), ...(completeAvailable ? { completeAvailable } : {}) } }, binding.state.targetAuthority)
                 binding.signal.throwIfAborted()
                 if (!request) { progress.finish('complete', received > 0); notifySyncReceiveCompleted(); return { count: received, more: false } }
                 binding.signal.throwIfAborted()
@@ -157,10 +162,9 @@ function createAdapter(connectionId: string): Adapter {
             }
         } catch (error) { progress.finish(externalProgressFailure(error)); throw error }
     }
-    const publish = async (binding?: BindingContext, flush = true, call?: LwwCall): Promise<LwwTurn> => {
-        const current = binding ?? await context(call?.signal)
+    const publishTurn = async (current: BindingContext, bound: boolean, flush: boolean, call?: LwwCall): Promise<LwwTurn> => {
         current.signal.throwIfAborted()
-        const progress = (binding && bindingProgress) || beginExternalProgress(connectionId, 'sync')
+        const progress = (bound && bindingProgress) || beginExternalProgress(connectionId, 'sync')
         const owned = progress !== bindingProgress
         let result: { segments: string; more: boolean } = { segments: '0', more: false }
         let meaningful = false
@@ -185,12 +189,15 @@ function createAdapter(connectionId: string): Adapter {
         } catch (error) { if (owned) progress.finish(externalProgressFailure(error)); throw error }
         return { count: Number(result.segments), more: result.more }
     }
+    const publish = (binding?: BindingContext, flush = true, call?: LwwCall): Promise<LwwTurn> => binding
+        ? publishTurn(binding, true, flush, call)
+        : withContext(call?.signal, current => publishTurn(current, false, flush, call))
     const scheduler = createLwwScheduler({
         available: () => !!active && !active.signal.aborted && networkAvailable(),
         busy: holdWhileBusy,
         publish: call => publish(undefined, true, call),
-        receive: async call => receive(await context(call.signal), call.turnLimit),
-        maintain: async call => { const current = await context(call.signal); current.signal.throwIfAborted(); await invoke('external_lww_maintenance', { request: header(connectionId, current) }); current.signal.throwIfAborted() },
+        receive: call => withContext(call.signal, binding => receive(binding, call.turnLimit)),
+        maintain: call => withContext(call.signal, async current => { current.signal.throwIfAborted(); await invoke('external_lww_maintenance', { request: header(connectionId, current) }); current.signal.throwIfAborted() }),
         succeeded: operation => { reportOperation(operation); if (operation === 'receive') continueHydration(true) },
         failed: (error, operation) => {
             reportOperation(operation, error)
@@ -270,7 +277,8 @@ function createAdapter(connectionId: string): Adapter {
         async resumeNewDeviceBinding(_preparation, _result, binding) { await transport.resumeBinding(binding) },
         async receiveAvailableChanges(binding) {
             if (!active || active.signal.aborted || active.state.targetAuthority !== binding.state.targetAuthority || active.state.selectionEpoch !== binding.state.selectionEpoch) throw new Error('Sync is stopped')
-            await receive({ ...binding, signal: AbortSignal.any([binding.signal, active.signal]) })
+            const joined = joinAbortSignals([binding.signal, active.signal])
+            try { await receive({ ...binding, signal: joined.signal }, undefined, true) } finally { joined.dispose() }
         },
     }
     const unregister = registerSyncBindingTransport({ kind: 'external', connectionId }, transport)

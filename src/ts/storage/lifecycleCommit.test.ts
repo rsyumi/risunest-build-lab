@@ -374,25 +374,44 @@ describe('registerLifecycleCommitListeners', () => {
         delete (window as any).RisuLifecycleBridge
     })
 
-    it('checkpoints through the native store on the Tauri production path', async () => {
+    it.each(['stop', 'trim-memory', 'exit'] as const)('records the native %s reason and checkpoints on the Tauri production path', async (reason) => {
         checkpointNativePersistentStore.mockClear()
         vi.resetModules()
         vi.doMock('../platform', async () => (await import('../platform.testSupport')).platformModule({ runtime: 'tauri', os: 'windows' }))
+        const diagnosticEvents: Record<string, unknown>[] = []
+        vi.doMock('@tauri-apps/api/core', async (importOriginal) => ({
+            ...await importOriginal<typeof import('@tauri-apps/api/core')>(),
+            invoke: async (command: string, args?: { event?: Record<string, unknown> }) => {
+                if (command === 'native_generation_diagnostic' && args?.event) diagnosticEvents.push(args.event)
+                return 7
+            },
+        }))
         const { registerLifecycleCommitListeners: registerTauri } = await import('./lifecycleCommit')
+        const { generationDiagnostics } = await import('../generationDiagnostics')
+        generationDiagnostics.startDocument()
+        await Promise.resolve()
         const onFlushComplete = vi.fn()
         ;(window as any).RisuLifecycleBridge = { onFlushComplete }
         const dispose = registerTauri(vi.fn(async () => undefined))
 
-        window.dispatchEvent(new CustomEvent('risu-native-lifecycle', {
-            detail: { reason: 'stop', ackToken: 'tauri-stop' },
-        }))
+        try {
+            window.dispatchEvent(new CustomEvent('risu-native-lifecycle', {
+                detail: { reason, ackToken: 'tauri-lifecycle' },
+            }))
 
-        await vi.waitFor(() => expect(onFlushComplete).toHaveBeenCalledWith('tauri-stop'))
-        expect(checkpointNativePersistentStore).toHaveBeenCalledWith('truncate')
-        dispose()
-        delete (window as any).RisuLifecycleBridge
-        vi.doUnmock('../platform')
-        vi.resetModules()
+            await vi.waitFor(() => expect(onFlushComplete).toHaveBeenCalledWith('tauri-lifecycle'))
+            expect(checkpointNativePersistentStore).toHaveBeenCalledWith('truncate')
+            expect(diagnosticEvents).toEqual([
+                { kind: 'document-start' },
+                { kind: 'lifecycle', documentSequence: 7, eventSequence: 1, event: reason },
+            ])
+        } finally {
+            dispose()
+            delete (window as any).RisuLifecycleBridge
+            vi.doUnmock('../platform')
+            vi.doUnmock('@tauri-apps/api/core')
+            vi.resetModules()
+        }
     })
 
     it('acknowledges the native ack token when the flush fails', async () => {

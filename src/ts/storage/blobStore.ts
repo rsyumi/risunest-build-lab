@@ -62,6 +62,7 @@ export interface InlayBlobMetadata {
     inlayType: InlayBlobType
     width?: number
     height?: number
+    metadata?: Record<string, unknown>
     preservationReason?: 'animation-cost' | 'color-profile'
 }
 
@@ -100,7 +101,7 @@ export interface BlobStore {
     putNewInlayImage?(
         key: string,
         data: Uint8Array,
-        input: { name: string, options?: InlayEncodeOptions },
+        input: { name: string, options?: InlayEncodeOptions, metadata?: Record<string, unknown> },
     ): Promise<InlayBlobMetadata>
     read(key: string, range?: BlobReadRange): Promise<Uint8Array | null>
     stat(key: string): Promise<BlobMetadata | null>

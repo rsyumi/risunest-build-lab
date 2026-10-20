@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { imageFixture } from '../../../tests/support/imageFixtures'
+import { language } from 'src/lang'
+import { requireImage } from '../media/imageFormats'
 
 import {
     archiveCurrentCharacterImage,
@@ -7,6 +9,22 @@ import {
 } from './characterImageFileRoute'
 
 describe('character image file route', () => {
+    it('reports unsupported desktop images through the selection error message', async () => {
+        const messages: string[] = []
+        const result = await selectCharacterImageFile('character-1', {
+            isTauriDesktop: true,
+            chooseDesktopPath: async () => '/chosen/portrait.png',
+            readDesktopHeader: async () => new Uint8Array(),
+            readDesktopPath: async () => new Uint8Array([1, 2, 3]),
+            chooseLegacyFile: async () => null,
+            nativeImport: async () => { throw new Error('unexpected native import') },
+            legacyImport: async data => requireImage(data).ext,
+            onImageError: message => { messages.push(message) },
+        })
+        expect(result).toEqual({ kind: 'cancelled' })
+        expect(messages).toEqual([language.risuNest.imageFormats.unsupported])
+    })
+
     it.each([['png', 'photo.jpg'], ['jpg', 'photo.png']] as const)('routes %s content named %s by its bytes', async (ext, name) => {
         const bytes = imageFixture(ext)
         const nativeImport = vi.fn()

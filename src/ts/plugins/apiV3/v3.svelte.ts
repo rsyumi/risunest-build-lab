@@ -1558,7 +1558,7 @@ const makeRisuaiAPIV3 = (
             staticModel?: string
             allowPlugins?: boolean
         }) => {
-            return holdModelCall(() => requestChatDataMain({
+            return holdModelCall(signal => requestChatDataMain({
                 formated: options.messages,
                 bias: {},
                 staticModel: options.staticModel,
@@ -1571,7 +1571,7 @@ const makeRisuaiAPIV3 = (
                 // explicitly with `allowPlugins: true`, accepting responsibility
                 // for avoiding provider-to-provider call loops.
                 blockPlugins: !options.allowPlugins,
-            }, options.mode, pluginLifetime.signal), pluginLifetime.signal)
+            }, options.mode, signal), pluginLifetime.signal)
         },
         sendChat: async (message: string) => {
             const authorityEpoch = getPersistentStorageAuthorityEpoch();

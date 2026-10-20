@@ -22,6 +22,7 @@ import {
     applyNativeDataHealthRepair,
     completeNativeDataHealthIntent,
     deepScanNativeDataHealth,
+    holdNativeDataHealthScan,
     scanNativeDataHealth,
     previewNativeDataHealthRepair,
     undoNativeDataHealthRepair,
@@ -135,7 +136,12 @@ describe('native persistent maintenance', () => {
             await executeNativePersistentAssetGc()
             await createNativePersistentSnapshot('manual')
             await scanNativeDataHealth()
-            await deepScanNativeDataHealth(true)
+            expect(held).toEqual(Array(3).fill('maintenance'))
+            // A deep scan's pages run under the one hold the whole scan keeps.
+            await holdNativeDataHealthScan(async () => {
+                expect(held).toEqual(Array(4).fill('maintenance'))
+                await deepScanNativeDataHealth(true)
+            })
             expect(held).toEqual(Array(4).fill('maintenance'))
         } finally {
             mocks.os = 'windows'
@@ -329,17 +335,22 @@ describe('native persistent maintenance', () => {
 
     it('copies the missing bodies only after the snapshot job has activated, under one hold across both', async () => {
         const events: string[] = []
-        mocks.snapshotRestore.mockImplementation(async () => { events.push('activated'); return activation })
+        mocks.snapshotRestore.mockImplementation(async (_runtime, _request, options) => {
+            options.onStatus({ ...bodyStatus, kind: 'restore-snapshot', state: 'running', phase: 'reading-source', progress: { completedBytes: 25, totalBytes: 100, completedItems: 0 } })
+            events.push('activated')
+            return activation
+        })
         mocks.invoke.mockImplementation(async command => {
             events.push(command)
             if (command === 'pds_snapshot_list') return [{id:'snapshot.db',bytes:1,modifiedAt:2}]
             if (command === 'native_snapshot_restore_bodies_start') return bodyReceipt
-            if (command === 'native_snapshot_restore_bodies_status') return bodyStatus
+            if (command === 'native_snapshot_restore_bodies_status') return { ...bodyStatus, progress: { completedBytes: 75, totalBytes: 100, completedItems: 0 } }
         })
         let held = 0
+        const progress = new Map<string, number[]>()
         window.RisuBackgroundTasks = {
-            begin: vi.fn(async () => { held++; return 'active' }),
-            progress: vi.fn(async () => {}),
+            begin: vi.fn(async id => { held++; progress.set(id, []); return 'active' }),
+            progress: vi.fn(async (id, percent) => { progress.get(id)!.push(percent) }),
             end: vi.fn(async () => { if (--held === 0) events.push('released') }),
         }
         mocks.os = 'android'
@@ -351,6 +362,8 @@ describe('native persistent maintenance', () => {
         }
         const work = events.filter(event => event !== 'native_snapshot_restore_bodies_status')
         expect(work).toEqual(['pds_snapshot_list', 'activated', 'native_snapshot_restore_bodies_start', 'released'])
+        // The spanning hold mirrors the measured phase, so it cannot mask either phase as unknown.
+        expect([...progress.values()][0]).toEqual([25, -1, 75])
         expect(mocks.relaunch).not.toHaveBeenCalled()
     })
     it('leaves a restore failure to the operation dialog and copies the bodies when the app recovers the activation', async () => {

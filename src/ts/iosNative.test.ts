@@ -95,11 +95,58 @@ describe("iOS generation lifecycle", () => {
           expect(invoke).toHaveBeenCalledWith("plugin:ios-native|end", { id: "save-lease" }),
         );
         expect(holds.expire).toHaveBeenCalledTimes(ending === "expired" ? 1 : 0);
+        // Returning to the screen also checks the media endpoint; let that call land inside this test.
+        if (ending === "active") await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("native_media_ensure"));
       } finally {
         remove();
       }
     },
   );
+  it("saves again at once while a background entry waits for deferred work", async () => {
+    let settle!: () => void;
+    const holds = {
+      settled: vi.fn(() => new Promise<void>((resolve) => { settle = resolve; })),
+      expire: vi.fn(),
+    };
+    const flush = vi.fn(async () => {});
+    const lifecycle = (detail: { event: string; id?: string }) =>
+      window.dispatchEvent(new CustomEvent("risunest-ios-lifecycle", { detail }));
+    const remove = installIOSPersistenceLifecycle(flush, holds);
+    try {
+      lifecycle({ event: "background", id: "save-lease" });
+      await vi.waitFor(() => expect(holds.settled).toHaveBeenCalledOnce());
+      lifecycle({ event: "memory-warning" });
+      await vi.waitFor(() => expect(flush).toHaveBeenCalledTimes(2));
+      expect(invoke).not.toHaveBeenCalled();
+      settle();
+      await vi.waitFor(() =>
+        expect(invoke).toHaveBeenCalledWith("plugin:ios-native|end", { id: "save-lease" }),
+      );
+    } finally {
+      remove();
+    }
+  });
+  it("ends the background save assertion without waiting when the app returned during the save", async () => {
+    const holds = { settled: vi.fn(() => new Promise<void>(() => {})), expire: vi.fn() };
+    let finish!: () => void;
+    const flush = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const lifecycle = (detail: { event: string; id?: string }) =>
+      window.dispatchEvent(new CustomEvent("risunest-ios-lifecycle", { detail }));
+    const remove = installIOSPersistenceLifecycle(flush, holds);
+    try {
+      lifecycle({ event: "background", id: "save-lease" });
+      await vi.waitFor(() => expect(flush).toHaveBeenCalledOnce());
+      lifecycle({ event: "active" });
+      finish();
+      await vi.waitFor(() =>
+        expect(invoke).toHaveBeenCalledWith("plugin:ios-native|end", { id: "save-lease" }),
+      );
+      expect(holds.settled).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("native_media_ensure"));
+    } finally {
+      remove();
+    }
+  });
   it("reports actual progress in order and releases only after pending progress", async () => {
     const calls: string[] = [];
     const deps = {

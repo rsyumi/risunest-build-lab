@@ -1732,9 +1732,9 @@ export async function exportCharacterCard(char:character, type:'png'|'json'|'cha
                 'charxJpeg': ['CharX Embeded Jpeg', 'jpeg']
             }
             const ext = nameExt[type]
-            await (localWriter as LocalWriter).init(ext[0], [ext[1]], `${char.name || 'character'}.${ext[1]}`)
-            // The destination is chosen, so the picker never holds the background task.
-            background = await beginMobileBackgroundTask('export', undefined, true)
+            const chosen = await (localWriter as LocalWriter).init(ext[0], [ext[1]], `${char.name || 'character'}.${ext[1]}`)
+            // The hold begins once a destination is chosen, so the picker never holds the background task.
+            if(chosen) background = await beginMobileBackgroundTask('export', undefined, true)
         }
         const writer = (type === 'charx' || type === 'charxJpeg') ? (new CharXWriter(localWriter)) : type === 'json' ? (new BlankWriter()) : (new PngChunk.streamWriter(img, localWriter))
         await writer.init()

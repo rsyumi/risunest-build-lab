@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { beginMobileBackgroundTask, type MobileBackgroundTask } from '../../../mobileBackgroundTask'
+import { beginDeferredMobileBackgroundTask, beginMobileBackgroundTask, type MobileBackgroundTask } from '../../../mobileBackgroundTask'
 import { createExternalStorageController, type ExternalStorageJobBridge } from './controller'
 import type { ExternalJobSummary, ExternalStorageState } from './types'
 
@@ -193,6 +193,27 @@ describe('external storage controller', () => {
             await backup; await cleanup; await controller.settled()
             expect(events).toEqual(['begin backup', 'begin maintenance', 'end backup', 'end maintenance'])
         } finally { vi.mocked(beginMobileBackgroundTask).mockReset() }
+    })
+
+    it('holds scheduled work only for when the app leaves the screen, and manual work at once', async () => {
+        vi.mocked(beginMobileBackgroundTask).mockClear()
+        vi.mocked(beginDeferredMobileBackgroundTask).mockClear()
+        const bridge: ExternalStorageJobBridge = {
+            startJob: vi.fn(async request => request.kind === 'backup' ? job('backup-job', 'running') : cleanupJob()),
+            getJob: vi.fn(async () => job('backup-job', 'succeeded', '8')),
+            cancelJob: vi.fn(),
+        }
+        const controller = createExternalStorageController(bridge, state, { wait: async () => {} })
+        const session = { kind: 'foreground', id: 'foreground-1' } as const
+        await controller.request({ connectionId: 'sync-1', kind: 'backup', targetRevision: '8', reason: 'automatic', session })
+        await controller.request({ connectionId: 'sync-1', kind: 'cleanup', targetRevision: '0', reason: 'automatic', session })
+        await controller.settled()
+        expect(vi.mocked(beginDeferredMobileBackgroundTask).mock.calls.map(([kind]) => kind)).toEqual(['backup', 'maintenance'])
+        expect(beginMobileBackgroundTask).not.toHaveBeenCalled()
+        await controller.request({ connectionId: 'sync-1', kind: 'cleanup', targetRevision: '0', reason: 'manual', session })
+        await controller.settled()
+        expect(vi.mocked(beginMobileBackgroundTask).mock.calls.map(([kind, , userInitiated]) => [kind, userInitiated])).toEqual([['maintenance', true]])
+        expect(beginDeferredMobileBackgroundTask).toHaveBeenCalledTimes(2)
     })
 
     it('runs another kind after a blocked attempt without sharing its result', async () => {

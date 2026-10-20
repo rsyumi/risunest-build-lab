@@ -21,6 +21,7 @@ vi.mock('src/lib/SideBars/Scripts/RegexList.svelte', () => ({ default: () => {} 
 vi.mock('src/lib/SideBars/Scripts/TriggerList.svelte', () => ({ default: () => {} }))
 vi.mock('src/lib/UI/GUI/TextAreaInput.svelte', () => ({ default: () => {} }))
 vi.mock('src/lib/Others/Help.svelte', () => ({ default: () => {} }))
+vi.mock('src/lib/Gallery/AssetGallery.svelte', () => ({ default: () => {} }))
 vi.mock('src/ts/process/lorebook.svelte', () => ({}))
 vi.mock('src/ts/globalApi.svelte', () => ({}))
 vi.mock('src/ts/process/scripts', () => ({ importRegex: vi.fn() }))

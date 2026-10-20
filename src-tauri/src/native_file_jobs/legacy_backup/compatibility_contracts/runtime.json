@@ -25,6 +25,7 @@
     "src/ts/util.ts": "3de70553aca2dcc9b02397677ee16caa75e50831ff8f2ea86c3694e7b6990281"
   },
   "pocket": {
+    "src/ts/process/files/inlayMeta.ts": "3139433d75dabdebb12c4f24eb1e8364e5affbb320ec5ea59f8eab6507bc6261",
     "package.json": "b57778ab53f062ebb1451d9b8768219d0db75e49e313ea200609ac350d0a22ea",
     "pnpm-lock.yaml": "e9f92e7fc5d854135900981ca14429612a4713e842a38690292b5ba284a5756e",
     "server/node/chunkStore.cjs": "ab70d2cc394e76ffdb7ec7c6a1cacbfba42c24e519dcf0f8fe231e1de05cf8c9",

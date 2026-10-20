@@ -359,3 +359,12 @@ export async function copyingDatabasePreparationModule(importOriginal: () => Pro
             structuredClone(input),
     } satisfies DatabasePreparationModule
 }
+
+export function generationDiagnosticsModule(
+    actual: typeof import('../../generationDiagnostics'),
+    invoke: (command: string, args: Record<string, unknown>) => Promise<unknown>,
+) {
+    const diagnostics = actual.createGenerationDiagnostics({ enabled: true, invoke })
+    diagnostics.startDocument()
+    return { ...actual, generationDiagnostics: diagnostics } satisfies typeof import('../../generationDiagnostics')
+}

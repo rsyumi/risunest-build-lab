@@ -1,5 +1,6 @@
 import { vi, type Mock } from 'vitest'
 import type { MobileBackgroundTask, MobileTaskKind } from './mobileBackgroundTask'
+import { measuredTaskPercent } from './taskPercent'
 
 type Run = typeof import('./mobileBackgroundTask').runWithMobileBackgroundTask
 
@@ -20,7 +21,8 @@ export function mobileBackgroundTaskModule() {
     return {
         hasMobileBackgroundTasks: vi.fn(() => false),
         subscribeMobileBackgroundTasks: vi.fn((_listener: () => void) => () => {}),
-        measuredTaskPercent: vi.fn((_completed: number, _total?: number): number | null => null),
+        retainMobileBackgroundActivity: vi.fn(() => () => {}),
+        measuredTaskPercent: vi.fn(measuredTaskPercent),
         mobileDeferredHoldsSettled: vi.fn(async () => {}),
         expireMobileDeferredHolds: vi.fn(),
         beginMobileBackgroundTask: vi.fn(begin),

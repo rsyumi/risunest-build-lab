@@ -558,6 +558,94 @@ fn asset_gc_dry_run_keeps_detached_export_roots_until_reader_release() {
 }
 
 #[test]
+fn gallery_file_lease_reads_only_the_selected_alias_and_keeps_its_bytes_until_release() {
+    use super::asset_object_catalog::AssetObjectRegistration;
+
+    for (kind, explicit_release) in [("asset", true), ("inlay", false)] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = PersistentStore::open(directory.path()).unwrap();
+        let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
+        let selected = cas.prepare_bytes(b"selected original bytes").unwrap();
+        let unrelated = cas.prepare_bytes(b"unrelated original bytes").unwrap();
+        let replacement = cas.prepare_bytes(b"replacement bytes").unwrap();
+        let alias = AssetAlias {
+            key: if kind == "asset" { "assets/selected.png" } else { "inlay-selected" }.into(),
+            object_hash: Some(selected.content_hash.clone()),
+            kind: kind.into(),
+            size: selected.byte_size as i64,
+            mime: "image/png".into(),
+            name: "Selected".into(),
+            ext: "png".into(),
+            inlay_type: (kind == "inlay").then(|| "image".into()),
+            width: None,
+            height: None,
+            metadata: json!({}),
+        };
+        let first = store.commit_asset_alias(&alias, 0).unwrap();
+        let other = AssetAlias {
+            key: if kind == "asset" { "assets/unrelated.png" } else { "inlay-unrelated" }.into(),
+            object_hash: Some(unrelated.content_hash.clone()),
+            size: unrelated.byte_size as i64,
+            ..alias.clone()
+        };
+        let revision = store.commit_asset_alias(&other, first.revision).unwrap().revision;
+        let generation = super::active_generation(&store.connection).unwrap();
+        let body = json!({ "unrelated": vec!["synthetic library body"; 4096] }).to_string();
+        store.connection.execute("UPDATE root SET value=?1 WHERE generation=?2", params![body, generation]).unwrap();
+        store.asset_object_catalog().register(&[
+            AssetObjectRegistration { object_hash: selected.content_hash.clone(), byte_size: selected.byte_size },
+            AssetObjectRegistration { object_hash: unrelated.content_hash.clone(), byte_size: unrelated.byte_size },
+            AssetObjectRegistration { object_hash: replacement.content_hash.clone(), byte_size: replacement.byte_size },
+        ], 0).unwrap();
+
+        let scans = snapshot::ASSET_ROOT_SCANS.with(|count| count.get());
+        let mut prepared = store.prepare_gallery_file_export(revision, kind, &alias.key).unwrap();
+        assert_eq!(snapshot::ASSET_ROOT_SCANS.with(|count| count.get()), scans,
+            "one gallery file must not scan unrelated library bodies");
+        assert_eq!(store.active_readers.active_count(), 1);
+        assert!(matches!(store.prepare_gallery_file_export(revision + 1, kind, &alias.key),
+            Err(StoreError::RevisionConflict { .. })));
+        assert!(store.prepare_gallery_file_export(revision, "invalid", &alias.key).is_err());
+        assert_eq!(store.active_readers.active_count(), 1);
+
+        let rewritten = AssetAlias {
+            object_hash: Some(replacement.content_hash.clone()),
+            size: replacement.byte_size as i64,
+            ext: "webp".into(),
+            ..alias.clone()
+        };
+        let revision = store.commit_asset_alias(&rewritten, revision).unwrap().revision;
+        let revision = store.commit_asset_alias(&AssetAlias {
+            key: other.key.clone(),
+            ..rewritten
+        }, revision).unwrap().revision;
+        store.delete_asset_alias(kind, &alias.key, revision).unwrap();
+        assert!(store.read_asset_alias(kind, &alias.key, None).unwrap().is_none());
+        let pinned = prepared.reader().unwrap();
+        let pinned_alias = super::super::gallery::pinned_gallery_alias(
+            &pinned.connection, &pinned.target, kind, &alias.key,
+        ).unwrap().unwrap();
+        assert_eq!(pinned_alias.object_hash.as_deref(), Some(selected.content_hash.as_str()));
+        assert_eq!(pinned_alias.ext, "png");
+
+        let collected = store.asset_gc_delete_page(16, None, 100, 10).unwrap().report;
+        assert!(collected.blockers.is_empty(), "{kind}: {:?}", collected.blockers);
+        assert_eq!(collected.deleted_hashes, [unrelated.content_hash.clone()], "{kind}");
+        assert_eq!(cas.read_object(&selected.content_hash).unwrap().unwrap(), b"selected original bytes");
+        assert!(cas.read_object(&unrelated.content_hash).unwrap().is_none());
+        if explicit_release { prepared.release_reader().unwrap(); }
+        drop(prepared);
+        assert_eq!(store.active_readers.active_count(), 0);
+        assert!(store.active_readers.detached_asset_roots().unwrap().is_empty());
+        let collected = store.asset_gc_delete_page(16, None, 100, 10).unwrap().report;
+        assert!(collected.blockers.is_empty(), "{kind}: {:?}", collected.blockers);
+        assert_eq!(collected.deleted_hashes, [selected.content_hash.clone()], "{kind}");
+        assert!(cas.read_object(&selected.content_hash).unwrap().is_none());
+        assert_eq!(cas.read_object(&replacement.content_hash).unwrap().unwrap(), b"replacement bytes");
+    }
+}
+
+#[test]
 fn detached_export_registry_keeps_exact_v8_roots_until_reader_release() {
     let directory = tempfile::tempdir().expect("create temporary directory");
     let mut store = PersistentStore::open(directory.path()).expect("open persistent store");

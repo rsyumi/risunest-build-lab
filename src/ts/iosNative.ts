@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { generationDiagnostics } from "./generationDiagnostics";
 import { isTauriIOS } from "./platform";
 
 export class BackgroundExecutionExpiredError extends DOMException {
@@ -177,26 +178,39 @@ export function installIOSPersistenceLifecycle(
   if (!isTauriIOS) return () => {};
   let pending = Promise.resolve();
   let backgroundId: string | undefined;
-  let stopWaiting: (() => void) | undefined;
+  // Each background entry counts up; returning to the screen marks every entry so far as returned.
+  let entries = 0;
+  let returnedThrough = 0;
+  const waits = new Set<() => void>();
+  const stopWaiting = () => {
+    for (const stop of [...waits]) stop();
+  };
   const save = (id?: string) => {
     if (id) backgroundId = id;
-    pending = pending
+    const entry = id ? ++entries : entries;
+    // Saves run in order and never wait for another entry's background work.
+    const flushed = (pending = pending
       .then(() => flush("ios-lifecycle"))
       .catch((error) => {
         console.error("iOS lifecycle save failed", error);
-      })
+      }));
+    if (!id) return;
+    void flushed
       .then(async () => {
-        if (!id || !holds) return;
+        if (!holds || returnedThrough >= entry) return;
         // The assertion lasts until deferred holds settle, the app returns, or iOS expires it.
         await new Promise<void>((resolve) => {
-          stopWaiting = resolve;
-          void holds.settled().then(resolve, resolve);
+          const stop = () => {
+            waits.delete(stop);
+            resolve();
+          };
+          waits.add(stop);
+          void holds.settled().then(stop, stop);
         });
-        stopWaiting = undefined;
       })
       .finally(async () => {
-        if (id) await invoke("plugin:ios-native|end", { id }).catch(() => {});
-        if (id && backgroundId === id) backgroundId = undefined;
+        await invoke("plugin:ios-native|end", { id }).catch(() => {});
+        if (backgroundId === id) backgroundId = undefined;
       });
   };
   const visibility = () => {
@@ -205,8 +219,14 @@ export function installIOSPersistenceLifecycle(
   const native = (event: Event) => {
     const detail = (event as CustomEvent<{ event: string; id?: string }>)
       .detail;
+    if (detail?.event === "background" || detail?.event === "memory-warning") {
+      generationDiagnostics.lifecycle(detail.event);
+    } else if (detail?.event === "expired") {
+      generationDiagnostics.lifecycle("expiry");
+    }
     if (detail?.event === "active") {
-      stopWaiting?.();
+      returnedThrough = entries;
+      stopWaiting();
       void import("./storage/platformBlobStore").then(({ getNativeMediaEndpoint }) =>
         getNativeMediaEndpoint.ensure()
       ).catch(error => console.error("Native media recovery failed", error));
@@ -215,7 +235,7 @@ export function installIOSPersistenceLifecycle(
     else if (detail?.event === "expired" || detail?.event === "memory-warning") {
       if (detail.event === "expired" && detail.id && detail.id === backgroundId) {
         holds?.expire();
-        stopWaiting?.();
+        stopWaiting();
       }
       save();
     }

@@ -8,6 +8,7 @@ import { collectPinnedReferences } from './officialAccountSnapshot'
 import { nativeOfficialAccountKeys } from './nativeOfficialAccountFlow'
 import type { OfficialAccountAssetOutcome } from './officialAccountAssetOutcome'
 import { OfficialAssetOwnershipError } from '../accountReadError'
+import { isBackgroundExpiryReason } from '../../iosNative'
 export { OfficialAssetOwnershipError } from '../accountReadError'
 
 export interface OfficialAssetContinuation {
@@ -49,7 +50,7 @@ export function createOfficialAccountAssetContinuation(dependencies: {
         if (operationId && operationId !== receipt.operationId) throw new OfficialAssetOwnershipError('receipt')
         if (receipt.state === 'awaiting-activation') return null
         await guard(receipt)
-        if (!Array.isArray(receipt.manifest) || receipt.manifest.some(key => typeof key !== 'string' || !key.startsWith('assets/'))
+        if (!Array.isArray(receipt.manifest) || receipt.manifest.some(key => typeof key !== 'string' || !/^assets[/\\]/.test(key))
             || new Set(receipt.manifest).size !== receipt.manifest.length || receipt.manifestId !== await digest(receipt.manifest)) {
             throw new OfficialAssetOwnershipError('receipt')
         }
@@ -124,12 +125,14 @@ export function createOfficialAccountAssetContinuation(dependencies: {
             await guard(receipt)
             await settings.set(key, { ...receipt, state: 'interrupted' })
         },
-        async settle(receipt: OfficialAssetContinuation, outcome: OfficialAccountAssetOutcome) {
+        async settle(receipt: OfficialAssetContinuation, outcome: OfficialAccountAssetOutcome, signal?: AbortSignal) {
             const current = await read()
             if (current?.operationId !== receipt.operationId) throw new OfficialAssetOwnershipError('receipt')
             await guard(receipt)
             if (outcome.state === 'succeeded') await clear()
-            else await settings.set(key, { ...receipt, state: outcome.state === 'cancelled' ? 'stopped' : 'failed', failedKeys: outcome.failedKeys })
+            else await settings.set(key, { ...receipt, state: outcome.state === 'cancelled'
+                ? isBackgroundExpiryReason(signal?.reason) ? 'interrupted' : 'stopped'
+                : 'failed', failedKeys: outcome.failedKeys })
         },
     }
 }

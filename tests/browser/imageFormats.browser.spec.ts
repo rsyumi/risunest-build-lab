@@ -29,3 +29,18 @@ test('WebView portrait decode failures use the shared export error', async ({ pa
     }, bytes)
     expect(result).toBe(languageEnglish.risuNest.imageFormats.portraitExportFailed)
 })
+
+test('WebView renders a legacy BMP portrait as PNG without changing its pixels', async ({ page }) => {
+    const bitmap = new Uint8Array(62)
+    const header = new DataView(bitmap.buffer)
+    bitmap.set([0x42, 0x4d])
+    for (const [offset, value] of [[2, 62], [10, 54], [14, 40], [18, 2], [22, 1], [34, 8]]) header.setUint32(offset, value, true)
+    header.setUint16(26, 1, true)
+    header.setUint16(28, 24, true)
+    bitmap.set([0, 0, 255, 0, 255, 0, 0, 0], 54)
+    await page.goto('/imageFormats.html')
+    await page.waitForFunction(() => !!window.imageFormats)
+    const result = await page.evaluate(bytes => window.imageFormats.render(bytes, 'png-card', true), [...bitmap])
+    expect(result).toMatchObject({ ext: 'legacy', width: 2, height: 1, pixel: [255, 0, 0, 255] })
+    expect(result.png.slice(0, 8)).toEqual([137, 80, 78, 71, 13, 10, 26, 10])
+})

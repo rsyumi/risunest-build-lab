@@ -1,5 +1,5 @@
 import { externalErrorKind } from './connection'
-import { beginMobileBackgroundTask, measuredTaskPercent, type MobileBackgroundTask } from '../../../mobileBackgroundTask'
+import { beginDeferredMobileBackgroundTask, beginMobileBackgroundTask, measuredTaskPercent, type MobileBackgroundTask } from '../../../mobileBackgroundTask'
 import type {
     DecimalString,
     ExternalConnectionError,
@@ -205,9 +205,11 @@ export function createExternalStorageController(
             const request = selectedGoal.request
             run.activeGoal = selectedGoal
             if (run.abort.signal.aborted) run.abort = new AbortController()
-            const acquisition = request.backgroundTask ?? beginMobileBackgroundTask(
-                request.kind === 'cleanup' ? 'maintenance' : request.kind, run.abort.signal, request.reason === 'manual',
-            )
+            const taskKind = request.kind === 'cleanup' ? 'maintenance' : request.kind
+            // Scheduled work shows a notification only if the app leaves the screen while it runs.
+            const acquisition = request.backgroundTask ?? (request.reason === 'manual'
+                ? beginMobileBackgroundTask(taskKind, run.abort.signal, true)
+                : beginDeferredMobileBackgroundTask(taskKind, run.abort.signal))
             const background = acquisition instanceof Promise ? await acquisition : acquisition
             if (held) await releaseHeld()
             const expired = () => {

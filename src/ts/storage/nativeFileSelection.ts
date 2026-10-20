@@ -6,7 +6,7 @@ import { recordNativeLogError } from '../nativeLog'
 import { isTauriAndroid, isTauriIOS } from '../platform'
 import { withLibraryFileSelection } from './libraryFileOperation'
 import { nativeRoots } from './nativePaths'
-import { ImageFormatError, imageFormatForName } from '../media/imageFormats'
+import { ImageFormatError, imageFormatForName, imageFormatFromBytes } from '../media/imageFormats'
 
 export interface NativeSelectedFile {
     path: string
@@ -128,6 +128,13 @@ export function selectNativeFileData(options: FileSelectionOptions = {}) {
         const selected: { name: string; data: Uint8Array<ArrayBuffer>; mimeType: string }[] = []
         for (const file of files) {
             try {
+                if (options.image) {
+                    const header = await readSelected(file, options.signal, 0, Math.min(file.bytes, 64 * 1024))
+                    const firstBoxSize = header.length >= 8 ? new DataView(header.buffer, header.byteOffset, header.byteLength).getUint32(0) : 0
+                    // AVIF may place its format box after another ISO BMFF box.
+                    const mayHaveLaterFormat = header.length < file.bytes && (firstBoxSize === 1 || (firstBoxSize >= 8 && firstBoxSize <= file.bytes))
+                    if (!imageFormatFromBytes(header) && !mayHaveLaterFormat) throw new ImageFormatError('unsupported')
+                }
                 selected.push({ name: file.name, data: await readSelected(file, options.signal), mimeType: file.mimeType })
             } catch (error) {
                 options.signal?.throwIfAborted()

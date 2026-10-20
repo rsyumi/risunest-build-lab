@@ -135,7 +135,9 @@ function installAndroidNativeControl(): void {
         notify: body => control.request<boolean>('notification.completion', body.slice(0, 4096)),
     }
     window.RisuBackgroundTasks = {
-        begin: (id, kind, deferred) => control.request<string>(deferred ? 'background.defer' : 'background.begin', id, kind),
+        begin: (id, kind, deferred, userInitiated) => deferred
+            ? control.request<string>('background.defer', id, kind)
+            : control.request<string>('background.begin', id, kind, String(userInitiated)),
         progress: (id, percent) => control.request('background.progress', id, String(percent)),
         end: id => control.request('background.end', id),
     }

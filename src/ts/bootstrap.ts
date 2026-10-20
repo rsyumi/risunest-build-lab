@@ -14,6 +14,7 @@ import { get } from "svelte/store";
 import { setDatabase, getDatabase, type Database } from "./storage/database.svelte";
 import { getStartupExclusions, loadDeviceSettings } from "./storage/deviceSettings";
 import { recordNativeLogError, setNativeLogFileEnabled } from "./nativeLog";
+import { generationDiagnostics } from './generationDiagnostics'
 import { registerRuntimeErrorHandlers } from "./runtimeErrors";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { MobileGUI, botMakerMode, selectedCharID, loadedStore, LoadingStatusState, bootFailure } from "./stores.svelte";
@@ -204,6 +205,7 @@ function registerAndroidScreenshotPublicationRecovery() {
  */
 export async function loadData() {
     if (get(loadedStore)) return
+    generationDiagnostics.startDocument()
     let stage: BootStage = 'startup'
     LoadingStatusState.startedAt = performance.now()
     bootFailure.set(null)

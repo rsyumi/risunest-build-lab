@@ -1,4 +1,5 @@
 pub(crate) mod archive;
+pub(crate) mod gallery;
 pub(crate) mod asset_object_catalog;
 pub(crate) mod asset_residency;
 pub(crate) mod commands;
@@ -872,6 +873,8 @@ pub(crate) enum PluginStorageMutation {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WorkingSetCommit {
     pub(crate) expected_revision: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) gallery_pending_fence: Option<[u8; 32]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) root: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -957,6 +960,7 @@ pub(super) struct ReadTarget {
 
 pub(crate) struct PersistentStore {
     gc_instance: String,
+    gallery: gallery::GallerySession,
     revision_leases: HashMap<String, snapshot::RevisionReadLease>,
     active_readers: Arc<snapshot::ActiveReaderRegistry>,
     connection: Connection,
@@ -1657,6 +1661,7 @@ impl PersistentStore {
         let device_store = open_device_store(&persistent_dir);
         let mut store = Self {
             gc_instance: uuid::Uuid::new_v4().to_string(),
+            gallery: gallery::GallerySession::default(),
             revision_leases: HashMap::new(),
             active_readers,
             connection,
@@ -1688,6 +1693,7 @@ impl PersistentStore {
         let device_store = open_device_store(&self.repository_root.join("persistent"));
         Ok(Self {
             gc_instance: uuid::Uuid::new_v4().to_string(),
+            gallery: gallery::GallerySession::default(),
             revision_leases: HashMap::new(),
             active_readers: Arc::clone(&self.active_readers),
             connection,
@@ -2067,7 +2073,11 @@ impl PersistentStore {
         commit: &WorkingSetCommit,
         asset_aliases: &[AssetAlias],
     ) -> StoreResult<RevisionResult> {
-        self.lww_commit(commit, asset_aliases)
+        let document = crate::generation_diagnostics::commit_document();
+        let mut committed_revision = None;
+        let result = self.lww_commit(commit, asset_aliases, &mut committed_revision);
+        crate::generation_diagnostics::commit_finished(document, commit.expected_revision, &result, committed_revision);
+        result
     }
 
     pub(crate) fn commit_asset_alias(
@@ -2075,7 +2085,7 @@ impl PersistentStore {
         alias: &AssetAlias,
         expected_revision: i64,
     ) -> StoreResult<RevisionResult> {
-        self.lww_commit(&WorkingSetCommit{expected_revision,..Default::default()}, &[alias.clone()])
+        self.commit_with_asset_aliases(&WorkingSetCommit{expected_revision,..Default::default()}, &[alias.clone()])
     }
 
     pub(crate) fn delete_asset_alias(
@@ -2084,7 +2094,7 @@ impl PersistentStore {
         key: &str,
         expected_revision: i64,
     ) -> StoreResult<RevisionResult> {
-        self.lww_commit(&WorkingSetCommit{expected_revision,unit_mutations:Some(vec![lww::UnitMutation::Delete{key:lww::unit_key(&[kind,key])?}]),..Default::default()}, &[])
+        self.commit_with_asset_aliases(&WorkingSetCommit{expected_revision,unit_mutations:Some(vec![lww::UnitMutation::Delete{key:lww::unit_key(&[kind,key])?}]),..Default::default()}, &[])
     }
 
     pub(crate) fn archive_preview(
@@ -2416,6 +2426,27 @@ impl PersistentStore {
             Arc::clone(&self.active_readers),
         )?;
         reader.publish_detached_asset_roots()?;
+        Ok(PreparedRisuSaveExport {
+            revision,
+            lease,
+            snapshots_dir: self.snapshots_dir.clone(),
+            database_path: self.database_path.clone(),
+            reader: Some(reader),
+        })
+    }
+
+    pub(crate) fn prepare_gallery_file_export(
+        &mut self,
+        revision: i64,
+        kind: &str,
+        key: &str,
+    ) -> StoreResult<PreparedRisuSaveExport> {
+        let (lease, reader) = snapshot::acquire_revision(
+            &self.database_path,
+            revision,
+            Arc::clone(&self.active_readers),
+        )?;
+        reader.publish_detached_gallery_file_root(kind, key)?;
         Ok(PreparedRisuSaveExport {
             revision,
             lease,

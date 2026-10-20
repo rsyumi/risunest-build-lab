@@ -1,64 +1,62 @@
 type NearViewportCallback = () => void
 
-const callbacks = new Map<Element, NearViewportCallback>()
-let observer: IntersectionObserver | null = null
+type ObserverGroup = {
+    root: Element | null
+    observer: IntersectionObserver
+    callbacks: Map<Element, NearViewportCallback>
+}
+type Registration = { group: ObserverGroup; callback: NearViewportCallback }
+const groups = new Map<Element | null, ObserverGroup>()
+const registrations = new WeakMap<Element, Registration>()
 
-function getObserver(): IntersectionObserver {
-    if (observer) return observer
-
-    observer = new IntersectionObserver(
-        (entries) => {
-            for (const entry of entries) {
-                if (!entry.isIntersecting) continue
-
-                const callback = callbacks.get(entry.target)
-                if (!callback) continue
-
-                callbacks.delete(entry.target)
-                observer?.unobserve(entry.target)
-                callback()
-            }
-
-            releaseObserverIfIdle()
-        },
-        {
-            root: null,
-            rootMargin: '240px',
-            threshold: 0,
-        },
-    )
-    return observer
+function remove(element: Element, registration: Registration) {
+    if (registrations.get(element) !== registration) return
+    registrations.delete(element)
+    const { group } = registration
+    group.callbacks.delete(element)
+    group.observer.unobserve(element)
+    if (group.callbacks.size === 0) {
+        group.observer.disconnect()
+        groups.delete(group.root)
+    }
 }
 
-function releaseObserverIfIdle() {
-    if (callbacks.size !== 0 || !observer) return
-    observer.disconnect()
-    observer = null
+function getObserver(root: Element | null): ObserverGroup {
+    const existing = groups.get(root)
+    if (existing) return existing
+    const group: ObserverGroup = {
+        root,
+        callbacks: new Map(),
+        observer: new IntersectionObserver((entries) => {
+            for (const entry of entries) {
+                if (!entry.isIntersecting) continue
+                const registration = registrations.get(entry.target)
+                if (!registration || registration.group !== group) continue
+                remove(entry.target, registration)
+                registration.callback()
+            }
+        }, { root, rootMargin: '240px', threshold: 0 }),
+    }
+    groups.set(root, group)
+    return group
 }
 
 export function observeNearViewport(
     element: Element,
     callback: NearViewportCallback,
+    root: Element | null = null,
 ): () => void {
     if (typeof IntersectionObserver === 'undefined') {
         callback()
         return () => {}
     }
-
-    const previous = callbacks.get(element)
-    if (previous) observer?.unobserve(element)
-
-    callbacks.set(element, callback)
-    getObserver().observe(element)
-
-    let active = true
-    return () => {
-        if (!active) return
-        active = false
-
-        if (callbacks.get(element) !== callback) return
-        callbacks.delete(element)
-        observer?.unobserve(element)
-        releaseObserverIfIdle()
-    }
+    const previous = registrations.get(element)
+    if (previous?.group.root === root) previous.group.observer.unobserve(element)
+    else if (previous) remove(element, previous)
+    const group = getObserver(root)
+    const registration = { group, callback }
+    registrations.set(element, registration)
+    group.callbacks.set(element, callback)
+    group.observer.observe(element)
+    return () => remove(element, registration)
 }
