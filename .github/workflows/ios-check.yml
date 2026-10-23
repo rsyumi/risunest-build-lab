@@ -6,6 +6,11 @@ on:
         description: Full iOS snapshot commit SHA in this build-lab repository
         type: string
         required: true
+      scope:
+        description: Simulator verification scope
+        type: choice
+        default: full
+        options: [full, app-lock]
       ipad:
         description: Also run the iPad simulator checks
         type: boolean
@@ -13,7 +18,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: ios-check-${{ inputs.source_sha }}-macos-15-${{ inputs.ipad }}
+  group: ios-check-${{ inputs.source_sha }}-macos-15-${{ inputs.ipad }}-${{ inputs.scope }}
   cancel-in-progress: true
 jobs:
   simulator:
@@ -28,6 +33,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/source/src-tauri/target
       CARGO_INCREMENTAL: "0"
       SNAPSHOT_SHA: ${{ inputs.source_sha }}
+      IOS_CHECK_SCOPE: ${{ inputs.scope }}
     steps:
       - name: Validate dispatch
         working-directory: ${{ github.workspace }}
@@ -35,6 +41,7 @@ jobs:
           set -euo pipefail
           test "$GITHUB_REF" = refs/heads/main
           [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          case "$IOS_CHECK_SCOPE" in full|app-lock) ;; *) exit 1;; esac
       - name: Select matching Apple toolchain
         working-directory: ${{ github.workspace }}
         run: |
@@ -213,9 +220,13 @@ jobs:
           if [ -f benchmarks/appLock/frames.py ]; then
             if ! command -v ffmpeg >/dev/null; then brew install ffmpeg; fi
             command -v ffprobe
+            ffmpeg -f avfoundation -list_devices true -i "" > artifacts/capture-devices.txt 2>&1 || true
+            export IOS_APP_LOCK_CAPTURE_INPUT="$(python3 -c 'import pathlib,re; text=pathlib.Path("artifacts/capture-devices.txt").read_text(); screens=re.findall(r"Capture screen [0-9]+",text); assert screens,"No enumerated screen"; print(screens[0]+":none")')"
           fi
           python3 ../control/scripts/ios-runtime.py 2>&1 | tee artifacts/ios-runtime.log
-          node ../control/scripts/verify-unicode-results.mjs ios artifacts
+          if [ "$IOS_CHECK_SCOPE" = full ]; then
+            node ../control/scripts/verify-unicode-results.mjs ios artifacts
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:

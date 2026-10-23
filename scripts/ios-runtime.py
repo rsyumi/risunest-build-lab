@@ -16,6 +16,13 @@ def run(args, cwd=root, env=None):
         print(error.output, flush=True)
         raise
 
+def run_app_lock_frames():
+    runner=root/'benchmarks/appLock/frames.py'
+    arguments=[sys.executable,str(runner),'--device',device,'--artifacts',str(artifacts/'app-lock-frames')]
+    if '--capture-input' in run([sys.executable,str(runner),'--help']):
+        arguments.extend(['--capture-input',os.environ['IOS_APP_LOCK_CAPTURE_INPUT']])
+    print(run(arguments))
+
 env = os.environ.copy()
 env['TAURI_ENV_PLATFORM'] = 'ios'
 print(run(['pnpm','exec','vite','build','--mode','agent','--config','benchmarks/ios/vite.config.ts'],env=env))
@@ -122,6 +129,13 @@ try:
     print(run(['xcrun','simctl','boot',device]))
     print(run(['xcrun','simctl','bootstatus',device,'-b']))
     print(run(['xcrun','simctl','install',device,str(app)]))
+    if os.environ.get('IOS_CHECK_SCOPE', 'full') == 'app-lock':
+        frame_runner=root/'benchmarks/appLock/frames.py'
+        if not frame_runner.is_file():
+            raise RuntimeError('The selected source has no app-lock frame runner')
+        run_app_lock_frames()
+        (artifacts/'ios-runtime-result.json').write_text(json.dumps({'passed':True,'scope':'app-lock','appLockFrames':True}))
+        sys.exit(0)
     launch('contracts');first=collect('contracts')
     launch('reload');second=collect('reload',120)
     before=next(x['result'] for x in first if x['stage']=='persistence')
@@ -162,7 +176,7 @@ try:
                'CODE_SIGNING_ALLOWED=NO'],cwd=uitests))
     frame_runner=root/'benchmarks/appLock/frames.py'
     if frame_runner.is_file():
-        print(run([sys.executable,str(frame_runner),'--device',device,'--artifacts',str(artifacts/'app-lock-frames')]))
+        run_app_lock_frames()
     product=pathlib.Path((artifacts/'app-path.txt').read_text())
     print(run(['codesign','--force','--deep','--sign','-',str(product)]))
     print(run(['xcrun','simctl','install',device,str(product)]))
