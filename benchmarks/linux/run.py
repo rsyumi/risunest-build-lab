@@ -258,7 +258,11 @@ try:
         current_stage = 'capture-start'
         specification = importlib.util.spec_from_file_location('appearance_capture', Path(__file__).resolve().parents[1] / 'macos/run.py')
         appearance_capture = importlib.util.module_from_spec(specification)
-        specification.loader.exec_module(appearance_capture)
+        sys.path.insert(0, str(Path(specification.origin).parent))
+        try:
+            specification.loader.exec_module(appearance_capture)
+        finally:
+            sys.path.pop(0)
         capture = appearance_capture.start_appearance_capture(out,
             f'appearance-{args.system_theme}-{args.app_theme}', 'linux', os.environ.get('DISPLAY'),
             args.capture_size, args.display_owner_pid, experiment_codec=args.capture_codec_control)
@@ -318,7 +322,11 @@ try:
             raise RuntimeError('App lock fixture did not become ready')
         specification = importlib.util.spec_from_file_location('appearance_capture', Path(__file__).resolve().parents[1] / 'macos/run.py')
         appearance_capture = importlib.util.module_from_spec(specification)
-        specification.loader.exec_module(appearance_capture)
+        sys.path.insert(0, str(Path(specification.origin).parent))
+        try:
+            specification.loader.exec_module(appearance_capture)
+        finally:
+            sys.path.pop(0)
         specification = importlib.util.spec_from_file_location('app_lock_frames', Path(__file__).resolve().parents[1] / 'appLock/frames.py')
         app_lock_frames = importlib.util.module_from_spec(specification)
         specification.loader.exec_module(app_lock_frames)

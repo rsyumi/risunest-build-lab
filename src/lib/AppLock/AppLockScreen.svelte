@@ -4,6 +4,7 @@
     import ScanFace from '@lucide/svelte/icons/scan-face'
     import FingerprintPattern from '@lucide/svelte/icons/fingerprint-pattern'
     import { language } from 'src/lang'
+    import risuNestLogo from '../../../src-tauri/icon-src/logo.svg?url'
     import SettingButton from '../Setting/RisuNest/SettingButton.svelte'
     import SettingNotice from '../Setting/RisuNest/SettingNotice.svelte'
 
@@ -99,7 +100,7 @@
     <div class="column">
         <div class="info">
             {#if mode === 'unlock'}
-                <img class="logo" src="/logo_192.png" alt="" />
+                <img class="logo" src={risuNestLogo} alt="" />
                 <div class="name">RisuNest</div>
             {:else}
                 <h2 class="title">{title}</h2>

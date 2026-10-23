@@ -5,6 +5,7 @@ import importlib.util
 import os
 from pathlib import Path
 import subprocess
+import sys
 import time
 
 PHASES = ('app-lock-immediate', 'app-lock-timed', 'app-lock-immediate-mutant')
@@ -230,7 +231,11 @@ def run_ios(device, artifacts, capture_input):
         'udid': device, 'name': booted[0]['name'], 'onlyBootedDevice': True, 'captureInput': capture_input}, indent=2))
     specification = importlib.util.spec_from_file_location('appearance_capture', Path(__file__).resolve().parents[1] / 'macos/run.py')
     capture_tools = importlib.util.module_from_spec(specification)
-    specification.loader.exec_module(capture_tools)
+    sys.path.insert(0, str(Path(specification.origin).parent))
+    try:
+        specification.loader.exec_module(capture_tools)
+    finally:
+        sys.path.pop(0)
     subprocess.run(['open', '-a', 'Simulator'], check=True)
     outcomes = []
     for phase in PHASES:

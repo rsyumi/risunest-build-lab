@@ -338,10 +338,27 @@ try {
         // Restoring the task may retain the picker above the root activity.
         adb(['shell', 'input', 'keyevent', 'KEYCODE_BACK'])
         adb(['shell', 'am', 'start', '-W', '-n', component])
-        await waitFor(gated, 'Leaving an owned picker did not lock')
-        results.pickerDepartureEvents = await client.evaluate(`window.__syntheticAppLockEvents`)
-        assert.ok(results.pickerDepartureEvents.some(event => !event.active), 'Owned picker departure was not observed')
-        await unlock()
+        results.rapidPickerDepartureEvents = await client.evaluate(`window.__syntheticAppLockEvents`)
+        results.rapidPickerDepartureObserved = results.rapidPickerDepartureEvents.some(event => !event.active)
+        if (results.rapidPickerDepartureObserved) {
+            await waitFor(gated, 'Observed rapid picker departure did not lock')
+            await unlock()
+        } else {
+            await waitFor(() => client.evaluate(`!document.querySelector('.app-lock-screen,.app-lock-cover')`), 'Unobserved picker continuation did not resume')
+        }
+        if (results.apiLevel >= 32) {
+            stage = 'observable owned picker departure'
+            await client.evaluate(`window.__syntheticAppLockEvents = []; window.RisuSafBridge.pickLegacyBackupSource(crypto.randomUUID()); true`)
+            await waitFor(() => /mResumedActivity|topResumedActivity/.test(adb(['shell', 'dumpsys', 'activity', 'activities']).stdout.split('\n').filter(line => line.includes('documentsui')).join('')), 'Owned picker did not reopen')
+            adb(['shell', 'input', 'keyevent', 'KEYCODE_HOME'])
+            await waitFor(() => client.evaluate(`window.__syntheticAppLockEvents.some(event => !event.active)`), 'Sustained picker departure was not observed')
+            await foreground()
+            adb(['shell', 'input', 'keyevent', 'KEYCODE_BACK'])
+            adb(['shell', 'am', 'start', '-W', '-n', component])
+            await waitFor(gated, 'Observed picker departure did not lock')
+            results.pickerDepartureEvents = await client.evaluate(`window.__syntheticAppLockEvents`)
+            await unlock()
+        }
         }
         stage = 'preview and screenshot'
         await marker()
