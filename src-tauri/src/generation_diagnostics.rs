@@ -53,6 +53,11 @@ pub(crate) enum Event {
         expected_revision: Option<i64>, acknowledged_revision: Option<i64>,
     },
     Lifecycle { document_sequence: u64, event_sequence: u64, event: Lifecycle, trim_level: Option<i32> },
+    ListenerPayload {
+        document_sequence: u64, event_sequence: u64, generation_sequence: u64,
+        listeners: u32, full_history_listeners: u32,
+        conversations: Option<u32>, messages: Option<u32>, message_characters: Option<u64>,
+    },
 }
 
 #[derive(Clone, Serialize)]
@@ -61,6 +66,19 @@ struct PhaseSlot {
     document_sequence: u64, generation_sequence: u64, phase: Option<Phase>, edge: Option<Edge>,
     phase_event_sequence: u64, path_event_sequence: u64,
     outcome: Option<Outcome>, save_path: Option<SavePath>, time_ms: u64,
+    #[serde(skip)]
+    listener_event_sequence: u64,
+    /// Latest phase event outside the listener phase; older payloads are stale.
+    #[serde(skip)]
+    listener_closed_sequence: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    listener_payload: Option<ListenerPayloadSlot>,
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ListenerPayloadSlot {
+    listeners: u32, full_history_listeners: u32,
+    conversations: Option<u32>, messages: Option<u32>, message_characters: Option<u64>,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -126,7 +144,7 @@ fn emit(sink: &impl DiagnosticSink, level: &'static str, value: impl Serialize) 
 fn phase_slot(slots: &mut Slots, document: u64, generation: u64, sequence: u64) -> Option<&mut PhaseSlot> {
     if let Some(previous) = slots.phase.as_ref() {
         if previous.document_sequence == document && previous.generation_sequence != generation
-            && sequence <= previous.phase_event_sequence.max(previous.path_event_sequence) {
+            && sequence <= previous.phase_event_sequence.max(previous.path_event_sequence).max(previous.listener_event_sequence) {
             return None;
         }
     }
@@ -135,7 +153,7 @@ fn phase_slot(slots: &mut Slots, document: u64, generation: u64, sequence: u64) 
     ) {
         slots.phase = Some(PhaseSlot { document_sequence: document, generation_sequence: generation,
             phase: None, edge: None, outcome: None, save_path: None, time_ms: now_ms(),
-            phase_event_sequence: 0, path_event_sequence: 0 });
+            phase_event_sequence: 0, path_event_sequence: 0, listener_event_sequence: 0, listener_closed_sequence: 0, listener_payload: None });
     }
     slots.phase.as_mut()
 }
@@ -175,12 +193,13 @@ impl Diagnostics {
                 *document_sequence
             }
             Event::Phase { document_sequence, .. } | Event::Persistence { document_sequence, .. }
-            | Event::Lifecycle { document_sequence, .. } => *document_sequence,
+            | Event::Lifecycle { document_sequence, .. } | Event::ListenerPayload { document_sequence, .. } => *document_sequence,
         };
         if current == 0 || document != current { return Err("stale-diagnostic-document"); }
         let event_sequence = match &event {
             Event::Admission { event_sequence, .. } | Event::Phase { event_sequence, .. }
-            | Event::Persistence { event_sequence, .. } | Event::Lifecycle { event_sequence, .. } => *event_sequence,
+            | Event::Persistence { event_sequence, .. } | Event::Lifecycle { event_sequence, .. }
+            | Event::ListenerPayload { event_sequence, .. } => *event_sequence,
             Event::DocumentStart {} => unreachable!(),
         };
         if event_sequence == 0 { return Err("invalid-diagnostic-number"); }
@@ -205,6 +224,11 @@ impl Diagnostics {
                         slot.phase_event_sequence = *event_sequence;
                         slot.time_ms = now_ms();
                     }
+                    // The listener payload describes only the listener phase.
+                    if !matches!(phase, Phase::OutputListener) && *event_sequence > slot.listener_closed_sequence {
+                        slot.listener_closed_sequence = *event_sequence;
+                        if *event_sequence > slot.listener_event_sequence { slot.listener_payload = None; }
+                    }
                     if save_path.is_some() && *event_sequence > slot.path_event_sequence {
                         slot.save_path = *save_path;
                         slot.path_event_sequence = *event_sequence;
@@ -224,6 +248,22 @@ impl Diagnostics {
                     matches!(previous, Event::Persistence { event_sequence: sequence, .. } if sequence < event_sequence)
                 ) {
                     slots.persistence = Some(event.clone());
+                }
+            }
+            Event::ListenerPayload {
+                document_sequence, event_sequence, generation_sequence, listeners, full_history_listeners,
+                conversations, messages, message_characters,
+            } => {
+                let mut slots = self.slots.lock().unwrap_or_else(|error| error.into_inner());
+                if document != self.document.load(Ordering::SeqCst) { return Err("stale-diagnostic-document"); }
+                if let Some(slot) = phase_slot(&mut slots, *document_sequence, *generation_sequence, *event_sequence) {
+                    if *event_sequence > slot.listener_event_sequence && *event_sequence > slot.listener_closed_sequence {
+                        slot.listener_payload = Some(ListenerPayloadSlot {
+                            listeners: *listeners, full_history_listeners: *full_history_listeners,
+                            conversations: *conversations, messages: *messages, message_characters: *message_characters,
+                        });
+                        slot.listener_event_sequence = *event_sequence;
+                    }
                 }
             }
             _ => {}
@@ -574,6 +614,45 @@ mod tests {
             serde_json::json!({"kind":"phase", "documentSequence":1, "eventSequence":1,"generationSequence":1,"phase":"private", "edge":"enter"}),
             serde_json::json!({"kind":"lifecycle", "documentSequence":1, "eventSequence":1,"event":"background", "message":"private"}),
         ] { assert!(serde_json::from_value::<Event>(value).is_err()); }
+    }
+    #[test]
+    fn listener_payload_reaches_a_renderer_exit_inside_the_listener_phase_only() {
+        let state = Diagnostics::default();
+        let sink = crate::native_log::NativeLogState::for_tests();
+        state.document_started(&sink);
+        let before = sink.tail(None).len();
+        let record = |value: serde_json::Value| state.record(serde_json::from_value(value).unwrap(), &sink).unwrap();
+        record(serde_json::json!({"kind":"phase", "documentSequence":1, "eventSequence":1, "generationSequence":1,
+            "phase":"output-listener", "edge":"enter"}));
+        record(serde_json::json!({"kind":"listener-payload", "documentSequence":1, "eventSequence":2,
+            "generationSequence":1, "listeners":2, "fullHistoryListeners":1}));
+        record(serde_json::json!({"kind":"listener-payload", "documentSequence":1, "eventSequence":3,
+            "generationSequence":1, "listeners":2, "fullHistoryListeners":1, "conversations":40,
+            "messages":120000, "messageCharacters":90000000u64}));
+        assert_eq!(sink.tail(None).len(), before);
+        state.renderer_exit(RendererExit::Linux { reason:"crashed" }, &sink);
+        let exit = tail(&sink);
+        assert_eq!(exit["phase"]["phase"], "output-listener");
+        assert_eq!(exit["phase"]["listenerPayload"], serde_json::json!({"listeners":2, "fullHistoryListeners":1,
+            "conversations":40, "messages":120000, "messageCharacters":90000000u64}));
+        record(serde_json::json!({"kind":"phase", "documentSequence":1, "eventSequence":4, "generationSequence":1,
+            "phase":"tts", "edge":"enter"}));
+        state.renderer_exit(RendererExit::Linux { reason:"crashed" }, &sink);
+        assert!(tail(&sink)["phase"].get("listenerPayload").is_none());
+        // A payload sent before the next phase can arrive after it.
+        record(serde_json::json!({"kind":"phase", "documentSequence":1, "eventSequence":5, "generationSequence":2,
+            "phase":"output-listener", "edge":"enter"}));
+        record(serde_json::json!({"kind":"listener-payload", "documentSequence":1, "eventSequence":6,
+            "generationSequence":2, "listeners":1, "fullHistoryListeners":1}));
+        record(serde_json::json!({"kind":"phase", "documentSequence":1, "eventSequence":8, "generationSequence":2,
+            "phase":"tts", "edge":"enter"}));
+        record(serde_json::json!({"kind":"listener-payload", "documentSequence":1, "eventSequence":7,
+            "generationSequence":2, "listeners":1, "fullHistoryListeners":1, "conversations":40}));
+        state.renderer_exit(RendererExit::Linux { reason:"crashed" }, &sink);
+        assert_eq!(tail(&sink)["phase"]["phase"], "tts");
+        assert!(tail(&sink)["phase"].get("listenerPayload").is_none());
+        assert!(serde_json::from_value::<Event>(serde_json::json!({"kind":"listener-payload", "documentSequence":1,
+            "eventSequence":5, "generationSequence":1, "listeners":1, "fullHistoryListeners":1, "name":"private"})).is_err());
     }
     #[test]
     fn failures_are_safe_and_logging_failure_or_disabled_files_does_not_change_slots() {

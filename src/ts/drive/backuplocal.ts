@@ -34,7 +34,7 @@ import { hubURL } from "../characterCards";
 import { language } from "src/lang";
 import { getColdStorageBackupKey, isColdStorageBackupData, listColdDataKeys } from "../process/coldstorage.svelte";
 import { getColdStorageAffectedCharacters } from "../process/coldstorageData";
-import { expandColdPayloads } from "../process/coldPayloadExpansion";
+import { coldItemFromMap, expandColdPayloads, importColdPluginStorage } from "../process/coldPayloadExpansion";
 import { getPersistentDataRuntime, publishCurrentOfficialRevision, replacePersistentDatabase } from "../storage/persistentDataRuntime.svelte";
 import { installLocalBackup } from "../storage/databaseRestore";
 import { type PinnedRisuSaveExport, withFlushedRisuSaveExport } from "../storage/risuSaveStoreAdapter";
@@ -434,7 +434,7 @@ export async function importLegacyBackupWithWebView(
     context: LegacyLocalBackupFallbackContext,
     lifecycle: { firstRun?: boolean; beforeActivation?(): Promise<void>; onCommitted?(): void } = {},
     confirmationTitle = language.backupLoadConfirm,
-): Promise<{ warningCodes: string[], upstreamLosses: { coldMissing: number, invalidInlays: number, pocketInlays: number } } | null> {
+): Promise<{ warningCodes: string[], upstreamLosses: { coldMissing: number, invalidInlays: number, pocketInlays: number, pluginStorage: number } } | null> {
     if (isTauri) throw new NativeFileJobError('native-required', 'Use the native backup source picker')
     const file = await pickWebBackupFile(context.signal)
     return file ? importLegacyBackupFile(file, context, lifecycle, confirmationTitle) : null
@@ -446,7 +446,7 @@ async function importLegacyBackupFile(
     lifecycle: { firstRun?: boolean; beforeActivation?(): Promise<void>; onCommitted?(): void },
     confirmationTitle: string,
     releaseSource?: () => Promise<void>,
-): Promise<{ warningCodes: string[], upstreamLosses: { coldMissing: number, invalidInlays: number, pocketInlays: number } } | null> {
+): Promise<{ warningCodes: string[], upstreamLosses: { coldMissing: number, invalidInlays: number, pocketInlays: number, pluginStorage: number } } | null> {
     context.setSource({ name: file.name, bytes: file.size })
 
     const encryptionMeta: {
@@ -459,7 +459,7 @@ async function importLegacyBackupFile(
     const blobStore = await resolveBlobStore()
     const counts = emptyNativeImportCounts()
     const warningCodes: string[] = []
-    const upstreamLosses = { coldMissing: 0, invalidInlays: 0, pocketInlays: 0 }
+    const upstreamLosses = { coldMissing: 0, invalidInlays: 0, pocketInlays: 0, pluginStorage: 0 }
     let bytesRead = 0
     let currentItem: string | undefined
     const attachments = createLegacyBackupAttachments(blobStore)
@@ -542,14 +542,8 @@ async function importLegacyBackupFile(
             counts.coldStorage += 1
             try {
                 const text = new TextDecoder().decode(data)
-                const jsonData = JSON.parse(text)
-
-                if (isColdStorageBackupData(jsonData)) {
-                    restoredColdStoragePayloads.set(coldStorageKey, jsonData)
-                } else {
-                    console.warn(`Skipping invalid cold storage backup item ${name}`)
-                    counts.skipped += 1
-                }
+                // Plugin storage items hold any JSON value, so the shape is checked by the reference.
+                restoredColdStoragePayloads.set(coldStorageKey, JSON.parse(text))
             } catch (e) {
                 console.error(`Failed to parse cold storage item ${coldStorageKey}:`, e)
                 counts.skipped += 1
@@ -650,12 +644,26 @@ async function importLegacyBackupFile(
         counts.presets = dbData.botPresets?.length ?? 0
         report('decoding-database')
 
+        const pluginColdStorageKeys = new Set<string>()
+        const plugins = await importColdPluginStorage(dbData, async (key) => {
+            pluginColdStorageKeys.add(key)
+            return coldItemFromMap(restoredColdStoragePayloads, key)
+        })
+        upstreamLosses.pluginStorage = plugins.omitted
+        for (const [key, value] of restoredColdStoragePayloads) {
+            if (pluginColdStorageKeys.has(key) || isColdStorageBackupData(value)) continue
+            console.warn(`Skipping invalid cold storage backup item ${key}`)
+            counts.skipped += 1
+        }
         const missingColdStorageKeys = (await listColdDataKeys(dbData))
-            .filter((key) => !restoredColdStoragePayloads.has(key))
+            .filter((key) => !isColdStorageBackupData(restoredColdStoragePayloads.get(key)))
         const affectedCold = getColdStorageAffectedCharacters(dbData, missingColdStorageKeys)
         upstreamLosses.coldMissing = missingColdStorageKeys.length
-        const warnings = missingColdStorageKeys.length === 0 ? []
-            : [language.errors.coldStorageIncompleteRestoreConfirm(affectedCold.characterNames.join(', '), missingColdStorageKeys.length, affectedCold.unresolvedKeys.length, false)]
+        const warnings = [
+            ...(missingColdStorageKeys.length === 0 ? []
+                : [language.errors.coldStorageIncompleteRestoreConfirm(affectedCold.characterNames.join(', '), missingColdStorageKeys.length, affectedCold.unresolvedKeys.length, false)]),
+            ...(plugins.omitted === 0 ? [] : [language.portableBackup.omittedRestoreData.pluginStorage(plugins.omitted)]),
+        ]
         const description = [language.checkboxConfirmation.dataReplacementDescription, ...warnings].join('\n\n')
         if (!isTauri && !(await hasLibraryCharacters()
             ? (await alertCheckboxConfirm({
@@ -674,8 +682,8 @@ async function importLegacyBackupFile(
             }))) {
             throw cancelledError()
         }
-        if (missingColdStorageKeys.length > 0 && !warningCodes.includes('upstream-restore-losses')) warningCodes.push('upstream-restore-losses')
-        await expandColdPayloads(dbData, async (key) => restoredColdStoragePayloads.get(key) ?? null)
+        if (warnings.length > 0 && !warningCodes.includes('upstream-restore-losses')) warningCodes.push('upstream-restore-losses')
+        await expandColdPayloads(dbData, async (key) => coldItemFromMap(restoredColdStoragePayloads, key))
         prepareExternalDatabaseImport(dbData)
         counts.characters = dbData.characters.length
         counts.charactersTotal = counts.characters

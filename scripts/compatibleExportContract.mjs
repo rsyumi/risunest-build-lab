@@ -19,7 +19,7 @@ export const references = {
   risuai: {
     directory:
       process.env.RISUAI_REFERENCE ?? fileURLToPath(new URL("../.tmp/test-references/risuai/", import.meta.url)),
-    revision: "c454df882aaf32e02a22da26d3718c8cadc97814",
+    revision: "02a83695d81eb4e083453c4524b8c7d463df95aa",
   },
   pocket: {
     directory:
@@ -56,7 +56,7 @@ export function verifyGeneratedContract(actual, expected) {
   verifySourceFilePins(actual.target, Object.keys(actual.reference.files), expected.reference.files);
 }
 
-export function generateContract(target) {
+export function verifyReferenceRevision(target) {
   const reference = references[target];
   if (!reference) throw new Error(`Unknown target: ${target}`);
   const rootPath = path.resolve(reference.directory);
@@ -76,6 +76,12 @@ export function generateContract(target) {
     throw new Error(
       `${target} reference revision differs from the approved contract`,
     );
+  return rootPath;
+}
+
+export function generateContract(target) {
+  const reference = references[target];
+  const rootPath = verifyReferenceRevision(target);
   const { root, types, nodes, files } = sourceContract(rootPath);
   for (const name of [
     "src/ts/storage/risuSave.ts",
@@ -240,6 +246,15 @@ export function sourceContract(rootPath) {
   return { root, types, nodes, files };
 }
 
+/** The targets a command selects with `--target <name>`, otherwise every target. */
+export function selectedTargets(argv) {
+  const index = argv.indexOf("--target");
+  if (index === -1) return Object.keys(references);
+  const target = argv[index + 1];
+  if (!Object.hasOwn(references, target ?? "")) throw new Error(`Unknown target: ${target}`);
+  return [target];
+}
+
 export function verifySourcePins(contract) {
   verifySourceFilePins(contract.target, Object.keys(contract.reference.files), contract.reference.files);
 }
@@ -306,7 +321,7 @@ if (
 ) {
   const check = process.argv.includes("--check");
   fs.mkdirSync(contractDirectory, { recursive: true });
-  for (const target of Object.keys(references)) {
+  for (const target of selectedTargets(process.argv)) {
     const contract = generateContract(target);
     const file = path.join(contractDirectory, `${target}.json`);
     if (check) {

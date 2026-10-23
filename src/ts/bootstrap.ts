@@ -20,7 +20,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { MobileGUI, botMakerMode, selectedCharID, loadedStore, LoadingStatusState, bootFailure } from "./stores.svelte";
 import { afterPluginsStarted, keepPluginsOffForThisStart, loadPlugins, loadPluginsAfterAuthoritativeRestore } from "./plugins/plugins.svelte";
 import { setPluginStartupSyncExcluded } from './plugins/pluginStartupGate';
-import { alertConfirm, alertError, alertInput, alertLogin, alertMd, alertNormal, alertSelect, alertToast, alertTOS, waitAlert } from "./alert";
+import { alertActionConfirm, alertConfirm, alertError, alertInput, alertLogin, alertMd, alertNormal, alertSelect, alertToast, alertTOS, waitAlert } from "./alert";
 import { backgroundErrorMessage } from "./storage/backgroundErrorMessage";
 import { applyHubSelection, characterURLImport, downloadRisuHub, hubURL } from "./characterCards";
 import { initializeNativeLocalUrls } from "./nativeLocalUrls";
@@ -77,6 +77,7 @@ import {
 } from "./storage/persistentDataRuntime.svelte";
 import { registerLifecycleCommitListeners } from "./storage/lifecycleCommit";
 import { createLifecycleFlush } from "./storage/lifecycleFlush";
+import { forgetDisplayRecovery, installDisplayRecovery, listenForDisplayWorkResume, suspendDisplayWork } from "./displayRecovery.svelte";
 import { releaseIdleTransformerModels } from "./process/transformers";
 import { forgetInlayProviderImages } from "./process/files/inlayProviderImage";
 import { platform as nativePlatform } from '@tauri-apps/plugin-os'
@@ -84,6 +85,7 @@ import { resolveBlobStore } from "./storage/platformBlobStore";
 import {
     OfficialAccountSnapshotAdapter,
     createOfficialAssociationMarkers,
+    type OfficialRestoreOmissions,
 } from "./storage/sync/officialAccountSnapshot";
 import { createNativeOfficialAccountAssets } from "./storage/sync/nativeOfficialAccountAssets";
 import { getSyncConflictBackupStore } from "./storage/sync/syncConflictBackup";
@@ -166,6 +168,7 @@ import {
 const appWindow = isTauri ? getCurrentWebviewWindow() : null
 let disposeLifecycleCommitListeners: (() => void) | undefined
 let disposeMacosLifecycle: (() => void) | undefined
+let disposeDisplayWorkResume: (() => void) | undefined
 let disposeWindowCloseDrain: (() => void) | undefined
 let disposeAndroidScreenshotRecovery: (() => void) | undefined
 
@@ -238,6 +241,9 @@ export async function loadData() {
             await initializeDeviceMarkers()
         }
         const markers = getDeviceMarkers()
+        // Chats whose display work the last run left recorded open in recovery.
+        await installDisplayRecovery(markers)
+        disposeDisplayWorkResume ??= listenForDisplayWorkResume()
         applyHubSelection(markers)
         const deviceSettings = loadDeviceSettings(markers)
         const pluginsExcludedAtStart = excluded('plugins')
@@ -278,6 +284,7 @@ export async function loadData() {
             nativePlatform,
             forgetInlayProviderImages,
             releaseIdleTransformerModels,
+            suspendDisplayWork,
         })
         const resolvePersistentWorkingSet = () => bootstrapPersistentDatabase({
             store: runtime.store,
@@ -422,16 +429,32 @@ export async function loadData() {
                 },
             })
             : undefined
+        const pluginOmissionWarnings = (omissions?: OfficialRestoreOmissions) => [
+            ...(omissions?.pluginStorage
+                ? [language.portableBackup.omittedRestoreData.pluginStorage(omissions.pluginStorage)]
+                : []),
+            ...(omissions?.oversizedPluginStorage
+                ? [language.portableBackup.omittedRestoreData.oversizedPluginStorage(omissions.oversizedPluginStorage)]
+                : []),
+        ]
         const officialAdapter = new OfficialAccountSnapshotAdapter({
             store: runtime.store,
             resolveBlobs: resolveBlobStore,
             account: accountStorage,
             cold: { readRemote: getAccountColdStorageItem },
             prepareCandidate: prepareDatabaseForPersistence,
+            confirmOmissions: isTauri
+                ? undefined
+                : (omissions) => alertActionConfirm({
+                    title: language.loadDataFromAccount,
+                    description: pluginOmissionWarnings(omissions).join('\n\n'),
+                    actionLabel: language.confirm,
+                    cancelLabel: language.cancel,
+                }),
             restoreCandidate: isTauri
-                ? (candidate, expectedRevision, signal) => restoreNativeOfficialAccountCandidate(
+                ? (candidate, expectedRevision, signal, omissions) => restoreNativeOfficialAccountCandidate(
                     runtime, candidate, expectedRevision, signal,
-                    [language.risuNest.backup.officialRestoreInlayWarning],
+                    [language.risuNest.backup.officialRestoreInlayWarning, ...pluginOmissionWarnings(omissions)],
                 )
                 : undefined,
             markPublished: () => undefined,
@@ -505,14 +528,22 @@ export async function loadData() {
             },
             assetReader: createStructuredAccountAssetReader(accountStorage),
             configureAssetReader: configureOfficialAccountAssetReader,
-            chooseExistingRemote: async () => await alertSelect([
-                language.loadDataFromAccount,
-                language.saveCurrentDataToAccount,
-            ]) === '0' ? 'pull' : 'push',
+            chooseExistingRemote: async () => {
+                const choice = await alertSelect([
+                    language.loadDataFromAccount,
+                    language.saveCurrentDataToAccount,
+                    language.cancelAccountSync,
+                ])
+                return choice === '0' ? 'pull' : choice === '2' ? 'cancel' : 'push'
+            },
             confirmInitialPush: async () =>
                 await alertInput('to overwrite your data, type "RISUNEST"') === 'RISUNEST',
             installDatabase: installPersistentWorkingSet,
             initializeWorkingSet: (database) => initializeActiveWorkingSet(database),
+            disableAccountSync: () => {
+                const account = getDatabase().account
+                if (account) account.useSync = false
+            },
             onRemoteError: (error) => {
                 console.error(error)
                 alertError(backgroundErrorMessage(error))
@@ -528,7 +559,7 @@ export async function loadData() {
             configureOfficialAccountAssetReader(null)
             const restoredAssets = createNativeOfficialAccountAssets({
                 settings: nativeDeviceSettings!, store: runtime.store, resolveBlobs: resolveBlobStore,
-                account: accountStorage, ledger: officialAssetLedger, flushMetadata: flushNativeOfficialMetadata, origin: new URL(hubURL).origin,
+                account: accountStorage, ledger: officialAssetLedger, flushMetadata: flushNativeOfficialMetadata, baseUrl: hubURL,
                 getAccountId: getNativeAccountId,
             })
             const completeRestoreAssets = restoredAssets.complete
@@ -765,6 +796,8 @@ export async function loadData() {
                 }
             },
             selectedDrain: () => selectedExitDrain,
+            // The app handled the exit, so its display work is not frozen and must not be marked at the next launch.
+            prepareExit: () => suspendDisplayWork('normal-exit'),
             reportError: (error) =>
                 console.error('Normal exit drain failed', error),
         })
@@ -888,6 +921,8 @@ export async function loadData() {
         }
         setTimeout(() => {
             void runtime.expirePersistentTrash().catch((error) => console.error('Trash expiry failed', error))
+                .then(() => forgetDisplayRecovery((target) =>
+                    !getDatabase().characters.some((character) => character.chaId === target.characterId)))
         }, 0)
         void finishBoot()
         performance.mark('boot:interactive')

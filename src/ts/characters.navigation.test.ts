@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { get } from 'svelte/store'
 
 const mocks = vi.hoisted(() => ({
@@ -168,6 +168,8 @@ import { MobileGUIStack, OpenRealmStore, selectedCharID } from './stores.svelte'
 import { doingChat } from './process/index.svelte'
 import { translateHTML } from './translator/translator'
 import { createConversationSummaryStub } from './storage/conversationResidency'
+import { installDisplayRecovery, isDisplayRecoveryMarked, type DisplayRecoveryTarget } from './displayRecovery.svelte'
+import { recoveryStore } from './displayRecovery.testSupport'
 import {
     beginNavigationActivity,
     navigationActivity,
@@ -179,6 +181,11 @@ function deferred<T>() {
         resolve = resolvePromise
     })
     return { promise, resolve }
+}
+
+async function markForDisplayRecovery(...marked: DisplayRecoveryTarget[]) {
+    await installDisplayRecovery(recoveryStore({ working: [], marked }, { commitAtOnce: true }).store)
+    onTestFinished(() => installDisplayRecovery(null))
 }
 
 describe('runtime chat identity', () => {
@@ -461,6 +468,9 @@ describe('runtime chat identity', () => {
         const first = createBlankChar()
         const second = createBlankChar()
         mocks.database.characters.push(first, second)
+        const firstChat = { characterId: first.chaId, conversationId: 'first-chat' }
+        const secondChat = { characterId: second.chaId, conversationId: 'second-chat' }
+        await markForDisplayRecovery(firstChat, secondChat)
 
         await removeChar(first.chaId, first.name, 'permanentForce')
 
@@ -471,6 +481,7 @@ describe('runtime chat identity', () => {
         expect(mocks.replacePersistentDatabase).not.toHaveBeenCalled()
         expect(mocks.database.characters.map((character: any) => character.chaId)).toEqual([second.chaId])
         expect(mocks.deactivateActiveWorkingSet).toHaveBeenCalledTimes(2)
+        expect([isDisplayRecoveryMarked(firstChat), isDisplayRecoveryMarked(secondChat)]).toEqual([false, true])
     })
 
     it.each([
@@ -1172,6 +1183,9 @@ describe('chat list operations', () => {
 
     it('keeps the selected chat when another chat is removed', async () => {
         const character = buildSelectedCharacter()
+        const removedChat = { characterId: character.chaId, conversationId: 'chat-a' }
+        const keptChat = { characterId: character.chaId, conversationId: 'chat-c' }
+        await markForDisplayRecovery(removedChat, keptChat)
 
         const removed = await removeChat(character, 'chat-a')
 
@@ -1179,6 +1193,7 @@ describe('chat list operations', () => {
         expect(character.chats.map((chat: any) => chat.id)).toEqual(['chat-b', 'chat-c'])
         expect(character.chatPage).toBe(0)
         expect(mocks.changeChatTo).not.toHaveBeenCalled()
+        expect([isDisplayRecoveryMarked(removedChat), isDisplayRecoveryMarked(keptChat)]).toEqual([false, true])
     })
 
     it('moves to a surviving chat before removing the selected chat', async () => {

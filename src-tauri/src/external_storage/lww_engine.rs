@@ -572,6 +572,14 @@ pub(crate) struct PublicationResult {
     pub bytes: DecimalU64,
     pub more: bool,
 }
+/// The receive pages one listing produced.
+#[derive(Debug)]
+pub(crate) struct ReceiveBatch {
+    /// Ids of the unfinished pages in order.
+    pub pages: Vec<String>,
+    /// The listing holds segments after the ones this batch stopped at.
+    pub more: bool,
+}
 impl Default for PublicationResult {
     fn default() -> Self {
         Self {
@@ -2112,22 +2120,23 @@ impl ExternalLwwEngine {
         authority: DecimalU64,
         cancel: &Cancellation,
     ) -> Result<Vec<StageReceive>> {
-        let ids = self.receive_requests_cached(store, authority, &Default::default(), cancel).await?;
+        let ids = self.receive_requests_cached(store, authority, &Default::default(), cancel).await?.pages;
         ids.iter()
             .map(|id| store.external_lww_unfinished_receive(id).map_err(store_error)?.ok_or_else(segment::corrupt))
             .collect()
     }
     /// Stores the receive pages of what this device has not applied and
-    /// returns the ids of the unfinished ones in order. Covered segments are
-    /// never read, and each segment's pages are stored before the next one is
-    /// read. Snapshots `checkpoints` has classified are not read again.
+    /// returns the ids of the unfinished ones in order, and whether the
+    /// listing holds more segments than the batch received. Covered segments
+    /// are never read, and each segment's pages are stored before the next one
+    /// is read. Snapshots `checkpoints` has classified are not read again.
     pub(crate) async fn receive_requests_cached(
         &self,
         store: &mut PersistentStore,
         authority: DecimalU64,
         checkpoints: &tokio::sync::Mutex<super::lww_compaction::CheckpointSummaries>,
         cancel: &Cancellation,
-    ) -> Result<Vec<String>> {
+    ) -> Result<ReceiveBatch> {
         self.receive_requests_limited(store, authority, checkpoints, RECEIVE_SEGMENT_LIMIT, cancel).await
     }
     async fn receive_requests_limited(
@@ -2137,7 +2146,7 @@ impl ExternalLwwEngine {
         checkpoints: &tokio::sync::Mutex<super::lww_compaction::CheckpointSummaries>,
         segment_limit: usize,
         cancel: &Cancellation,
-    ) -> Result<Vec<String>> {
+    ) -> Result<ReceiveBatch> {
         let target = self.target_scope();
         store.external_lww_seed_activation(&target, authority).map_err(store_error)?;
         let progress=store.lww_receive_progress(authority).map_err(store_error)?;
@@ -2155,20 +2164,22 @@ impl ExternalLwwEngine {
             .map_err(store_error)?;
         let upper=DecimalU64(self.admitted_upper()?.checked_add(300_000).ok_or_else(segment::corrupt)?);
         let mut offered = Vec::new();
-        if !behind(&covered, &reachable(&current, &groups)) {
+        let listed = reachable(&current, &groups);
+        if !behind(&covered, &listed) {
             let (reached, stopped) = self.receive_segments(store, authority, &current, groups, upper, &mut offered, segment_limit, cancel).await?;
             if stopped {
-                return Ok(offered);
+                let more = listed.iter().any(|(writer, seq)| reached.get(writer).copied().unwrap_or(0) < *seq);
+                return Ok(ReceiveBatch { pages: offered, more });
             }
             if !behind(&covered, &reached) {
                 store.external_lww_retain_receives(&target, &offered.iter().cloned().collect()).map_err(store_error)?;
-                return Ok(offered);
+                return Ok(ReceiveBatch { pages: offered, more: false });
             }
             offered.clear();
         }
         self.receive_published(store, authority, &current, upper, &mut offered, cancel).await?;
         store.external_lww_retain_receives(&target, &offered.iter().cloned().collect()).map_err(store_error)?;
-        Ok(offered)
+        Ok(ReceiveBatch { pages: offered, more: false })
     }
     /// Receives each writer's next consecutive segments and returns the
     /// sequence each writer reached. A writer whose clock runs ahead of the

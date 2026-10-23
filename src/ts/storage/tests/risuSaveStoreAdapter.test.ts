@@ -146,7 +146,9 @@ describe('RisuSave persistent store adapter', () => {
         bytes.set(magicRisuSaveHeader)
         let offset = magicRisuSaveHeader.length
         for (const block of blocks) { bytes.set(block, offset); offset += block.length }
-        expect((await decodeRisuSave(bytes)).pluginStorageMeta).toEqual(meta)
+        const decoded = await decodeRisuSave(bytes)
+        expect(decoded.pluginStorageMeta).toEqual(meta)
+        expect(JSON.stringify(decoded)).not.toContain('SaveKV')
     })
 
     it.each(risuSaveFixtures)(

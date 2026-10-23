@@ -1354,7 +1354,7 @@ pub(super) mod tests {
             let ordinary=backup.reference.receipt.locator.object.clone();
             let before=(f.provider.read_attempts(&first_checkpoint),f.provider.read_attempts(&ordinary));
 
-            let requests=f.receiver.receive_requests_cached(&mut f.b,DecimalU64(0),&summaries,&cancel).await.unwrap()
+            let requests=f.receiver.receive_requests_cached(&mut f.b,DecimalU64(0),&summaries,&cancel).await.unwrap().pages
                 .iter().map(|id|f.b.external_lww_unfinished_receive(id).unwrap().unwrap()).collect::<Vec<_>>();
             assert!(!requests.is_empty());
             for request in requests {
@@ -1366,27 +1366,27 @@ pub(super) mod tests {
                 "a receive reads the checkpoint once and never the backup stored beside it");
 
             let (read,listed)=reads(&f);
-            assert!(f.receiver.receive_requests_cached(&mut f.b,DecimalU64(0),&summaries,&cancel).await.unwrap().is_empty());
+            assert!(f.receiver.receive_requests_cached(&mut f.b,DecimalU64(0),&summaries,&cancel).await.unwrap().pages.is_empty());
             assert_eq!(reads(&f),(read,listed+2),"an idle receive reads objects or lists more than twice");
             assert!(f.receiver.maintenance_needed_cached(&summaries,&cancel).await.unwrap().is_none());
             assert_eq!(reads(&f),(read,listed+4),"an idle maintenance check reads objects or lists more than twice");
 
             let own=tokio::sync::Mutex::new(super::super::lww_compaction::CheckpointSummaries::default());
-            for id in f.sender.receive_requests_cached(&mut f.a,DecimalU64(0),&own,&cancel).await.unwrap() {
+            for id in f.sender.receive_requests_cached(&mut f.a,DecimalU64(0),&own,&cancel).await.unwrap().pages {
                 let request=f.a.external_lww_unfinished_receive(&id).unwrap().unwrap();
                 f.a.lww_stage_receive(&request).unwrap();
                 f.a.lww_apply_receive(&ApplyReceive{header:request.header.clone(),generating:vec![]}).unwrap();
                 f.a.lww_finish_receive(&request.header).unwrap();
             }
             let (read,listed)=reads(&f);
-            assert!(f.sender.receive_requests_cached(&mut f.a,DecimalU64(0),&own,&cancel).await.unwrap().is_empty());
+            assert!(f.sender.receive_requests_cached(&mut f.a,DecimalU64(0),&own,&cancel).await.unwrap().pages.is_empty());
             assert_eq!(reads(&f),(read,listed+2),"an idle receive on the publishing device reads objects or lists more than twice");
 
             let second=f.sender.compact_published(&mut f.a,&directory.path().join("second"),"00000000-0000-4000-8000-000000000092",&writer,
                 &f.sender.capabilities,&cancel,None).await.unwrap();
             let (read,_)=reads(&f);
             let known=(f.provider.read_attempts(&first_checkpoint),f.provider.read_attempts(&ordinary));
-            assert!(f.receiver.receive_requests_cached(&mut f.b,DecimalU64(0),&summaries,&cancel).await.unwrap().is_empty());
+            assert!(f.receiver.receive_requests_cached(&mut f.b,DecimalU64(0),&summaries,&cancel).await.unwrap().pages.is_empty());
             assert_eq!(reads(&f).0,read+1,"a new checkpoint is the only object the next receive reads");
             assert_eq!(f.provider.read_attempts(&second.reference.receipt.locator.object),1);
             assert_eq!((f.provider.read_attempts(&first_checkpoint),f.provider.read_attempts(&ordinary)),known);

@@ -4,6 +4,7 @@ import { join } from 'node:path'
 export const testSuffix = '**/*.{test,spec}.?(c|m)[jt]s?(x)'
 export const appRoots = ['src', 'tests', 'scripts', 'src-tauri/src']
 export const appTestIncludes = appRoots.map(root => `${root}/${testSuffix}`)
+export const luaWorkerTests = ['src/ts/process/scriptings.test.ts', 'src/ts/process/scriptings.historyWindow.test.ts']
 export const extendedAppTests = ['src/ts/storage/selectedConversationEvictionCorpus.test.ts']
 // Tests that need no DOM run without happy-dom, which skips its per-file setup.
 export const nodeAppTests = [
@@ -414,14 +415,19 @@ export function selectNodeTests(files, owner = 'node') {
 // A listed path that no longer exists would silently stop routing a renamed test.
 export function assertListedTestsExist(files) {
   const present = new Set(files.map(normalizePath))
-  const missing = [...extendedAppTests, ...nodeAppTests].filter(path => !present.has(path))
+  const missing = [...extendedAppTests, ...nodeAppTests, ...luaWorkerTests].filter(path => !present.has(path))
   if (missing.length) throw new Error(`Listed test entries missing: ${missing.join(', ')}`)
 }
 
 export function assertInventory(files, inventories) {
   const expected = new Map(files.map(path => [normalizePath(path), ownerOf(path)]).filter(([, owner]) => owner !== null))
+  const repeated = luaWorkerTests.filter(path => expected.has(path))
+  const worker = inventories['app-lua-worker'] ?? []
+  if (new Set(worker).size !== worker.length || worker.length !== repeated.length
+      || worker.some(path => !repeated.includes(path))) throw new Error('Lua Worker rerun inventory mismatch')
   const seen = new Set()
   for (const [owner, selected] of Object.entries(inventories)) {
+    if (owner === 'app-lua-worker') continue
     for (const rawPath of selected) {
       const path = normalizePath(rawPath)
       if (seen.has(path)) throw new Error(`Duplicate test ownership: ${path}`)

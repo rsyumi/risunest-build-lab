@@ -1,7 +1,7 @@
 {
   "name": "risunest",
   "private": true,
-  "version": "1.0.6",
+  "version": "1.1.0",
   "packageManager": "pnpm@10.34.5",
   "type": "module",
   "engines": {
@@ -68,6 +68,8 @@
     "ios:init:agent": "tauri ios init --ci --skip-targets-install --config src-tauri/tauri.agent.conf.json",
     "ios:build:simulator:agent": "tauri ios build --ci --target aarch64-sim --no-sign --config src-tauri/tauri.agent.conf.json",
     "ios:test:portable-source": "node scripts/testIOSPortableSourceContracts.mjs",
+    "lua:build-worker": "node tools/lua-worker/build.mjs",
+    "lua:check-worker": "node tools/lua-worker/build.mjs --check",
     "benchmark:vitest": "vitest bench --config vitest.benchmark.config.ts --run --pool=forks --maxWorkers=1 --no-file-parallelism",
     "benchmark:phase1": "pnpm benchmark:vitest src/ts/process/phase1Algorithms.bench.ts",
     "benchmark:streaming:display": "pnpm benchmark:vitest src/ts/process/streamingDisplayReplay.bench.ts",
@@ -171,6 +173,7 @@
     "@vitest/coverage-v8": "4.1.11",
     "autoprefixer": "^10.6.1",
     "better-sqlite3": "12.11.1",
+    "binaryen": "123.0.0",
     "fake-indexeddb": "^6.2.5",
     "fast-check": "^4.10.2",
     "happy-dom": "^20.14.5",

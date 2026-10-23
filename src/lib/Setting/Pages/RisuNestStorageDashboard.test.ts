@@ -31,6 +31,13 @@ const alerts = vi.hoisted(() => ({
 }))
 
 vi.mock('src/ts/storage/nativePersistentMaintenance', () => maintenance)
+const runtime = vi.hoisted(() => ({ flushPendingData: vi.fn(async (_reason: string) => {}) }))
+vi.mock('src/ts/storage/persistentDataRuntime.svelte', async () => {
+    const { createAssetAliasCleanupTarget } = await import('src/ts/storage/deletedOwnerAssetCleanup.testSupport')
+    return { ...runtime, assetAliasCleanupTarget: () => createAssetAliasCleanupTarget(runtime.flushPendingData) }
+})
+const core = vi.hoisted(() => ({ invoke: vi.fn(async (_command: string, _args?: unknown): Promise<unknown> => ({ revision: 2 })) }))
+vi.mock('@tauri-apps/api/core', async (importOriginal) => ({ ...await importOriginal<typeof import('@tauri-apps/api/core')>(), invoke: core.invoke }))
 vi.mock('src/ts/storage/sync/syncConflictBackup', () => ({ getSyncConflictBackupStore: () => backups }))
 vi.mock('src/ts/alert', () => alerts)
 vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'tauri', os: 'windows' }))
@@ -298,6 +305,15 @@ describe('RisuNestStorageDashboard', () => {
                 maintenance.executeNativePersistentAssetGc,
             ).toHaveBeenCalledOnce(),
         )
+        // Pending edits are committed before each scan, so a file they use is not offered.
+        const [beforePreview, beforeExecute] = runtime.flushPendingData.mock.invocationCallOrder
+        expect(beforePreview).toBeLessThan(maintenance.previewNativePersistentAssetGc.mock.invocationCallOrder[0])
+        expect(beforeExecute).toBeGreaterThan(maintenance.previewNativePersistentAssetGc.mock.invocationCallOrder[0])
+        expect(beforeExecute).toBeLessThan(maintenance.executeNativePersistentAssetGc.mock.invocationCallOrder[0])
+        // Unused aliases are deleted through the save queue before the files they held are swept.
+        expect(core.invoke).toHaveBeenCalledExactlyOnceWith('pds_asset_delete_orphaned_aliases', { expectedRevision: 1, owner: null })
+        expect(beforeExecute).toBeLessThan(core.invoke.mock.invocationCallOrder[0])
+        expect(core.invoke.mock.invocationCallOrder[0]).toBeLessThan(maintenance.executeNativePersistentAssetGc.mock.invocationCallOrder[0])
         expect(alerts.alertConfirm).toHaveBeenCalledWith(
             'This will delete 2 unused files (2.0 KiB). Continue?',
         )

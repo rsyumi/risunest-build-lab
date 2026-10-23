@@ -514,11 +514,7 @@ fn portrait_bytes(
     repository: &PayloadCas,
     job: &JobControl,
 ) -> Result<Vec<u8>, NativeJobError> {
-    let Some(key) = character
-        .get("image")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-    else {
+    let Some(key) = character_json_export::available_portrait_key(character, reader, repository)? else {
         return Ok(FALLBACK_PORTRAIT.to_vec());
     };
     let alias =
@@ -1209,6 +1205,68 @@ mod tests {
         let card: Value = serde_json::from_slice(&card).unwrap();
         assert_eq!(card["data"]["assets"][0]["uri"], "__asset:1");
         assert_eq!(card["data"]["assets"][1]["uri"], "ccdefault:");
+    }
+
+    #[test]
+    fn unreadable_portrait_exports_the_fallback_portrait() {
+        let exported_portrait = |state: &str| {
+            let directory = TempDir::new().unwrap();
+            let mut store = PersistentStore::open(directory.path()).unwrap();
+            let cas = PayloadCas::new(directory.path()).unwrap();
+            let portrait = alias("assets/portrait.png", &synthetic_png(), "png", &cas);
+            let (image, aliases) = match state {
+                "unset" => ("", vec![]),
+                "missing-alias" => (portrait.key.as_str(), vec![]),
+                "missing-payload" => (portrait.key.as_str(), vec![AssetAlias {
+                    object_hash: Some(hex::encode(Sha256::digest(b"never stored"))),
+                    ..portrait.clone()
+                }]),
+                _ => unreachable!(),
+            };
+            let character = json!({
+                "type": "character", "chaId": "png-publication", "name": "PNG Card",
+                "image": image, "ccAssets": [], "additionalAssets": [],
+                "emotionImages": [], "triggerscript": [], "customscript": [], "chats": []
+            });
+            let staging = store.replace_begin().unwrap().staging_id;
+            store.replace_put_root(&staging, &json!({})).unwrap();
+            store.replace_put_presets(&staging, &[]).unwrap();
+            store.replace_add_characters(&staging, &[character]).unwrap();
+            store.replace_put_asset_aliases(&staging, &aliases).unwrap();
+            let revision = store.replace_commit(&staging, Some(0)).unwrap().revision;
+            let metadata = json!({
+                "spec": "chara_card_v3", "spec_version": "3.0",
+                "data": {
+                    "name": "PNG Card",
+                    "extensions": {"risuai": {"triggerscript": [], "customScripts": []}},
+                    "assets": [{"type": "icon", "uri": "ccdefault:", "name": "main", "ext": "png"}]
+                }
+            });
+            let owned = directory.path().join("owned");
+            fs::create_dir(&owned).unwrap();
+            let destination = directory.path().join("card.png");
+            export_character_png_with_release(
+                store.prepare_risu_save_export(revision).unwrap(), "png-publication", metadata,
+                &owned, &directory.path().join("handoffs"), Some(&destination),
+                &JobRegistry::default().create(JobKind::ExportCharacterCard).unwrap(),
+                PngCardLimits::default(), PreparedRisuSaveExport::release_reader, None,
+            )
+            .unwrap_or_else(|error| panic!("{state}: {}", error.message));
+            let parse_root = directory.path().join("parse");
+            fs::create_dir(&parse_root).unwrap();
+            parse_png_card(
+                &mut fs::File::open(destination).unwrap(),
+                &parse_root,
+                PngCardLimits::default(),
+                || false,
+            )
+            .unwrap()
+            .base_image
+            .sha256
+        };
+        let fallback = exported_portrait("unset");
+        assert_eq!(exported_portrait("missing-alias"), fallback);
+        assert_eq!(exported_portrait("missing-payload"), fallback);
     }
 
     #[test]

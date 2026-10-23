@@ -227,6 +227,14 @@ fn check(job: &JobControl) -> Result<(), NativeJobError> {
         Ok(())
     }
 }
+// A cancel request leaves the job Cancelling, so the job control calls that follow it fail.
+fn job_control_error(job: &JobControl, error: String) -> NativeJobError {
+    if job.is_cancel_requested() {
+        cancelled("gallery download cancelled")
+    } else {
+        job_error(error)
+    }
+}
 fn copy(
     source: &mut impl Read,
     output: &mut impl Write,
@@ -405,7 +413,8 @@ pub(crate) fn export_gallery(
     .map_err(io_error)?;
     let mut released = false;
     let outcome = (|| {
-        job.start(JobPhase::WritingExport).map_err(job_error)?;
+        job.start(JobPhase::WritingExport)
+            .map_err(|error| job_control_error(job, error))?;
         check(job)?;
         let (kind, entries) = selection.into_entries();
         let total = entries.len() as u64;
@@ -432,7 +441,7 @@ pub(crate) fn export_gallery(
             completed_items: 0,
             total_items: Some(total),
         })
-        .map_err(job_error)?;
+        .map_err(|error| job_control_error(job, error))?;
         for (index, entry) in entries.into_iter().enumerate() {
             check(job)?;
             let reader = prepared.reader().map_err(store_error)?;
@@ -536,7 +545,7 @@ pub(crate) fn export_gallery(
                 completed_items: index as u64 + 1,
                 total_items: Some(total),
             })
-            .map_err(job_error)?;
+            .map_err(|error| job_control_error(job, error))?;
         }
         if let Some(zip) = zip {
             zip.finish(job)?;
@@ -549,7 +558,7 @@ pub(crate) fn export_gallery(
         released = true;
         pins.release(CasReleaseOutcome::Aborted).map_err(io_error)?;
         job.set_phase(JobPhase::PublishingDestination)
-            .map_err(job_error)?;
+            .map_err(|error| job_control_error(job, error))?;
         let (root, target, handoff_path) = if let Some(path) = destination_path {
             (
                 path.parent()
@@ -854,8 +863,7 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"existing");
         let registry = JobRegistry::default();
         let job = registry.create(JobKind::ExportGalleryFile).unwrap();
-        job.cancellation_flag()
-            .store(true, std::sync::atomic::Ordering::Release);
+        job.request_cancel().unwrap();
         let prepared = store.prepare_gallery_file_export(revision, "inlay", "inlay-1").unwrap();
         let readers = prepared.reader().unwrap().active_readers();
         let error = export_gallery(

@@ -125,6 +125,22 @@ describe('external storage shared panel', () => {
         run.finish('complete'); await tick()
         expect(target.textContent).toContain(strings.transfer.syncComplete)
     })
+    it('keeps a finished sync turn in progress while receiving continues, including during the next hidden check', async () => {
+        const flags = new SvelteMap([['catchingUp', true]])
+        target = document.createElement('div'); document.body.append(target)
+        component = mount(ExternalTransferProgress, { target, props: { connectionId: 'synthetic', strings, get catchingUp() { return flags.get('catchingUp') } } })
+        const status = () => target.querySelector('[data-external-progress="sync"]')?.textContent ?? ''
+        const first = beginExternalProgress('synthetic', 'sync')
+        first.stage('applying'); first.finish('complete'); await tick()
+        expect(status()).toContain(strings.transfer.syncing)
+        expect(status()).not.toContain(strings.transfer.syncComplete)
+        expect(target.querySelector('[role="progressbar"]')?.hasAttribute('aria-valuenow')).toBe(false)
+        const next = beginExternalProgress('synthetic', 'sync'); await tick()
+        expect(status()).toContain(strings.transfer.syncing)
+        expect(status()).not.toContain(strings.transfer.syncComplete)
+        next.stage('applying'); next.finish('complete'); flags.set('catchingUp', false); await tick()
+        expect(status()).toContain(strings.transfer.syncComplete)
+    })
     it('shows onboarding details directly and remains active while applying a completed download', async () => {
         const run = beginExternalProgress('synthetic', 'binding')
         run.stage('applying')

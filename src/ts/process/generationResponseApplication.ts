@@ -16,6 +16,7 @@ import {
 } from './generationConversationOperation'
 import type { requestDataResponse } from './request/request'
 import { consumeStreamingDisplayStream } from './streamingDisplayStream'
+import { beginDisplayWork } from '../displayRecovery.svelte'
 import { historyLength } from './historyWindowIndex'
 import type { ConversationCommitObserver } from './conversationOperationContext'
 import type { GenerationDiagnosticTrace, GenerationDiagnosticPhase, GenerationDiagnosticOutcome } from '../generationDiagnostics'
@@ -69,6 +70,8 @@ export interface ApplyGenerationResponseOptions {
     abortSignal: AbortSignal
     continueGeneration: boolean
     sayingCharacterId: string
+    /** The character whose chat receives the response. */
+    ownerCharacterId: string
     generationId: string
     generationInfo: MessageGenerationInfo
     promptInfo: MessagePresetInfo
@@ -218,8 +221,13 @@ export async function applyGenerationResponse(
                     throw error
                 }
             }
+            // Streaming renders into the chat, which a recovery record covers.
+            const displayWork = beginDisplayWork(targetChat.id
+                ? { characterId: options.ownerCharacterId, conversationId: targetChat.id }
+                : null)
             let streamCompleted = false
             try {
+                if (displayWork.ready) await displayWork.ready
                 const streamResult = await consumeStreamingDisplayStream({
                     mode: performanceMode,
                     reader,
@@ -259,6 +267,7 @@ export async function applyGenerationResponse(
                 })
                 streamCompleted = streamResult.completed
             } finally {
+                displayWork.release()
                 if (targetChat.id) clearStreamingConversation(targetChat.id)
                 targetChat.isStreaming = false
                 targetChat.activeStreamingDisplayOptimizationMode = undefined

@@ -11,6 +11,7 @@ import { SynchronousSessionConversationViewportSource } from 'src/ts/conversatio
 import type { LiveChatParserProjectionResolver } from 'src/ts/selectedConversationLiveParserProjection'
 import ChatsHarness from './ChatsHarness.test.svelte'
 import { consumeStreamingDisplayStream } from 'src/ts/process/streamingDisplayStream'
+import { ReloadChatPointer } from 'src/ts/stores.svelte'
 const scriptingState = vi.hoisted(() => ({
     database: { characters: [] as character[], templateDefaultVariables: '' },
     parses: 0,
@@ -18,6 +19,9 @@ const scriptingState = vi.hoisted(() => ({
     inFlight: new Set<Promise<string>>(),
     metadataReads: 0,
     session: null as ActiveConversationSession | null,
+    moduleTriggers: [] as unknown[],
+    functionTimeout: null as number | null,
+    slowListenerRuns: 0,
 }))
 const luaCode = `listenEdit('editDisplay', function(id, value)
     local previous = getState(id, 'synthetic_initialized')
@@ -36,12 +40,22 @@ vi.mock('src/ts/storage/database.svelte', () => ({
 vi.mock('src/ts/parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule({
     hasher: vi.fn(),
     risuChatParser: (value: string) => value,
-    ParseMarkdown: (value: string, character: character) => {
+    ParseMarkdown: (
+        value: string,
+        character: character,
+        _mode: string,
+        chatID: number,
+        _conditions: unknown,
+        renderContext?: { displayRequestOrder?: number },
+    ) => {
         scriptingState.parses++
         const parse = (async () => {
             if (scriptingState.parses > scriptingState.parseBudget) return 'SYNTHETIC_PARSE_BUDGET_EXCEEDED'
             const { runLuaEditTrigger } = await import('src/ts/process/scriptings')
-            return runLuaEditTrigger(character, 'editdisplay', value)
+            return runLuaEditTrigger(
+                character, 'editdisplay', value, { index: chatID },
+                undefined, undefined, undefined, renderContext?.displayRequestOrder,
+            )
         })()
         scriptingState.inFlight.add(parse)
         return parse.finally(() => scriptingState.inFlight.delete(parse))
@@ -57,6 +71,7 @@ vi.mock('src/ts/alert', () => ({
     alertInput: vi.fn(),
     alertNormal: vi.fn(),
     alertSelect: vi.fn(),
+    alertToast: vi.fn(),
 }))
 vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'tauri', os: 'android' }))
 vi.mock('src/ts/tokenizer', () => ({ tokenize: vi.fn() }))
@@ -70,9 +85,26 @@ vi.mock('src/ts/util', () => ({
 }))
 vi.mock('src/ts/process/modules', () => ({
     getModuleLorebooks: () => [],
-    getModuleTriggers: () => [],
+    getModuleTriggers: () => scriptingState.moduleTriggers,
     getModuleAssets: () => [],
 }))
+vi.mock('src/ts/process/luaRuntime', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('src/ts/process/luaRuntime')>()
+    return {
+        ...actual,
+        async createLuaFactory() {
+            const factory = await actual.createLuaFactory()
+            const createEngine = factory.createEngine.bind(factory)
+            factory.createEngine = async (options) => {
+                const timeout = scriptingState.functionTimeout
+                const engine = await createEngine(timeout === null ? options : { ...options, functionTimeout: timeout })
+                engine.global.set('noteSlowListener', () => { scriptingState.slowListenerRuns++ })
+                return engine
+            }
+            return factory
+        },
+    }
+})
 vi.mock('src/ts/process/files/inlays', () => ({
     getInlayAsset: vi.fn(),
     writeInlayImage: vi.fn(),
@@ -333,6 +365,117 @@ test.each([false, true])(
     },
     30_000,
 )
+
+test('opens 30 rows with one timeout of a display listener that never finishes', async () => {
+    const character = makeCharacter(
+        Array.from({ length: 30 }, (_, index) => ({
+            role: 'char',
+            data: `synthetic ${index}`,
+            chatId: `slow-${index}`,
+        })),
+    )
+    character.triggerscript[0].effect = [{
+        type: 'triggerlua',
+        code: `listenEdit('editDisplay', function(id, value)
+    noteSlowListener()
+    while true do end
+end)`,
+    }]
+    scriptingState.moduleTriggers = [{
+        type: 'start',
+        conditions: [],
+        effect: [{
+            type: 'triggerlua',
+            code: `listenEdit('editDisplay', function(id, value)
+    return value .. ' MODULE_OK'
+end)`,
+        }],
+    }]
+    scriptingState.functionTimeout = 200
+    scriptingState.slowListenerRuns = 0
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const timeouts = () => errors.mock.calls.filter(([error]) => error?.code === 'lua-listener-timeout').length
+    const conversation = character.chats[0]
+    const session = new ActiveConversationSession({
+        characterId: character.chaId,
+        conversationId: conversation.id!,
+        conversation,
+        storeRevision: 1,
+    })
+    scriptingState.database = { characters: [character], templateDefaultVariables: '' }
+    scriptingState.session = session
+    const source = new SynchronousSessionConversationViewportSource({
+        session,
+        captureCurrent: () => ({ character, conversation }),
+    })
+    const resolver: LiveChatParserProjectionResolver = {
+        resolve: async ({ row, totalMessages }) => ({
+            kind: 'complete',
+            characterId: character.chaId,
+            conversationId: conversation.id!,
+            revision: session.version,
+            totalMessages,
+            chatID: row.absoluteIndex,
+            projectedChatID: row.absoluteIndex,
+            historyOffset: 0,
+            reasons: ['projection-budget'],
+            release: () => {},
+        }),
+    }
+    const target = document.createElement('div')
+    document.body.appendChild(target)
+    const mounted = mount(ChatsHarness, {
+        target,
+        props: {
+            initialCharacter: character,
+            initialViewportSource: source,
+            parserProjectionResolver: resolver,
+        },
+    })
+    const bodies = () =>
+        [...target.querySelectorAll('[data-lua-body]')].filter(
+            (node) => Number(node.getAttribute('data-index')) >= 0,
+        )
+    const rendered = (count: number) => {
+        expect(bodies()).toHaveLength(count)
+        for (const node of bodies()) {
+            const index = node.getAttribute('data-index')
+            expect(node.textContent).toContain(`synthetic ${index} MODULE_OK`)
+        }
+    }
+    try {
+        await vi.waitFor(() => rendered(30), { timeout: 15_000 })
+        await settleParsers()
+        // Every row and the greeting were requested before the listener timed out.
+        expect([scriptingState.slowListenerRuns, timeouts()]).toEqual([1, 1])
+
+        session.append({ role: 'char', data: 'synthetic 30', chatId: 'slow-30' })
+        await vi.waitFor(() => rendered(31), { timeout: 15_000 })
+        await settleParsers()
+        // The added row runs the listener; the rebuilt rows skip the one that failed.
+        expect([scriptingState.slowListenerRuns, timeouts()]).toEqual([2, 2])
+
+        // Reloading every row costs one more budget, requested before that timeout.
+        const parsesBeforeReload = scriptingState.parses
+        ReloadChatPointer.update((pointers: Record<number, number>) => {
+            for (let index = 0; index < 31; index++) pointers[index] = (pointers[index] ?? 0) + 1
+            return pointers
+        })
+        await vi.waitFor(() => expect(scriptingState.parses).toBeGreaterThanOrEqual(parsesBeforeReload + 31), { timeout: 15_000 })
+        await settleParsers()
+        rendered(31)
+        expect([scriptingState.slowListenerRuns, timeouts()]).toEqual([3, 3])
+    } finally {
+        await unmount(mounted)
+        source.dispose()
+        target.remove()
+        errors.mockRestore()
+        scriptingState.session = null
+        scriptingState.moduleTriggers = []
+        scriptingState.functionTimeout = null
+        ReloadChatPointer.set({})
+    }
+}, 30_000)
 
 test('renders balanced stream snapshots through the real ChatBody and Lua before EOF without replacing the body', async () => {
     const character = makeCharacter([{ role: 'char', data: '', chatId: 'stream-output' }])

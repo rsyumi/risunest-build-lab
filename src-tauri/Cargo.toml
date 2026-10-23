@@ -1,6 +1,6 @@
 [package]
 name = "risunest"
-version = "1.0.6"
+version = "1.1.0"
 description = "RisuNest"
 authors = ["Yumi"]
 license = ""
@@ -108,6 +108,9 @@ reqwest = { version = "0.12.28", features = ["blocking", "json"] }
 
 [target.'cfg(any(windows, target_os = "android", target_os = "linux", target_os = "ios", target_os = "macos"))'.dependencies]
 regex = "1.13.1"
+
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
+os_info = "3.15.0"
 
 [target.'cfg(windows)'.dependencies]
 tauri-winrt-notification = "=0.8.1"

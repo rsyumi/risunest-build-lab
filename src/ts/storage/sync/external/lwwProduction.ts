@@ -32,6 +32,19 @@ export function subscribeExternalLwwFailures(listener: (failures: ReadonlyMap<st
     failureListeners.add(listener); listener(new Map(failures))
     return () => { failureListeners.delete(listener) }
 }
+const catchingUp = new Set<string>()
+const catchUpListeners = new Set<(ids: ReadonlySet<string>) => void>()
+function reportCatchingUp(id: string, value: boolean): void {
+    if (value === catchingUp.has(id)) return
+    if (value) catchingUp.add(id)
+    else catchingUp.delete(id)
+    for (const listener of catchUpListeners) listener(new Set(catchingUp))
+}
+/** The connections whose last receive left changes that the next receive continues at once. */
+export function subscribeExternalLwwCatchUp(listener: (ids: ReadonlySet<string>) => void): () => void {
+    catchUpListeners.add(listener); listener(new Set(catchingUp))
+    return () => { catchUpListeners.delete(listener) }
+}
 export function supportsExternalLwwNewDevice(id: string): boolean {
     const transport = adapters.get(id)?.transport
     return !!(transport?.prepareNewDeviceBinding && transport.replaceAsNewDevice && transport.resumeNewDeviceBinding)
@@ -141,8 +154,8 @@ function createAdapter(connectionId: string): Adapter {
         const joined = joinAbortSignals([signal, active?.signal])
         try { return await run({ state, signal: joined.signal }) } finally { joined.dispose() }
     }
-    // Native code returns one bounded page per call until the listed batch is done;
-    // with `completeAvailable` it lists again after each batch until nothing is left.
+    // Native code returns one bounded page per call and lists the next batch at once while segments remain;
+    // with `completeAvailable` it also lists again after a finished listing, so later arrivals are received too.
     const receive = async (binding: BindingContext, turnLimit?: number, completeAvailable = false): Promise<LwwTurn> => {
         const progress = beginExternalProgress(connectionId, 'sync')
         let received = 0
@@ -195,6 +208,7 @@ function createAdapter(connectionId: string): Adapter {
     const scheduler = createLwwScheduler({
         available: () => !!active && !active.signal.aborted && networkAvailable(),
         busy: holdWhileBusy,
+        catchingUp: value => reportCatchingUp(connectionId, value),
         publish: call => publish(undefined, true, call),
         receive: call => withContext(call.signal, binding => receive(binding, call.turnLimit)),
         maintain: call => withContext(call.signal, async current => { current.signal.throwIfAborted(); await invoke('external_lww_maintenance', { request: header(connectionId, current) }); current.signal.throwIfAborted() }),

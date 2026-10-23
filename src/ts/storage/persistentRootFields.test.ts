@@ -3,6 +3,7 @@ import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 import { personaMirrorMap, presetMirrorMap } from './effectiveIdentityState'
 import { sharedRootFields } from './persistentRootFields'
+import { CHARACTER_SHARED_FIELDS, CONVERSATION_SHARED_FIELDS } from './persistentUnitCapture'
 
 /** Kept on this installation only. */
 const deviceLocalRootFields = [
@@ -31,6 +32,9 @@ const ownUnitRootFields = [
     'pluginCustomStorage', 'pluginStorageMeta', 'characterOrder', 'protectedPresetValues', 'explicitGlobalChatVariables',
 ]
 
+/** Still shared because released backups and peers carry them, whether or not Database still declares them. */
+const releasedSharedRootFields = ['personaNote']
+
 function databaseKeys(): string[] {
     const path = 'src/ts/storage/database.svelte.ts'
     const source = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true)
@@ -46,10 +50,10 @@ function databaseKeys(): string[] {
     })
 }
 
-function nativeRootFields(): string[] {
+function nativeFields(name: string): string[] {
     const source = readFileSync('src-tauri/src/persistent_store/lww_classification.rs', 'utf8')
-    const body = /pub\(super\) const ROOT_FIELDS: &\[&str\] = &\[([^\]]*)\];/.exec(source)?.[1]
-    if (body === undefined) throw new Error('ROOT_FIELDS not found')
+    const body = new RegExp(`pub\\(super\\) const ${name}: &\\[&str\\] = &\\[([^\\]]*)\\];`).exec(source)?.[1]
+    if (body === undefined) throw new Error(`${name} not found`)
     return [...body.matchAll(/"([^"]+)"/g)].map((match) => match[1])
 }
 
@@ -67,7 +71,11 @@ describe('root field classification', () => {
         expect(new Set(keys).size).toBe(keys.length)
         expect(keys.filter((key) => !classes.has(key))).toEqual([])
         expect([...classes].filter(([, names]) => names.length > 1)).toEqual([])
-        expect([...classes.keys()].filter((key) => !keys.includes(key))).toEqual([])
+        expect([...classes.keys()].filter((key) => !keys.includes(key) && !releasedSharedRootFields.includes(key))).toEqual([])
+    })
+
+    it('keeps root keys that released data carries shared', () => {
+        expect(releasedSharedRootFields.filter((key) => !sharedRootFields.has(key))).toEqual([])
     })
 
     it('shares every RisuNest root setting', () => {
@@ -76,8 +84,19 @@ describe('root field classification', () => {
     })
 
     it('keeps the native root unit list equal to the shared root fields', () => {
-        const native = nativeRootFields()
+        const native = nativeFields('ROOT_FIELDS')
         expect(native).toEqual([...native].sort())
         expect(native).toEqual([...sharedRootFields].sort())
+    })
+})
+
+describe('content field classification', () => {
+    it('keeps the native character and conversation unit lists equal to the shared fields', () => {
+        const character = nativeFields('CHARACTER_FIELDS'), conversation = nativeFields('CONVERSATION_FIELDS')
+        expect(character).toEqual([...character].sort())
+        expect(conversation).toEqual([...conversation].sort())
+        // The native capture shares statics on its own, without its messages.
+        expect([...character, 'statics'].sort()).toEqual([...CHARACTER_SHARED_FIELDS].sort())
+        expect(conversation).toEqual([...CONVERSATION_SHARED_FIELDS].sort())
     })
 })

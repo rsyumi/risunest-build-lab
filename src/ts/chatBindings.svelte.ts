@@ -16,8 +16,13 @@ import {
     getPersistentDataRuntime,
     getActiveConversationSession,
     getPersistentNavigationGeneration,
+    getPersistentStorageAuthorityEpoch,
+    captureSelectedConversationTarget,
+    acquireCompleteConversation,
     flushPendingData,
 } from './storage/persistentDataRuntime.svelte'
+import { SelectedConversationPromotionStaleError } from './storage/activeWorkingSet.svelte'
+import { requestScriptDisplayRefresh } from './process/scriptDisplayRefresh'
 
 /** A binding edit during a generation would discard its response, so it waits for it. */
 export function chatBindingBlockedByGeneration(): boolean {
@@ -106,4 +111,90 @@ export async function bindPersona(conversation: Chat, index: number): Promise<vo
 
 export async function saveChatBinding(): Promise<void> {
     await flushPendingData('chat-binding')
+}
+
+export interface OnboardingTarget {
+    readonly characterId: string
+    readonly conversationId: string | undefined
+    readonly conversation: Chat
+    isCurrent(): boolean
+}
+
+/**
+ * Captures the selected conversation for a character onboarding. It stays current only while
+ * the same character and conversation are selected and the library has not been replaced, even
+ * by one that reuses the same IDs.
+ */
+export function captureOnboardingTarget(): OnboardingTarget | null {
+    const character = DBState.db.characters[get(selectedCharID)]
+    const binding = captureChatBindingTarget()
+    if (!character || !binding) return null
+    const conversationId = binding.conversation.id
+    const authorityEpoch = getPersistentStorageAuthorityEpoch()
+    return {
+        characterId: character.chaId,
+        conversationId,
+        get conversation() {
+            return binding.conversation
+        },
+        isCurrent: () => binding.isCurrent() && getPersistentStorageAuthorityEpoch() === authorityEpoch,
+    }
+}
+
+export type OnboardingFinishResult = 'applied' | 'blocked' | 'stale'
+
+/**
+ * Writes the answers to the conversation's chat variables and marks its onboarding as done.
+ * `null` answers (Skip) only mark it done. Nothing is written once the target is no longer
+ * current, and a running generation blocks the write until it ends.
+ */
+export async function finishOnboarding(
+    target: OnboardingTarget,
+    answers: ReadonlyMap<string, string> | null,
+): Promise<OnboardingFinishResult> {
+    if (conversationMutationBlockedByGeneration(target.conversationId)) return 'blocked'
+    if (!target.isCurrent()) return 'stale'
+    if (!answers?.size) {
+        await updateChatBinding(target.conversation, { onboardingDone: true })
+        await saveChatBinding()
+        return 'applied'
+    }
+    const selection = captureSelectedConversationTarget()
+    if (!selection) {
+        // Without a persistent selection there is no lease to take; a matching session still commits.
+        const conversation = target.conversation
+        const session = getActiveConversationSession()
+        if (session?.isActive && !session.isTransactionActive && session.matchesConversation(target.characterId, conversation)) {
+            requestScriptDisplayRefresh({ keys: session.updateChatVariables(answers) })
+        } else {
+            conversation.scriptstate ??= {}
+            for (const [key, value] of answers) conversation.scriptstate['$' + key] = value
+        }
+        await updateChatBinding(conversation, { onboardingDone: true })
+        await saveChatBinding()
+        return 'applied'
+    }
+    if (selection.characterId !== target.characterId || selection.conversationId !== target.conversationId) {
+        return 'stale'
+    }
+    let lease: Awaited<ReturnType<typeof acquireCompleteConversation>>
+    try {
+        lease = await acquireCompleteConversation('onboarding', selection)
+    } catch (error) {
+        if (error instanceof SelectedConversationPromotionStaleError) return 'stale'
+        throw error
+    }
+    try {
+        if (conversationMutationBlockedByGeneration(target.conversationId)) return 'blocked'
+        const conversation = target.conversation
+        if (!target.isCurrent() || !lease.session.matchesConversation(target.characterId, conversation)) {
+            return 'stale'
+        }
+        requestScriptDisplayRefresh({ keys: lease.session.updateChatVariables(answers) })
+        await updateChatBinding(conversation, { onboardingDone: true })
+        await saveChatBinding()
+        return 'applied'
+    } finally {
+        lease.release()
+    }
 }

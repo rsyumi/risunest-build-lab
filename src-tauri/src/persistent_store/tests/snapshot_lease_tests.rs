@@ -367,6 +367,8 @@ fn asset_gc_dry_run_keeps_leased_generation_roots_until_release() {
     store
         .commit_asset_alias(&replacement, first.revision)
         .unwrap();
+    // An alias nothing uses holds nothing, so a character uses this one.
+    super::asset_catalog_gc_tests::add_synthetic_character(&mut store, "leased-holder", "assets/leased.bin");
     store
         .asset_object_catalog()
         .register(
@@ -518,6 +520,8 @@ fn asset_gc_dry_run_keeps_detached_export_roots_until_reader_release() {
     store
         .commit_asset_alias(&replacement, first.revision)
         .unwrap();
+    // An alias nothing uses holds nothing, so a character uses this one.
+    super::asset_catalog_gc_tests::add_synthetic_character(&mut store, "detached-holder", "assets/detached.bin");
     store
         .asset_object_catalog()
         .register(

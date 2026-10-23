@@ -80,6 +80,15 @@ export type AccountNativeOfficialWriteAttempt<T> = (
     context: AccountNativeOfficialWriteAttemptContext,
 ) => Promise<AccountNativeOfficialWriteAttemptResult<T> | null>
 
+export interface AccountNativeAssetReadContext {
+    credential: { kind: 'risu-auth'; token: string }
+    reauthenticated: boolean
+}
+
+export type AccountNativeAssetReadAttempt = (
+    context: AccountNativeAssetReadContext,
+) => Promise<'done' | 'reauthentication-needed'>
+
 export interface AccountRecoveredOfficialWrite {
     session: string | null
     warning?: string | null
@@ -331,6 +340,29 @@ export class AccountStorage{
                 receipt: result.receipt,
                 completeReload: () => applyAccountReload(result.reloadSession ?? false),
             }
+        }
+    }
+
+    /** A rejected credential gets one reauthentication and one more attempt. */
+    async readAssetsFromNative(
+        attempt: AccountNativeAssetReadAttempt,
+        options: { signal?: AbortSignal } = {},
+    ): Promise<'done' | 'unauthenticated'> {
+        let reauthenticated = false
+        while (true) {
+            this.checkAuth()
+            if (getDeviceMarkers().getItem('ignoreRisuAuth') === 'true' || !this.auth) return 'unauthenticated'
+            const expectedAccountId = this.getAccountId()
+            const expectedToken = this.auth
+            const result = await attempt({ credential: { kind: 'risu-auth', token: this.auth }, reauthenticated })
+            if (result === 'done') return 'done'
+            if (reauthenticated) return 'unauthenticated'
+            try { await this.reauthenticate(options.signal, expectedAccountId, expectedToken) }
+            catch (error) {
+                if (options.signal?.aborted) throw error
+                return 'unauthenticated'
+            }
+            reauthenticated = true
         }
     }
 
@@ -661,7 +693,7 @@ async function performAccountUnmigration(): Promise<void> {
         isColdStorageBackupData,
         listColdDataKeys,
     } = await import("../process/coldstorage.svelte")
-    const { expandColdPayloads } = await import("../process/coldPayloadExpansion")
+    const { coldItemFromMap, expandColdPayloads } = await import("../process/coldPayloadExpansion")
     const blobStore = await resolveBlobStore()
     const accountStorage = new AccountStorage()
     const coldKeys = await listColdDataKeys(db)
@@ -710,14 +742,15 @@ async function performAccountUnmigration(): Promise<void> {
                     })
                 },
                 readRemoteCold: async (key) => {
-                    const value = await getAccountColdStorageItem(key)
-                    if (value !== null && !isColdStorageBackupData(value)) {
+                    const item = await getAccountColdStorageItem(key)
+                    if (item.kind !== 'present') return null
+                    if (!isColdStorageBackupData(item.value)) {
                         throw new Error(`Invalid account cold payload: ${key}`)
                     }
-                    return value
+                    return item.value
                 },
             })
-            await expandColdPayloads(candidate, async (key) => selectedCold.get(key) ?? null)
+            await expandColdPayloads(candidate, async (key) => coldItemFromMap(selectedCold, key))
         },
         replaceDatabase: (database, reason, options) => {
             alertStore.set({ type: 'wait', msg: language.accountUnmigration.finishing })

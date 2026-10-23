@@ -151,11 +151,18 @@ describe('local backup persistent snapshot', () => {
         expect(state.fullReadFile).not.toHaveBeenCalled()
     })
 
-    it.each([false, true])('expands cold chat and skips an upstream plugin index when present (%s)', async (pluginIndex) => {
+    it.each([false, true])('expands cold chat and imports upstream plugin values when present (%s)', async (pluginIndex) => {
         state.native = false
         const coldKey = '00000000-0000-4000-8000-00000000c01d'
-        const database = structuredClone(risuSaveFixtureDatabase) as Database & { pluginStorage: Record<string, unknown> }
-        database.pluginStorage = { inline: 'preserved', ...(pluginIndex ? { _coldpluginIndex: '00000000-0000-4000-8000-00000000c02d' } : {}) }
+        const indexKey = '00000000-0000-4000-8000-00000000c02d'
+        const largeKey = '00000000-0000-4000-8000-00000000c03d'
+        const legacyKey = '00000000-0000-4000-8000-00000000c04d'
+        const strayKey = '00000000-0000-4000-8000-00000000c06d'
+        const database = structuredClone(risuSaveFixtureDatabase) as Database
+        database.pluginCustomStorage = {
+            inline: 'preserved',
+            ...(pluginIndex ? { _coldpluginIndex: indexKey, _coldplugin: { legacy: legacyKey } } : {}),
+        }
         database.characters[0].coldstorage = coldKey
         const restoredName = 'Restored cold character'
         const cold = {
@@ -165,11 +172,22 @@ describe('local backup persistent snapshot', () => {
                 coldstorage: undefined,
             },
         }
+        const json = (value: unknown) => new TextEncoder().encode(JSON.stringify(value))
         const archive = backupArchive(
-            ...(pluginIndex ? [backupEntry('coldstorage_00000000-0000-4000-8000-00000000c02d.json', new TextEncoder().encode(JSON.stringify({
-                type: 'risu-plugin-storage-index', version: 1, entries: [{ k: 'omitted', s: '"plugin value"' }], trash: [],
-            })))] : []),
-            backupEntry(`coldstorage_${coldKey}.json`, new TextEncoder().encode(JSON.stringify(cold))),
+            ...(pluginIndex ? [
+                backupEntry(`coldstorage_${indexKey}.json`, json({
+                    type: 'risu-plugin-storage-index', version: 1, trash: [],
+                    entries: [
+                        { k: 'small', s: 'false' },
+                        { k: 'large', l: largeKey },
+                        { k: 'lost', l: '00000000-0000-4000-8000-00000000c05d' },
+                    ],
+                })),
+                backupEntry(`coldstorage_${largeKey}.json`, json('')),
+                backupEntry(`coldstorage_${legacyKey}.json`, json(null)),
+                backupEntry(`coldstorage_${strayKey}.json`, json('stray')),
+            ] : []),
+            backupEntry(`coldstorage_${coldKey}.json`, json(cold)),
             backupEntry('database.risudat', encodeRisuSaveLegacy(database, 'compression')),
         )
         const file = backupFile('backup.bin', archive)
@@ -178,7 +196,8 @@ describe('local backup persistent snapshot', () => {
         const click = vi.spyOn(input, 'click').mockImplementation(() => {})
         const createElement = vi.spyOn(document, 'createElement').mockReturnValueOnce(input)
         const { LoadLocalBackup } = await import('./backuplocal')
-        const { alertWait } = await import('../alert')
+        const { alertCheckboxConfirm, alertWait } = await import('../alert')
+        const { language } = await import('../../lang')
         const pending = LoadLocalBackup()
         await vi.waitFor(() => expect(click).toHaveBeenCalledOnce())
         input.dispatchEvent(new Event('change'))
@@ -190,8 +209,11 @@ describe('local backup persistent snapshot', () => {
         const replaced = state.replacePersistentDatabase.mock.calls[0][0] as typeof database
         expect(replaced.characters[0].name).toBe(restoredName)
         expect(replaced.characters[0].coldstorage).toBeUndefined()
-        expect(replaced.pluginStorage.inline).toBe('preserved')
-        expect(replaced.pluginStorage.omitted).toBeUndefined()
+        expect(replaced.pluginCustomStorage).toEqual(pluginIndex
+            ? { inline: 'preserved', small: false, large: '', legacy: null }
+            : { inline: 'preserved' })
+        const pluginWarning = language.portableBackup.omittedRestoreData.pluginStorage(1)
+        expect(vi.mocked(alertCheckboxConfirm).mock.calls[0][0].description.includes(pluginWarning)).toBe(pluginIndex)
         expect(alertWait).not.toHaveBeenCalled()
 
         const context = state.fallbackContext
@@ -205,16 +227,17 @@ describe('local backup persistent snapshot', () => {
         ])
         const last = context.onStatus.mock.calls.at(-1)?.[0]
         expect(last?.kind).toBe('restore-legacy-local-backup')
+        const entries = pluginIndex ? 6 : 2
         expect(last?.progress).toEqual({
             completedBytes: archive.byteLength,
             totalBytes: archive.byteLength,
-            completedItems: pluginIndex ? 3 : 2,
-            totalItems: pluginIndex ? 3 : 2,
+            completedItems: entries,
+            totalItems: entries,
         })
         expect(last?.detail?.counts).toMatchObject({
-            entriesRead: pluginIndex ? 3 : 2,
-            entriesTotal: pluginIndex ? 3 : 2,
-            coldStorage: pluginIndex ? 2 : 1,
+            entriesRead: entries,
+            entriesTotal: entries,
+            coldStorage: entries - 1,
             assets: 0,
             skipped: pluginIndex ? 1 : 0,
             characters: database.characters.length,
@@ -286,7 +309,7 @@ describe('local backup persistent snapshot', () => {
             expect(alertCheckboxConfirm).not.toHaveBeenCalled()
         }
 
-        expect(result).toEqual({ warningCodes: ['upstream-restore-losses'], upstreamLosses: {coldMissing:0,invalidInlays:1,pocketInlays:0} })
+        expect(result).toEqual({ warningCodes: ['upstream-restore-losses'], upstreamLosses: {coldMissing:0,invalidInlays:1,pocketInlays:0,pluginStorage:0} })
         expect(state.blobStore?.put).not.toHaveBeenCalled()
         const last = context.onStatus.mock.calls.at(-1)?.[0]
         expect(last?.detail?.counts).toMatchObject({
@@ -297,14 +320,18 @@ describe('local backup persistent snapshot', () => {
         })
     })
 
-    it.each([true, false])('shows only the cold storage warning on the web when the library holds no character, answer=%s', async answer => {
+    it.each([[true, false], [false, false], [true, true]])('shows only the cold storage warning on the web when the library holds no character, answer=%s, invalid entry=%s', async (answer, invalidEntry) => {
         state.native = false
         state.characters = false
         const { alertActionConfirm, alertCheckboxConfirm } = await import('../alert')
         vi.mocked(alertActionConfirm).mockResolvedValueOnce(answer)
         const database = structuredClone(risuSaveFixtureDatabase) as Database
-        database.characters[0].coldstorage = 'missing-cold'
-        const file = backupFile('cold-missing.bin', backupEntry('database.risudat', encodeRisuSaveLegacy(database, 'compression')))
+        const coldKey = '00000000-0000-4000-8000-00000000c07d'
+        database.characters[0].coldstorage = coldKey
+        const file = backupFile('cold-missing.bin', backupArchive(
+            ...(invalidEntry ? [backupEntry(`coldstorage_${coldKey}.json`, new TextEncoder().encode('"not a character"'))] : []),
+            backupEntry('database.risudat', encodeRisuSaveLegacy(database, 'compression')),
+        ))
         const input = document.createElement('input')
         Object.defineProperty(input, 'files', { value: [file] })
         const click = vi.spyOn(input, 'click').mockImplementation(() => {})

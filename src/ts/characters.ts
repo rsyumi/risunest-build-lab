@@ -56,6 +56,7 @@ import { PersistentMutationFencedError } from './storage/saveCoordinator'
 import { beginNavigationActivity } from './ui/navigationActivity'
 import { yieldToUi } from './ui/yieldToUi'
 import { estimateCharacterBytes } from './storage/conversationInsertPages'
+import { forgetDisplayRecovery } from './displayRecovery.svelte'
 
 export async function commitDetachedCharacter(
     character: character,
@@ -962,6 +963,7 @@ export async function removeChar(identifier:string|number,name:string, type:'nor
         return
     }
     if (type !== 'normal') {
+        void forgetDisplayRecovery((target) => target.characterId === targetId)
         await clearSelectionAfterCommittedReplacement()
     } else {
         clearSelectionAfterCommittedDetail()
@@ -1236,11 +1238,15 @@ export async function removeChat(character: character, chatId: string): Promise<
         if (!survivingId) return false
         if (!(await changeChatTo(survivingId)) && !(await changeChatTo(survivingId))) return false
     }
-    return editSelectedChatList(character.chaId, 'remove-chat', (current) => {
+    const removed = await editSelectedChatList(character.chaId, 'remove-chat', (current) => {
         const removeIndex = current.chats.findIndex((chat) => chat.id === chatId)
         if (removeIndex === -1 || removeIndex === current.chatPage) return false
         current.chats.splice(removeIndex, 1)
         current.chats = current.chats
         return null
     })
+    if (removed) {
+        void forgetDisplayRecovery((target) => target.characterId === character.chaId && target.conversationId === chatId)
+    }
+    return removed
 }

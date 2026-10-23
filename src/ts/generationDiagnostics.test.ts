@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createGenerationDiagnostics, type GenerationDiagnosticAdmission } from './generationDiagnostics'
+import { createGenerationDiagnostics, type GenerationDiagnosticAdmission, type GenerationListenerPayloadDiagnostic } from './generationDiagnostics'
 
 describe('generation diagnostic boundary', () => {
     it('drops early events and correlates later events with the native document and generation', async () => {
@@ -54,9 +54,18 @@ describe('generation diagnostic boundary', () => {
             boundary: 'checkpoint', savePath: 'windowed', pendingEvents: 4,
             dirtyRecords: 4, unacknowledgedMs: 2000, expectedRevision: 5, acknowledgedRevision: 6,
         })
+        trace.listenerPayload({
+            listeners: 2, fullHistoryListeners: 1, conversations: 3, messages: 40, messageCharacters: 900,
+            characterName: 'PRIVATE_CONTENT_CANARY',
+        } as GenerationListenerPayloadDiagnostic)
         expect(JSON.stringify(events)).not.toContain('PRIVATE_CONTENT_CANARY')
         expect(events[1]).toMatchObject({ documentSequence: 3, generationSequence: 1, historyLimitMultiplier: 1.5 })
         expect(events[2]).toMatchObject({ expectedRevision: 5, acknowledgedRevision: 6 })
+        // The native parser rejects unknown fields, so the emitted names are exact.
+        expect(events[3]).toEqual({
+            kind: 'listener-payload', documentSequence: 3, eventSequence: 3, generationSequence: 1,
+            listeners: 2, fullHistoryListeners: 1, conversations: 3, messages: 40, messageCharacters: 900,
+        })
     })
 
     it('recovers when startup readiness precedes the first native document', async () => {

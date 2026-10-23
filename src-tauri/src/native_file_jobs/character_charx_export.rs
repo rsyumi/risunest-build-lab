@@ -211,6 +211,8 @@ where
     let mut completed_bytes = 0_u64;
     let mut completed_items = 0_u64;
     let mut decoded_bytes = 0_u64;
+    let portrait_key =
+        super::character_json_export::available_portrait_key(&character, &reader, &repository)?;
     let cc_asset_count = character
         .get("ccAssets")
         .and_then(Value::as_array)
@@ -242,7 +244,7 @@ where
                     .as_ref()
                     .and_then(|entries| entries.get(offset))
             });
-        let Some(source_identity) = embedded_asset_source(asset, &character, occurrence)? else {
+        let Some(source_identity) = embedded_asset_source(asset, portrait_key, occurrence)? else {
             completed_items += 1;
             job.set_export_progress(JobProgress {
                 completed_bytes,
@@ -468,11 +470,7 @@ fn create_appended_jpeg_source(
             "appended CharX JPEG export cancelled before portrait encoding",
         ));
     }
-    let portrait = match character
-        .get("image")
-        .and_then(Value::as_str)
-        .filter(|key| !key.is_empty())
-    {
+    let portrait = match super::character_json_export::available_portrait_key(character, reader, repository)? {
         Some(key) => {
             let alias = export::pinned_asset_alias(&reader.connection, &reader.target, key)
                 .map_err(store_error)?;
@@ -771,7 +769,7 @@ fn asset_is_embedded(asset: &Value) -> Result<bool, NativeJobError> {
 
 fn embedded_asset_source(
     asset: &Value,
-    character: &Value,
+    portrait_key: Option<&str>,
     occurrence: Option<&OwnerManifestEntry>,
 ) -> Result<Option<EmbeddedAssetSource>, NativeJobError> {
     let asset = asset
@@ -782,13 +780,9 @@ fn embedded_asset_source(
         .and_then(Value::as_str)
         .ok_or_else(|| invalid_input("CCv3 asset URI must be a string"))?;
     if uri == "ccdefault:" {
-        return Ok(character
-            .get("image")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-            .map(EmbeddedAssetSource::Alias)
-            .or(Some(EmbeddedAssetSource::FallbackPortrait)));
+        return Ok(Some(portrait_key.map_or(EmbeddedAssetSource::FallbackPortrait, |key| {
+            EmbeddedAssetSource::Alias(key.to_owned())
+        })));
     }
     if uri.starts_with("http://") || uri.starts_with("https://") {
         return Ok(None);
@@ -1077,11 +1071,19 @@ mod tests {
         }
     }
 
-    fn fixture() -> Fixture {
-        fixture_with_portrait(true)
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Portrait {
+        Present,
+        Unset,
+        MissingAlias,
+        MissingPayload,
     }
 
-    fn fixture_with_portrait(has_portrait: bool) -> Fixture {
+    fn fixture() -> Fixture {
+        fixture_with_portrait(Portrait::Present)
+    }
+
+    fn fixture_with_portrait(portrait_state: Portrait) -> Fixture {
         let directory = TempDir::new().unwrap();
         let mut store = PersistentStore::open(directory.path()).unwrap();
         let cas = PayloadCas::new(directory.path()).unwrap();
@@ -1113,10 +1115,10 @@ mod tests {
         ])
         .unwrap();
         let manifest = cas.prepare_bytes(&manifest_bytes).unwrap();
-        let portrait_key = if has_portrait {
-            portrait.key.clone()
-        } else {
+        let portrait_key = if portrait_state == Portrait::Unset {
             String::new()
+        } else {
+            portrait.key.clone()
         };
         let character = json!({
             "type": "character",
@@ -1148,8 +1150,13 @@ mod tests {
             .replace_add_characters(&staging.staging_id, &[character])
             .unwrap();
         let mut aliases = vec![shared.clone(), emotion.clone(), cc.clone()];
-        if has_portrait {
-            aliases.push(portrait.clone());
+        match portrait_state {
+            Portrait::Present => aliases.push(portrait.clone()),
+            Portrait::MissingPayload => aliases.push(AssetAlias {
+                object_hash: Some(hex::encode(Sha256::digest(b"never stored"))),
+                ..portrait.clone()
+            }),
+            Portrait::Unset | Portrait::MissingAlias => {}
         }
         store
             .replace_put_asset_aliases(&staging.staging_id, &aliases)
@@ -1204,7 +1211,7 @@ mod tests {
                 shared.object_hash.clone().unwrap(),
                 second_occurrence.content_hash,
                 emotion.object_hash.unwrap(),
-                if has_portrait {
+                if portrait_state == Portrait::Present {
                     portrait.object_hash.unwrap()
                 } else {
                     hex::encode(Sha256::digest(FALLBACK_PORTRAIT))
@@ -1503,55 +1510,65 @@ mod tests {
     }
 
     #[test]
-    fn image_less_character_reimports_with_the_exact_built_in_fallback_portrait() {
-        let mut fixture = fixture_with_portrait(false);
-        let prepared = fixture
-            .store
-            .prepare_risu_save_export(fixture.revision)
-            .unwrap();
-        let owned = fixture.directory.path().join("owned");
-        let chosen = fixture.directory.path().join("chosen");
-        fs::create_dir(&owned).unwrap();
-        fs::create_dir(&chosen).unwrap();
-        let destination = chosen.join("image-less.charx");
-        let job = JobRegistry::default()
-            .create(JobKind::ExportCharacterCharx)
-            .unwrap();
+    fn unreadable_portrait_reimports_with_the_exact_built_in_fallback_portrait() {
+        for (state, container) in [Portrait::Unset, Portrait::MissingAlias, Portrait::MissingPayload]
+            .into_iter()
+            .flat_map(|state| [
+                (state, CharacterCharxContainer::PlainCharx),
+                (state, CharacterCharxContainer::AppendedCharxJpeg),
+            ])
+        {
+            let mut fixture = fixture_with_portrait(state);
+            let prepared = fixture
+                .store
+                .prepare_risu_save_export(fixture.revision)
+                .unwrap();
+            let owned = fixture.directory.path().join("owned");
+            let chosen = fixture.directory.path().join("chosen");
+            fs::create_dir(&owned).unwrap();
+            fs::create_dir(&chosen).unwrap();
+            let destination = chosen.join("image-less.charx");
+            let job = JobRegistry::default()
+                .create(JobKind::ExportCharacterCharx)
+                .unwrap();
 
-        export_character_charx(
-            prepared,
-            "current-character",
-            fixture.card,
-            fixture.module,
-            &owned,
-            &fixture.directory.path().join("handoffs"),
-            Some(&destination),
-            &job,
-        )
-        .unwrap();
+            export_character_charx_container(
+                prepared,
+                "current-character",
+                fixture.card,
+                fixture.module,
+                container,
+                &owned,
+                &fixture.directory.path().join("handoffs"),
+                Some(&destination),
+                &job,
+                None,
+            )
+            .unwrap_or_else(|error| panic!("{state:?} {container:?}: {}", error.message));
 
-        let parsed_root = fixture.directory.path().join("parsed-image-less");
-        fs::create_dir(&parsed_root).unwrap();
-        let CharXInspection::Card(parsed) = inspect_charx_file(
-            &destination,
-            "image-less.charx",
-            &parsed_root,
-            CharXLimits::default(),
-            || false,
-        )
-        .unwrap() else {
-            panic!("exported file must be a CharX card")
-        };
-        let portrait = parsed
-            .payloads
-            .iter()
-            .find(|payload| payload.original_name.starts_with("assets/icon/"))
-            .unwrap();
-        assert_eq!(
-            portrait.sha256,
-            hex::encode(Sha256::digest(FALLBACK_PORTRAIT))
-        );
-        assert_eq!(fs::read(&portrait.staged_path).unwrap(), FALLBACK_PORTRAIT);
+            let parsed_root = fixture.directory.path().join("parsed-image-less");
+            fs::create_dir(&parsed_root).unwrap();
+            let CharXInspection::Card(parsed) = inspect_charx_file(
+                &destination,
+                "image-less.charx",
+                &parsed_root,
+                CharXLimits::default(),
+                || false,
+            )
+            .unwrap() else {
+                panic!("exported file must be a CharX card")
+            };
+            let portrait = parsed
+                .payloads
+                .iter()
+                .find(|payload| payload.original_name.starts_with("assets/icon/"))
+                .unwrap();
+            assert_eq!(
+                portrait.sha256,
+                hex::encode(Sha256::digest(FALLBACK_PORTRAIT))
+            );
+            assert_eq!(fs::read(&portrait.staged_path).unwrap(), FALLBACK_PORTRAIT);
+        }
     }
 
     #[test]

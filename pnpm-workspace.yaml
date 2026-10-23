@@ -11,3 +11,4 @@ patchedDependencies:
   '@tauri-apps/plugin-http@2.8.0': patches/@tauri-apps__plugin-http@2.8.0.patch
   playwright-core@1.63.0: patches/playwright-core@1.63.0.patch
   playwright@1.63.0: patches/playwright@1.63.0.patch
+  wasmoon@1.16.0: patches/wasmoon@1.16.0.patch

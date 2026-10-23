@@ -54,6 +54,7 @@ import {
     type PersistentScopedReplacementOptions,
     type PreparedUnitIntent,
     type SaveCoordinatorClock,
+    type SaveCoordinatorDependencies,
     type WindowedConversationPersistenceAuthority,
 } from './saveCoordinator'
 import {
@@ -347,6 +348,7 @@ export interface PersistentDataRuntimeDependencies {
     prepareDatabase(database: Database): Promise<Database>
     /** Gives a stored root read by a refresh the same preparation boot applies. */
     prepareRoot?(root: PersistentRoot): Promise<PersistentRoot>
+    deletedCharacterAssets?: SaveCoordinatorDependencies['deletedCharacterAssets']
 }
 
 export interface PersistentActivatedLibraryGuard {
@@ -698,6 +700,7 @@ export function createPersistentDataRuntime(
         onPersistenceIdle: () => workingSet.scheduleSelectedConversationDemotion(),
         onFlushPromise: dependencies.onFlushPromise,
         onBackgroundError: dependencies.onBackgroundError,
+        deletedCharacterAssets: dependencies.deletedCharacterAssets,
         onLocalSaveFailure: dependencies.onLocalSaveFailure,
         onWorkingSetRefreshRequired: (revision) => {
             if (revision === null) pendingRefreshChangeSet = null

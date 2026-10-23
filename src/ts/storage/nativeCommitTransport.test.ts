@@ -25,7 +25,10 @@ it('encodes a large commit into exact UTF-8 bytes without a worker or structured
             { type: 'set', key: 'payload', value },
             { type: 'set', key: 'lone', value: 'a�b' },
         ] } })
-        expect(bytes).toEqual(new TextEncoder().encode(expected))
+        // toEqual walks the megabyte array element by element and takes seconds; Buffer.compare checks the same bytes.
+        const expectedBytes = new TextEncoder().encode(expected)
+        expect(bytes.byteLength).toBe(expectedBytes.byteLength)
+        expect(Buffer.compare(bytes, expectedBytes)).toBe(0)
         expect(bytes.byteLength).toBe(bytes.buffer.byteLength)
     } finally {
         vi.unstubAllGlobals()

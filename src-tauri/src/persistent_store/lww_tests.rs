@@ -1673,6 +1673,46 @@ fn local_and_opaque_fields_persist_without_publication() {
 }
 
 #[test]
+fn realm_block_loadout_and_onboarding_fields_publish_and_apply_on_a_peer() {
+    let (_source_dir, mut source) = store();
+    let (peer_dir, mut peer) = store();
+    create_conversation(&mut source, "char", "conv");
+    let blocked = serde_json::json!([{"id":"synthetic-creator","name":"Synthetic creator"}]);
+    let options = serde_json::json!({"modules":false,"globalVariables":true,"preset":false,"persona":true});
+    let onboarding = serde_json::json!({"enabled":true,"mode":"form","questions":[]});
+    save(
+        &mut source,
+        vec![
+            mutation(&["root", "blockedRealmCreators"], blocked.clone()),
+            mutation(&["root", "loadoutApplyOptions"], options.clone()),
+            mutation(&["character", "char", "onboarding"], onboarding.clone()),
+            mutation(&["conversation", "char", "conv", "onboardingDone"], serde_json::json!(true)),
+        ],
+    );
+    let outbox = source.lww_read_outbox(0.into(), 100).unwrap().entries;
+    copy_objects(&source, &peer);
+    receive(
+        &mut peer,
+        "shared-fields",
+        outbox
+            .into_iter()
+            .map(|entry| Change { key: entry.key, stamp: entry.stamp, value: entry.value })
+            .collect(),
+        vec![],
+    );
+    drop(peer);
+    let peer = PersistentStore::open(peer_dir.path()).unwrap();
+    let root = peer.read_root(None).unwrap().value;
+    assert_eq!(root["blockedRealmCreators"], blocked);
+    assert_eq!(root["loadoutApplyOptions"], options);
+    assert_eq!(peer.read_character("char", None).unwrap().unwrap().value["onboarding"], onboarding);
+    assert_eq!(
+        peer.read_conversation("char", "conv", None).unwrap().unwrap().value["onboardingDone"],
+        true
+    );
+}
+
+#[test]
 fn plugin_record_deletion_is_reusable_and_generic_record_deletion_is_permanent() {
     let (_, mut store) = store();
     receive(
@@ -2004,6 +2044,14 @@ fn archive_publishes_one_state_unit_and_shared_payload_excludes_local_fields() {
                 &["conversation", "char", "chat", "localFuture"],
                 serde_json::json!("private-chat"),
             ),
+            mutation(
+                &["character", "char", "onboarding"],
+                serde_json::json!({"enabled":true,"mode":"html","questions":[],"html":"<form></form>"}),
+            ),
+            mutation(
+                &["conversation", "char", "chat", "onboardingDone"],
+                serde_json::json!(true),
+            ),
         ],
     );
     clear_outbox(&mut store);
@@ -2037,6 +2085,8 @@ fn archive_publishes_one_state_unit_and_shared_payload_excludes_local_fields() {
     assert!(shared["conversations"][0]["detail"]
         .get("localFuture")
         .is_none());
+    assert_eq!(shared["detail"]["onboarding"]["html"], "<form></form>");
+    assert_eq!(shared["conversations"][0]["detail"]["onboardingDone"], true);
     clear_outbox(&mut store);
     let revision = store.revision().unwrap();
     store.restore_character("char", revision).unwrap();

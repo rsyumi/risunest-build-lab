@@ -5140,10 +5140,12 @@ it('cancels staged restore and waits for terminal settlement when the fresh prec
     ])
 })
 
-it.each(['both', 'cold', 'inlay', 'characters'] as const)('cancels default incomplete restore warnings in one dialog: %s', async kind => {
+it.each(['both', 'cold', 'inlay', 'characters', 'pluginStorage'] as const)('cancels default incomplete restore warnings in one dialog: %s', async kind => {
     restoreAlerts.confirm.mockReset().mockResolvedValue(false)
     restoreAlerts.checkbox.mockReset().mockResolvedValue({ confirmed: false, checked: false })
-    const preview = { unavailableColdKeys: kind === 'inlay' || kind === 'characters' ? [] : ['missing'], characterNames: ['Synthetic'], invalidInlays: kind === 'cold' || kind === 'characters' ? [] : ['inlay_aa.risuinlay'], omissions: { excludedCharacters: kind === 'characters' ? 3 : 0 } }
+    const omissionsOnly = kind === 'characters' || kind === 'pluginStorage'
+    const omissions = kind === 'pluginStorage' ? { damagedPluginStorage: 2, oversizedPluginStorage: 4 } : { excludedCharacters: kind === 'characters' ? 3 : 0 }
+    const preview = { unavailableColdKeys: kind === 'inlay' || omissionsOnly ? [] : ['missing'], characterNames: ['Synthetic'], invalidInlays: kind === 'cold' || omissionsOnly ? [] : ['inlay_aa.risuinlay'], omissions }
     const host = createNativeJobHost([{ ...status('waitingForInput'), phase: 'awaiting-activation', incompleteRestorePreview: preview }, status('cancelled')])
     const acquire = vi.fn()
     await expect(runNativeLegacyLocalBackupRestore(
@@ -5156,6 +5158,10 @@ it.each(['both', 'cold', 'inlay', 'characters'] as const)('cancels default incom
     const description = restoreAlerts.checkbox.mock.calls[0][0].description
     if (kind === 'characters') expect(description).toContain(language.portableBackup.omittedRestoreData.excludedCharacters(3))
     else expect(description).not.toContain(language.portableBackup.omittedRestoreData.excludedCharacters(0))
+    if (kind === 'pluginStorage') {
+        expect(description).toContain(language.portableBackup.omittedRestoreData.damagedPluginStorage(2))
+        expect(description).toContain(language.portableBackup.omittedRestoreData.oversizedPluginStorage(4))
+    }
     expect(host.commands()).not.toContain('native_file_job_finalize')
 })
 

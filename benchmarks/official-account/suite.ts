@@ -1,6 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
 import type { InvokeArgs, InvokeOptions } from '@tauri-apps/api/core'
-import { Buffer } from 'buffer'
 import type { Database } from '../../src/ts/storage/database.svelte'
 import type { AssetAlias, PersistentDataStore } from '../../src/ts/storage/persistentDataStore'
 import { createCompleteAssetRepositoryBlobStore } from '../../src/ts/storage/assetRepository'
@@ -10,10 +9,9 @@ import { createNativeDeviceSettings } from '../../src/ts/storage/nativeDeviceSet
 import { createNativeOfficialAssetLedger } from '../../src/ts/storage/sync/officialAssetLedger'
 import { createNativeOfficialAccountAssets } from '../../src/ts/storage/sync/nativeOfficialAccountAssets'
 import { nativeOfficialAccountKeys } from '../../src/ts/storage/sync/nativeOfficialAccountFlow'
-import type { AccountReadOptions, AccountReadResult } from '../../src/ts/storage/accountStorage'
+import type { AccountStorage } from '../../src/ts/storage/accountStorage'
 import { hashPayloadBytes } from '../../src/ts/storage/payloadCas'
-import { accountReadDeadline, readAccountBody } from '../../src/ts/storage/accountReadBody'
-import { transferOfficialAccountAssets } from '../../src/ts/storage/sync/officialAccountTransfer'
+import { runNativeOfficialAssetRestore, type NativeFileJobDependencies } from '../../src/ts/storage/nativeFileJobs'
 
 export async function runOfficialAccountMeasurements(store: PersistentDataStore, origin: string) {
     if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) throw new Error('Synthetic loopback origin required')
@@ -32,6 +30,10 @@ export async function runOfficialAccountMeasurements(store: PersistentDataStore,
         const result = await timed(`ipc.${command}`, () => invoke<T>(command, args, options))
         receivedBytes += result instanceof Uint8Array || result instanceof ArrayBuffer ? result.byteLength : Array.isArray(result) ? result.length : 0
         return result
+    }
+    const jobs: NativeFileJobDependencies = { isTauri: () => true, invoke: measuredInvoke, wait: milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)) }
+    const account: Pick<AccountStorage, 'readAssetsFromNative'> = {
+        readAssetsFromNative: async attempt => await attempt({ credential: { kind: 'risu-auth', token: 'synthetic' }, reauthenticated: false }) === 'done' ? 'done' : 'unauthenticated',
     }
     const observedStore = new Proxy(store, { get(target, property) {
         const value = Reflect.get(target, property)
@@ -55,7 +57,8 @@ export async function runOfficialAccountMeasurements(store: PersistentDataStore,
     let sequence = 1
     for (const size of [32 * 1024, 4 * 1024 * 1024]) for (const latency of [300, 1000]) for (const concurrency of [1, 2, 4] as const) {
         const count = 12
-        const keys = Array.from({ length: count }, () => `assets/official-measure-${sequence++}-${latency}-${size}.bin`)
+        const seeds = Array.from({ length: count }, () => sequence++)
+        const keys = seeds.map(seed => `assets/official-measure-${seed}-${latency}-${size}.bin`)
         await store.replaceFromDatabase({ characters: [], username: '', botPresets: [], botPresetsId: 0,
             modules: [{ id: 'synthetic-assets', name: 'Synthetic', assets: keys.map(key => ['synthetic', key, 'bin']) }],
             syntheticPadding: 'x'.repeat(4 * 1024 * 1024),
@@ -67,23 +70,14 @@ export async function runOfficialAccountMeasurements(store: PersistentDataStore,
             const start = performance.now(); ledger.record(key, replacement); ledgerMs += performance.now() - start
         } }
         const expected = new Map<string, string>()
-        const account = { async readItem(key: string, options: AccountReadOptions = {}): Promise<AccountReadResult> {
-            return timed('network.read', async () => {
-                const deadline = accountReadDeadline(options.signal)
-                try {
-                    const response = await fetch(`${origin}/api/account/read/${Buffer.from(key).toString('hex')}`, {
-                        headers: { 'x-risu-key': key }, signal: deadline.signal,
-                    })
-                    if (!response.ok) throw new Error(`Synthetic server status ${response.status}`)
-                    const bytes = await readAccountBody(response, deadline.signal, deadline.reset, options.onBytes)
-                    expected.set(key, await hashPayloadBytes(bytes))
-                    return { kind: 'value', bytes }
-                } finally { deadline.dispose() }
-            })
-        } }
+        for (const [index, seed] of seeds.entries()) {
+            const bytes = new Uint8Array(size).fill(seed % 251)
+            new DataView(bytes.buffer).setUint32(0, seed, true)
+            expected.set(keys[index], await hashPayloadBytes(bytes))
+        }
         const assets = createNativeOfficialAccountAssets({ settings: nativeSettings, store: observedStore,
-            account, ledger: recorded, resolveBlobs: async () => blobs, flushMetadata: () => timed('ledger.flush', () => ledger.flush()), origin, concurrency,
-            getAccountId: () => 'synthetic',
+            account, ledger: recorded, resolveBlobs: async () => blobs, flushMetadata: () => timed('ledger.flush', () => ledger.flush()), baseUrl: origin, concurrency,
+            getAccountId: () => 'synthetic', jobs,
         })
         await assets.prepare('synthetic')
         await assets.bind('synthetic')
@@ -93,7 +87,7 @@ export async function runOfficialAccountMeasurements(store: PersistentDataStore,
         const startedAt = Date.now()
         const outcome = await assets.complete('synthetic')
         const elapsedMs = performance.now() - started
-        if (outcome.state !== 'succeeded' || outcome.counts.installed !== count || expected.size !== count) throw new Error('Synthetic restore did not download every body')
+        if (outcome.state !== 'succeeded' || outcome.counts.installed !== count) throw new Error('Synthetic restore did not download every body')
         const sample = { count, size, latency, concurrency, elapsedMs, ledgerMs, timings: { ...timings }, calls: { ...calls }, sentBytes, receivedBytes, startedAt, finishedAt: Date.now(),
             initialJSHeapBytes: initialHeap, sampledPeakJSHeapBytes: peakHeap || null }
         for (const key of keys) {
@@ -169,8 +163,8 @@ export async function runOfficialAccountMeasurements(store: PersistentDataStore,
             syntheticPadding: 'x'.repeat(4 * 1024 * 1024),
         } as unknown as Database)
         const continuation = createNativeOfficialAccountAssets({ settings: nativeSettings, store: observedStore,
-            resolveBlobs: async () => blobs, account: { readItem: async () => { throw new Error('Manifest measurement must not download') } },
-            ledger: { record() {}, clear() {}, reset() {}, publishedAs: () => null }, flushMetadata: async () => {}, origin, getAccountId: () => 'synthetic',
+            resolveBlobs: async () => blobs, account: { readAssetsFromNative: async () => { throw new Error('Manifest measurement must not download') } },
+            ledger: { record() {}, clear() {}, reset() {}, publishedAs: () => null }, flushMetadata: async () => {}, baseUrl: origin, getAccountId: () => 'synthetic',
         })
         const startedAt = Date.now(), started = performance.now()
         await continuation.prepare('synthetic'); await continuation.bind('synthetic')
@@ -180,13 +174,16 @@ export async function runOfficialAccountMeasurements(store: PersistentDataStore,
         manifestSamples.push({ count, writtenMs, elapsedMs: performance.now() - started, startedAt, finishedAt: Date.now() })
         await continuation.clear()
         let completed = 0
+        timings = {}; calls = {}
+        const initialHeap = heapUsed(); peakHeap = initialHeap ?? 0
         const scheduling = performance.now()
-        await transferOfficialAccountAssets({ accountId: 'synthetic-scheduler', origin, keys,
-            read: async () => ({ kind: 'missing' }), install: async () => { throw new Error('Missing bodies must not install') },
-            settled: (_key, result) => { if (result !== 'missing') throw new Error('Unexpected synthetic scheduler result'); completed++ },
-        })
-        if (completed !== count) throw new Error('Synthetic scheduler lost keys')
-        schedulerSamples.push({ count, elapsedMs: performance.now() - scheduling, note: 'Production scheduler with immediate synthetic missing responses; no network or storage.' })
+        const missing = Array.from({ length: count }, (_, index) => `assets/official-missing-${index}.bin`)
+        const result = await runNativeOfficialAssetRestore({ baseUrl: origin, credential: { kind: 'risu-auth', token: 'synthetic' }, accountId: 'synthetic-scheduler',
+            expectedLibrary: await store.readLibraryIdentity!(), keys: missing, concurrency: 4, reauthenticated: false,
+        }, { settled: (_key, result) => { if (result !== 'missing') throw new Error('Unexpected synthetic scheduler result'); completed++ } }, jobs)
+        if (completed !== count || result.reason || result.unsettled.length) throw new Error('Synthetic scheduler lost keys')
+        schedulerSamples.push({ count, elapsedMs: performance.now() - scheduling, calls: { ...calls }, initialJSHeapBytes: initialHeap, sampledPeakJSHeapBytes: peakHeap || null,
+            note: 'Native asset restore job with immediate synthetic 204 responses over loopback HTTP at concurrency 4; no bodies or storage writes.' })
     }
     let checkpoints = 0, checkpointWriteMs = 0
     const checkpointsLedger = await createNativeOfficialAssetLedger({ get: async () => null, set: nativeSettings.set.bind(nativeSettings),
@@ -204,5 +201,5 @@ export async function runOfficialAccountMeasurements(store: PersistentDataStore,
     if (checkpoints < 2 || Object.keys(JSON.parse(persisted['officialPublishedAssets:synthetic']).assets).length !== 8001) throw new Error('Elapsed native checkpoints did not persist the final generation')
     return { runtime: navigator.userAgent, rootPaddingBytes: 4 * 1024 * 1024, samples, ledgerSamples, nativeLedgerSamples, presenceSamples, manifestSamples, schedulerSamples,
         elapsedCheckpoints: { count: 8001, checkpoints, elapsedMs: checkpointElapsedMs, writeMs: checkpointWriteMs },
-        note: 'Actual account asset completion with native SQLite/CAS and loopback HTTP at the account transport boundary. Timings are nested, not additive. Network timing includes independent source hashing. Ledger sink and actual native ledger samples are separate. Sampled JS heap excludes native/WebView process memory and may miss short-lived peaks. Synthetic data only.' }
+        note: 'Actual account asset completion through the native restore job with native SQLite/CAS and a loopback HTTP server. Timings are nested, not additive. Ledger sink and actual native ledger samples are separate. Sampled JS heap excludes native/WebView process memory and may miss short-lived peaks. Synthetic data only.' }
 }

@@ -19,7 +19,7 @@
     import { hasLibraryCharacters } from 'src/ts/storage/libraryCharacters'
     import { createNativeSyncBindingBridge } from 'src/ts/storage/sync/bindingNative'
     import { subscribeSyncBindingChanges } from 'src/ts/storage/sync/bindingChanges'
-    import { isExternalLwwRunning, requestExternalLwwNow, subscribeExternalLwwFailures, supportsExternalLwwNewDevice } from 'src/ts/storage/sync/external/lwwProduction'
+    import { isExternalLwwRunning, requestExternalLwwNow, subscribeExternalLwwCatchUp, subscribeExternalLwwFailures, supportsExternalLwwNewDevice } from 'src/ts/storage/sync/external/lwwProduction'
     import { externalErrorLabel, externalSyncFailureText, externalSyncStatusView } from 'src/ts/storage/sync/syncStatusView'
     import BindingTargetSwitch from 'src/ts/storage/sync/BindingTargetSwitch.svelte'
     import { PREVIOUS_FILES_DOWNLOAD_FAILED } from 'src/ts/storage/sync/bindingFlow'
@@ -68,9 +68,11 @@
     let destroyed = false
     let stopJobEvents: (() => void) | undefined
     let stopSyncFailures: (() => void) | undefined
+    let stopSyncCatchUp: (() => void) | undefined
     let stopProgress: (() => void) | undefined
     let progress = $state<ReadonlyMap<string, ExternalOperationProgress>>(new Map())
     let syncFailures = $state<ReadonlyMap<string, unknown>>(new Map())
+    let syncCatchingUp = $state<ReadonlySet<string>>(new Set())
     let busy = $state(false)
     /** Which action is running, so only the button that started it shows a spinner. */
     let activeAction = $state('')
@@ -767,7 +769,7 @@
 
     // The status button shows the same badge, so the mapping lives with the sync status view.
     function connectionBadge(connection: ExternalConnectionSummary) {
-        return externalSyncStatusView(strings, connection, activeJob(connection), externalProgressFor(progress, connection.id), syncStopped(connection))
+        return externalSyncStatusView(strings, connection, activeJob(connection), externalProgressFor(progress, connection.id), syncStopped(connection), syncCatchingUp.has(connection.id))
     }
 
     // A backup registers each pack as it seals it, so its upload has no total until it ends.
@@ -821,6 +823,7 @@
 
     onMount(async () => {
         stopSyncFailures = subscribeExternalLwwFailures(value => syncFailures = value)
+        stopSyncCatchUp = subscribeExternalLwwCatchUp(value => syncCatchingUp = value)
         stopProgress = subscribeExternalProgress(value => {
             const completed = [...value].some(([key, operation]) => operation.visible && operation.state === 'complete' && progress.get(key)?.state === 'running')
             progress = value
@@ -846,6 +849,7 @@
         clearTimeout(pollTimer)
         stopJobEvents?.()
         stopSyncFailures?.()
+        stopSyncCatchUp?.()
         stopProgress?.()
         stopBindingChanges?.()
         if (exportRun) void bridge.cancelExport(exportRun.id).catch(() => {})
@@ -922,7 +926,7 @@
                     </dl>
                 {/if}
                 {#if job && externalJobIsPaused(job) && job.error?.retryAtMs}<p class="note">{strings.retryAt.replace('{0}', when(job.error.retryAtMs))}</p>{/if}
-                <ExternalTransferProgress connectionId={connection.id} {strings} {job} remaining={remaining[connection.id]}>
+                <ExternalTransferProgress connectionId={connection.id} {strings} {job} remaining={remaining[connection.id]} catchingUp={syncCatchingUp.has(connection.id)}>
                     {#snippet exportActions()}
                         {#if exportRun?.connectionId === connection.id}
                             <SettingButton variant="secondary" size="sm" onclick={() => exportRun && bridge.cancelExport(exportRun.id)}>{strings.cancel}</SettingButton>

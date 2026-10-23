@@ -329,7 +329,7 @@ fn pocket_namespaced_cold_storage_is_staged_for_expansion() {
 }
 
 #[test]
-fn duplicate_cold_namespaces_and_invalid_cold_data_cannot_activate() {
+fn duplicate_cold_namespaces_cannot_activate_and_invalid_cold_data_is_unavailable() {
     let key = "9f8b7c6d-1a2b-3c4d-5e6f-a1b2c3d4e5f6";
     let duplicates = [
         archive_entry(&format!("coldstorage/{key}.json"), b"[]"),
@@ -337,11 +337,16 @@ fn duplicate_cold_namespaces_and_invalid_cold_data_cannot_activate() {
     ]
     .concat();
     assert!(plan(duplicates, &NeverCancelled).is_err());
-    assert!(plan(
+    let invalid = plan(
         archive_entry(&format!("coldstorage/{key}.json"), b"invalid"),
-        &NeverCancelled
+        &NeverCancelled,
     )
-    .is_err());
+    .unwrap();
+    assert!(invalid.cold_payloads.is_empty());
+    assert_eq!(
+        invalid.unavailable_cold_payloads.get(key),
+        Some(&restore::ColdPayloadUnavailable::Damaged)
+    );
 }
 
 fn plan(

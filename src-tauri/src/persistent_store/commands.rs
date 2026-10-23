@@ -4,6 +4,7 @@ pub(crate) mod image_geometry;
 pub(crate) mod hypa;
 
 use super::archive::ArchivePreview;
+use super::asset_alias_orphans::{OrphanAliasScope, OWNED_ASSET_KEY_PREFIX};
 use super::device_store::plugin_values::{
     PluginDeviceHydration, PluginDeviceListItem, PluginDeviceMutation, PluginDeviceRead, PluginDeviceRange,
 };
@@ -1631,7 +1632,7 @@ fn pds_asset_gc_preview_all(
     let now = current_time_ms()?;
     // Preview roots are scoped to this invocation. Deletion always collects fresh roots.
     let preview = with_store_mutex_admitted(state, operation_guard, |store| {
-        store.prepare_asset_gc_preview()
+        store.prepare_asset_gc_preview(now)
     })?;
     let mut cursor = None;
     let mut result = AssetGcMaintenanceResult {
@@ -1758,6 +1759,131 @@ fn pds_asset_gc_execute_all(
         }
     }
     Ok(result)
+}
+
+/// Keys one permanent-delete cleanup accepts, and the longest key it accepts.
+const DELETED_OWNER_CLEANUP_MAX_KEYS: usize = 100_000;
+const DELETED_OWNER_CLEANUP_MAX_KEY_BYTES: usize = 4096;
+
+/// The asset keys a permanently deleted character, module or persona named, and the wall-clock
+/// time its delete began, so an alias written since is kept.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DeletedOwnerAssets {
+    keys: Vec<String>,
+    started_at_ms: i64,
+}
+
+/// Deletes the asset aliases nothing references, or with `owner` only those the deleted owner
+/// alone used, while the library is still at `expected_revision`. An owner's files are then
+/// deleted in the background with no grace for new files; the unused-file cleanup deletes the
+/// files of other aliases.
+#[tauri::command(async)]
+pub(crate) fn pds_asset_delete_orphaned_aliases(
+    app: AppHandle,
+    state: State<'_, PersistentStoreState>,
+    expected_revision: i64,
+    owner: Option<DeletedOwnerAssets>,
+) -> Result<RevisionResult, StoreError> {
+    logged(
+        "pds_asset_delete_orphaned_aliases",
+        delete_orphaned_aliases(&app, &state, expected_revision, owner),
+    )
+}
+
+fn delete_orphaned_aliases<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &PersistentStoreState,
+    expected_revision: i64,
+    owner: Option<DeletedOwnerAssets>,
+) -> StoreResult<RevisionResult> {
+    let operation_guard = state.admit_renderer_operation()?;
+    let owner = owner.map(|owner| {
+        if owner.keys.len() > DELETED_OWNER_CLEANUP_MAX_KEYS
+            || owner.keys.iter().any(|key| key.len() > DELETED_OWNER_CLEANUP_MAX_KEY_BYTES)
+            || owner.started_at_ms < 0
+        {
+            return Err(StoreError::Validation { message: "deleted owner cleanup input is out of bounds".into() });
+        }
+        let keys = owner.keys.into_iter()
+            .filter(|key| key.starts_with(OWNED_ASSET_KEY_PREFIX))
+            .collect::<std::collections::BTreeSet<_>>();
+        Ok((keys, owner.started_at_ms))
+    }).transpose()?;
+    let now = current_time_ms()?;
+    let (revision, deleted) = with_store_mutex_mut_admitted(state, &operation_guard, |store| {
+        let actual = store.revision()?;
+        if actual != expected_revision {
+            return Err(StoreError::RevisionConflict { expected: expected_revision, actual });
+        }
+        let deleted = match &owner {
+            Some((keys, _)) if keys.is_empty() => Vec::new(),
+            Some((keys, started_at_ms)) => store.delete_orphaned_asset_aliases(
+                &OrphanAliasScope::DeletedOwner { keys, started_at_ms: *started_at_ms },
+            )?,
+            None => store.delete_orphaned_asset_aliases(&OrphanAliasScope::Cleanup { now_ms: now })?,
+        };
+        Ok((store.revision()?, deleted))
+    })?;
+    if owner.is_some() && !deleted.is_empty() {
+        let objects = deleted.into_iter().map(|alias| alias.object_hash).collect();
+        let app = app.clone();
+        // The renderer adopts the revision before the files are gone, so its saves do not wait.
+        tauri::async_runtime::spawn_blocking(move || {
+            let state = app.state::<PersistentStoreState>();
+            let _ = logged(
+                "pds_asset_delete_deleted_owner_files",
+                delete_deleted_owner_files(&state, &operation_guard, objects),
+            );
+        });
+    }
+    Ok(RevisionResult { revision })
+}
+
+/// Deletes the files of a deleted owner's aliases, skipping the grace for new files since the
+/// owner is gone by the user's choice. Pages hold the store no longer than an unused-file cleanup
+/// page does.
+fn delete_deleted_owner_files(
+    state: &PersistentStoreState,
+    operation_guard: &RendererOperationGuard,
+    objects: std::collections::BTreeSet<String>,
+) -> StoreResult<()> {
+    let now = current_time_ms()?;
+    let marks = with_store_mutex_admitted(state, operation_guard, |store| {
+        store.prepare_asset_gc_delete_marks()
+    })?;
+    let objects = objects.into_iter().collect::<Vec<_>>();
+    let mut library = None;
+    for page in objects.chunks(asset_gc_execute_page() as usize) {
+        let page = page.iter().cloned().collect();
+        with_store_mutex_mut_admitted(state, operation_guard, |store| {
+            store.asset_gc_delete_exact_objects(&marks, &page, &mut library, now, 0)
+        })?;
+    }
+    Ok(())
+}
+
+/// Characters one permanent delete removes at most.
+const DELETED_CHARACTERS_MAX: usize = 128;
+
+/// The owned asset keys the conversations of characters about to be permanently deleted name,
+/// which a read of their details leaves out.
+#[tauri::command(async)]
+pub(crate) fn pds_character_asset_keys(
+    state: State<'_, PersistentStoreState>,
+    character_ids: Vec<String>,
+) -> Result<Vec<String>, StoreError> {
+    let operation_guard = state.admit_renderer_operation()?;
+    if character_ids.len() > DELETED_CHARACTERS_MAX {
+        return Err(StoreError::Validation { message: "too many characters for one asset key read".into() });
+    }
+    logged(
+        "pds_character_asset_keys",
+        with_store_mutex_admitted(&state, &operation_guard, |store| {
+            store.character_conversation_asset_keys(&character_ids, DELETED_OWNER_CLEANUP_MAX_KEYS)
+        })
+        .map(|keys| keys.into_iter().collect()),
+    )
 }
 
 /// Candidates one cleanup page deletes.
@@ -3468,6 +3594,112 @@ mod tests {
                 .is_none()
         }));
     }
+    /// A character purged before this cleanup existed, or before its own cleanup ran, leaves
+    /// aliases nothing references. The preview lists their files once the aliases are past the
+    /// grace, and keeps a newer one as recent; the alias delete and the execute remove them.
+    #[test]
+    fn asset_gc_commands_delete_aliases_a_purged_character_left() {
+        use crate::persistent_store::tests::asset_catalog_gc_tests::{add_synthetic_character, alias_object, backdate_alias};
+        use crate::server_sync::lww_tests::put_asset;
+
+        let directory = tempdir().unwrap();
+        let mut store = PersistentStore::open(directory.path()).unwrap();
+        let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
+        let purged = put_asset(&mut store, "assets/purged.png", b"synthetic purged body").object_hash.unwrap();
+        let recent = put_asset(&mut store, "assets/recent.png", b"synthetic recent body").object_hash.unwrap();
+        add_synthetic_character(&mut store, "purged", "assets/purged.png assets/recent.png");
+        store.commit(&WorkingSetCommit {
+            expected_revision: store.revision().unwrap(),
+            delete_character_ids: Some(vec!["purged".into()]),
+            ..Default::default()
+        }).unwrap();
+        backdate_alias(&store, "assets/purged.png", 1_000);
+        let state = PersistentStoreState { store: Mutex::new(Some(store)), ..PersistentStoreState::default() };
+        let operation_guard = state.admit_renderer_operation().unwrap();
+
+        let preview = pds_asset_gc_preview_all(&state, &operation_guard).unwrap();
+        let states = preview.candidates.iter()
+            .map(|candidate| (candidate.object_hash.as_str(), candidate.state))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(states, [(purged.as_str(), "deletable"), (recent.as_str(), "recent")].into());
+        let app = tauri::test::mock_builder().build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let revision = state.store.lock().unwrap().as_ref().unwrap().revision().unwrap();
+        assert!(delete_orphaned_aliases(app.handle(), &state, revision, None).unwrap().revision > revision);
+        let executed = pds_asset_gc_execute_all(&state, &operation_guard).unwrap();
+        assert_eq!(executed.deleted_count, 1);
+
+        drop(operation_guard);
+        let store = state.store.into_inner().unwrap().unwrap();
+        assert_eq!(alias_object(&store, "assets/purged.png"), None);
+        assert!(cas.stat_object(&purged).unwrap().is_none());
+        assert_eq!(alias_object(&store, "assets/recent.png"), Some(recent.clone()));
+        assert!(cas.stat_object(&recent).unwrap().is_some());
+    }
+
+    /// A permanent delete removes at once the aliases only the deleted owner used, once no
+    /// revision lease still reads them and only at the revision the renderer expects, then their
+    /// files in the background. A shared asset and one written after the delete started stay.
+    #[test]
+    fn deleted_owner_cleanup_deletes_only_assets_the_owner_alone_used() {
+        use crate::persistent_store::tests::asset_catalog_gc_tests::{add_synthetic_character, alias_object};
+        use crate::server_sync::lww_tests::put_asset;
+
+        let directory = tempdir().unwrap();
+        let mut store = PersistentStore::open(directory.path()).unwrap();
+        let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
+        let only = put_asset(&mut store, "assets/only.png", b"synthetic only body").object_hash.unwrap();
+        let second = put_asset(&mut store, "assets/second.png", b"synthetic second body").object_hash.unwrap();
+        let shared = put_asset(&mut store, "assets/shared.png", b"synthetic shared body").object_hash.unwrap();
+        add_synthetic_character(&mut store, "owner", "assets/only.png assets/second.png assets/shared.png");
+        add_synthetic_character(&mut store, "other", "<img src=\"assets/shared.png\">");
+        // The file was saved just now, well inside the grace a cleanup page keeps.
+        store.connection.execute("UPDATE asset_objects SET created_at_ms = ?1",
+            [super::super::device_store::now_ms().unwrap()]).unwrap();
+        let lease = store.acquire_revision(store.revision().unwrap()).unwrap().lease;
+        let written = super::super::device_store::now_ms().unwrap();
+        while super::super::device_store::now_ms().unwrap() <= written {
+            std::thread::yield_now();
+        }
+        let started_at_ms = super::super::device_store::now_ms().unwrap();
+        store.commit(&WorkingSetCommit {
+            expected_revision: store.revision().unwrap(),
+            delete_character_ids: Some(vec!["owner".into()]),
+            ..Default::default()
+        }).unwrap();
+        let late = put_asset(&mut store, "assets/late.png", b"synthetic late body").object_hash.unwrap();
+        let revision = store.revision().unwrap();
+        let keys = ["assets/only.png", "assets/second.png", "assets/shared.png", "assets/late.png", "sync-conflict-backups/a.risudat"]
+            .map(str::to_owned).to_vec();
+        let owner = || Some(DeletedOwnerAssets { keys: keys.clone(), started_at_ms });
+        let app = tauri::test::mock_builder().build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        app.manage(PersistentStoreState { store: Mutex::new(Some(store)), ..PersistentStoreState::default() });
+        let state = app.state::<PersistentStoreState>();
+
+        assert!(matches!(delete_orphaned_aliases(app.handle(), &state, revision - 1, owner()),
+            Err(StoreError::RevisionConflict { .. })));
+        assert_eq!(delete_orphaned_aliases(app.handle(), &state, revision, owner()).unwrap().revision, revision);
+        state.store.lock().unwrap().as_mut().unwrap().release_revision(&lease).unwrap();
+        assert!(delete_orphaned_aliases(app.handle(), &state, revision, owner()).unwrap().revision > revision);
+        // The background file delete holds a renderer operation until it ends.
+        let gate = state.renderer_gate.state.lock().unwrap();
+        let (gate, waited) = state.renderer_gate.drained
+            .wait_timeout_while(gate, std::time::Duration::from_secs(60), |gate| gate.operations > 0)
+            .unwrap();
+        assert!(!waited.timed_out());
+        drop(gate);
+
+        let store = state.store.lock().unwrap();
+        let store = store.as_ref().unwrap();
+        assert_eq!(alias_object(store, "assets/only.png"), None);
+        assert!(cas.stat_object(&only).unwrap().is_none());
+        assert_eq!(alias_object(store, "assets/second.png"), None);
+        assert!(cas.stat_object(&second).unwrap().is_none());
+        assert_eq!(alias_object(store, "assets/shared.png"), Some(shared.clone()));
+        assert!(cas.stat_object(&shared).unwrap().is_some());
+        assert_eq!(alias_object(store, "assets/late.png"), Some(late.clone()));
+        assert!(cas.stat_object(&late).unwrap().is_some());
+    }
+
     /// The local data screen reads the shipped defaults, then writes the one
     /// row the user changed.
     #[test]

@@ -387,7 +387,7 @@
                 {#each ['all', 'image', 'video', 'audio'] as const as type}<button class="g-chip" class:active={query.type === type} onclick={() => { query.type = type; changeFilter() }}>{text[type]} <span>{counts[type]}</span></button>{/each}
                 </div>
                 <div class="g-row attachment-controls">
-                <select class="g-select" aria-label={text.sort} bind:value={query.sort} onchange={changeFilter}><option value="newest">{text.newest}</option><option value="oldest">{text.oldest}</option><option value="largest">{text.largest}</option></select>
+                <select class="risu-select h-[1.875rem] max-w-full rounded-md border border-darkborderc bg-darkbg pl-2.5 text-[13px] text-textcolor" aria-label={text.sort} bind:value={query.sort} onchange={changeFilter}><option value="newest">{text.newest}</option><option value="oldest">{text.oldest}</option><option value="largest">{text.largest}</option></select>
                 <div class="g-segment"><button class:active={$gallerySize === 'normal'} onclick={() => gallerySize.set('normal')}>{text.normal}</button><button class:active={$gallerySize === 'large'} onclick={() => gallerySize.set('large')}>{text.large}</button></div>
                 <button class="g-button small" class:primary={selecting} onclick={() => { selecting = !selecting }}>{text.select}</button>
                 </div>
@@ -399,7 +399,7 @@
                 <button class="g-chip" class:active={query.usage === 'all'} onclick={() => { query.usage = 'all'; changeFilter() }}>{text.all}</button>
                 <button class="g-chip" class:active={query.usage === 'unused'} onclick={() => { query.usage = 'unused'; changeFilter() }}>{text.unused} {completedScan.counts.unused}</button>
                 {#if completedScan.counts.unknown}<button class="g-chip" class:active={query.usage === 'unknown'} onclick={() => { query.usage = 'unknown'; changeFilter() }}>{text.unknown} {completedScan.counts.unknown}</button>{/if}
-                <select class="g-select" aria-label={text.character} value={query.characterId ?? ''} onchange={event => { query.characterId = event.currentTarget.value || undefined; changeFilter() }}><option value="">{text.allCharacters}</option>{#each completedScan.characters as character}<option value={character.characterId}>{character.name ?? DBState.db.characters.find(value => value.chaId === character.characterId)?.name ?? character.characterId} ({character.count})</option>{/each}</select>
+                <select class="risu-select h-[1.875rem] max-w-full rounded-md border border-darkborderc bg-darkbg pl-2.5 text-[13px] text-textcolor" aria-label={text.character} value={query.characterId ?? ''} onchange={event => { query.characterId = event.currentTarget.value || undefined; changeFilter() }}><option value="">{text.allCharacters}</option>{#each completedScan.characters as character}<option value={character.characterId}>{character.name ?? DBState.db.characters.find(value => value.chaId === character.characterId)?.name ?? character.characterId} ({character.count})</option>{/each}</select>
             </div>
         {/if}
         <div class="g-notices" aria-live="polite">

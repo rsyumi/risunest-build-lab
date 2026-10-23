@@ -17,6 +17,7 @@ import {
   contractDirectory,
   acceptsContract,
   verifySourcePins,
+  selectedTargets,
 } from "./compatibleExportContract.mjs";
 const require = createRequire(import.meta.url);
 const ts = require("typescript");
@@ -54,7 +55,9 @@ export function createReferenceHarness(target) {
     "storage/database.svelte.ts",
     "bootstrap.ts",
     "globalApi.svelte.ts",
-    ...(target === "risuai" ? ["drive/backuplocal.ts"] : ["process/files/inlayMeta.ts"]),
+    ...(target === "risuai"
+      ? ["storage/saveKV.ts", "drive/backuplocal.ts"]
+      : ["process/files/inlayMeta.ts"]),
   ].map((p) => path.join(directory, "src/ts", p));
   if (target === "pocket")
     entryPaths.push(path.join(directory, "server/node/server.cjs"));
@@ -73,6 +76,25 @@ export function createReferenceHarness(target) {
     );
   };
   const io = new Proxy({}, { get: () => forbidden });
+  // RisuAI's block writer stores an absent database part as an empty block,
+  // which its decoder reports and skips. Only that report is allowed, and only
+  // for parts the harness itself left absent when it encoded the save.
+  const blockParts = {
+    botPresets: "preset",
+    modules: "modules",
+    loadouts: "loadouts",
+    plugins: "plugins",
+    pluginCustomStorage: "pluginStorage",
+  };
+  const emptyBlocks = new WeakMap();
+  let allowedBlockErrors = new Set();
+  const consoleError = (message, error) => {
+    const block = typeof message === "string"
+      ? /^Error processing block (.*):$/.exec(message)?.[1]
+      : undefined;
+    if (block === undefined || !allowedBlockErrors.has(block) || error?.name !== "SyntaxError")
+      forbidden();
+  };
   const state = { db: {} };
   const memoryStorage = new Map();
   const storage = {
@@ -149,7 +171,7 @@ export function createReferenceHarness(target) {
     TransformStream,
     Response,
     structuredClone,
-    console: { log() {}, warn() {}, error: forbidden },
+    console: { log() {}, warn() {}, error: consoleError },
     fetch: forbidden,
     setTimeout: forbidden,
     setInterval: forbidden,
@@ -176,6 +198,7 @@ export function createReferenceHarness(target) {
     exists: forbidden,
     mkdir: forbidden,
     readFile: forbidden,
+    remove: forbidden,
     BaseDirectory: {},
     alertError: forbidden,
     alertConfirm: forbidden,
@@ -319,7 +342,9 @@ export function createReferenceHarness(target) {
   }
   const wanted = [
     "decodeRisuSave",
-    "encodeRisuSaveLegacy",
+    ...(target === "risuai"
+      ? ["encodeRisuSave", "saveKV"]
+      : ["encodeRisuSaveLegacy"]),
     "setDatabase",
     "getDatabase",
     "checkNewFormat",
@@ -342,6 +367,7 @@ export function createReferenceHarness(target) {
   for (const name of wanted) {
     const node = entryPaths
       .flatMap((file) => program.getSourceFile(file).statements)
+      .flatMap((n) => ts.isVariableStatement(n) ? n.declarationList.declarations : [n])
       .find((n) => n.name?.text === name);
     if (!node) throw new Error(`Reference declaration missing: ${name}`);
     include(node);
@@ -354,10 +380,58 @@ export function createReferenceHarness(target) {
     },
   }).outputText;
   vm.runInContext(javascript, context, { timeout: 10000 });
+  // RisuAI decodes the database and its SaveKV blocks separately; Pocket has no
+  // SaveKV, so its KV is always empty.
+  const decodeSave = async (bytes) => {
+    if (target === "pocket")
+      return { database: await context.decodeRisuSave(bytes), kv: {} };
+    allowedBlockErrors = emptyBlocks.get(bytes) ?? new Set();
+    try {
+      const { database, kv } = await context.decodeRisuSave(bytes);
+      return { database, kv };
+    } finally {
+      allowedBlockErrors = new Set();
+    }
+  };
+  // The save the target writes after loading: RisuAI's backup writer reads KV
+  // from the live SaveKV store, which the caller loads first.
+  const encodeSave = async (value) => {
+    if (target === "pocket")
+      return context.encodeRisuSaveLegacy(value, "compression");
+    const bytes = await context.encodeRisuSave(value, {
+      compression: true,
+      kv: context.saveKV,
+    });
+    emptyBlocks.set(
+      bytes,
+      new Set(
+        Object.entries(blockParts)
+          .filter(([field]) => value[field] === undefined)
+          .map(([, block]) => block),
+      ),
+    );
+    return bytes;
+  };
+  const loadKV = (kv) => {
+    if (target === "risuai") context.saveKV.load(kv);
+    else if (Object.keys(kv).length) forbidden();
+  };
   return {
     sources: [...sources].sort(),
-    decode: (bytes) => context.decodeRisuSave(bytes),
-    encode: (value) => context.encodeRisuSaveLegacy(value, "compression"),
+    decode: async (bytes) => (await decodeSave(bytes)).database,
+    async encode(value, kv = {}) {
+      loadKV(kv);
+      return encodeSave(value);
+    },
+    liveKV: () =>
+      target === "risuai"
+        ? Object.fromEntries(
+            context.saveKV.namespaces().map((ns) => [
+              ns,
+              JSON.parse(context.saveKV.encodeNamespace(ns)),
+            ]),
+          )
+        : {},
     storage: memoryStorage,
     transaction,
     get lastSourceDatabase() {
@@ -437,7 +511,7 @@ export function createReferenceHarness(target) {
       return state.db;
     },
     async roundTrip(bytes) {
-      const decoded = await context.decodeRisuSave(bytes);
+      const { database: decoded, kv } = await decodeSave(bytes);
       if (target === "pocket") {
         const restored = context.restoreColdStorageCharactersInDb(decoded);
         if (restored.failed)
@@ -448,13 +522,17 @@ export function createReferenceHarness(target) {
               throw new Error("Pocket cold chat restoration failed");
       }
       context.setDatabase(decoded);
+      loadKV(kv);
       await context.checkNewFormat();
-      const encoded = context.encodeRisuSaveLegacy(state.db, "compression");
+      const encoded = await encodeSave(state.db);
+      const resaved = await decodeSave(encoded);
       return {
         decoded,
+        kv,
         normalized: state.db,
         encoded,
-        resaved: await context.decodeRisuSave(encoded),
+        resaved: resaved.database,
+        resavedKV: resaved.kv,
       };
     },
   };
@@ -715,7 +793,7 @@ if (
     process.exit(0);
   }
   const pins = {};
-  for (const target of Object.keys(references)) {
+  for (const target of selectedTargets(process.argv)) {
     const harness = createReferenceHarness(target);
     pins[target] = referenceRuntimePins(target, harness);
     console.log(
@@ -723,9 +801,10 @@ if (
     );
   }
   const file = path.join(contractDirectory, "runtime.json");
+  const committed = JSON.parse(fs.readFileSync(file, "utf8"));
   if (process.argv.includes("--check")) {
-    const expected = JSON.parse(fs.readFileSync(file, "utf8"));
-    for (const target of Object.keys(references))
-      verifySourceFilePins(target, Object.keys(pins[target]), expected[target]);
-  } else fs.writeFileSync(file, JSON.stringify(pins, null, 2) + "\n");
+    for (const target of Object.keys(pins))
+      verifySourceFilePins(target, Object.keys(pins[target]), committed[target]);
+  } else
+    fs.writeFileSync(file, JSON.stringify({ ...committed, ...pins }, null, 2) + "\n");
 }

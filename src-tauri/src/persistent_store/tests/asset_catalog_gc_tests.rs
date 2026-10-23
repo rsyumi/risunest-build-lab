@@ -1420,7 +1420,7 @@ fn resolved_aliases_allow_gc_but_unknown_references_and_plugins_report_blocked()
             store.connection.execute("UPDATE root SET value = ?1 WHERE generation = ?2",
                 rusqlite::params![r#"{"image":"assets/unknown.bin"}"#, generation]).unwrap();
         }
-        let preview = store.prepare_asset_gc_preview().unwrap();
+        let preview = store.prepare_asset_gc_preview(100).unwrap();
         let (page, details) = store.asset_gc_preview_page_detail(&preview, 16, None, 100, 10).unwrap();
         assert!(!page.report.blockers.is_empty());
         assert!(page.report.potential_delete_hashes.is_empty());
@@ -1674,4 +1674,236 @@ fn catalog_pages_seek_past_objects_registered_at_the_same_time() {
     assert_eq!(steps.len(), 8);
     // A page that walked from the first object to its cursor would cost several first pages.
     assert!(steps.iter().all(|&step| step <= steps[0] * 2), "{steps:?}");
+}
+
+/// The object the `asset` alias for `key` names, when the alias exists.
+pub(crate) fn alias_object(store: &PersistentStore, key: &str) -> Option<String> {
+    store.read_asset_alias("asset", key, None).unwrap().and_then(|alias| alias.value.object_hash)
+}
+
+/// Moves the last write of the alias for `key` back to `physical_ms`, as if an older release had
+/// written it then.
+pub(crate) fn backdate_alias(store: &PersistentStore, key: &str, physical_ms: u64) {
+    let unit = super::super::lww::unit_key(&["asset", key]).unwrap();
+    let stamp: String = store.connection
+        .query_row("SELECT stamp FROM lww_units WHERE key = ?1", [unit.as_str()], |row| row.get(0))
+        .unwrap();
+    let mut stamp: risunest_sync_wire::stamp::Stamp = serde_json::from_str(&stamp).unwrap();
+    stamp.physical_ms = risunest_sync_wire::stamp::DecimalU64(physical_ms);
+    store.connection
+        .execute("UPDATE lww_units SET stamp = ?1 WHERE key = ?2",
+            rusqlite::params![serde_json::to_string(&stamp).unwrap(), unit.as_str()])
+        .unwrap();
+}
+
+pub(crate) fn add_synthetic_character(store: &mut PersistentStore, character_id: &str, desc: &str) {
+    store.commit(&WorkingSetCommit {
+        add_character: Some(json!({
+            "chaId": character_id, "type": "character", "name": "Synthetic", "image": "",
+            "desc": desc, "chats": [], "lastInteraction": 500,
+        })),
+        ..empty_working_set_commit(store.revision().unwrap())
+    }).unwrap();
+}
+
+#[test]
+fn unused_file_cleanup_keeps_aliases_referenced_in_any_stored_form_or_held_by_another_root() {
+    use crate::server_sync::lww_tests::put_asset;
+    use super::super::asset_alias_orphans::OrphanAliasScope;
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    let keys = [
+        "assets/shared.png", "assets/html.png", "assets/backslash.png", "assets/한글.png",
+        "assets/plugin-bare.png", "assets/setting.png", "assets/archived.png",
+        "assets/snapshotted.png", "assets/ledger.png",
+    ];
+    // Only this alias is old enough for the snapshot to hold it.
+    put_asset(&mut store, "assets/snapshotted.png", b"synthetic snapshotted body");
+    add_synthetic_character(&mut store, "snapshot-owner", "assets/snapshotted.png");
+    let snapshot = store.snapshot_create("synthetic-alias-cleanup").unwrap();
+    store.commit(&WorkingSetCommit {
+        delete_character_ids: Some(vec!["snapshot-owner".into()]),
+        ..empty_working_set_commit(store.revision().unwrap())
+    }).unwrap();
+    for key in keys.iter().filter(|key| **key != "assets/snapshotted.png") {
+        put_asset(&mut store, key, format!("synthetic body of {key}").as_bytes());
+    }
+    add_synthetic_character(&mut store, "kept",
+        r#"<div><img src="assets/html.png" alt=""></div>{{raw::assets/shared.png}} assets\backslash.png assets/한글.png"#);
+    data_health_tests::add_character_with_owner_manifest(
+        &mut store, "manifest-owner", "assets/manifest.png", "portrait.png");
+    // Only the owner manifest still names this key.
+    store.connection.execute(
+        "UPDATE characters SET detail = json_remove(detail, '$.additionalAssets') WHERE character_id = 'manifest-owner'",
+        []).unwrap();
+    store.connection.execute("DELETE FROM lww_units WHERE key = ?1",
+        [super::super::lww::unit_key(&["character", "manifest-owner", "additionalAssets"]).unwrap().as_str()]).unwrap();
+    // A newer body, so the manifest holds a different object than the alias names.
+    put_asset(&mut store, "assets/manifest.png", b"synthetic newer manifest body");
+    add_synthetic_character(&mut store, "archived", "assets/archived.png");
+    store.archive_character("archived", store.revision().unwrap(), 10).unwrap();
+    // Only the archived payload still names this key.
+    assert!(store.connection.execute(r#"DELETE FROM lww_units WHERE key LIKE '["character","archived"%'"#, []).unwrap() > 0);
+    store.commit(&WorkingSetCommit {
+        plugin_storage: Some(vec![PluginStorageMutation::Set {
+            owner: "synthetic-plugin".into(), key: "portrait".into(), value: json!({"id": "plugin-bare.png"}),
+        }]),
+        ..empty_working_set_commit(store.revision().unwrap())
+    }).unwrap();
+    let device = store.device_store().unwrap();
+    device.write_setting("official-account.pending-assets.v1", &json!([{"key": "assets/setting.png"}])).unwrap();
+    device.write_setting("official-account.asset-ledger.v1", &json!({"assets/ledger.png": 1})).unwrap();
+    for key in keys.iter().copied().chain(["assets/manifest.png"]) {
+        backdate_alias(&store, key, 1_000);
+    }
+    let now = super::super::device_store::now_ms().unwrap();
+    let kept = |store: &PersistentStore, deleted: &[&str]| {
+        for key in keys.iter().copied().chain(["assets/manifest.png"]).filter(|key| !deleted.contains(key)) {
+            assert!(alias_object(store, key).is_some(), "{key} must stay");
+        }
+    };
+
+    // An asset key nothing resolves blocks the cleanup, so no alias counts as unused.
+    let generation = super::active_generation(&store.connection).unwrap();
+    store.connection.execute("UPDATE root SET value = ?1 WHERE generation = ?2",
+        rusqlite::params![r#"{"image":"assets/unknown.bin"}"#, generation]).unwrap();
+    assert!(store.delete_orphaned_asset_aliases(&OrphanAliasScope::Cleanup { now_ms: now }).unwrap().is_empty());
+    kept(&store, &[]);
+    store.connection.execute("UPDATE root SET value = '{}' WHERE generation = ?1", [&generation]).unwrap();
+
+    let deleted = store.delete_orphaned_asset_aliases(&OrphanAliasScope::Cleanup { now_ms: now }).unwrap();
+    assert_eq!(deleted.iter().map(|alias| alias.key.as_str()).collect::<Vec<_>>(), ["assets/ledger.png"]);
+    kept(&store, &["assets/ledger.png"]);
+
+    store.snapshot_delete(&snapshot.id).unwrap();
+    let deleted = store.delete_orphaned_asset_aliases(&OrphanAliasScope::Cleanup { now_ms: now }).unwrap();
+    assert_eq!(deleted.iter().map(|alias| alias.key.as_str()).collect::<Vec<_>>(), ["assets/snapshotted.png"]);
+    kept(&store, &["assets/ledger.png", "assets/snapshotted.png"]);
+}
+
+#[test]
+fn unused_alias_cleanup_keeps_device_plugin_writers_out_until_it_commits() {
+    use crate::server_sync::lww_tests::put_asset;
+    use super::super::asset_alias_orphans::OrphanAliasScope;
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    put_asset(&mut store, "assets/orphan.png", b"synthetic orphan body");
+    backdate_alias(&store, "assets/orphan.png", 1_000);
+    let now = super::super::device_store::now_ms().unwrap();
+    let device_path = store.device_store().unwrap().connection().path().unwrap().to_owned();
+
+    // A plugin writer on another connection could save a reference to the key between the
+    // reference check and the commit, so it must find the device store locked by then.
+    let writer_locked_out = std::rc::Rc::new(std::cell::Cell::new(false));
+    let locked_out = writer_locked_out.clone();
+    super::super::lww::BEFORE_HELD_COMMIT.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
+        let writer = rusqlite::Connection::open(device_path).unwrap();
+        writer.busy_timeout(std::time::Duration::ZERO).unwrap();
+        locked_out.set(writer.execute_batch("BEGIN IMMEDIATE").is_err());
+    })));
+    let deleted = store.delete_orphaned_asset_aliases(&OrphanAliasScope::Cleanup { now_ms: now }).unwrap();
+    assert_eq!(deleted.iter().map(|alias| alias.key.as_str()).collect::<Vec<_>>(), ["assets/orphan.png"]);
+    assert!(writer_locked_out.get());
+}
+
+#[test]
+fn unused_alias_cleanup_reads_received_message_pages_not_applied_yet() {
+    use crate::server_sync::lww_tests::put_asset;
+    use super::super::asset_alias_orphans::OrphanAliasScope;
+    use risunest_external_storage_format::{logical_records::encode_message_page, message_pages::{ManifestPage, MessageManifest, MANIFEST_SCHEMA}};
+    use risunest_sync_wire::{descriptor::RecordDescriptor, unit::{UnitKey, UnitValue}};
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    for key in ["assets/received.png", "assets/unused.png", "assets/late.png"] {
+        put_asset(&mut store, key, format!("synthetic body of {key}").as_bytes());
+        backdate_alias(&store, key, 1_000);
+    }
+    let page = encode_message_page(&[json!({"role": "char", "data": "<img src=\"assets/received.png\">"})]).unwrap();
+    let manifest = MessageManifest {
+        schema: MANIFEST_SCHEMA.into(),
+        message_count: 1.into(),
+        pages: vec![ManifestPage { hash: page.hash.clone(), message_count: 1, byte_length: page.size.into() }],
+    }.encode().unwrap();
+    super::super::message_pages::put_object(&store.connection, &manifest.hash, &manifest.bytes).unwrap();
+    let value = UnitValue::object(RecordDescriptor::content(manifest.hash.clone())).unwrap();
+    let key = UnitKey::new(&["messages", "receiving-owner", "chat"]).unwrap();
+    store.connection.execute("INSERT INTO lww_receive_rows VALUES('synthetic-receive',?1,'{}',?2,'staged')",
+        rusqlite::params![key.as_str(), serde_json::to_string(&value).unwrap()]).unwrap();
+    let now = super::super::device_store::now_ms().unwrap();
+    let cleanup = OrphanAliasScope::Cleanup { now_ms: now };
+
+    // Until its page arrives, the received chat may use any of them.
+    assert!(store.delete_orphaned_asset_aliases(&cleanup).unwrap().is_empty());
+
+    super::super::message_pages::put_object(&store.connection, &page.hash, &page.bytes).unwrap();
+    // A row received through another connection after the search may use the rest.
+    let library_path = store.database_path.clone();
+    super::super::lww::BEFORE_HELD_COMMIT.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
+        rusqlite::Connection::open(library_path).unwrap()
+            .execute("INSERT INTO lww_receive_rows VALUES('later-receive','[\"root\"]','{}','{}','held')", []).unwrap();
+    })));
+    assert!(matches!(store.delete_orphaned_asset_aliases(&cleanup), Err(StoreError::RevisionConflict { .. })));
+    assert!(alias_object(&store, "assets/unused.png").is_some());
+
+    store.connection.execute("DELETE FROM lww_receive_rows WHERE request_id = 'later-receive'", []).unwrap();
+    let deleted = store.delete_orphaned_asset_aliases(&cleanup).unwrap();
+    assert_eq!(deleted.iter().map(|alias| alias.key.as_str()).collect::<Vec<_>>(), ["assets/late.png", "assets/unused.png"]);
+    assert!(alias_object(&store, "assets/received.png").is_some());
+}
+
+#[test]
+fn a_commit_whose_hold_fails_is_not_applied_by_recovery() {
+    use crate::server_sync::lww_tests::put_asset;
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    put_asset(&mut store, "assets/kept.png", b"synthetic kept body");
+    let delete = WorkingSetCommit {
+        expected_revision: store.revision().unwrap(),
+        unit_mutations: Some(vec![super::super::lww::UnitMutation::Delete {
+            key: super::super::lww::unit_key(&["asset", "assets/kept.png"]).unwrap(),
+        }]),
+        ..Default::default()
+    };
+    assert!(matches!(
+        store.commit_holding(&delete, |_| Err::<(), _>(StoreError::CommitBusy)),
+        Err(StoreError::CommitBusy)
+    ));
+    store.lww_recover_intents().unwrap();
+    assert!(alias_object(&store, "assets/kept.png").is_some());
+}
+
+/// A permanent delete reads its character's details without the conversations, so the keys only
+/// a chat names come from the store, by the rules the renderer applies to the details.
+#[test]
+fn deleted_character_conversations_give_the_owned_keys_they_name() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    for (character_id, data) in [
+        ("owner", "<img src=\"assets/chat.png\"> {{raw::assets\\raw.png}}"),
+        ("other", "assets/other.png"),
+    ] {
+        store.commit(&WorkingSetCommit {
+            add_character: Some(json!({
+                "chaId": character_id, "type": "character", "name": "Synthetic", "image": "", "desc": "",
+                "lastInteraction": 500,
+                "chats": [{"id": format!("{character_id}-chat"), "name": "Chat", "note": "see assets/note.png", "message": [
+                    {"role": "user", "data": data, "chatId": format!("{character_id}-first")},
+                    {"role": "char", "data": "sync-conflict-backups/a.risudat assets/", "chatId": format!("{character_id}-second")},
+                    {"role": "char", "data": format!("assets/{}.png", "가".repeat(1400)), "chatId": format!("{character_id}-long")},
+                ]}],
+            })),
+            ..empty_working_set_commit(store.revision().unwrap())
+        }).unwrap();
+    }
+
+    let owner = ["owner".to_owned()];
+    assert_eq!(
+        store.character_conversation_asset_keys(&owner, 100).unwrap(),
+        std::collections::BTreeSet::from(["assets/chat.png", "assets/note.png", "assets/raw.png"].map(str::to_owned)),
+    );
+    assert_eq!(store.character_conversation_asset_keys(&owner, 1).unwrap().len(), 1);
 }

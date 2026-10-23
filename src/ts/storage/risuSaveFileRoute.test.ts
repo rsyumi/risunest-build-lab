@@ -719,6 +719,22 @@ describe('RisuSave picker route', () => {
         expect(deps.runNativeExport).not.toHaveBeenCalled()
     })
 
+    it('reports upstream cold plugin storage in a browser save as left out instead of storing it', async () => {
+        const deps = dependencies('web')
+        const runtime = deps.runtime()
+        deps.runtime = () => runtime
+        vi.mocked(deps.decodeRisuSave).mockResolvedValueOnce({
+            username: 'Web import',
+            characters: [],
+            pluginCustomStorage: { kept: 0, _coldpluginIndex: 'index-id', _coldplugin: { legacy: 'legacy-id' } },
+        })
+
+        const imported = await importRisuSaveFromPicker({}, deps)
+
+        expect(imported?.warningCodes).toEqual(['upstream-restore-losses'])
+        expect(vi.mocked(runtime.replacePersistentDatabase).mock.calls[0][0].pluginCustomStorage).toEqual({ kept: 0 })
+    })
+
     it.each(['native-desktop', 'native-ios'] as const)('retains native failure and source cleanup on %s without a browser read', async platform => {
         for (const code of ['capability-unavailable', 'unsupported-format']) {
             const deps = dependencies('native-desktop')

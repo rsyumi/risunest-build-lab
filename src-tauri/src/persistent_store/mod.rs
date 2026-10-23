@@ -1,4 +1,5 @@
 pub(crate) mod archive;
+mod asset_alias_orphans;
 pub(crate) mod gallery;
 pub(crate) mod asset_object_catalog;
 pub(crate) mod asset_residency;
@@ -1249,6 +1250,29 @@ pub(crate) struct AssetGcPreview {
     marks: crate::asset_repository::migration_gc::AssetGcMarks,
     /// What holds an object besides the library, so a retained candidate can say why.
     holders: Vec<(&'static str, std::collections::BTreeSet<String>)>,
+    /// Objects of unreferenced aliases written within the grace, which the cleanup keeps for now.
+    recent_orphan_objects: std::collections::BTreeSet<String>,
+}
+
+/// Moves the objects of recently written unreferenced aliases from deletable to recent, since the
+/// cleanup deletes those aliases only after the grace.
+fn keep_recent_orphan_objects(
+    report: &mut crate::asset_repository::migration_gc::AssetGcDryRunReport,
+    recent: &std::collections::BTreeSet<String>,
+    sizes: &std::collections::HashMap<String, u64>,
+) {
+    if recent.is_empty() {
+        return;
+    }
+    let (kept, deletable): (Vec<_>, Vec<_>) = std::mem::take(&mut report.potential_delete_hashes)
+        .into_iter()
+        .partition(|hash| recent.contains(hash));
+    for hash in kept {
+        report.potential_delete_bytes = report.potential_delete_bytes.saturating_sub(sizes.get(&hash).copied().unwrap_or(0));
+        report.grace_retained_hashes.push(hash);
+    }
+    report.grace_retained_hashes.sort();
+    report.potential_delete_hashes = deletable;
 }
 
 /// One stored object the cleanup looked at, and what it decided.
@@ -1721,6 +1745,10 @@ impl PersistentStore {
         current_revision(&self.connection)
     }
 
+    pub(crate) fn library_identity(&self) -> StoreResult<String> {
+        active_generation(&self.connection)
+    }
+
     pub(crate) fn read_root(&self, lease: Option<&str>) -> StoreResult<Versioned<Value>> {
         let (connection, target) = self.read_view(lease)?;
         query::read_root(connection, &target)
@@ -2078,6 +2106,19 @@ impl PersistentStore {
         let document = crate::generation_diagnostics::commit_document();
         let mut committed_revision = None;
         let result = self.lww_commit(commit, asset_aliases, &mut committed_revision);
+        crate::generation_diagnostics::commit_finished(document, commit.expected_revision, &result, committed_revision);
+        result
+    }
+
+    /// `commit` with `hold` taken before the library commit and kept until it ends.
+    pub(crate) fn commit_holding<G>(
+        &mut self,
+        commit: &WorkingSetCommit,
+        hold: impl FnOnce(&Self) -> StoreResult<G>,
+    ) -> StoreResult<RevisionResult> {
+        let document = crate::generation_diagnostics::commit_document();
+        let mut committed_revision = None;
+        let result = self.lww_commit_holding(commit, &[], &mut committed_revision, hold);
         crate::generation_diagnostics::commit_finished(document, commit.expected_revision, &result, committed_revision);
         result
     }
@@ -2857,14 +2898,20 @@ impl PersistentStore {
         now_ms: i64,
         minimum_grace_ms: i64,
     ) -> StoreResult<crate::asset_repository::migration_gc::AssetGcDryRunPage> {
-        let preview = self.prepare_asset_gc_preview()?;
+        let preview = self.prepare_asset_gc_preview(now_ms)?;
         self.asset_gc_preview_page(&preview, limit, cursor, now_ms, minimum_grace_ms)
     }
 
-    pub(crate) fn prepare_asset_gc_preview(&self) -> StoreResult<AssetGcPreview> {
+    pub(crate) fn prepare_asset_gc_preview(&self, now_ms: i64) -> StoreResult<AssetGcPreview> {
         let cas = crate::asset_repository::PayloadCas::new(&self.repository_root)?;
         let scan = cas.into_read_scan();
-        let labelled = self.collect_labelled_asset_gc_roots(false, true)?;
+        // Unreferenced aliases are not holders, so their files show as the cleanup will treat them.
+        let scope = asset_alias_orphans::OrphanAliasScope::Cleanup { now_ms };
+        let search = self.search_unreferenced_asset_aliases(&scope)?;
+        let labelled = match &search {
+            Some(search) => self.collect_asset_gc_roots_without_unreferenced_aliases(search, true)?,
+            None => self.collect_labelled_asset_gc_roots(false, true)?,
+        };
         // Only the holders that are small and explainable are kept for attribution; the library
         // itself is the default answer and copying its root set would cost as much as it holds.
         let holders = labelled
@@ -2879,11 +2926,15 @@ impl PersistentStore {
             labelled.into_iter().map(|(_, roots)| roots),
             |hash| residency.gc_size(hash),
         )?;
+        let recent_orphan_objects = search
+            .map(|search| search.orphans(&marks, &scope).1.into_iter().map(|alias| alias.object_hash).collect())
+            .unwrap_or_default();
         Ok(AssetGcPreview {
             scan,
             residency,
             marks,
             holders,
+            recent_orphan_objects,
         })
     }
 
@@ -2912,7 +2963,7 @@ impl PersistentStore {
                 )
             })
             .collect();
-        let report = crate::asset_repository::migration_gc::sweep_asset_candidates_with_remote_scan(
+        let mut report = crate::asset_repository::migration_gc::sweep_asset_candidates_with_remote_scan(
             &preview.scan,
             candidates.items,
             &preview.marks,
@@ -2921,6 +2972,8 @@ impl PersistentStore {
             |hash| preview.residency.gc_size(hash),
         )
         .map_err(StoreError::from)?;
+        let sizes = looked_at.iter().map(|(hash, bytes, _)| (hash.clone(), *bytes)).collect();
+        keep_recent_orphan_objects(&mut report, &preview.recent_orphan_objects, &sizes);
         let deletable: std::collections::BTreeSet<&str> = report
             .potential_delete_hashes
             .iter()
@@ -2980,7 +3033,8 @@ impl PersistentStore {
         };
 
         let candidates = self.query_asset_object_catalog(limit, cursor)?;
-        let report = sweep_asset_candidates_with_remote_scan(
+        let sizes = candidates.items.iter().map(|candidate| (candidate.object_hash.clone(), candidate.byte_size)).collect();
+        let mut report = sweep_asset_candidates_with_remote_scan(
             &preview.scan,
             candidates.items,
             &preview.marks,
@@ -2989,6 +3043,7 @@ impl PersistentStore {
             |hash| preview.residency.gc_size(hash),
         )
         .map_err(StoreError::from)?;
+        keep_recent_orphan_objects(&mut report, &preview.recent_orphan_objects, &sizes);
         Ok(AssetGcDryRunPage {
             report,
             next_cursor: candidates.next_cursor,
@@ -3221,6 +3276,42 @@ impl PersistentStore {
         cursor: Option<&str>,
         now_ms: i64,
         minimum_grace_ms: i64,
+        hook: impl FnMut(
+            crate::asset_repository::migration_gc::AssetGcDeleteHookPoint,
+        ) -> StoreResult<()>,
+    ) -> StoreResult<crate::asset_repository::migration_gc::AssetGcDryRunPage> {
+        self.asset_gc_delete_catalog_candidates(
+            initial_marks, library, |store| store.query_asset_object_catalog(limit, cursor),
+            now_ms, minimum_grace_ms, hook,
+        )
+    }
+
+    /// Deletes exactly the listed objects that no root holds, with the same final recheck as a
+    /// cleanup page. Objects missing from the catalog are skipped.
+    pub(crate) fn asset_gc_delete_exact_objects(
+        &mut self,
+        initial_marks: &crate::asset_repository::migration_gc::AssetGcMarks,
+        object_hashes: &std::collections::BTreeSet<String>,
+        library: &mut Option<AssetGcLibraryRoots>,
+        now_ms: i64,
+        minimum_grace_ms: i64,
+    ) -> StoreResult<crate::asset_repository::migration_gc::AssetGcDryRunPage> {
+        self.asset_gc_delete_catalog_candidates(
+            initial_marks, library,
+            |store| asset_object_catalog::query_exact(&store.connection, object_hashes),
+            now_ms, minimum_grace_ms, |_| Ok(()),
+        )
+    }
+
+    /// Deletes the candidates `load` reads that no root holds. `load` runs again under the
+    /// writer exclusion and must return the same candidates.
+    fn asset_gc_delete_catalog_candidates(
+        &mut self,
+        initial_marks: &crate::asset_repository::migration_gc::AssetGcMarks,
+        library: &mut Option<AssetGcLibraryRoots>,
+        load: impl Fn(&Self) -> StoreResult<AssetObjectCatalogPage>,
+        now_ms: i64,
+        minimum_grace_ms: i64,
         mut hook: impl FnMut(
             crate::asset_repository::migration_gc::AssetGcDeleteHookPoint,
         ) -> StoreResult<()>,
@@ -3235,7 +3326,7 @@ impl PersistentStore {
             message: "asset GC plugin cache is unavailable".into(),
         })?;
         self.validate_plugin_gc_cache(plugins)?;
-        let initial_candidates = self.query_asset_object_catalog(limit, cursor)?;
+        let initial_candidates = load(self)?;
         let residency = crate::server_sync::residency::Residency::open(&self.repository_root)
             .map_err(|error| std::io::Error::other(error.code))?;
         let initial_report = sweep_asset_candidates_with_remote(
@@ -3264,7 +3355,7 @@ impl PersistentStore {
 
         let _repository_guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
         let _device_guard = self.device_store()?.acquire_plugin_gc_barrier(&plugins.device_fence)?;
-        let final_candidates = self.query_asset_object_catalog(limit, cursor)?;
+        let final_candidates = load(self)?;
         if final_candidates != initial_candidates {
             return Err(StoreError::Validation {
                 message: "asset object catalog page changed before final GC recheck".to_owned(),

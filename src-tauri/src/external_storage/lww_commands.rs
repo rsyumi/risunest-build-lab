@@ -29,6 +29,8 @@ struct Session {
     cancel: Cancellation,
     /// Ids of the receive pages the last listing produced, in order.
     receive_pages: VecDeque<String>,
+    /// The last listing holds segments its pages stopped before.
+    receive_more: bool,
 }
 impl Session {
     fn new() -> Self {
@@ -41,6 +43,7 @@ impl Session {
             clock_refresh_attempted: false,
             cancel: Cancellation::default(),
             receive_pages: VecDeque::new(),
+            receive_more: false,
         }
     }
 
@@ -49,6 +52,7 @@ impl Session {
         self.identity = None;
         self.dependencies = None;
         self.receive_pages.clear();
+        self.receive_more = false;
         self.fresh_after = Instant::now();
     }
 
@@ -508,8 +512,9 @@ pub(crate) async fn external_lww_receive(
     }).await)
 }
 
-/// A publication that sent segments or a receive page the renderer finished
-/// completes a sync round, so only those record the connection's sync time.
+/// A publication that sent segments or finishing every receive page of a
+/// listing that held nothing more completes a sync round, so only those record
+/// the connection's sync time.
 fn record_sync_round(engine: &ExternalLwwEngine) {
     runtime::record_connection_completion_at(
         &engine.connection_root,
@@ -540,10 +545,10 @@ async fn publish_round(
 }
 
 /// One page per call: pages from the last listing come first, and a new
-/// listing runs on the next round after every page is finished. With
-/// `complete_available` it runs at once, so no page means none is available.
-/// Returns the page and whether this call found a page finished and recorded
-/// the sync time.
+/// listing runs on the next round after every page is finished. It runs at
+/// once while the last listing holds segments its batch stopped before, or
+/// with `complete_available`; then no page means none is available. Returns
+/// the page and whether this call recorded the sync time.
 async fn receive_page(
     store: &mut crate::persistent_store::PersistentStore,
     session: &mut Session,
@@ -553,21 +558,24 @@ async fn receive_page(
 ) -> Result<(Option<StageReceive>, bool)> {
     let mut finished = 0;
     loop {
-        let Session { engine, receive_pages: queue, cancel, .. } = session;
+        let Session { engine, receive_pages: queue, receive_more: more, cancel, .. } = session;
         let engine = engine.as_ref().ok_or_else(lww_segment::corrupt)?;
         let result = async {
             let mut page = next_receive_page(store, queue, authority, &mut finished)?;
-            if page.is_none() && (finished == 0 || complete_available) {
-                *queue = engine.receive_requests_cached(store, authority, checkpoints, cancel).await?.into();
+            let recorded = page.is_none() && finished > 0 && !*more;
+            if page.is_none() && (finished == 0 || complete_available || *more) {
+                let batch = engine.receive_requests_cached(store, authority, checkpoints, cancel).await?;
+                *more = batch.more;
+                *queue = batch.pages.into();
                 page = next_receive_page(store, queue, authority, &mut finished)?;
             }
-            if finished > 0 {
+            if recorded {
                 record_sync_round(engine);
             }
             if let Some(page) = &page {
                 ExternalLwwEngine::prepare_archive_bodies(store, page, cancel).await?;
             }
-            Ok((page, finished > 0))
+            Ok((page, recorded))
         }.await;
         match result {
             Ok(value) => return Ok(value),
@@ -675,6 +683,7 @@ pub(crate) async fn external_lww_fence(
         let fenced = fence(&app, &connection_id, &mut session, new_device).await;
         session.cancel.cancel();
         session.receive_pages.clear();
+        session.receive_more = false;
         if let Some(engine) = session.engine.as_mut() {
             engine.invalidate_clock()
         }
@@ -714,6 +723,7 @@ pub(crate) async fn external_lww_resume(connection_id: String) -> Result<()> {
         session.cancel = cancel;
         session.fresh_after = Instant::now();
         session.receive_pages.clear();
+        session.receive_more = false;
         if let Some(engine) = session.engine.as_mut() {
             engine.invalidate_clock()
         }
@@ -1105,6 +1115,47 @@ mod tests {
             let (exhausted, recorded) = receive_page(&mut f.b, &mut receiver, &checkpoints, DecimalU64(0), true).await.unwrap();
             assert!(exhausted.is_none());
             assert!(recorded);
+        });
+    }
+
+    #[test]
+    fn a_receive_lists_the_next_batch_at_once_while_the_listing_holds_more() {
+        use super::super::connection_store::ConnectionStore;
+        use crate::persistent_store::{lww::{ApplyReceive, UnitMutation}, WorkingSetCommit};
+        use risunest_sync_wire::{stamp::DecimalU64, unit::UnitKey};
+        tauri::async_runtime::block_on(async {
+            let mut f = super::super::lww_tests::CycleFixture::new();
+            let receiver = super::super::previous_storage_tests::receiver_connection(&f).stored;
+            ConnectionStore::open(f.directory_b.path()).unwrap().insert(&receiver).unwrap();
+            let last_sync = |root: &std::path::Path| ConnectionStore::open(root).unwrap().read("receiver").unwrap().last_sync_at_ms;
+            for index in 0..6 {
+                f.a.commit(&WorkingSetCommit {
+                    expected_revision: f.a.revision().unwrap(),
+                    unit_mutations: Some(vec![UnitMutation::Set {
+                        key: UnitKey::new(&["root", "language"]).unwrap(), value: serde_json::json!(format!("synthetic-{index}")),
+                    }]),
+                    ..Default::default()
+                }).unwrap();
+                f.publish_a().await;
+            }
+            let mut session = Session::new();
+            session.engine = Some(f.receiver);
+            let checkpoints = Default::default();
+            // Six segments take two listings of at most four; the second follows the first without a round in between.
+            for _ in 0..6 {
+                let (page, recorded) = receive_page(&mut f.b, &mut session, &checkpoints, DecimalU64(0), false).await.unwrap();
+                let page = page.expect("pages continue while the listing holds more segments");
+                assert!(!recorded);
+                assert_eq!(last_sync(f.directory_b.path()), None);
+                f.b.lww_stage_receive(&page).unwrap();
+                f.b.lww_apply_receive(&ApplyReceive { header: page.header.clone(), generating: Vec::new() }).unwrap();
+                f.b.lww_finish_receive(&page.header).unwrap();
+            }
+            let (done, recorded) = receive_page(&mut f.b, &mut session, &checkpoints, DecimalU64(0), false).await.unwrap();
+            assert!(done.is_none());
+            assert!(recorded, "finishing the last listed segment records the sync time");
+            assert!(last_sync(f.directory_b.path()).is_some());
+            assert_eq!(f.b.read_root(None).unwrap().value["language"], "synthetic-5");
         });
     }
 

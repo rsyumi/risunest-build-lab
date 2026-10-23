@@ -1,4 +1,5 @@
 import { streaming, tokenizer, snapshotRestore } from "./runtimeContracts";
+import { runLuaWorkerContract } from "../../tests/browser/luaWorkerContract";
 import { installPickerContracts } from "./pickerContracts";
 import { invoke } from "@tauri-apps/api/core";
 import { join } from "@tauri-apps/api/path";
@@ -245,6 +246,7 @@ async function main() {
     await report("regex", await regex());
     await report("streaming", await streaming());
     await report("tokenizer", await tokenizer());
+    await report("lua-worker", await runLuaWorkerContract());
     const root = await nativeDataPath();
     const folder = await join(root, "ios-file-staging", crypto.randomUUID());
     const path = await join(folder, "synthetic.bin");

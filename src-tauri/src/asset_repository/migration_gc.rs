@@ -115,6 +115,18 @@ pub(crate) struct AssetGcMarks {
     retain_all_objects: bool,
 }
 
+impl AssetGcMarks {
+    /// Whether the roots hold `hash`, as every object is held when some root could not be read.
+    pub(crate) fn holds(&self, hash: &str) -> bool {
+        self.retain_all_objects || self.marked_hashes.contains(hash)
+    }
+
+    /// Whether some root could not be read, which keeps every object.
+    pub(crate) fn is_blocked(&self) -> bool {
+        self.retain_all_objects || !self.blockers.is_empty()
+    }
+}
+
 pub(crate) struct PluginGcCache {
     pub(crate) instance: String,
     pub(crate) library_revision: i64,

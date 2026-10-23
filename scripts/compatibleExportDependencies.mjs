@@ -7,6 +7,7 @@ import {
   references,
   contractDirectory,
   verifySourceFilePins,
+  verifyReferenceRevision,
 } from "./compatibleExportContract.mjs";
 
 const libraries = {
@@ -81,19 +82,31 @@ export function createTargetReferenceRequire(target) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  if (process.argv.length !== 3 || process.argv[2] !== "--prepare")
-    throw new Error("Usage: node scripts/compatibleExportDependencies.mjs --prepare");
+  const usage = "Usage: node scripts/compatibleExportDependencies.mjs --prepare [--target risuai|pocket] [--reference-update]";
+  const args = process.argv.slice(2);
+  if (args.shift() !== "--prepare") throw new Error(usage);
+  let targets = Object.keys(libraries);
+  let referenceUpdate = false;
+  while (args.length) {
+    const arg = args.shift();
+    if (arg === "--target" && Object.hasOwn(libraries, args[0] ?? "")) targets = [args.shift()];
+    else if (arg === "--reference-update") referenceUpdate = true;
+    else throw new Error(usage);
+  }
   const pins = JSON.parse(
     fs.readFileSync(path.join(contractDirectory, "runtime.json"), "utf8"),
   );
   const { packageManager } = JSON.parse(
     fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"),
   );
-  for (const target of Object.keys(libraries)) {
+  for (const target of targets) {
     const directory = references[target].directory;
     const files = ["package.json", "pnpm-lock.yaml"];
-    verifySourceFilePins(target, files, Object.fromEntries(files.map(file => [file, pins[target][file]])));
-    const destination = path.join(cacheRoot, target);
+    // A reference update regenerates runtime.json after this step, so it checks
+    // the moved revision pin instead of the previous manifest and lockfile hashes.
+    if (referenceUpdate) verifyReferenceRevision(target);
+    else verifySourceFilePins(target, files, Object.fromEntries(files.map(file => [file, pins[target][file]])));
+    const destination = referenceDependencyDirectory(target);
     fs.mkdirSync(destination, { recursive: true });
     fs.writeFileSync(path.join(destination, "package.json"), JSON.stringify({
       private: true,

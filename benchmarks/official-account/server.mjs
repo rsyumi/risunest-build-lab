@@ -7,6 +7,9 @@ export async function startOfficialAccountFixtureServer() {
         if (request.method === 'OPTIONS') { response.writeHead(204).end(); return }
         const path = request.url?.match(/^\/api\/account\/read\/([a-f0-9]+)$/)?.[1]
         const key = path ? Buffer.from(path, 'hex').toString('utf8') : ''
+        if (request.method === 'GET' && /^assets\/official-missing-\d+\.bin$/.test(key) && request.headers['x-risu-key'] === key) {
+            response.writeHead(204).end(); return
+        }
         const fixture = key.match(/^assets\/official-measure-(\d+)-(\d+)-(\d+)\.bin$/)
         if (request.method !== 'GET' || !fixture || request.headers['x-risu-key'] !== key) {
             response.writeHead(400).end(); return

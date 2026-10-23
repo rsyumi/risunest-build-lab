@@ -297,6 +297,28 @@ describe('bounded LWW ownership under latency', () => {
         expect(f.publish.mock.calls.every(call => (call as unknown as [{turnLimit: number}])[0].turnLimit === 4)).toBe(true)
         f.scheduler.stop()
     })
+    it('reports catching up from a receive that left changes until a receive takes the rest or a failure blocks receiving', async () => {
+        vi.useFakeTimers()
+        let catchingUp = false
+        const seen: boolean[] = []
+        const results: Array<() => Promise<ReturnType<typeof turn>>> = [
+            async () => turn(4, true), async () => turn(2),
+            async () => turn(4, true), async () => { throw new Error('synthetic offline') },
+            async () => turn(4, true), async () => { throw Object.assign(new Error('synthetic rejected'), { retryable: false }) },
+        ]
+        const receive = vi.fn(() => { seen.push(catchingUp); return results.shift()!() })
+        const scheduler = createLwwScheduler({ available: () => true, publish: async () => turn(), receive, failed: () => {}, catchingUp: value => { catchingUp = value }, now: () => Date.now() })
+        scheduler.start(false); await scheduler.settled()
+        expect(seen).toEqual([false, true])
+        expect(catchingUp).toBe(false)
+        await vi.advanceTimersByTimeAsync(20_000)
+        expect(seen).toEqual([false, true, false, true])
+        expect(catchingUp).toBe(true)
+        await vi.advanceTimersByTimeAsync(20_000)
+        expect(seen).toEqual([false, true, false, true, true, true])
+        expect(catchingUp).toBe(false)
+        scheduler.stop()
+    })
     it('does not spin on a generating-only outbox or a zero-progress receive', async () => {
         const f = fixture(); await started(f)
         f.publish.mockResolvedValue(turn(0, true)); f.receive.mockResolvedValue(turn(0, true))

@@ -7,13 +7,21 @@ export interface OfficialAccountAssetCounts {
     notAttempted: number
 }
 
+export interface OfficialAccountTransferProgress {
+    bytes: number
+    bytesPerSecond?: number
+    active: number
+    limit: number
+    waitingUntil?: number
+}
+
 export interface OfficialAccountAssetProgress {
     phase: 'checking' | 'downloading' | 'finishing'
     state: 'running' | 'succeeded' | 'failed' | 'cancelled'
     counts: OfficialAccountAssetCounts
     reason?: 'authentication' | 'local' | 'account-changed' | 'library-changed' | 'service' | 'files' | 'receipt' | 'checking'
     operationId?: string
-    transfer?: import('./officialAccountTransfer').OfficialAccountTransferProgress
+    transfer?: OfficialAccountTransferProgress
 }
 
 export interface OfficialAccountAssetOutcome extends OfficialAccountAssetProgress {

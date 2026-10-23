@@ -75,18 +75,22 @@ fn bounded_discovery_keeps_unoffered_pages_and_restarts_from_durable_progress() 
         publish(&mut f, 6).await;
         let cancel = Cancellation::default();
         let cache = Default::default();
-        let all = f.receiver.receive_requests_limited(&mut f.b, 0.into(), &cache, 10, &cancel).await.unwrap();
+        let all = f.receiver.receive_requests_limited(&mut f.b, 0.into(), &cache, 10, &cancel).await.unwrap().pages;
         assert_eq!(all.len(), 6);
         let first = f.receiver.receive_requests_cached(&mut f.b, 0.into(), &cache, &cancel).await.unwrap();
+        assert!(first.more, "the listing holds segments after the batch");
+        let first = first.pages;
         assert_eq!(first, all[..4]);
         assert!(f.b.external_lww_unfinished_receive(&all[5]).unwrap().is_some());
         assert!(f.b.lww_receive_progress(0.into()).unwrap().is_empty());
         apply(&mut f.b, &first);
         f.b = PersistentStore::open(f.directory_b.path()).unwrap();
         let next = f.receiver.receive_requests_cached(&mut f.b, 0.into(), &cache, &cancel).await.unwrap();
+        assert!(!next.more);
+        let next = next.pages;
         assert_eq!(next, all[4..]);
         apply(&mut f.b, &next);
-        assert!(f.receiver.receive_requests_cached(&mut f.b, 0.into(), &cache, &cancel).await.unwrap().is_empty());
+        assert!(f.receiver.receive_requests_cached(&mut f.b, 0.into(), &cache, &cancel).await.unwrap().pages.is_empty());
         assert_eq!(f.b.read_root(None).unwrap().value["language"], "synthetic-5");
         assert_eq!(f.b.lww_receive_progress(0.into()).unwrap()[0].cursor.0, 6);
     });
@@ -103,7 +107,7 @@ fn partial_discovery_does_not_fallback_to_checkpoint_or_prune_but_complete_gap_d
         f.sender.compact_published(&mut f.a, directory.path(), "00000000-0000-4000-8000-0000000000e1",
             &writer, &f.sender.capabilities, &cancel, None).await.unwrap();
         let cache = Default::default();
-        let first = f.receiver.receive_requests_limited(&mut f.b, 0.into(), &cache, 2, &cancel).await.unwrap();
+        let first = f.receiver.receive_requests_limited(&mut f.b, 0.into(), &cache, 2, &cancel).await.unwrap().pages;
         assert_eq!(first.len(), 2);
         assert!(first.iter().all(|id| id.starts_with("external-receive-")));
         let extra = StageReceive {
@@ -112,10 +116,10 @@ fn partial_discovery_does_not_fallback_to_checkpoint_or_prune_but_complete_gap_d
             admitted_time_upper_ms: DecimalU64(crate::external_storage::runtime::now_ms() + 300_000),
         };
         f.b.external_lww_stable_receive(&f.receiver.target_scope(), &extra).unwrap();
-        f.receiver.receive_requests_limited(&mut f.b, 0.into(), &cache, 2, &cancel).await.unwrap();
+        f.receiver.receive_requests_limited(&mut f.b, 0.into(), &cache, 2, &cancel).await.unwrap().pages;
         assert!(f.b.external_lww_unfinished_receive(&extra.header.request_id).unwrap().is_some());
         for receipt in f.sender.listing(&cancel).await.unwrap() { f.provider.forget(&receipt.locator.object); }
-        let fallback = f.receiver.receive_requests_cached(&mut f.b, 0.into(), &cache, &cancel).await.unwrap();
+        let fallback = f.receiver.receive_requests_cached(&mut f.b, 0.into(), &cache, &cancel).await.unwrap().pages;
         assert!(fallback.iter().all(|id| id.starts_with("external-snapshot-")));
         assert!(!fallback.is_empty());
         assert!(f.b.external_lww_unfinished_receive(&extra.header.request_id).unwrap().is_none());
@@ -162,12 +166,12 @@ fn a_bounded_segment_keeps_page_group_progress_until_its_last_page_is_durable() 
         set_receive_page_bytes_for_test(1);
         let cancel = Cancellation::default();
         let cache = Default::default();
-        let pages = f.receiver.receive_requests_limited(&mut f.b, 0.into(), &cache, 1, &cancel).await.unwrap();
+        let pages = f.receiver.receive_requests_limited(&mut f.b, 0.into(), &cache, 1, &cancel).await.unwrap().pages;
         assert_eq!(pages.len(), 2);
         apply(&mut f.b, &pages[..1]);
         assert!(f.b.lww_receive_progress(0.into()).unwrap().is_empty());
         f.b = PersistentStore::open(f.directory_b.path()).unwrap();
-        let resumed = f.receiver.receive_requests_limited(&mut f.b, 0.into(), &cache, 1, &cancel).await.unwrap();
+        let resumed = f.receiver.receive_requests_limited(&mut f.b, 0.into(), &cache, 1, &cancel).await.unwrap().pages;
         assert_eq!(resumed, pages[1..]);
         apply(&mut f.b, &resumed);
         assert_eq!(f.b.lww_receive_progress(0.into()).unwrap()[0].cursor.0, 1);
@@ -182,13 +186,13 @@ fn finished_pages_do_not_make_limited_discovery_report_an_incomplete_empty_check
         publish(&mut f, 3).await;
         let cancel = Cancellation::default();
         let cache = Default::default();
-        let first = f.receiver.receive_requests_limited(&mut f.b, 0.into(), &cache, 1, &cancel).await.unwrap();
+        let first = f.receiver.receive_requests_limited(&mut f.b, 0.into(), &cache, 1, &cancel).await.unwrap().pages;
         apply(&mut f.b, &first);
         assert_eq!(first.len(), 1);
         assert!(f.b.external_lww_receive_finished(&first[0]).unwrap());
         // Retain completion proofs while independently injecting a lagging traversal cursor.
         f.b.device_store().unwrap().connection().execute("DELETE FROM lww_progress WHERE kind='external'", []).unwrap();
-        let next = f.receiver.receive_requests_limited(&mut f.b, 0.into(), &cache, 1, &cancel).await.unwrap();
+        let next = f.receiver.receive_requests_limited(&mut f.b, 0.into(), &cache, 1, &cancel).await.unwrap().pages;
         assert_eq!(next.len(), 1);
         assert!(!first.contains(&next[0]));
         apply(&mut f.b, &next);

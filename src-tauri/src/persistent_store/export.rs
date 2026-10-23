@@ -109,11 +109,17 @@ pub(crate) fn pinned_asset_alias(
     target: &ReadTarget,
     key: &str,
 ) -> StoreResult<super::AssetAlias> {
-    super::query::read_asset_alias(connection, "asset", key, target)?
-        .ok_or_else(|| StoreError::Validation {
-            message: format!("pinned character asset alias is missing: {key}"),
-        })
-        .map(|versioned| versioned.value)
+    pinned_asset_alias_if_present(connection, target, key)?.ok_or_else(|| StoreError::Validation {
+        message: format!("pinned character asset alias is missing: {key}"),
+    })
+}
+
+pub(crate) fn pinned_asset_alias_if_present(
+    connection: &Connection,
+    target: &ReadTarget,
+    key: &str,
+) -> StoreResult<Option<super::AssetAlias>> {
+    Ok(super::query::read_asset_alias(connection, "asset", key, target)?.map(|versioned| versioned.value))
 }
 
 pub(super) const PRESET_MIRRORS: &[(&str, &str)] = &[

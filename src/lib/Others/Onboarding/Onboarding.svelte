@@ -871,6 +871,7 @@
                                     <Globe />
                                     <span class="sr-only">{t.language}</span>
                                     <select
+                                        class="risu-select"
                                         value={DBState.db.language}
                                         onchange={(event) =>
                                             setLanguage(
@@ -1547,7 +1548,7 @@
     }
     .pill select {
         border: 0;
-        background: none;
+        background-color: transparent;
         font-size: 12.5px;
         outline: none;
     }

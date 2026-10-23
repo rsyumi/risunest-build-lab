@@ -105,6 +105,8 @@ export const languageEnglish = {
             missing: (count: number) => `Missing saved data (${count}) will not be restored.`,
             values: (count: number) => `Unsupported saved values (${count}) will not be restored.`,
             pluginStorage: (count: number) => `Unsupported plugin storage (${count}) will not be restored.`,
+            damagedPluginStorage: (count: number) => `Damaged plugin storage (${count}) will not be restored.`,
+            oversizedPluginStorage: (count: number) => `Oversized plugin storage (${count}) will not be restored.`,
             inlays: (count: number) => `Unsupported inlay entries (${count}) will not be restored.`,
         },
         "recovery": {
@@ -303,6 +305,11 @@ export const languageEnglish = {
             "SuperMemory Prompt decides what prompt should be sent to summarize. If you leave it blank, it will use the default prompt. leaving blank is recommended.\n\n" +
             "After it is all setup, you can able it in the setting of a character.",
         replaceGlobalNote: "If it's not blank, it replaces current global note to this.",
+        onboarding:
+            "Onboarding lets users pick options before a chat starts, like a short form. Each answer is saved to a chat variable, usable with `{{getvar::name}}` or triggers.\n\n" +
+            "Until the user finishes or skips it, the chat shows a banner that opens the onboarding. It can be reopened from the chat menu.\n\n" +
+            "**Form** mode builds choices and text questions. Multiple-choice answers are saved as a JSON array.\n\n" +
+            "**HTML** mode lets you write your own layout. It is sanitized like chat messages, and `<style>` is supported. Add `risu-change-var-name=\"varname\"` and `risu-change-var-value=\"value\"` to any element to set the variable when it is clicked; the clicked element gets the `selected` class. On `<input>`, `<select>` and `<textarea>`, the variable follows the input's value.",
         backgroundHTML:
             "A Markdown/HTML Data that would be injected to the background of chat screen.\n\n You can also use additional assets. for example, you can use `{{audio::<asset name}}` for background music." +
             "\n\n Additionaly, you can use these with additional assets:" +
@@ -462,7 +469,7 @@ export const languageEnglish = {
             "- **Playground**: Embedding testing in Playground",
         keepSessionAlive:
             "Keeps the tab active and prevents the session from expiring due to inactivity in browsers. This may require refresh to take effect.\n\n" +
-            "- **Via Sound**: Plays a silent audio at regular intervals to keep the session alive. This method is known as most compatible and effective in most browsers.\n",
+            "- **Via Sound**: Loops an inaudible low-frequency tone to keep the session alive. This method is known as most compatible and effective in most browsers. On Android, a media notification is shown while it is active, and other music apps may pause.\n",
         reSummarizationPrompt:
             "The prompt used when merging multiple selected summaries into one via bulk edit. If blank, the default prompt is used.",
         hypaV3MemoryTokensRatio:
@@ -1144,6 +1151,7 @@ export const languageEnglish = {
     logout: "Logout",
     loadDataFromAccount: "Load Data from Account",
     saveCurrentDataToAccount: "Save Current Data to Account",
+    cancelAccountSync: "Cancel Account Sync",
     chatAssumed: "",
     proxyAPIKey: "Key/Password",
     proxyRequestModel: "Request Model",
@@ -1231,6 +1239,14 @@ export const languageEnglish = {
     ifRandom: "If random",
     ifValue: "If Value",
     hideRealm: "Hide RisuRealm",
+    blockRealmCreator: "Block Creator",
+    blockRealmCreatorConfirm: "Block all RisuRealm content from {{creator}}?",
+    realmCreatorBlocked: "Content from this blocked RisuRealm creator is unavailable.",
+    realmCreatorBlockedSuccess: "Creator blocked.",
+    manageBlockedRealmCreators: "Manage Blocked Creators",
+    blockedRealmCreators: "Blocked RisuRealm Creators",
+    noBlockedRealmCreators: "No RisuRealm creators are blocked.",
+    unblockRealmCreator: "Unblock",
     hideAllImages: "Hide All Images",
     popularityLevel: "{} Popularity",
     colorScheme: "Color Scheme",
@@ -1401,6 +1417,30 @@ export const languageEnglish = {
     nickname: "Nickname",
     useRegexLorebook: "Use Regex",
     customPromptTemplateToggle: "Custom Toggles",
+    onboarding: "Onboarding",
+    onboardingEnable: "Enable Onboarding",
+    onboardingFloatingButton: "Show Floating Button",
+    onboardingAvailable: "This character has an onboarding",
+    onboardingAvailableDesc: "Choose a few options to set up this chat.",
+    onboardingSkip: "Skip",
+    onboardingDone: "Done",
+    onboardingModeForm: "Form",
+    onboardingModeHTML: "HTML",
+    onboardingTitle: "Title",
+    onboardingQuestion: "Question",
+    onboardingAddQuestion: "Add Question",
+    onboardingAddOption: "Add Option",
+    onboardingVarName: "Variable Name",
+    onboardingVarNameMissing: "Set a variable name, or this question will not be shown.",
+    onboardingTypeSingle: "Single Choice",
+    onboardingTypeMultiple: "Multiple Choice",
+    onboardingTypeText: "Text",
+    onboardingOptionLabel: "Label",
+    onboardingOptionValue: "Value (defaults to label)",
+    onboardingPlaceholder: "Placeholder",
+    onboardingRequired: "Required",
+    onboardingRequiredMissing: "This question is required.",
+    onboardingHTMLHint: "Use risu-change-var-name and risu-change-var-value on elements to set chat variables. Clicked elements get the .selected class.",
     defaultVariables: "Default Variables",
     hypaAllocatedTokens: "Allocated Tokens",
     hypaChunkSize: "Chunk Size",
@@ -1724,7 +1764,7 @@ export const languageEnglish = {
     claude1HourCaching: "Claude 1 Hour Caching",
     folderNameInput: "Please input the new folder name",
     folderRemoveLengthError: "To remove a folder, it must not contain any entries.",
-    personaNote: "Persona Note",
+    personaNotePlaceholder: "Put a unique identifier for this persona here. Example: \"Hunter persona\"",
     mcpAccessPrompt: '{{tool}} is trying to "{{action}}". Do you want to allow this?',
     mcpStdioModuleImportBlocked: "This module cannot be imported because it contains a local MCP program configuration. Register local MCPs directly in the module settings.",
     mcpStdioRegisterConfirm: "Registering this MCP runs the program configured below on your computer with your user permissions. The program can access files and the network, and may run again while the module is enabled. Only register programs you trust. Do you want to run the program and register this MCP?",
@@ -2027,6 +2067,10 @@ export const languageEnglish = {
 
         backgroundDataFailed: 'Some changes to the data could not be completed.',
         scriptTimeout: 'A Lua script took too long and was stopped.',
+        displayRecovery: {
+            notice: 'Opened this chat with Modify Display turned off.',
+            turnBackOn: 'Turn back on',
+        },
         localSaveFailure: {
             failed: 'Changes could not be saved. Retry saving before closing the app.',
             invalid: '{0} could not be saved. Check this data, then retry saving.',
@@ -2528,6 +2572,9 @@ export const languageEnglish = {
             historyLimitMultiplier: 'Loading limit',
             historyLimitMultiplierHelp:
                 'Loads messages up to the given multiple of the set maximum context size. With HypaMemory, messages that are not summarized yet are always loaded. Increase this value if a module or plugin you use needs more older messages.',
+            pluginOutputCurrentChatOnly: 'Send only the current chat to plugins',
+            pluginOutputCurrentChatOnlyHelp:
+                "When a response is generated, plugins receive only the current chat without this character's other chats, which reduces memory use. Plugins that read other chats may not work correctly.",
         },
         ui: {
             title: 'UI',
@@ -2536,6 +2583,8 @@ export const languageEnglish = {
             messageSendKeyButton: 'Send button',
             chatEditPopup: 'Edit chat messages in a popup',
             chatEditPopupHelp: 'Pressing the chat edit button lets you edit the message in a popup.',
+            scrollNavigation: 'Scroll navigation',
+            scrollNavigationHelp: 'Shows buttons for moving between chat messages in the bottom-right corner when scrolling.',
             syncStatusUi: 'Show sync UI',
             syncStatusUiHelp: 'Shows the sync status icon, and a notice when sync stops or plugins are waiting for sync.',
         },

@@ -31,12 +31,13 @@ export async function prepareCharacterPortraitRendition(
     signal?.throwIfAborted()
     const source = await withPersistentRevisionLease(await getPersistentDataStore().acquireRevision(revision), async reader => {
         const alias = (await reader.readAssetAlias({ kind: 'asset', key: character.image }))?.value
-        if (!alias?.objectHash) throw new Error(language.risuNest.imageFormats.portraitExportFailed)
+        // An unreadable portrait gets no rendition; the native export writes the fallback image.
+        if (!alias?.objectHash) return undefined
         const cas = createNativeImmutablePayloadCas()
         const range = { start: 0, endExclusive: Math.min(alias.size, 64 * 1024) }
         const header = await cas.readObjectRange(alias.objectHash, range, alias.size)
             ?? await createNativeRemoteAssetReader().readObject(alias.objectHash, range)
-        if (!header) throw new Error(language.risuNest.imageFormats.portraitExportFailed)
+        if (!header) return undefined
         const detected = imageFormatFromBytes(header)
         if (detected && detected.ext !== 'avif') return undefined
         if (alias.size > MAX_BYTES) throw new Error(language.risuNest.imageFormats.portraitExportFailed)

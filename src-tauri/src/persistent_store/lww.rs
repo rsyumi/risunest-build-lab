@@ -418,6 +418,7 @@ pub(crate) struct CommitIntentInput(Intent<'static>);
 std::thread_local! {
     static BACKUP_CAPTURE_PINNED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static BACKUP_CAPTURE_RELEASED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub(super) static BEFORE_HELD_COMMIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 fn device_revision(db: &Connection) -> StoreResult<i64> {
@@ -1312,6 +1313,18 @@ impl PersistentStore {
         aliases: &[super::AssetAlias],
         committed_revision: &mut Option<i64>,
     ) -> StoreResult<RevisionResult> {
+        self.lww_commit_holding(input, aliases, committed_revision, |_| Ok(()))
+    }
+    /// Takes `hold` once the intent is reserved and keeps it until the library commit ends, so a
+    /// check of state other connections write still holds when the commit lands. A failed hold
+    /// completes the intent, so recovery never applies it unchecked.
+    pub(super) fn lww_commit_holding<G>(
+        &mut self,
+        input: &WorkingSetCommit,
+        aliases: &[super::AssetAlias],
+        committed_revision: &mut Option<i64>,
+        hold: impl FnOnce(&Self) -> StoreResult<G>,
+    ) -> StoreResult<RevisionResult> {
         self.lww_recover_intents()?;
         let header = Header {
             binding_authority: input
@@ -1324,6 +1337,15 @@ impl PersistentStore {
         };
         let intent = Intent::for_commit(input, aliases);
         let (stamp, digest) = self.reserve_intent(&header, &intent)?;
+        let held = match hold(self) {
+            Ok(held) => held,
+            Err(error) => {
+                self.complete_intent(&header, intent.kept_after_completion())?;
+                return Err(error);
+            }
+        };
+        #[cfg(test)]
+        BEFORE_HELD_COMMIT.with(|hook| hook.borrow_mut().take()).map(|hook| hook());
         let result = commit::commit_lww(
             &mut self.connection,
             input,
@@ -1332,6 +1354,7 @@ impl PersistentStore {
             &stamp,
             &digest,
         );
+        drop(held);
         *committed_revision = result.as_ref().ok().map(|value| value.revision);
         if result.is_ok()
             || matches!(

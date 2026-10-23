@@ -165,6 +165,7 @@ describe('native file job bootstrap reconciliation', () => {
     it.each([
         'prepare-content-import',
         'import-jpeg-asset',
+        'restore-official-account-assets',
     ] as const)('cancels and drains a nonterminal %s job without restore finalization', async (kind) => {
         const calls: string[] = []
         const pending = await reconcileNativeRestoresBeforeBootstrap({

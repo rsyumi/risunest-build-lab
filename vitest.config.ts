@@ -1,6 +1,6 @@
 import { defineConfig, mergeConfig } from 'vitest/config'
 import { sharedVitestConfig } from './tests/vitestShared'
-import { appTestIncludes, extendedAppTests, harnessVitestTests, nodeAppTests, separateRunnerPaths } from './tests/suiteOwnership.mjs'
+import { appTestIncludes, extendedAppTests, harnessVitestTests, luaWorkerTests, nodeAppTests, separateRunnerPaths } from './tests/suiteOwnership.mjs'
 
 export default mergeConfig(sharedVitestConfig(), defineConfig({
   test: {
@@ -52,6 +52,15 @@ export default mergeConfig(sharedVitestConfig(), defineConfig({
       {
         extends: true,
         test: { name: 'app-node', include: nodeAppTests, environment: 'node' },
+      },
+      {
+        extends: true,
+        test: {
+          name: 'app-lua-worker', include: luaWorkerTests, environment: 'node',
+          setupFiles: ['src/ts/process/tests/luaWorkerSetup.ts'],
+          provide: { luaWorker: true },
+          testTimeout: 15_000,
+        },
       },
       {
         extends: true,

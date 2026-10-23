@@ -9,7 +9,7 @@ export const MobileGUI = writable(false), CustomGUISettingMenuStore = writable(f
 export { alertStore }
 export const bookmarkListOpen = writable(false)
 export const LoadingStatusState = { startedAt: null, text: '' }
-export const popupStore = {}, easyPanelStore = {}, popUpEditorStore = {}, loadoutModalStore = {}, irisStore = {}, customSideBarConfigDialogStore = {}
+export const popupStore = {}, easyPanelStore = {}, popUpEditorStore = {}, loadoutModalStore = {}, onboardingModalStore = {}, irisStore = {}, customSideBarConfigDialogStore = {}
 export const hypaV3ModalOpen = writable(false), hypaV3ProgressStore = writable({ open: false })
 export const MobileGUIStack = writable(1), MobileSideBar = writable(0), selectedCharID = writable(-1)
 export const onboardingHold = writable(false), showRealmInfoStore = writable(null), SettingsMenuIndex = writable(0)

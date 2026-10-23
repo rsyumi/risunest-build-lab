@@ -1,13 +1,13 @@
 import { get } from "svelte/store"
 import { CbsHistoryAccessError } from '../cbsHistoryAccess'
 import { parseChatML } from "../parser/chatML";
-import { getDatabase, type character, type customscript, type Database } from "../storage/database.svelte"
+import { getCurrentCharacter, getDatabase, type character, type customscript, type Database } from "../storage/database.svelte"
 import {
     defaultTranslatorPrompt,
     getCurrentTranslatorPresetFromState,
     type TranslatorPreset,
 } from "./presets";
-import { globalFetch } from "../globalApi.svelte"
+import { fetchNative, globalFetch } from "../globalApi.svelte"
 import { isTauri } from "src/ts/platform"
 import { alertError } from "../alert"
 import { requestChatData } from "../process/request/request"
@@ -17,6 +17,7 @@ import { selectedCharID } from "../stores.svelte"
 import { getModuleRegexScripts } from "../process/modules"
 import { getNodetextToSentence, sleep } from "../util"
 import { processScriptFull, type ProcessScriptCaptureContext } from "../process/scripts"
+import { displayRecoveryTarget, withDisplayWork } from "../displayRecovery.svelte"
 import localforage from "localforage"
 import sendSound from '../../etc/send.mp3'
 import { ByteBudgetLru } from "../util/byteBudgetLru"
@@ -261,15 +262,31 @@ async function translateMain(text:string, arg:{from:string, to:string, host:stri
     }
 
 
-    const url = `https://${arg.host}/translate_a/single?client=gtx&dt=t&sl=${db.translatorInputLanguage}&tl=${arg.to}&q=` + encodeURIComponent(text)
+    const url = `https://${arg.host}/translate_a/single?client=gtx&dt=t&sl=${db.translatorInputLanguage}&tl=${arg.to}`
 
+    // The text goes in the body, which has no URL length limit.
+    const request = {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+        body: 'q=' + encodeURIComponent(text),
+    }
+    // Google can refuse one HTTP client while it still answers another, and a refusal
+    // may reach the WebView only as a network error.
+    let f: Response | null = null
+    try {
+        f = await fetch(url, request)
+    } catch (error) {
+        if(!isTauri) throw error
+    }
+    if(isTauri && (f === null || f.status === 429)){
+        f = await fetchNative(url, { ...request, logFetch: false })
+    }
 
-
-    const f = await fetch(url, {
-
-        method: "GET",
-
-    })
+    if(!f.ok){
+        // An unread native body keeps its response open until the idle timeout.
+        await f.body?.cancel().catch(() => {})
+        return `ERR::Google Translate Error ${f.status}`
+    }
 
     const res = await f.json()
 
@@ -481,18 +498,21 @@ export async function translateHTML(
                 return;
             }
             
-            const { data: processedTranslated } = await processScriptFull(
-                alwaysExistChar,
-                translated,
-                "editdisplay",
-                chatID,
-                captureContext?.cbsConditions,
-                {
-                    captureContext: captureContext?.scriptContext,
-                    projectedChatID: captureContext?.projectedChatID,
-                    cache: captureContext ? 'bypass' : 'normal',
-                    signal,
-                },
+            const { data: processedTranslated } = await withDisplayWork(
+                displayRecoveryTarget(() => getCurrentCharacter(), alwaysExistChar.chaId),
+                () => processScriptFull(
+                    alwaysExistChar,
+                    translated,
+                    "editdisplay",
+                    chatID,
+                    captureContext?.cbsConditions,
+                    {
+                        captureContext: captureContext?.scriptContext,
+                        projectedChatID: captureContext?.projectedChatID,
+                        cache: captureContext ? 'bypass' : 'normal',
+                        signal,
+                    },
+                ),
             );
             // If the translation is the same, don't replace the node
             if (translated == processedTranslated) {

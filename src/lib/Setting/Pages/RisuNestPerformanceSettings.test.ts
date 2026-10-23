@@ -8,6 +8,7 @@ const deviceSettings = vi.hoisted(() => ({
         performanceProfile: 'normal' as const,
         generationHistoryLimitEnabled: false,
         generationHistoryLimitMultiplier: 2,
+        pluginOutputCurrentChatOnly: false,
     })),
     subscribeDeviceSettings: vi.fn(() => () => undefined),
     updateDeviceSettings: vi.fn(),
@@ -53,6 +54,24 @@ describe('RisuNestPerformanceSettings', () => {
         expect(deviceSettings.updateDeviceSettings).toHaveBeenCalledWith({ performanceProfile: 'low-spec' })
     })
 
+    it('offers sending only the current chat to plugins as unchecked and stores turning it on', async () => {
+        const target = document.createElement('div')
+        document.body.append(target)
+        mounted = mount(RisuNestPerformanceSettings, { target })
+        await tick()
+
+        const toggle = [...target.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((input) =>
+            input.getAttribute('aria-label') === strings.pluginOutputCurrentChatOnly
+                || input.closest('label')?.textContent?.includes(strings.pluginOutputCurrentChatOnly))
+        expect(toggle?.checked).toBe(false)
+        expect(target.textContent).toContain(strings.pluginOutputCurrentChatOnlyHelp)
+
+        toggle!.click()
+        await tick()
+
+        expect(deviceSettings.updateDeviceSettings).toHaveBeenCalledExactlyOnceWith({ pluginOutputCurrentChatOnly: true })
+    })
+
     it('shows the loading limit only while the history limit is on and stores the toggle', async () => {
         const target = document.createElement('div')
         document.body.append(target)
@@ -84,6 +103,7 @@ describe('RisuNestPerformanceSettings', () => {
             performanceProfile: 'normal',
             generationHistoryLimitEnabled: true,
             generationHistoryLimitMultiplier: 2,
+            pluginOutputCurrentChatOnly: false,
         })
         const target = document.createElement('div')
         document.body.append(target)

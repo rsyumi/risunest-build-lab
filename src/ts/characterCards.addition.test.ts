@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
     database: {
         characters: [] as any[],
         statics: { imports: 0 },
+        blockedRealmCreators: [] as any[],
     },
     commitDetachedCharacter: vi.fn(async (character: any, _reason: string) => {
         mocks.database.characters.push(character)
@@ -13,6 +14,8 @@ const mocks = vi.hoisted(() => ({
     alertCardExport: vi.fn(),
     alertConfirm: vi.fn(),
     alertError: vi.fn(),
+    alertNormal: vi.fn(),
+    alertRisuServiceTOS: vi.fn(),
     readImage: vi.fn(async (_key: string) => new Uint8Array([1, 2, 3, 4])),
     saveAsset: vi.fn(),
     charxWrites: [] as Array<{ key: string; data: Uint8Array }>,
@@ -40,6 +43,7 @@ vi.mock('./characters', () => ({
 }))
 vi.mock('./storage/database.svelte', () => ({
     defaultSdDataFunc: () => ({}),
+    appVer: '0.0.0',
     getDatabase: () => mocks.database,
 }))
 vi.mock('./alert', () => ({
@@ -48,9 +52,9 @@ vi.mock('./alert', () => ({
     alertError: mocks.alertError,
     alertInput: vi.fn(),
     alertMd: vi.fn(),
-    alertNormal: vi.fn(),
+    alertNormal: mocks.alertNormal,
     alertStore: { set: vi.fn() },
-    alertTOS: vi.fn(), alertRisuServiceTOS: vi.fn(),
+    alertTOS: vi.fn(), alertRisuServiceTOS: mocks.alertRisuServiceTOS,
     alertWait: vi.fn(),
 }))
 vi.mock('./util', () => ({
@@ -150,13 +154,17 @@ vi.mock('./media', () => ({
 }))
 
 import {
+    downloadRisuHub,
     exportCharacterCard,
     exportChar,
+    getRealmInfo,
+    getRisuHub,
     importCharacter,
     importCharacterCardSpec,
     importCharacterProcess,
     isNativeCharacterContentImportEnabled,
     mapPreparedNativeCharacterCard,
+    showRealmInfoStore,
     type CharacterCardV2Risu,
 } from './characterCards'
 import {
@@ -174,6 +182,7 @@ describe('character card additions', () => {
         mocks.platform = 'desktop'
         mocks.database.characters = []
         mocks.database.statics.imports = 0
+        mocks.database.blockedRealmCreators = []
         mocks.nextId = 0
         mocks.charxWrites = []
         mocks.pngWrites = []
@@ -952,5 +961,131 @@ describe('character card additions', () => {
         const payload = mocks.pngWrites.find((entry) => entry.key === 'chara-ext-asset_:1')
         expect(Array.from(Buffer.from(new TextDecoder().decode(payload?.data), 'base64')))
             .toEqual([1, 2, 3, 4])
+    })
+
+    const plainCharacter = (overrides: Record<string, unknown> = {}) => ({
+        type: 'character', name: 'Plain card', image: 'assets/avatar.png', firstMessage: 'Hello', desc: '',
+        chats: [], chatFolders: [], chatPage: 0, viewScreen: 'none', bias: [], emotionImages: [], globalLore: [],
+        chaId: 'plain-card', customscript: [], triggerscript: [], alternateGreetings: [], tags: [],
+        additionalAssets: [], ccAssets: [], extentions: {}, ...overrides,
+    }) as any
+    const exportedJson = (index: number) => JSON.parse(new TextDecoder().decode(mocks.downloads[index].data))
+    async function withFetch<T>(handler: (url: string) => unknown, run: () => Promise<T>) {
+        const fetchMock = vi.fn(async (url: string) => handler(String(url)))
+        const originalFetch = globalThis.fetch
+        globalThis.fetch = fetchMock as unknown as typeof fetch
+        try {
+            await run()
+        } finally {
+            globalThis.fetch = originalFetch
+        }
+        return fetchMock.mock.calls.map(([url]) => String(url))
+    }
+
+    it('exports the default portrait when the character image cannot be read', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        const fallback = { ok: true, status: 200, statusText: 'OK', arrayBuffer: async () => new Uint8Array([9, 8, 7]).buffer }
+        try {
+            const requests = await withFetch(() => fallback, async () => {
+                mocks.readImage.mockRejectedValueOnce(new Error('synthetic unreadable image'))
+                await exportCharacterCard(plainCharacter(), 'json', { spec: 'v3' })
+                mocks.readImage.mockResolvedValueOnce(new Uint8Array())
+                await exportCharacterCard(plainCharacter(), 'json', { spec: 'v3' })
+            })
+            expect(requests).toEqual(['/none.webp', '/none.webp'])
+        } finally {
+            warn.mockRestore()
+        }
+        for (const index of [0, 1]) {
+            const portrait = exportedJson(index).data.assets.find((asset: any) => asset.type === 'icon' && asset.name === 'main')
+            expect(Array.from(Buffer.from(portrait.uri.split(',')[1], 'base64'))).toEqual([9, 8, 7])
+        }
+
+        const missing = { ok: false, status: 404, statusText: 'Not Found', arrayBuffer: async () => new ArrayBuffer(0) }
+        mocks.readImage.mockResolvedValueOnce(new Uint8Array())
+        let failure: unknown
+        await withFetch(() => missing, async () => {
+            failure = await exportCharacterCard(plainCharacter(), 'json', { spec: 'v3' }).catch((error: unknown) => error)
+        })
+        expect(String(failure)).toContain('404')
+        expect(mocks.downloads).toHaveLength(2)
+    })
+
+    it('carries the onboarding through a V3 card export and import', async () => {
+        const onboarding = {
+            enabled: true, mode: 'form', title: 'Start', description: 'Pick a start', html: '', floatingButton: true,
+            questions: [{
+                id: 'q1', title: 'Route', description: '', type: 'multiple', varName: 'route', required: true, placeholder: '',
+                options: [{ label: 'Forest', value: 'forest' }],
+            }],
+        }
+        await exportCharacterCard(plainCharacter({ onboarding }), 'json', { spec: 'v3' })
+        const card = exportedJson(0)
+        expect(card.data.extensions.risuai.onboarding).toEqual(onboarding)
+        card.data.assets = []
+        const imported = await importCharacterCardSpec(structuredClone(card), undefined, 'normal', {}, null, true)
+        expect(imported && imported.onboarding).toEqual(onboarding)
+
+        card.data.extensions.risuai.onboarding = {
+            enabled: 'yes', mode: 'canvas', title: 3,
+            questions: [{ type: 'slider', varName: 'mood', options: [{ label: 'Calm' }, null] }, null],
+        }
+        const coerced = await importCharacterCardSpec(structuredClone(card), undefined, 'normal', {}, null, true)
+        expect(coerced && coerced.onboarding).toEqual({
+            enabled: false, mode: 'form', title: '', description: '', html: '', floatingButton: false,
+            questions: [{
+                id: expect.any(String), title: '', description: '', type: 'single', varName: 'mood', required: false, placeholder: '',
+                options: [{ label: 'Calm', value: '' }],
+            }],
+        })
+        delete card.data.extensions.risuai.onboarding
+        const without = await importCharacterCardSpec(structuredClone(card), undefined, 'normal', {}, null, true)
+        expect(without && without.onboarding).toBeUndefined()
+    })
+
+    it('stops a Realm download or preview from a blocked creator before anything is downloaded', async () => {
+        mocks.database.blockedRealmCreators = [{ id: 'blocked-creator', name: 'Blocked' }]
+        const info = (creator: string) => ({ status: 200, json: async () => ({ id: 'synthetic-card', creator }), text: async () => '' })
+        showRealmInfoStore.set(null)
+
+        const requests = await withFetch(() => info('blocked-creator'), async () => {
+            await downloadRisuHub('synthetic-card')
+            await downloadRisuHub('synthetic-card', { creator: 'blocked-creator' })
+            await getRealmInfo('synthetic-card')
+        })
+        expect(requests).toHaveLength(2)
+        expect(requests.every(url => url.endsWith('/hub/info/synthetic-card'))).toBe(true)
+        expect(mocks.alertNormal.mock.calls).toEqual(Array(3).fill([language.realmCreatorBlocked]))
+        expect(mocks.alertRisuServiceTOS).not.toHaveBeenCalled()
+        expect(get(showRealmInfoStore)).toBeNull()
+
+        await withFetch(() => info('allowed-creator'), async () => {
+            await downloadRisuHub('synthetic-card')
+            await getRealmInfo('synthetic-card')
+        })
+        expect(mocks.alertRisuServiceTOS).toHaveBeenCalledOnce()
+        expect(get(showRealmInfoStore)).toMatchObject({ creator: 'allowed-creator' })
+        expect(mocks.alertNormal).toHaveBeenCalledTimes(3)
+    })
+
+    it('hides cards from blocked creators in Realm listings', async () => {
+        mocks.database.blockedRealmCreators = [{ id: 'blocked-creator', name: 'Blocked' }]
+        const cards = [{ id: 'kept', creator: 'allowed-creator' }, { id: 'hidden', creator: 'blocked-creator' }, { id: 'anonymous' }]
+        const listed: unknown[] = []
+        for (const body of [cards, { cards, additionalHTML: '' }]) {
+            await withFetch(() => ({ status: 200, json: async () => structuredClone(body) }), async () => {
+                listed.push((await getRisuHub({ search: '', page: 0, nsfw: false, sort: '' })).map(card => card.id))
+            })
+        }
+        expect(listed).toEqual([['kept', 'anonymous'], ['kept', 'anonymous']])
+    })
+
+    it('reports a failed creator lookup and does not download the Realm card', async () => {
+        const requests = await withFetch(() => ({ status: 503, text: async () => 'synthetic lookup failure' }), async () => {
+            await downloadRisuHub('synthetic-card')
+        })
+        expect(requests).toEqual([expect.stringMatching(/\/hub\/info\/synthetic-card$/)])
+        expect(String(mocks.alertError.mock.calls[0]?.[0])).toContain('synthetic lookup failure')
+        expect(mocks.alertRisuServiceTOS).not.toHaveBeenCalled()
     })
 })

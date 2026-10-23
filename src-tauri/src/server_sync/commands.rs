@@ -853,6 +853,20 @@ mod failure_log_tests {
 
     #[test]
     fn routine_refusals_and_transient_codes_are_warnings_without_their_cause() {
+        let (_root, mut store) = super::super::lww_tests::local();
+        let capture = store.prepare_content_capture("synthetic-capture", "synthetic-export",
+            store.revision().unwrap()).unwrap();
+        let failure = recorded("synthetic-capture-status", store.asset_residency_status())
+            .err().expect("a capture keeps the asset inventory unavailable");
+        assert_eq!((failure.code.as_str(), failure.status, failure.retryable),
+            ("library-operation-busy", 409, true));
+        let entry = logged("synthetic-capture-status");
+        assert_eq!(entry.level, "warn");
+        assert!(entry.message.contains("code=library-operation-busy status=409 at="));
+        assert!(!entry.message.contains("cause="));
+        drop(capture);
+        assert!(store.asset_residency_status().is_ok());
+
         for (index, code) in EXPECTED_REFUSALS
             .iter()
             .chain(super::super::TRANSIENT_CODES.iter())

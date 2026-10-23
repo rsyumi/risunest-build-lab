@@ -4272,7 +4272,7 @@ dependencies = [
 
 [[package]]
 name = "risunest"
-version = "1.0.6"
+version = "1.1.0"
 dependencies = [
  "aes",
  "async-trait",
@@ -4300,6 +4300,7 @@ dependencies = [
  "native-tls",
  "notify-rust",
  "oauth2",
+ "os_info",
  "percent-encoding",
  "png 0.18.1",
  "quick-xml",

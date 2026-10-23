@@ -49,10 +49,20 @@ export interface GenerationPersistenceDiagnostic {
     acknowledgedRevision?: number
 }
 
+/** What output listeners receive; counts are present once the event is built. */
+export interface GenerationListenerPayloadDiagnostic {
+    listeners: number
+    fullHistoryListeners: number
+    conversations?: number
+    messages?: number
+    messageCharacters?: number
+}
+
 export interface GenerationDiagnosticTrace {
     admission(value: GenerationDiagnosticAdmission): void
     phase(phase: GenerationDiagnosticPhase, edge: 'enter' | 'exit', details?: GenerationDiagnosticPhaseDetails): void
     persistence(value: GenerationPersistenceDiagnostic): void
+    listenerPayload(value: GenerationListenerPayloadDiagnostic): void
 }
 
 type DiagnosticInvoke = (command: string, args: Record<string, unknown>) => Promise<unknown>
@@ -144,6 +154,11 @@ export function createGenerationDiagnostics(options: { enabled: boolean; invoke:
                     pendingEvents: value.pendingEvents, dirtyRecords: value.dirtyRecords,
                     unacknowledgedMs: value.unacknowledgedMs,
                     expectedRevision: value.expectedRevision, acknowledgedRevision: value.acknowledgedRevision,
+                }),
+                listenerPayload: (value) => emit({
+                    kind: 'listener-payload', listeners: value.listeners,
+                    fullHistoryListeners: value.fullHistoryListeners, conversations: value.conversations,
+                    messages: value.messages, messageCharacters: value.messageCharacters,
                 }),
             }
         },

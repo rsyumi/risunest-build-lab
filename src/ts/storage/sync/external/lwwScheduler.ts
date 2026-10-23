@@ -15,6 +15,8 @@ export interface LwwSchedulerDependencies {
     clearTimer?(timer: unknown): void
     /** Reports whether work is running, waiting, or due without a new check. */
     busy?(busy: boolean): void
+    /** Reports whether the last receive left changes to receive, so the next one follows at once. */
+    catchingUp?(catchingUp: boolean): void
 }
 type ExplicitKind = 'publish' | 'receive' | 'manual'
 interface Waiting {
@@ -38,7 +40,9 @@ export function createLwwScheduler(dependencies: LwwSchedulerDependencies) {
     // Hidden: timers stop, routine publishes wait, and only a receive that returned pages continues.
     let hidden = false
     let receiveMore = false
+    let receiveBehind = false
     let reportedBusy = false
+    let reportedCatchingUp = false
     let epoch = 0
     let lifetime = new AbortController()
     let dirtyVersion = 0
@@ -62,6 +66,11 @@ export function createLwwScheduler(dependencies: LwwSchedulerDependencies) {
     const blocked = new Set<LwwOperation>()
     const failureByOperation = new Map<LwwOperation, unknown>()
     const reportBusy = () => {
+        const catchingUp = enabled && receiveBehind
+        if (catchingUp !== reportedCatchingUp) {
+            reportedCatchingUp = catchingUp
+            dependencies.catchingUp?.(catchingUp)
+        }
         const busy = !!inFlight || !!maintenance || waiting.size > 0
             || enabled && (receivePending || !hidden && dirtyVersion !== coveredVersion)
         if (busy === reportedBusy) return
@@ -138,6 +147,7 @@ export function createLwwScheduler(dependencies: LwwSchedulerDependencies) {
                 } else if (!hasPublish()) firstDirty = undefined
             } else {
                 receiveMore = result.more && result.count > 0
+                receiveBehind = result.more
                 receivePending ||= hidden ? receiveMore : result.more
                 emptyListings = result.more || result.count ? 0 : emptyListings + 1
                 if (result.more && !result.count) retryAt.receive = Math.max(retryAt.receive, now() + 20_000)
@@ -148,6 +158,8 @@ export function createLwwScheduler(dependencies: LwwSchedulerDependencies) {
                 if (operation === 'publish') { firstDirty ??= now(); immediate = true }
                 else { receiveMore = false; receivePending ||= !hidden }
                 rememberFailure(error, operation)
+                // A retried receive still has changes to take; only a blocking failure ends the catch-up.
+                if (operation === 'receive' && blocked.has('receive')) receiveBehind = false
             }
             throw error
         }
@@ -267,7 +279,7 @@ export function createLwwScheduler(dependencies: LwwSchedulerDependencies) {
     const pauseAutomatic = () => {
         enabled = false
         clearWake(); clearReceive(); clearMaintenance()
-        coveredVersion = dirtyVersion; firstDirty = undefined; immediate = false; receivePending = false; receiveMore = false
+        coveredVersion = dirtyVersion; firstDirty = undefined; immediate = false; receivePending = false; receiveMore = false; receiveBehind = false
     }
     return {
         dirty,

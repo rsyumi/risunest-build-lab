@@ -140,6 +140,15 @@ describe('openSyncConflictBackups', () => {
         expect(mocks.installLocalBackup).toHaveBeenCalledOnce()
     })
 
+    it('never stores upstream cold plugin storage references from a web backup', async () => {
+        mocks.decodeRisuSave.mockResolvedValue({
+            characters: [],
+            pluginCustomStorage: { kept: null, _coldpluginIndex: 'index-id', _coldplugin: { legacy: 'legacy-id' } },
+        })
+        await (await import('./syncConflictRestore')).openSyncConflictBackups()
+        expect(mocks.replacePersistentDatabase.mock.calls[0][0].pluginCustomStorage).toEqual({ kept: null })
+    })
+
     it('keeps the library when the web confirmation is declined', async () => {
         mocks.alertConfirm.mockResolvedValue(false)
         await (await import('./syncConflictRestore')).openSyncConflictBackups()

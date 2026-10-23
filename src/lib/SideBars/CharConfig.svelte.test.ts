@@ -33,6 +33,7 @@ vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({ mutatePersistent
 vi.mock('./LoreBook/LoreBookSetting.svelte', () => ({ default: () => {} }))
 vi.mock('./Scripts/RegexList.svelte', () => ({ default: () => {} }))
 vi.mock('./Scripts/TriggerList.svelte', () => ({ default: () => {} }))
+vi.mock('./OnboardingEditor.svelte', () => ({ default: () => {} }))
 vi.mock('./Toggles.svelte', () => ({ default: () => {} }))
 vi.mock('../UI/GUI/TextAreaInput.svelte', () => ({ default: () => {} }))
 vi.mock('../UI/GUI/MultiLangInput.svelte', () => ({ default: () => {} }))
@@ -162,4 +163,18 @@ it('resolves a large additional-asset list only while its submenu is open and ig
     await tick()
     expect(mocks.fileSrc).toHaveBeenCalledTimes(300)
     expect(document.querySelector('img[src="data:,synthetic-late"]')).toBeNull()
+})
+
+it('offers the asset style with new image handling even when the asset prompt is off', async () => {
+    const assetStyle = () => [...document.querySelectorAll('span')].find(span => span.textContent?.trim() === languageEnglish.assetStyle)
+    DBState.db.newImageHandlingBeta = true
+    DBState.db.characters[0].prebuiltAssetCommand = false
+    await setup(1)
+    button(languageEnglish.additionalAssets).click()
+    await tick()
+    const select = assetStyle()!.nextElementSibling as HTMLSelectElement
+    expect([...select.options].map(option => option.value)).toEqual(['', 'dynamic'])
+    DBState.db.newImageHandlingBeta = false
+    await tick()
+    expect(assetStyle()).toBeUndefined()
 })

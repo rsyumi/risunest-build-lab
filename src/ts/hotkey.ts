@@ -19,8 +19,7 @@ export function initHotkey(){
             !shortcutModifier(ev) &&
             !ev.altKey &&
             !ev.shiftKey &&
-            (['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName) ||
-                document.activeElement.getAttribute('contenteditable'))
+            isTypingTarget(document.activeElement)
         ) {
             return
         }
@@ -304,9 +303,32 @@ export function hotkeyMatches(hotkey: typeof DBState.db.hotkeys[number], ev: Key
     if(hotkey.shift !== ev.shiftKey) return false
     if(hotkey.key.toLowerCase() !== ev.key.toLowerCase()) return false
     if(!hotkey.ctrl && !hotkey.alt && !hotkey.shift){
-        if(['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return false
+        return !isTypingTarget(document.activeElement)
     }
     return true
+}
+
+/**
+ * Whether `el` accepts text input.
+ */
+function isTypingTarget(el: Element | null): boolean {
+    if(!el){
+        return false
+    }
+    if(['INPUT', 'TEXTAREA'].includes(el.tagName)){
+        return true
+    }
+    // The nearest explicit contenteditable state decides; an empty value means editable.
+    for(let node: Element | null = el; node; node = node.parentElement){
+        const state = node.getAttribute('contenteditable')?.toLowerCase()
+        if(state === '' || state === 'true' || state === 'plaintext-only'){
+            return true
+        }
+        if(state === 'false'){
+            break
+        }
+    }
+    return 'editContext' in el && el.editContext != null
 }
 
 function clickQuery(query:string){

@@ -14,6 +14,8 @@ vi.mock('../platform', async () => (await import('../platform.testSupport')).pla
 
 import { registerLifecycleCommitListeners } from './lifecycleCommit'
 import { createLifecycleFlush } from './lifecycleFlush'
+import { beginDisplayWork, installDisplayRecovery, suspendDisplayWork } from '../displayRecovery.svelte'
+import { recoveryStore } from '../displayRecovery.testSupport'
 import {
     captureRoot,
     deferred,
@@ -34,6 +36,7 @@ function platformLifecycleFlush(
         nativePlatform: () => platform,
         forgetInlayProviderImages: vi.fn(),
         releaseIdleTransformerModels: vi.fn(async () => undefined),
+        suspendDisplayWork,
     }).flushForLifecycle
 }
 
@@ -291,6 +294,43 @@ describe('registerLifecycleCommitListeners', () => {
         await vi.waitFor(() => expect(onFlushComplete).toHaveBeenCalledWith('exit-1'))
         dispose()
         delete (window as any).RisuLifecycleBridge
+    })
+
+    it('acknowledges a native stop after the record of running display work is removed', async () => {
+        const device = recoveryStore()
+        await installDisplayRecovery(device.store)
+        const work = beginDisplayWork({ characterId: 'synthetic-character', conversationId: 'synthetic-chat' })
+        device.commitAll()
+        await work.ready
+        const onFlushComplete = vi.fn()
+        ;(window as any).RisuLifecycleBridge = { onFlushComplete }
+        const runtime = {
+            flushPendingData: vi.fn(async () => undefined),
+            flushPendingDataLocally: vi.fn(async () => undefined),
+        }
+        const dispose = registerLifecycleCommitListeners(
+            platformLifecycleFlush(runtime, false, 'android'),
+            undefined,
+            vi.fn(async () => undefined),
+        )
+        try {
+            window.dispatchEvent(new CustomEvent('risu-native-lifecycle', {
+                detail: { reason: 'stop', ackToken: 'stop-display' },
+            }))
+            await vi.waitFor(() => expect(device.pendingWrites).toBe(1))
+            expect(device.record).toBeNull()
+            // A turn of the event loop in which an acknowledgement that did not wait would arrive.
+            await new Promise((resolve) => setTimeout(resolve, 0))
+            expect(onFlushComplete).not.toHaveBeenCalled()
+
+            device.commitAll()
+            await vi.waitFor(() => expect(onFlushComplete).toHaveBeenCalledExactlyOnceWith('stop-display'))
+        } finally {
+            dispose()
+            work.release()
+            await installDisplayRecovery(null)
+            delete (window as any).RisuLifecycleBridge
+        }
     })
 
     it('flushes, checkpoints with truncate, then acknowledges a native event', async () => {

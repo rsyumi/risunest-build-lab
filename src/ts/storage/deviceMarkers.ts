@@ -20,6 +20,7 @@ export const DEVICE_MARKER_KEYS = [
     'risuNestDefaultPluginsAttempted',
     'risuNestUpdateSettings',
     'mcpStdioApprovals',
+    'risuNestDisplayRecovery',
 ] as const
 
 export type DeviceMarkerKey = (typeof DEVICE_MARKER_KEYS)[number]
@@ -30,6 +31,8 @@ export interface DeviceMarkerStorage {
     removeItem(key: string): void
     /** Resolves once every queued change has committed. */
     flush(): Promise<void>
+    /** Resolves once every queued change has finished, leaving a failure for the next `flush` to report. */
+    settled?(): Promise<void>
     reload?(): Promise<void>
 }
 
@@ -97,6 +100,7 @@ export function createNativeDeviceMarkers(
             values.clear()
             for (const [key, value] of next) values.set(key, value)
         },
+        settled: () => tail,
         async flush() {
             await tail
             if (failure !== null) {

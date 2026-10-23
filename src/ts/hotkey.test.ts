@@ -91,7 +91,7 @@ vi.mock('./process/index.svelte', () => ({
 }))
 vi.mock('./dragTypes', () => ({ RISU_SIDEBAR_DRAG_TYPE: 'character' }))
 
-import { initHotkey, initMobileGesture } from './hotkey'
+import { hotkeyMatches, initHotkey, initMobileGesture } from './hotkey'
 import { alertStore, settingsOpen } from './stores.svelte'
 
 afterEach(() => vi.restoreAllMocks())
@@ -140,6 +140,42 @@ describe('character hotkeys', () => {
         await keydown(event)
         expect(mocks.deactivateActiveWorkingSet).not.toHaveBeenCalled()
         expect(event.defaultPrevented).toBe(false)
+    })
+
+    it.each([
+        { name: 'an empty contenteditable', html: '<div contenteditable="" tabindex="0" data-focus></div>' },
+        { name: 'an inherited contenteditable', html: '<div contenteditable="true"><span tabindex="0" data-focus>text</span></div>' },
+        { name: 'a plaintext-only contenteditable', html: '<div contenteditable="plaintext-only" tabindex="0" data-focus></div>' },
+        { name: 'an EditContext element', html: '<div tabindex="0" data-focus data-edit-context></div>' },
+    ])('does not run unmodified hotkeys while typing in $name', async ({ html }) => {
+        let keydown!: (event: KeyboardEvent) => Promise<void>
+        vi.spyOn(document, 'addEventListener').mockImplementation((type, handler) => {
+            if (type === 'keydown') keydown = handler as unknown as typeof keydown
+        })
+        initHotkey()
+        const host = document.createElement('div')
+        host.innerHTML = html
+        document.body.append(host)
+        const focused = host.querySelector<HTMLElement>('[data-focus]')!
+        if (focused.hasAttribute('data-edit-context')) Object.assign(focused, { editContext: {} })
+        try {
+            focused.focus()
+            expect(document.activeElement).toBe(focused)
+
+            await keydown(new KeyboardEvent('keydown', { key: 'h', cancelable: true }))
+
+            expect(mocks.deactivateActiveWorkingSet).not.toHaveBeenCalled()
+            expect(hotkeyMatches({ key: 'h', action: 'home' } as never, new KeyboardEvent('keydown', { key: 'h' }))).toBe(false)
+
+            settingsOpen.set(true)
+            const escape = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true })
+            await keydown(escape)
+            expect(get(settingsOpen)).toBe(true)
+            expect(escape.defaultPrevented).toBe(false)
+        } finally {
+            settingsOpen.set(false)
+            host.remove()
+        }
     })
 
     it('waits for preset activation before reporting the hotkey switch', async () => {

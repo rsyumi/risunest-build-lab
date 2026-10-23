@@ -13,7 +13,7 @@ const SNAPSHOT_PART_FILE: &str = "official-account-snapshot.risudat.part";
 const MAX_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const MAX_ERROR_BYTES: usize = 64 * 1024;
 const NETWORK_CANCEL_POLL: Duration = Duration::from_millis(250);
-const NETWORK_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+pub(super) const NETWORK_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
@@ -309,7 +309,7 @@ fn snapshot_endpoint(base_url: &str) -> Result<String, NativeJobError> {
     ))
 }
 
-fn authenticated_headers(
+pub(super) fn authenticated_headers(
     credential: &OfficialSnapshotCredential,
 ) -> Result<HeaderMap, NativeJobError> {
     let mut headers = HeaderMap::new();
@@ -332,7 +332,7 @@ fn authenticated_headers(
     Ok(headers)
 }
 
-async fn bounded_response_bytes(
+pub(super) async fn bounded_response_bytes(
     mut response: reqwest::Response,
     job: &JobControl,
     idle_timeout: Duration,
@@ -358,7 +358,7 @@ async fn bounded_response_bytes(
     Ok(bytes)
 }
 
-async fn await_network_operation<F, T>(
+pub(super) async fn await_network_operation<F, T>(
     operation: F,
     job: &JobControl,
     idle_timeout: Duration,

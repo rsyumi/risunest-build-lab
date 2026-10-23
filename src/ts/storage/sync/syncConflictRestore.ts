@@ -10,6 +10,7 @@ import {
     replacePersistentDatabase,
 } from '../persistentDataRuntime.svelte'
 import { decodeRisuSave } from '../risuSave'
+import { importColdPluginStorage } from '../../process/coldPayloadExpansion'
 import { hasLibraryCharacters } from '../libraryCharacters'
 import { presentFileOperationError } from '../fileOperationErrorPresentation'
 import type { NativeFileJobSource } from '../nativeFileJobs'
@@ -75,6 +76,8 @@ export async function openSyncConflictBackups(): Promise<void> {
         if (!decoded || typeof decoded !== 'object' || !Array.isArray(decoded.characters)) {
             throw new Error('conflict-backup-invalid')
         }
+        const plugins = await importColdPluginStorage(decoded, async () => ({ kind: 'missing' }))
+        if (plugins.omitted > 0) console.warn(`Conflict backup restore left out ${plugins.omitted} plugin storage values`)
     } catch (cause) {
         console.error('Conflict backup could not be read', cause)
         alertError(language.syncConflictBackupUnreadable)

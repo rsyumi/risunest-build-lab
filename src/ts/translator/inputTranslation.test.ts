@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const f = vi.hoisted(() => ({ fetch: vi.fn(), request: vi.fn(), alert: vi.fn(), translatorType: 'deepl', translator: 'ko', deeplXUrl: 'https://deeplx-a.invalid', experimentalGoogle: false }))
+const f = vi.hoisted(() => ({ fetch: vi.fn(), request: vi.fn(), alert: vi.fn(), translatorType: 'deepl', translator: 'ko', deeplXUrl: 'https://deeplx-a.invalid', experimentalGoogle: false, tauri: false }))
 vi.mock('../storage/database.svelte', () => ({
     getDatabase: () => ({
         characters: [], presetRegex: [], translator: f.translator, translatorInputLanguage: 'en', aiModel: 'gpt',
@@ -15,7 +15,12 @@ vi.mock('../globalApi.svelte', async importOriginal => ({ ...await importOrigina
 vi.mock('../process/request/request', async importOriginal => ({ ...await importOriginal<typeof import('../process/request/request')>(), requestChatData: f.request }))
 vi.mock('../alert', async importOriginal => ({ ...await importOriginal<typeof import('../alert')>(), alertError: f.alert }))
 vi.mock('localforage', async () => (await import('../plugins/localforage.testSupport')).localforageModule(new Map()))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule(() => (
+    f.tauri ? { runtime: 'tauri', os: 'ios' } : { runtime: 'web', os: 'windows' }
+)))
+vi.mock('@tauri-apps/plugin-http', async () => (await import('../globalApi.testSupport')).tauriHttpModule())
 
+import { fetch as pluginFetch } from '@tauri-apps/plugin-http'
 import { getDatabase } from '../storage/database.svelte'
 import { setRuntimePerformanceProfile } from '../runtimePerformanceProfile'
 import { doingChat } from '../process/generationState'
@@ -38,6 +43,7 @@ beforeEach(() => {
     f.translator = 'ko'
     f.deeplXUrl = 'https://deeplx-a.invalid'
     f.experimentalGoogle = false
+    f.tauri = false
     f.fetch.mockResolvedValue({ ok: false, data: 'synthetic unavailable' })
     f.request.mockResolvedValue({ type: 'fail', result: 'synthetic unavailable' })
 })
@@ -141,5 +147,49 @@ describe('live chat rows', () => {
             setRuntimePerformanceProfile('normal')
         }
         expect(f.fetch).toHaveBeenCalledTimes(2)
+    })
+})
+
+describe('Google Translate', () => {
+    type SentRequest = { method?: string, body?: string, dataText?: string }
+    const translated = () => new Response(JSON.stringify([[['KO paragraph']]]))
+    const refused = () => new Response('<html>synthetic refusal</html>', { status: 429 })
+    const unreachable = (): Response => { throw new TypeError('Load failed') }
+    function googleRequest(runtime: 'tauri' | 'web', webView: () => Response, native: () => Response = translated) {
+        f.translatorType = 'google'
+        f.tauri = runtime === 'tauri'
+        const webFetch = vi.fn(async (_url: URL | string, _init: SentRequest) => webView())
+        vi.stubGlobal('fetch', webFetch)
+        vi.mocked(pluginFetch).mockImplementation(async () => native())
+        const requests = (calls: unknown[][], body: 'body' | 'dataText') => calls.map(([url, init]) => (
+            { url: String(url), method: (init as SentRequest).method, q: new URLSearchParams((init as SentRequest)[body]).get('q') }
+        ))
+        return () => ({ webView: requests(webFetch.mock.calls, 'body'), native: requests(vi.mocked(pluginFetch).mock.calls, 'dataText') })
+    }
+    const endpoint = 'https://translate.googleapis.com/translate_a/single?client=gtx&dt=t&sl=en&tl=ko'
+
+    it.each(['tauri', 'web'] as const)('sends a paragraph of any length in the WebView request body on %s', async runtime => {
+        const sent = googleRequest(runtime, translated)
+        const text = `${runtime} ` + 'A paragraph longer than a URL can carry. '.repeat(500).trim()
+        await expect(translate(text, false)).resolves.toBe('KO paragraph')
+        expect(sent()).toEqual({ webView: [{ url: endpoint, method: 'POST', q: text }], native: [] })
+    })
+    it.each([['a network error', unreachable], ['a 429', refused]])('asks the native client on Tauri when the WebView request ends in %s', async (failure, webView) => {
+        const sent = googleRequest('tauri', webView)
+        const text = `paragraph the WebView cannot get translated after ${failure}`
+        await expect(translate(text, false)).resolves.toBe('KO paragraph')
+        expect(sent().native).toEqual([{ url: endpoint, method: 'POST', q: text }])
+    })
+    it('passes on the native error when neither client reaches Google on Tauri', async () => {
+        googleRequest('tauri', unreachable, () => { throw new TypeError('synthetic native transport failure') })
+        await expect(translate('paragraph neither client can send', false)).rejects.toThrow('synthetic native transport failure')
+    })
+    it('keeps the original text, reports the status and releases the native response when both clients are refused on Tauri', async () => {
+        const release = vi.fn()
+        googleRequest('tauri', unreachable, () => new Response(new ReadableStream({ cancel: release }), { status: 429 }))
+        const text = 'paragraph Google refuses'
+        await expect(translate(text, false)).resolves.toBe(text)
+        expect(f.alert).toHaveBeenCalledExactlyOnceWith('ERR::Google Translate Error 429')
+        expect(release).toHaveBeenCalledOnce()
     })
 })

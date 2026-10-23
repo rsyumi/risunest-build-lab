@@ -26,10 +26,19 @@ vi.mock('src/ts/process/lorebook.svelte', () => ({}))
 vi.mock('src/ts/globalApi.svelte', () => ({}))
 vi.mock('src/ts/process/scripts', () => ({ importRegex: vi.fn() }))
 vi.mock('src/ts/util', () => ({}))
+vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule({ runtime: 'tauri', os: 'windows' }))
+const core = vi.hoisted(() => ({ invoke: vi.fn(async () => ({})) }))
+vi.mock('@tauri-apps/api/core', async (importOriginal) => ({ ...await importOriginal<typeof import('@tauri-apps/api/core')>(), invoke: core.invoke }))
+const runtime = vi.hoisted(() => ({ flushPendingData: vi.fn(async (_reason: string) => {}) }))
+vi.mock('src/ts/storage/persistentDataRuntime.svelte', async () => {
+    const { createAssetAliasCleanupTarget } = await import('src/ts/storage/deletedOwnerAssetCleanup.testSupport')
+    return { ...runtime, assetAliasCleanupTarget: () => createAssetAliasCleanupTarget(runtime.flushPendingData) }
+})
 
 let instance: ReturnType<typeof mount>
 beforeEach(() => {
     DBState.db = { modules: [], enabledModules: [] } as any
+    vi.clearAllMocks()
 })
 afterEach(async () => {
     if (instance) await unmount(instance)
@@ -126,5 +135,23 @@ it('does not remove the last module when a pending deletion target has already d
     await tick()
     confirm(true)
     await tick()
+    expect(DBState.db.modules.map(module => module.id)).toEqual(['Second'])
+    expect(runtime.flushPendingData).not.toHaveBeenCalled()
+})
+
+it('deletes the assets of a removed module once the removal is saved', async () => {
+    DBState.db.modules = [
+        { id: 'First', name: 'First', description: '', assets: [['map', 'assets/first-map.png', 'png']] },
+        { id: 'Second', name: 'Second', description: '', assets: [['map', 'assets/second-map.png', 'png']] },
+    ] as any
+    instance = mount(ModuleSettings, { target: document.body })
+    await tick()
+    const row = [...document.querySelectorAll('span')].find(span => span.textContent === 'First')!.parentElement!
+    row.querySelectorAll<HTMLButtonElement>('button')[3].click()
+    await vi.waitFor(() => expect(core.invoke).toHaveBeenCalledWith('pds_asset_delete_orphaned_aliases', {
+        expectedRevision: 1, owner: { keys: ['assets/first-map.png'], startedAtMs: expect.any(Number) },
+    }))
+    expect(runtime.flushPendingData).toHaveBeenCalledWith('module-delete')
+    expect(runtime.flushPendingData.mock.invocationCallOrder[0]).toBeLessThan(core.invoke.mock.invocationCallOrder[0])
     expect(DBState.db.modules.map(module => module.id)).toEqual(['Second'])
 })

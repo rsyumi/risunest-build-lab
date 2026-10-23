@@ -22,6 +22,9 @@ patchedDependencies:
   playwright@1.63.0:
     hash: b19010ee7d16dd5c3a984ba66a2ff3d77d900633b07ed0cd01cf5180f9049cd8
     path: patches/playwright@1.63.0.patch
+  wasmoon@1.16.0:
+    hash: 9526cf793968f2553046cd6132aea603cc5abc6294f6e31019004fa2e671abcb
+    path: patches/wasmoon@1.16.0.patch
 
 importers:
 
@@ -221,7 +224,7 @@ importers:
         version: 14.0.2
       wasmoon:
         specifier: ^1.16.0
-        version: 1.16.0
+        version: 1.16.0(patch_hash=9526cf793968f2553046cd6132aea603cc5abc6294f6e31019004fa2e671abcb)
       wavefile:
         specifier: ^11.0.0
         version: 11.0.0
@@ -289,6 +292,9 @@ importers:
       better-sqlite3:
         specifier: 12.11.1
         version: 12.11.1
+      binaryen:
+        specifier: 123.0.0
+        version: 123.0.0
       fake-indexeddb:
         specifier: ^6.2.5
         version: 6.2.5
@@ -1377,6 +1383,10 @@ packages:
 
   bidi-js@1.1.0:
     resolution: {integrity: sha512-fX1Onk0tdVPC7obPWB5EbJ1z7NVhLq4m2xZLq2YXBkxzMXIGRpNMU88n0EPgWseKl12J7zXs7qrDxPK4sRs2fg==}
+
+  binaryen@123.0.0:
+    resolution: {integrity: sha512-/hls/a309aZCc0itqP6uhoR+5DsKSlJVfB8Opd2BY9Ndghs84IScTunlyidyF4r2Xe3lQttnfBNIDjaNpj6mTw==}
+    hasBin: true
 
   bindings@1.5.0:
     resolution: {integrity: sha512-p2q/t/mhvuOj/UeLlV6566GD/guowlr0hHxClI0W9m7MWYkL1F0hLo+0Aexs9HSPCtR1SXQ0TD3MMKrXZajbiQ==}
@@ -3472,6 +3482,8 @@ snapshots:
     dependencies:
       require-from-string: 2.0.2
 
+  binaryen@123.0.0: {}
+
   bindings@1.5.0:
     dependencies:
       file-uri-to-path: 1.0.0
@@ -4569,7 +4581,7 @@ snapshots:
     dependencies:
       xml-name-validator: 5.0.0
 
-  wasmoon@1.16.0:
+  wasmoon@1.16.0(patch_hash=9526cf793968f2553046cd6132aea603cc5abc6294f6e31019004fa2e671abcb):
     dependencies:
       '@types/emscripten': 1.39.10
 

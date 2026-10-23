@@ -26,6 +26,18 @@ const compressedWire = (value) =>
     Buffer.from([0, 82, 73, 83, 85, 83, 65, 86, 69, 0, 8]),
     gzipSync(packr.encode(value)),
   ]);
+// Uncompressed RisuSave block file: [type][compression][name length][name][u32 LE length][data].
+const risuSaveBlocks = (blocks) =>
+  Buffer.concat([
+    Buffer.from("RISUSAVE\0"),
+    ...blocks.map(([type, name, value]) => {
+      const nameBytes = Buffer.from(name);
+      const data = Buffer.isBuffer(value) ? value : Buffer.from(JSON.stringify(value));
+      const length = Buffer.alloc(4);
+      length.writeUInt32LE(data.length);
+      return Buffer.concat([Buffer.from([type, 0, nameBytes.length]), nameBytes, length, data]);
+    }),
+  ]);
 const archiveEntry = (name, bytes) => {
   const filename = Buffer.from(name);
   const head = Buffer.alloc(4);
@@ -148,10 +160,25 @@ for (const target of ["risuai", "pocket"]) {
             plain(await harness.decode(compressedWire(value))),
             value,
           );
+          // RisuAI writes a database as RisuSave blocks, one per database part,
+          // so the re-save check needs every part present.
+          const database = {
+            ...value,
+            botPresets: [{ name: "Synthetic preset" }],
+            modules: [],
+            loadouts: [],
+            plugins: [],
+            pluginCustomStorage: { synthetic: value },
+          };
           assert.deepEqual(
-            plain(await harness.decode(harness.encode(value))),
-            value,
+            plain(await harness.decode(await harness.encode(database))),
+            database,
           );
+          if (target === "pocket")
+            assert.deepEqual(
+              plain(await harness.decode(await harness.encode(value))),
+              value,
+            );
         },
       );
 
@@ -439,6 +466,55 @@ for (const target of ["risuai", "pocket"]) {
           }
         },
       );
+
+      if (target === "risuai")
+        await t.test(
+          "actual block save reader, importer and re-save carry SaveKV namespaces",
+          async () => {
+            const kv = {
+              synthetic: {
+                version: 1,
+                entries: [
+                  { k: "empty", v: "" },
+                  { k: "zero", v: 0 },
+                  { k: "false", v: false },
+                  { k: "null", v: null },
+                  { k: "nested", v: { text: "합성", list: [1, null] } },
+                ],
+              },
+              other: { version: 1, entries: [{ k: "1", v: "one" }, { k: "0", v: "zero" }] },
+            };
+            const character = {
+              chaId: "synthetic-kv-char",
+              type: "character",
+              name: "Synthetic KV",
+              chats: [{ id: "synthetic-kv-chat", name: "", message: [] }],
+            };
+            const database = risuSaveBlocks([
+              [1, "root", { formatversion: 5, characterOrder: [character.chaId] }],
+              [2, character.chaId, character],
+              ...Object.entries(kv).map(([ns, content]) => [12, `kv:${ns}`, content]),
+              [0, "config", { version: 1 }],
+            ]);
+            const imported = await harness.importArchive(
+              archiveEntry("database.risudat", database),
+            );
+            assert.deepEqual(harness.liveKV(), kv);
+            const result = await harness.roundTrip(imported);
+            assert.equal(result.resaved.characters[0].name, "Synthetic KV");
+            assert.deepEqual(plain(result.kv), kv);
+            assert.deepEqual(plain(result.resavedKV), kv);
+            // The same empty part in a save the harness did not write fails closed.
+            await assert.rejects(
+              harness.decode(risuSaveBlocks([
+                [1, "root", { formatversion: 5 }],
+                [11, "pluginStorage", Buffer.alloc(0)],
+                [0, "config", { version: 1 }],
+              ])),
+              /unsupported side effect/,
+            );
+          },
+        );
 
       if (target === "pocket")
         await t.test(
@@ -794,7 +870,7 @@ for (const target of ["risuai", "pocket"]) {
             message.data = "edited synthetic response";
             message.swipes[message.swipeId] = message.data;
             const edited = await harness.roundTrip(
-              harness.encode(result.resaved),
+              await harness.encode(result.resaved),
             );
             assert.equal(
               edited.resaved.characters[0].chats[0].message[1].data,

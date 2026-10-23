@@ -881,7 +881,7 @@ fn maintenance_group(recorder:&Recorder,library:&Path,work:&Path,settings:&Setti
         let store=store.as_ref().ok_or("library absent")?;
         reset_observers();
         let window=Window::start(settings.sample);
-        let preview=store.prepare_asset_gc_preview().text()?;
+        let preview=store.prepare_asset_gc_preview(now).text()?;
         let prepared=window.elapsed();
         let (mut cursor,mut pages,mut candidates,mut candidate_bytes,mut blockers,mut details)=(None,0u64,0u64,0u64,0u64,0u64);
         loop {
@@ -903,6 +903,8 @@ fn maintenance_group(recorder:&Recorder,library:&Path,work:&Path,settings:&Setti
         let store=store.as_mut().ok_or("library absent")?;
         reset_observers();
         let window=Window::start(settings.sample);
+        let aliases=store.delete_orphaned_asset_aliases(&crate::persistent_store::asset_alias_orphans::OrphanAliasScope::Cleanup{now_ms:now}).text()?.len() as u64;
+        let aliases_at=window.elapsed();
         let marks=store.prepare_asset_gc_delete_marks().text()?;
         let prepared=window.elapsed();
         let (mut cursor,mut library_roots,mut pages,mut deleted,mut deleted_bytes,mut blockers)=(None,None,0u64,0u64,0u64,0u64);
@@ -922,11 +924,53 @@ fn maintenance_group(recorder:&Recorder,library:&Path,work:&Path,settings:&Setti
             }
         }
         let (elapsed,memory)=window.stop();
-        let line=json!({"elapsedMs":elapsed,"subTimingsMs":{"prepare":prepared,"delete":swept_at-prepared,"messagePageSweep":elapsed-swept_at},
-            "memory":memory,"counts":{"pages":pages,"pageLimit":1024,"deleted":deleted,"deletedBytes":deleted_bytes,"blockers":blockers,
+        let line=json!({"elapsedMs":elapsed,"subTimingsMs":{"aliases":aliases_at,"prepare":prepared-aliases_at,"delete":swept_at-prepared,"messagePageSweep":elapsed-swept_at},
+            "memory":memory,"counts":{"pages":pages,"pageLimit":1024,"orphanedAliases":aliases,"deleted":deleted,"deletedBytes":deleted_bytes,"blockers":blockers,
                 "messagePageSweeps":sweeps,"expectedOrphans":orphans,"observers":take_observers(HashTotals::default())},
             "sqlite":sqlite_sizes(store.repository_root())});
         if deleted!=orphans {return Err(format!("cleanup deleted a different count than the injected orphans: {line}"));}
+        Ok(line)
+    });
+    recorder.phase("owner-cleanup",opened,|| {
+        use crate::persistent_store::asset_alias_orphans::OrphanAliasScope;
+        let store=store.as_mut().ok_or("library absent")?;
+        // The character with the most assets, permanently deleted the way a purge deletes it.
+        let generation=crate::persistent_store::active_generation(&store.connection).text()?;
+        let (owner,detail):(String,String)=store.connection.query_row(
+            "SELECT character_id,detail FROM characters WHERE generation=?1
+             ORDER BY json_array_length(detail,'$.additionalAssets') DESC LIMIT 1",
+            [&generation],|row|Ok((row.get(0)?,row.get(1)?))).text()?;
+        let detail:Value=serde_json::from_str(&detail).text()?;
+        let keys=detail["additionalAssets"].as_array().ok_or("owner assets absent")?.iter()
+            .filter_map(|tuple|tuple.get(1)?.as_str()).filter(|key|key.starts_with("assets/")).map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        let started_at=epoch_ms();
+        store.commit(&WorkingSetCommit {expected_revision:store.revision().text()?,delete_character_ids:Some(vec![owner]),
+            ..Default::default()}).text()?;
+        reset_observers();
+        let window=Window::start(settings.sample);
+        let aliases=store.delete_orphaned_asset_aliases(&OrphanAliasScope::DeletedOwner {keys:&keys,started_at_ms:started_at}).text()?;
+        let aliases_at=window.elapsed();
+        let objects=aliases.iter().map(|alias|alias.object_hash.clone()).collect::<BTreeSet<_>>();
+        let marks=store.prepare_asset_gc_delete_marks().text()?;
+        let prepared=window.elapsed();
+        let (now,ordered,mut library)=(epoch_ms(),objects.iter().cloned().collect::<Vec<_>>(),None);
+        let (mut pages,mut deleted,mut deleted_bytes,mut blockers,mut longest_page)=(0u64,0usize,0u64,0usize,0f64);
+        for page in ordered.chunks(1024) {
+            let started=Instant::now();
+            let page=store.asset_gc_delete_exact_objects(&marks,&page.iter().cloned().collect(),&mut library,now,0).text()?;
+            longest_page=longest_page.max(elapsed_ms(started));
+            pages+=1;deleted+=page.report.deleted_hashes.len();deleted_bytes+=page.report.deleted_bytes;blockers+=page.report.blockers.len();
+        }
+        let (elapsed,memory)=window.stop();
+        let line=json!({"elapsedMs":elapsed,"subTimingsMs":{"aliases":aliases_at,"prepare":prepared-aliases_at,"delete":elapsed-prepared,
+                "longestDeletePage":longest_page},
+            "memory":memory,"counts":{"keys":keys.len(),"deletedAliases":aliases.len(),"objects":objects.len(),"pages":pages,"pageLimit":1024,
+                "deleted":deleted,"deletedBytes":deleted_bytes,"blockers":blockers,"observers":take_observers(HashTotals::default())},
+            "sqlite":sqlite_sizes(store.repository_root())});
+        if aliases.len()!=keys.len() || deleted!=objects.len() {
+            return Err(format!("owner cleanup left some of the owner's assets: {line}"));
+        }
         Ok(line)
     });
 }

@@ -17,6 +17,8 @@ export type SyncStatusSource = { syncNow(): Promise<void> } & (
         /** The last failed sync attempt, until one succeeds. */
         failure?: unknown
         syncStopped: boolean
+        /** The last receive left changes that the next receive continues at once. */
+        catchingUp?: boolean
         refresh(): void
     }
 )

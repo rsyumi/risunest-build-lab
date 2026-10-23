@@ -39,6 +39,8 @@ import { findActiveHistoryWindow, resolveHistoryWindowChat, toWindowIndex } from
 import { recordAmbientChatVariableReads, recordChatVariableReads, DisplayReadRecord } from "./scriptVariableReads";
 import { findCharacterById } from "./scriptCharacterLookup";
 import { beginDisplayScriptRun } from "./scriptTimeoutNotice";
+import { nextDisplayListenerOrder } from "./luaDisplayTimeouts";
+import { displayRecoveryTarget, isDisplayRecoveryMarked } from "../displayRecovery.svelte";
 import { openHistoryWindowCopy, writeHistoryWindowMessage, type HistoryWindowCopy } from "./historyWindowWrite";
 
 export type ScriptMode = 'editinput'|'editoutput'|'editprocess'|'editdisplay'
@@ -55,6 +57,8 @@ export interface ProcessScriptOptions {
     promptOperationScope?: PromptScriptOperationScope
     /** Collects the chat variables a display row's pipeline reads. */
     variableReads?: DisplayReadRecord
+    /** When the view asked for this display, from `nextDisplayListenerOrder`. */
+    displayRequestOrder?: number
 }
 
 export interface ProcessScriptInvocationContext {
@@ -523,6 +527,9 @@ export async function processScriptFull(
     options: ProcessScriptOptions = {},
 ) {
     options.signal?.throwIfAborted()
+    if (mode === 'editdisplay' && options.displayRequestOrder === undefined) {
+        options = { ...options, displayRequestOrder: nextDisplayListenerOrder() }
+    }
     if (
         mode !== 'editdisplay' ||
         options.captureContext ||
@@ -630,7 +637,10 @@ async function processScriptFullImpl(char:character|simpleCharacterArgument, dat
     const promptOperationScope = captureContext ? undefined : options.promptOperationScope
     let db = captureContext?.parserContext.database ?? invocation?.database ?? promptOperationScope?.database ?? getDatabase()
     let emoChanged = false
-    if (!captureContext) {
+    // A chat that froze the app while its display ran opens without the Modify Display step.
+    const displayRecovery = mode === 'editdisplay' &&
+        isDisplayRecoveryMarked(displayRecoveryTarget(() => getCurrentCharacter(), char.chaId))
+    if (!captureContext && !displayRecovery) {
         data = await runLuaEditTrigger(
             char,
             mode,
@@ -639,11 +649,12 @@ async function processScriptFullImpl(char:character|simpleCharacterArgument, dat
             undefined,
             options.onConversationCommit,
             options.signal,
+            options.displayRequestOrder,
         )
         options.signal?.throwIfAborted()
     }
 
-    if(mode === 'editdisplay' && !captureContext){
+    if(mode === 'editdisplay' && !captureContext && !displayRecovery){
         const currentChar = getCurrentCharacter()
         try{
             const perf = performance.now()
@@ -665,7 +676,7 @@ async function processScriptFullImpl(char:character|simpleCharacterArgument, dat
     let conversationOwner = captureContext || invocation
         ? null
         : promptOperationScope?.getOwner() ?? captureScriptConversationOwner(char)
-    const usesPluginCompatibility = !captureContext &&
+    const usesPluginCompatibility = !captureContext && !displayRecovery &&
         (conversationOwner !== null || invocation !== undefined) && pluginV2[mode].size > 0
     const compatibilityPin = usesPluginCompatibility &&
         !promptOperationScope?.usesPluginCompatibility && conversationOwner?.session
@@ -706,6 +717,7 @@ async function processScriptFullImpl(char:character|simpleCharacterArgument, dat
                   ...char.customscript,
                   ...(captureContext?.moduleRegexScripts ?? invocation?.moduleRegexScripts ?? getModuleRegexScripts()),
               ]
+        if (displayRecovery) scripts = []
         plan = getRegexExecutionPlan(scripts, mode)
         conversationAccess = captureContext || invocation
             ? 'none'

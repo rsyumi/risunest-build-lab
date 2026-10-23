@@ -114,6 +114,7 @@ import { initializeOfficialAccountBootstrap } from './storage/sync/officialAccou
 import { initializeNativeSyncBindings, installServerSyncProduction } from './storage/sync/serverSyncProduction'
 import { createSyncExitCoordinator } from './storage/syncExitCoordinator'
 import { getExternalStorageBridge } from './storage/sync/external/bridge'
+import { beginDisplayWork, installDisplayRecovery, isDisplayRecoveryMarked } from './displayRecovery.svelte'
 
 beforeEach(() => {
     vi.clearAllMocks()
@@ -393,6 +394,51 @@ describe('renderer recovery notice', () => {
         answerTerms(true)
         await vi.waitFor(() => expect(startup.takeRendererRecovery).toHaveBeenCalled())
         expect(defaultPlugins.startDefaultPluginBootstrap).not.toHaveBeenCalled()
+    })
+})
+
+describe('display recovery record', () => {
+    beforeEach(() => {
+        startup.native = true
+        startup.exclusions = []
+        startup.reachUi = true
+        startup.reconcile.mockResolvedValue(undefined)
+    })
+
+    it('marks the chats the last run left in the display record and drops marks of characters gone after trash expiry', async () => {
+        const kept = { characterId: 'kept-character', conversationId: 'kept-chat' }
+        const gone = { characterId: 'gone-character', conversationId: 'gone-chat' }
+        startup.markers.getItem.mockImplementation((key) => key === 'risuNestDisplayRecovery'
+            ? JSON.stringify({ working: [kept, gone], marked: [] })
+            : null)
+        startup.database.characters = [{ chaId: kept.characterId }]
+        vi.mocked(alertTOS).mockReturnValueOnce(new Promise(() => {}))
+        try {
+            await loadData()
+            expect(startup.markers.setItem).toHaveBeenCalledWith('risuNestDisplayRecovery', JSON.stringify({ working: [], marked: [kept, gone] }))
+            expect(isDisplayRecoveryMarked(kept)).toBe(true)
+            await vi.waitFor(() => expect(isDisplayRecoveryMarked(gone)).toBe(false))
+            expect(isDisplayRecoveryMarked(kept)).toBe(true)
+        } finally {
+            startup.markers.getItem.mockImplementation(() => null)
+            await installDisplayRecovery(null)
+        }
+    })
+
+    it('removes the record of display work still running when the app exits normally', async () => {
+        type ExitDependencies = Parameters<typeof createSyncExitCoordinator>[0]
+        vi.mocked(alertTOS).mockReturnValueOnce(new Promise(() => {}))
+        try {
+            await loadData()
+            const target = { characterId: 'streaming-character', conversationId: 'streaming-chat' }
+            await beginDisplayWork(target).ready
+            expect(startup.markers.setItem).toHaveBeenLastCalledWith('risuNestDisplayRecovery', JSON.stringify({ working: [target], marked: [] }))
+            const dependencies = vi.mocked(createSyncExitCoordinator).mock.calls.at(-1)![0] as ExitDependencies
+            await dependencies.prepareExit!()
+            expect(startup.markers.removeItem).toHaveBeenLastCalledWith('risuNestDisplayRecovery')
+        } finally {
+            await installDisplayRecovery(null)
+        }
     })
 })
 
