@@ -13,6 +13,7 @@ final class AppLockCoordinator {
     private var state = AppLockState()
     private var observers: [NSObjectProtocol] = []
     private var covers: [UIView] = []
+    private let accessibilityMask = AppLockAccessibilityMask<WKWebView>()
     private var authentication: LAContext?
     private var ownedPromptDepth = 0
     private var promptInactive = false
@@ -46,6 +47,8 @@ final class AppLockCoordinator {
     deinit {
         observers.forEach(NotificationCenter.default.removeObserver)
         authentication?.invalidate()
+        covers.forEach { $0.removeFromSuperview() }
+        accessibilityMask.restore()
     }
 
     func beginOwnedPrompt() { ownedPromptDepth += 1 }
@@ -95,7 +98,12 @@ final class AppLockCoordinator {
         guard force || state.coverRequired || (promptInactive && state.policy.hideRecentsPreview) else {
             covers.forEach { $0.removeFromSuperview() }
             covers.removeAll()
+            accessibilityMask.restore()
             return
+        }
+        if let webView = webView {
+            accessibilityMask.hide(webView, isHidden: { $0.accessibilityElementsHidden },
+                                   setHidden: { $0.accessibilityElementsHidden = $1 })
         }
         let color = Self.color(state.policy.backgroundColor)
         for window in windows() {
@@ -108,8 +116,9 @@ final class AppLockCoordinator {
             cover.autoresizingMask = [.flexibleWidth, .flexibleHeight]
             cover.backgroundColor = color
             cover.isOpaque = true
-            cover.isAccessibilityElement = false
-            cover.accessibilityElementsHidden = true
+            cover.isAccessibilityElement = true
+            cover.accessibilityLabel = "RisuNest"
+            cover.accessibilityViewIsModal = true
             let icon = UIImageView(image: Self.appIcon())
             icon.translatesAutoresizingMaskIntoConstraints = false
             icon.contentMode = .scaleAspectFit

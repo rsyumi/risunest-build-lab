@@ -63,6 +63,17 @@ try {
     run('NativeFileStateTests')
     run('AppLockStateTests')
     const originalAppLockState = readFileSync(appLockState, 'utf8')
+    for (const [before, after, test] of [
+        ['setHidden(content, true)', 'setHidden(content, false)', 'testNativeCoverHidesContentUntilRestoringItsPreviousAccessibility'],
+        ['restoreContent = { setHidden($0, previous) }', 'restoreContent = { setHidden($0, false) }', 'testNativeCoverHidesContentUntilRestoringItsPreviousAccessibility'],
+        ['guard self.content !== content else { return }', '', 'testNativeCoverHidesContentUntilRestoringItsPreviousAccessibility'],
+        ['deinit { restore() }', 'deinit {}', 'testReplacingAndReleasingNativeCoverRestoresTheCoveredContent'],
+    ]) {
+        assert.equal(originalAppLockState.split(before).length, 2)
+        writeFileSync(appLockState, originalAppLockState.replace(before, after))
+        try { run(`AppLockStateTests/${test}`, true) }
+        finally { writeFileSync(appLockState, originalAppLockState) }
+    }
     const epochGuard = 'guard active && epoch == renderedEpoch && (locked || !policy.gateRequired) else { return false }'
     assert.equal(originalAppLockState.split(epochGuard).length, 2)
     writeFileSync(appLockState, originalAppLockState.replace(epochGuard, 'guard active && (locked || !policy.gateRequired) else { return false }'))

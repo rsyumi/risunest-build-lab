@@ -23,6 +23,7 @@ vi.mock('@tauri-apps/api/core', async (original) => ({
         if (command === 'app_lock_ready') {
             if (args!.epoch !== boundary.snapshot.epoch) return false
             if (boundary.rejectedFrames-- > 0) return false
+            boundary.policy!.gateRequired = args!.locked as boolean
             boundary.visible = true
             return true
         }
@@ -40,6 +41,11 @@ vi.mock('@tauri-apps/api/event', async (original) => ({
 describe('app lock startup facade', () => {
     it('releases a boot failure before marker initialization and restores lock policy before normal content', async () => {
         appLock.setBackgroundColor('rgb(255 255 255)')
+        await appLock.renderLoading()
+        expect(appLock.state.initialized).toBe(false)
+        expect(boundary.visible).toBe(true)
+        expect(boundary.policy).toMatchObject({ gateRequired: false, enabled: false })
+        boundary.visible = false
         await appLock.renderBootFailure()
         expect(appLock.state.initialized).toBe(false)
         expect(boundary.visible).toBe(true)
@@ -48,6 +54,7 @@ describe('app lock startup facade', () => {
         boundary.snapshot = { active: true, epoch: 2, atMs: 100, departedAtMs: 50 }
         boundary.listener!({ payload: boundary.snapshot })
         await vi.waitFor(() => expect(boundary.visible).toBe(true))
+        expect(boundary.policy!.gateRequired).toBe(false)
         const pin = await createPinRecord('123456')
         const record = JSON.stringify({ ...defaultAppLockRecord(), enabled: true, pin })
         await appLock.initialize({ read: () => record, commit: async () => {} })

@@ -647,7 +647,7 @@ fn builder_with_main_window(
                             .to_owned(),
                     ))
                     .map_err(|error| format!("iOS native initialization failed: {error}"))?;
-                app_lock::setup(app.handle())?;
+            app_lock::setup(app.handle());
                 let app_data_dir = app_paths::data_root(app)?;
                 app.state::<external_storage::job_store::JobCommandState>()
                     .root

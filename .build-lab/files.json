@@ -45,8 +45,8 @@
     {
       "path": "benchmarks/appLock/frames.py",
       "mode": "100644",
-      "bytes": 14483,
-      "sha256": "7b84916c7ee7080a3e2a78701a8a55288f4449258b0f2bf79176c2079d2a0b7f"
+      "bytes": 17828,
+      "sha256": "c5201259be269a06ae57f2e0e5ca001ce410f48cb85b238b5c9534ef548b33be"
     },
     {
       "path": "benchmarks/appLock/mutationPlugin.ts",
@@ -2271,14 +2271,14 @@
     {
       "path": "crates/tauri-plugin-ios-native/ios/Sources/AppLockCoordinator.swift",
       "mode": "100644",
-      "bytes": 10615,
-      "sha256": "b7ee30c5898b5b3fcdb798c3e297cd21f50eb7f4dbc71c88967bb8d7d43957fd"
+      "bytes": 11085,
+      "sha256": "adeff0fae108920222cd6406e6985618a6802c35e898153667135a46496c8a72"
     },
     {
       "path": "crates/tauri-plugin-ios-native/ios/Sources/AppLockState.swift",
       "mode": "100644",
-      "bytes": 1828,
-      "sha256": "94dd589ddaa0e67008e4b747cc17b831556feb85969d3d86d0c101f2383b6616"
+      "bytes": 2498,
+      "sha256": "54555fb1856f87729dfa4f6d4c1a4824e61117907c6e1bcd2719c8a8e4c6d0bc"
     },
     {
       "path": "crates/tauri-plugin-ios-native/ios/Sources/IosNativePlugin.swift",
@@ -2301,8 +2301,8 @@
     {
       "path": "crates/tauri-plugin-ios-native/ios/Tests/AppLockStateTests.swift",
       "mode": "100644",
-      "bytes": 2894,
-      "sha256": "f4d6797985b32aaeae419337280ade7f215585042986ee8e447d4ceb0322047b"
+      "bytes": 4586,
+      "sha256": "1bc181c09a69e386750ddf34e1d16a730ec72bfc14f15f6dee484f835b524aa9"
     },
     {
       "path": "crates/tauri-plugin-ios-native/ios/Tests/NativeFileStateTests.swift",
@@ -3849,8 +3849,8 @@
     {
       "path": "scripts/testIOSPortableSourceContracts.mjs",
       "mode": "100644",
-      "bytes": 8334,
-      "sha256": "e24ea169387841b60d29da292a245980ecbf1abaa1ed873a4dfa7303085fb7c3"
+      "bytes": 9217,
+      "sha256": "09d260d649515fea628abd042dc7491463d59e04d6c69db7104c49c83898d0b9"
     },
     {
       "path": "scripts/testNative.mjs",
@@ -6009,26 +6009,26 @@
     {
       "path": "src-tauri/src/app_lock/macos.rs",
       "mode": "100644",
-      "bytes": 19995,
-      "sha256": "55b5d835f85b8bf91add3e764c576828e5b5035d03da62e575dc3c3e7dac1d6a"
+      "bytes": 20817,
+      "sha256": "7cec61bedc88b5ba5b3a8215095c697c1339d00439dc3f2ce4adb9bc96675975"
     },
     {
       "path": "src-tauri/src/app_lock/mod.rs",
       "mode": "100644",
-      "bytes": 3477,
-      "sha256": "4907a8bc607e06a083885fe4f85f6f4fd93ec0e12da954c89082f9ffe9b1c1c9"
+      "bytes": 3914,
+      "sha256": "81434bdcb96da17015d6bbb93e0d3d52198c0c0a252bc5970425289d5c32a703"
     },
     {
       "path": "src-tauri/src/app_lock/windows.rs",
       "mode": "100644",
-      "bytes": 14164,
-      "sha256": "7ea0666ac0bee6d294423fcaa5b532e83c7691367cab85528355121b47fd69a5"
+      "bytes": 20065,
+      "sha256": "50f04e6e5f742d5f080027aaf40c55b7045439ab449c881af988838b32c3d627"
     },
     {
       "path": "src-tauri/src/app_lock_record.rs",
       "mode": "100644",
-      "bytes": 2702,
-      "sha256": "3648d125eb674a22604ba9f4f0cc4d2e16e5a8d62f1367a502e0fd688b6e66df"
+      "bytes": 4142,
+      "sha256": "2ec524a6b0c75c1e75d425df4889311ea7b057761876ca20e013db578509679c"
     },
     {
       "path": "src-tauri/src/app_paths.rs",
@@ -6195,8 +6195,8 @@
     {
       "path": "src-tauri/src/command_future_size.rs",
       "mode": "100644",
-      "bytes": 13472,
-      "sha256": "13ca573aee2718b2dc7231e69fda41fc6b44b69252bbe22bb61f33c2b4ca4f4e"
+      "bytes": 13559,
+      "sha256": "84cbc55f170a59a6e1df2fa3c60655b3dfd7e5ebadc1e4cd899166d70ec6317c"
     },
     {
       "path": "src-tauri/src/data_health/journal.rs",
@@ -7113,8 +7113,8 @@
     {
       "path": "src-tauri/src/lib.rs",
       "mode": "100644",
-      "bytes": 62611,
-      "sha256": "67b60d3a582956b6c18e38c5e8ccc9538f2787638076187042524d22924250e1"
+      "bytes": 62606,
+      "sha256": "8fa124079ba0893083bf693f339784833c0ccce4170c92e17dc38b1060d560d9"
     },
     {
       "path": "src-tauri/src/linux_session.rs",
@@ -8787,8 +8787,8 @@
     {
       "path": "src-tauri/windows-app-manifest.xml",
       "mode": "100644",
-      "bytes": 392,
-      "sha256": "4636f3ba46080315ac3277d473d433b79c00863c9cdca1c93c0c83554c6a3d43"
+      "bytes": 583,
+      "sha256": "b787bee1a526a84a76b30791587fb8d60ff79e10b328a4bdc9617e47a36890d1"
     },
     {
       "path": "src-tauri/windows-common.nsh",
@@ -8811,8 +8811,8 @@
     {
       "path": "src/App.svelte",
       "mode": "100644",
-      "bytes": 26198,
-      "sha256": "904fbdb533dcaf3502f4d7db06c187304d639b2aae01bccbf8dcbc9796a56e41"
+      "bytes": 26430,
+      "sha256": "99dc0bbe9fa4e40225d783644cc9786660f920d9c8ed30a4707d7fa1e88955b4"
     },
     {
       "path": "src/LiteMain.svelte",
@@ -8961,8 +8961,8 @@
     {
       "path": "src/lib/AppLock/AppLockGate.svelte",
       "mode": "100644",
-      "bytes": 3101,
-      "sha256": "d86cf2568020abd5cb42ba4421288a9c9606cad8df537c7a982228b3c5fd71dd"
+      "bytes": 3001,
+      "sha256": "dad376f7b2554142994c1895f8e7622560f6480e0766c8bca83e98cb91d9f4c5"
     },
     {
       "path": "src/lib/AppLock/AppLockScreen.svelte",
@@ -11679,8 +11679,8 @@
     {
       "path": "src/styles.css",
       "mode": "100644",
-      "bytes": 17433,
-      "sha256": "6befb7ae627a873f153b360cc8d280083d6544419deba3bc295b110ba70197cf"
+      "bytes": 17503,
+      "sha256": "be21e5612df978077b920a41e4cf21f8821a74efebf961b9fc067c182bcae1c6"
     },
     {
       "path": "src/ts/3d/threeload.ts",
@@ -11763,32 +11763,32 @@
     {
       "path": "src/ts/appLock/appLock.svelte.ts",
       "mode": "100644",
-      "bytes": 6151,
-      "sha256": "40b7253b7394814bf530618b9fd152450c7cdc5f110e5167686e9c2443d16dad"
+      "bytes": 6436,
+      "sha256": "2c38814f46deb4b8e594c2de8e3fa520f42a6a205aa6f120cba3b250feedcf78"
     },
     {
       "path": "src/ts/appLock/appLock.test.ts",
       "mode": "100644",
-      "bytes": 4916,
-      "sha256": "f25a34773ace09469baaa889f5ed2b207593a5473fe20cb762662e6d7ee5e4f0"
+      "bytes": 5298,
+      "sha256": "91015de4765437f78632060a1a3f473ab250864b8b178c4e4bc9721037420014"
     },
     {
       "path": "src/ts/appLock/controller.test.ts",
       "mode": "100644",
-      "bytes": 23625,
-      "sha256": "e76dcbec3e2774aebbea24e3dd7bac750b70e321adfaf29433cfdbbf618c7a5a"
+      "bytes": 27476,
+      "sha256": "739cd7b03362bcb573aa306131facf380424dbfe3e40d200090500435bfd35c1"
     },
     {
       "path": "src/ts/appLock/controller.ts",
       "mode": "100644",
-      "bytes": 20729,
-      "sha256": "5062514b64b60bf4b9c36ef0d7e75be9cfa55f4bb79398fd84c854479d20b3c1"
+      "bytes": 22200,
+      "sha256": "f78113485d6b42e27e40f190b80b244ff5a5da8dda31e32a305b90d73de6be24"
     },
     {
       "path": "src/ts/appLock/input.ts",
       "mode": "100644",
-      "bytes": 5147,
-      "sha256": "a530aff59cd8a2e373bca3c13fb5f2ef6b984fe2b3428283b99d2f5be3d753b3"
+      "bytes": 7330,
+      "sha256": "22444dc95e905b25cd7424f050a8330af0cd556cde8b6fdba4d7f7b8ef059719"
     },
     {
       "path": "src/ts/appLock/native.ts",
@@ -19113,8 +19113,8 @@
     {
       "path": "tests/browser/lazyApp.browser.spec.ts",
       "mode": "100644",
-      "bytes": 17564,
-      "sha256": "4d8620777008081e25c7e216a3d81803ca59305f4ae3dd618622b726e246c250"
+      "bytes": 24394,
+      "sha256": "5676d8192d1ae1bdbd653c77c077d98cf68a23b64b90bc88d85c3fbc68289d1d"
     },
     {
       "path": "tests/browser/lazyApp.html",
@@ -19131,14 +19131,14 @@
     {
       "path": "tests/browser/lazyAppMain.ts",
       "mode": "100644",
-      "bytes": 1779,
-      "sha256": "eaaa9239156a39dfdcff00182e39eaa79b844cb80db8cd45d7fa788588a8e990"
+      "bytes": 2444,
+      "sha256": "57af127cac7535291ef8234ce84c9115d0d09e727df6e5ac60249e87f00eb561"
     },
     {
       "path": "tests/browser/lazyAppPlugin.ts",
       "mode": "100644",
-      "bytes": 3079,
-      "sha256": "910962b55ccfee38e5203d80686b45b153e2d133a45bad1e32f2a4e42a9a9a32"
+      "bytes": 3169,
+      "sha256": "ae82c26ecfd3f1b1ff72ab4246e12b780cd7e530d8cc8a10f12cf9834bad2f68"
     },
     {
       "path": "tests/browser/luaWorkerContract.ts",
@@ -19453,6 +19453,12 @@
       "sha256": "0b3cf97bf3c1cd5b796d18d9990a9ae5a402152ffc58df73cd8975b2dfa812cb"
     },
     {
+      "path": "tests/native/appLockFrames.ps1",
+      "mode": "100644",
+      "bytes": 23891,
+      "sha256": "117e4e4aab261e39cfbe20b5b78bbf655c0340eac91ea246e64faa7e26bd8055"
+    },
+    {
       "path": "tests/native/contractScenarios.ts",
       "mode": "100644",
       "bytes": 13365,
@@ -19473,8 +19479,8 @@
     {
       "path": "tests/native/main.ts",
       "mode": "100644",
-      "bytes": 6383,
-      "sha256": "0c359d03975dc3dd02584e6a89da399530e5a3c0d4597817d03b9c633ade4f97"
+      "bytes": 7898,
+      "sha256": "c5dab3416a482d94b0bb46e82443d766c18c4a3ab7a00e003249f646ccaf2e19"
     },
     {
       "path": "tests/native/native/.gitignore",
@@ -19497,14 +19503,14 @@
     {
       "path": "tests/native/native/build.rs",
       "mode": "100644",
-      "bytes": 36,
-      "sha256": "cd0ac1f2fb0555a110a0298f504469b11502fe59744a2c7e6b1b2aa4aac425df"
+      "bytes": 347,
+      "sha256": "bfd7f42fe416873407e3f218602c2af63cb76449d8330cabf87d380907ed69de"
     },
     {
       "path": "tests/native/native/src/main.rs",
       "mode": "100644",
-      "bytes": 5005,
-      "sha256": "d3f5dd87585fb299c38b305ea54016162080310b555ddd643a2c8ae902a3448f"
+      "bytes": 6091,
+      "sha256": "44f9ac1286a6c902a046832f44ea33fb42e87bd4212c9fee6a2b5bcaba8c5df8"
     },
     {
       "path": "tests/native/native/tauri.conf.json",
@@ -19551,8 +19557,8 @@
     {
       "path": "tests/native/run.mjs",
       "mode": "100644",
-      "bytes": 10962,
-      "sha256": "2a372269fdb760b00d9f105fc9bd6d83b4ec42ddeed6eb6e95d97e394a570367"
+      "bytes": 11349,
+      "sha256": "e2d8aad6cf67c0d90f32da66a67617fb002692981ce6ddf67be876c45573da3a"
     },
     {
       "path": "tests/native/vite.config.ts",
@@ -20616,8 +20622,8 @@
     {
       "path": "tests/README.md",
       "mode": "100644",
-      "bytes": 2011,
-      "sha256": "8be78c6c3e29163ef78c80e8ca5573426729ea335636ec53c3e9f1b61c546e3b",
+      "bytes": 2843,
+      "sha256": "930e0166b1dac4f7ef7b5f03f032aed0416323b8f433dc36863470bf6c7312b3",
       "reason": "explanatory-document"
     },
     {

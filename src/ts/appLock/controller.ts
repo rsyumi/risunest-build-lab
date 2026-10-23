@@ -122,7 +122,8 @@ export class AppLockController {
     private protectBridge(): void {
         this.operation++
         this.bridgeFailed = true
-        if (!this.bootFailure && !(this.recovery && !this.recordRead)) {
+        if (!this.bootFailure && !(this.recovery && !this.recordRead)
+            && (!this.recordRead || this.state.record.enabled)) {
             this.update({ readFailed: true, failure: this.state.failure === 'record' ? 'record' : 'bridge', busy: false })
         }
     }
@@ -214,7 +215,10 @@ export class AppLockController {
             if (this.state.record.enabled && this.departureTiming === 'immediate') this.requireLock()
         } else {
             const departed = snapshot.departedAtMs ?? this.departedAtMs
-            this.update({ active: true, epoch: snapshot.epoch, returnPending: true, busy: this.savingPin })
+            const returnPending = this.gated
+                || (this.state.record.enabled && this.departureTiming !== 'launch')
+                || (this.state.record.hideRecentsPreview && this.state.previewSupported)
+            this.update({ active: true, epoch: snapshot.epoch, returnPending, busy: this.savingPin })
             if (this.state.record.enabled && departed !== null
                 && lockRequiredAfterDeparture(this.departureTiming, departed, snapshot.atMs)) this.requireLock()
             this.departedAtMs = null
@@ -247,6 +251,24 @@ export class AppLockController {
         return this.policyTail
     }
 
+    async renderLoading(): Promise<void> {
+        if (!this.state.initialized || this.bootFailure) return
+        if (this.bridgeFailed && this.recordRead && !this.state.record.enabled) await this.publishPolicy()
+        const epoch = this.state.epoch
+        const operation = this.operation
+        await this.policyTail
+        if (!this.state.active || epoch !== this.state.epoch || operation !== this.operation) return
+        let accepted = false
+        try { accepted = await this.native.ready(epoch, this.state.locked || this.state.readFailed || this.state.flow !== null) } catch { return }
+        if (epoch !== this.state.epoch || operation !== this.operation) return
+        if (!accepted) this.retryPresentation(epoch, operation)
+        else {
+            this.readinessRetryCount = 0
+            if (this.readinessRetry) clearTimeout(this.readinessRetry)
+            this.readinessRetry = null
+        }
+    }
+
     async renderBootFailure(): Promise<void> {
         if (!this.bootFailure) this.operation++
         this.bootFailure = true
@@ -273,6 +295,7 @@ export class AppLockController {
     }
 
     async rendered(reason: string): Promise<void> {
+        if (this.bridgeFailed && this.recordRead && !this.state.record.enabled) await this.publishPolicy()
         const epoch = this.state.epoch
         const operation = this.operation
         await this.policyTail
@@ -417,6 +440,10 @@ export class AppLockController {
     private changeRecord(change: (record: AppLockRecord) => AppLockRecord): Promise<boolean> {
         const next = this.writeTail.then(async () => {
             const record = change(this.state.record)
+            if (record.enabled && !this.listening) {
+                await this.ensureListening()
+                if (!this.listening) return false
+            }
             try { await this.storage.commit(JSON.stringify(record)) } catch { return false }
             this.recordRead = true
             this.update({ record })

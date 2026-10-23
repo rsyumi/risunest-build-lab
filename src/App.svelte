@@ -75,8 +75,10 @@
     const bootFailureVisible = $derived(!$loadedStore && !$recoveryStart && !!$bootFailure)
     const appLockVisible = $derived(isTauri && !bootFailureVisible && ($loadedStore || !!$recoveryStart) && appLock.gated)
 
+    const appLockFramesHidden = $derived(isTauri && !bootFailureVisible && appLock.gated)
+
     $effect.pre(() => {
-        setAppLockInputBlocked(appLockVisible)
+        setAppLockInputBlocked(appLockVisible, appLockFramesHidden)
         return () => setAppLockInputBlocked(false)
     })
 
@@ -95,14 +97,16 @@
     $effect(() => {
         if (!isTauri) return
         const failure = bootFailureVisible
-        const ready = $loadedStore || !!$recoveryStart
+        const loading = !$loadedStore && !$recoveryStart && !$bootFailure
         const epoch = appLock.state.epoch
         const presentation = appLock.state.presentationRevision
-        if (!failure && (!appLock.state.initialized || !ready || appLock.gated)) return
+        const initialized = appLock.state.initialized
+        if (!failure && !loading && (!initialized || appLock.gated)) return
         let cancelled = false
         void tick().then(() => requestAnimationFrame(() => requestAnimationFrame(() => {
             if (cancelled || epoch !== appLock.state.epoch || presentation !== appLock.state.presentationRevision) return
             if (failure) void appLock.renderBootFailure()
+            else if (loading) void appLock.renderLoading()
             else void appLock.rendered(language.risuNest.appLock.promptUnlock)
         })))
         return () => { cancelled = true }

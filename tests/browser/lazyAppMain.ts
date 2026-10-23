@@ -1,11 +1,14 @@
 import { mount } from 'svelte'
+import '../../src/styles.css'
 import App from '../../src/App.svelte'
-import { openRoute, lazyImportBoundary, navigationState, loadedStore, bootFailure } from './lazyAppAdapters'
+import { openRoute, lazyImportBoundary, navigationState, loadedStore, bootFailure, alertStore } from './lazyAppAdapters'
 import { appLock } from '../../src/ts/appLock/appLock.svelte'
 import { createPinRecord, defaultAppLockRecord } from '../../src/ts/appLock/record'
 import { installAppLockInput } from '../../src/ts/appLock/input'
 import { createSyncExitCoordinator } from '../../src/ts/storage/syncExitCoordinator'
 import { configureSyncExitCoordinator } from '../../src/ts/storage/syncExitProduction'
+import { loadV3Plugins } from '../../src/ts/plugins/apiV3/v3.svelte'
+import { fixtureState } from './hostAdapters'
 
 installAppLockInput()
 const exitCoordinator = createSyncExitCoordinator({
@@ -17,8 +20,8 @@ const exitCoordinator = createSyncExitCoordinator({
 })
 configureSyncExitCoordinator(exitCoordinator)
 const lockDriver = {
-    async initialize() {
-        let record = JSON.stringify({ ...defaultAppLockRecord(), enabled: true, timing: 'immediate', pin: await createPinRecord('123456') })
+    async initialize(nativeUnlock = false) {
+        let record = JSON.stringify({ ...defaultAppLockRecord(), enabled: true, timing: 'immediate', nativeUnlock, pin: await createPinRecord('123456') })
         await appLock.initialize({ read: () => record, commit: async value => { record = value } })
     },
     bootFailure(loaded: boolean) {
@@ -27,6 +30,15 @@ const lockDriver = {
     },
     requestExit() { void exitCoordinator.requestExit() },
     changePin() { appLock.beginChange() },
+    loading(value: boolean) { loadedStore.set(!value) },
+    loadingAlert() { alertStore.set({ type: 'ask', msg: 'Synthetic startup confirmation' }) },
 }
-Object.assign(window, { lazyImportBoundary, lazyApp: { open: openRoute, ...navigationState, lock: lockDriver } })
+const plugin = {
+    async load(script: string) {
+        fixtureState.database.plugins = [{ name: 'lock-fixture', script, arguments: {}, realArg: {}, version: '3.0', customLink: [], argMeta: {}, enabled: true }]
+        await loadV3Plugins(fixtureState.database.plugins)
+    },
+    writes: fixtureState.writes,
+}
+Object.assign(window, { lazyImportBoundary, lazyApp: { open: openRoute, ...navigationState, lock: lockDriver, plugin } })
 mount(App, { target: document.querySelector<HTMLElement>('#app')! })

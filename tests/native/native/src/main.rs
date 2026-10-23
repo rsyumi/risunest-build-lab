@@ -9,7 +9,26 @@ fn boundary_phase(app: tauri::AppHandle) -> serde_json::Value {
     assert_eq!(root, PathBuf::from(value("RISUNEST_BOUNDARY_ROOT")));
     assert_eq!(fs::read_to_string(root.join("boundary-owner")).unwrap(), value("RISUNEST_BOUNDARY_ID"));
     serde_json::json!({"runId": value("RISUNEST_BOUNDARY_ID"), "phase": value("RISUNEST_BOUNDARY_PHASE"),
+        "appLockUnavailable": std::env::var("RISUNEST_BOUNDARY_APP_LOCK_UNAVAILABLE").as_deref() == Ok("1"),
         "accountOrigin": std::env::var("RISUNEST_BOUNDARY_ACCOUNT_ORIGIN").ok()})
+}
+
+#[tauri::command]
+fn boundary_cover_present(app: tauri::AppHandle) -> Result<bool, String> {
+    let window = app.get_webview_window("main").ok_or("main window unavailable")?;
+    if window.is_visible().map_err(|error| error.to_string())? { return Err("boundary window must stay hidden".into()); }
+    #[cfg(windows)]
+    {
+        #[link(name = "user32")]
+        extern "system" {
+            fn FindWindowExW(parent: *mut std::ffi::c_void, after: *mut std::ffi::c_void, class: *const u16, title: *const u16) -> *mut std::ffi::c_void;
+        }
+        let class: Vec<u16> = "RisuNestLockCover\0".encode_utf16().collect();
+        let parent = window.hwnd().map_err(|error| error.to_string())?.0;
+        Ok(!unsafe { FindWindowExW(parent, std::ptr::null_mut(), class.as_ptr(), std::ptr::null()) }.is_null())
+    }
+    #[cfg(not(windows))]
+    { Ok(true) }
 }
 
 fn write_report(report: &serde_json::Value, options: &mut fs::OpenOptions) -> Result<(), String> {
@@ -52,7 +71,7 @@ fn boundary_close_main(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 fn boundary_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
-    tauri::generate_handler![boundary_phase, boundary_finish, boundary_record, boundary_ready, boundary_close_main]
+    tauri::generate_handler![boundary_phase, boundary_finish, boundary_record, boundary_ready, boundary_close_main, boundary_cover_present]
 }
 
 fn main() {
@@ -65,6 +84,7 @@ fn main() {
     assert_eq!(fs::read_to_string(root.join("boundary-owner")).unwrap(), id);
     let mut context = tauri::generate_context!();
     assert_eq!(context.config().identifier, "io.github.rsyumi.risunest.boundary");
+    assert!(!context.config().app.windows[0].visible, "boundary window must stay hidden");
     assert!(matches!(context.config().build.frontend_dist, Some(tauri::utils::config::FrontendDist::Files(_))));
     context.config_mut().identifier = identifier;
     context.config_mut().app.windows[0].data_directory = Some(root.join("webview"));

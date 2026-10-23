@@ -13,7 +13,7 @@ beforeAll(async () => {
     pin = await createPinRecord('123456')
 })
 
-function fixture(options: { record?: unknown; timing?: AppLockTiming; nativeUnlock?: boolean; available?: boolean } = {}) {
+function fixture(options: { record?: unknown; timing?: AppLockTiming; nativeUnlock?: boolean; available?: boolean; gateRequired?: boolean } = {}) {
     let stored: unknown = options.record === undefined ? JSON.stringify({
         ...defaultAppLockRecord(), enabled: true, pin,
         timing: options.timing ?? 'launch', nativeUnlock: options.nativeUnlock ?? false,
@@ -23,7 +23,7 @@ function fixture(options: { record?: unknown; timing?: AppLockTiming; nativeUnlo
         auth: options.available ? { status: 'available', method: 'device' } : { status: 'unsupported' }, previewSupported: false,
     }
     let listener: (snapshot: AppLockLifecycle) => void
-    let nativeGateRequired = false
+    let nativeGateRequired = options.gateRequired ?? false
     let presentedLocked: boolean | null = null
     const adapter: AppLockNativeAdapter = {
         check: vi.fn(async () => capabilities),
@@ -31,6 +31,7 @@ function fixture(options: { record?: unknown; timing?: AppLockTiming; nativeUnlo
         setPolicy: vi.fn(async (policy) => { nativeGateRequired = policy.gateRequired; return lifecycle }),
         ready: vi.fn(async (epoch, locked) => {
             if (epoch !== lifecycle.epoch || (nativeGateRequired && !locked)) return false
+            nativeGateRequired = locked
             presentedLocked = locked
             return true
         }),
@@ -105,6 +106,81 @@ describe('app lock record and timing', () => {
 })
 
 describe('app lock controller', () => {
+    it.each([false, true])('keeps an unlocked launch-only return interactive (enabled=%s)', async (enabled) => {
+        const f = fixture(enabled ? {} : { record: null })
+        await f.controller.initialize()
+        if (enabled) await enter(f.controller)
+        f.emit(false, 100)
+        f.emit(true, 100_000)
+        expect(f.controller.gated).toBe(false)
+        expect(f.controller.state.returnPending).toBe(false)
+        expect(f.controller.state.locked).toBe(false)
+    })
+
+    it.each(['listen', 'setPolicy'] as const)('does not gate a disabled record after a native %s failure', async (method) => {
+        const f = fixture({ record: null })
+        vi.mocked(f.adapter[method]).mockRejectedValueOnce(new Error('synthetic bridge failure'))
+        await f.controller.initialize()
+        expect(f.controller.state.readFailed).toBe(false)
+        expect(f.controller.gated).toBe(false)
+    })
+
+    it('repairs a stale native gate after the disabled policy initially fails to arrive', async () => {
+        const f = fixture({ record: null, gateRequired: true })
+        vi.mocked(f.adapter.setPolicy).mockRejectedValueOnce(new Error('policy unavailable'))
+        await f.controller.initialize()
+        expect(f.controller.gated).toBe(false)
+        await f.controller.rendered('unlock')
+        expect(f.presented()).toBe(false)
+    })
+
+    it('reconnects a failed listener before enabling and then locks on departure', async () => {
+        const f = fixture({ record: null })
+        vi.mocked(f.adapter.listen).mockRejectedValueOnce(new Error('transient listener failure'))
+        await f.controller.initialize()
+        f.controller.beginSetup()
+        await enter(f.controller, '123456123456')
+        expect(f.controller.state.record.enabled).toBe(true)
+        expect(f.controller.gated).toBe(false)
+        await f.controller.setTiming('immediate')
+        f.emit(false, 100)
+        expect(f.controller.state.locked).toBe(true)
+    })
+
+    it('retains the disabled record and offers setup retry while the listener remains unavailable', async () => {
+        const f = fixture({ record: null })
+        vi.mocked(f.adapter.listen).mockRejectedValue(new Error('listener unavailable'))
+        await f.controller.initialize()
+        f.controller.beginSetup()
+        await enter(f.controller, '123456123456')
+        expect(f.controller.state.record.enabled).toBe(false)
+        expect(f.stored()).toBeNull()
+        expect(f.controller.state.saveFailed).toBe(true)
+        f.controller.cancelFlow()
+        expect(f.controller.gated).toBe(false)
+    })
+
+    it('releases disabled startup loading without leaving the native input gate required', async () => {
+        const f = fixture({ record: null })
+        await f.controller.initialize()
+        await f.controller.renderLoading()
+        expect(f.presented()).toBe(false)
+        await f.controller.rendered('unlock')
+        expect(f.presented()).toBe(false)
+        expect(f.controller.gated).toBe(false)
+    })
+
+    it('presents the loading surface without unlocking or starting native authentication', async () => {
+        const f = fixture({ nativeUnlock: true, available: true })
+        await f.controller.initialize()
+        await f.controller.renderLoading()
+        expect(f.presented()).toBe(true)
+        expect(f.controller.state.locked).toBe(true)
+        expect(f.adapter.authenticate).not.toHaveBeenCalled()
+        await f.controller.rendered('unlock')
+        expect(f.controller.state.locked).toBe(false)
+    })
+
     it('starts every enabled mode locked, accepts the correct PIN and retains wrong-PIN entry until feedback ends', async () => {
         const f = fixture()
         await f.controller.initialize()
@@ -183,9 +259,12 @@ describe('app lock controller', () => {
     })
 
     it('keeps content gated when the native policy or lifecycle subscription fails and permits retry', async () => {
-        const policy = fixture({ record: null })
-        vi.mocked(policy.adapter.setPolicy).mockRejectedValueOnce(new Error('native policy unavailable'))
+        const policy = fixture()
         await policy.controller.initialize()
+        await enter(policy.controller)
+        vi.mocked(policy.adapter.setPolicy).mockRejectedValueOnce(new Error('native policy unavailable'))
+        policy.controller.setBackgroundColor('#ffffff')
+        await vi.waitFor(() => expect(policy.controller.state.failure).toBe('bridge'))
         expect(policy.controller.state.readFailed).toBe(true)
         expect(policy.controller.state.failure).toBe('bridge')
         expect(policy.controller.gated).toBe(true)
@@ -195,11 +274,13 @@ describe('app lock controller', () => {
         await policy.controller.rendered('unlock')
         expect(policy.presented()).toBe(false)
         expect(policy.controller.gated).toBe(false)
-        const events = fixture({ record: null })
+        const events = fixture()
         vi.mocked(events.adapter.listen).mockRejectedValueOnce(new Error('native events unavailable'))
         await events.controller.initialize()
         expect(events.controller.gated).toBe(true)
         await events.controller.retryRead()
+        expect(events.controller.state.locked).toBe(true)
+        await enter(events.controller)
         expect(events.controller.gated).toBe(false)
         const unlocked = fixture({ available: true })
         await unlocked.controller.initialize()
