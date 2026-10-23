@@ -51,7 +51,8 @@ export async function appLockFixture(platform: 'ios' | 'macos' | 'linux', phase:
     const { appLock } = await import('../../src/ts/appLock/appLock.svelte')
     const { DBState } = await import('../../src/ts/stores.svelte')
     const { changeChar } = await import('../../src/ts/characters')
-    await until(() => appLock.state.initialized && performance.getEntriesByName('boot:interactive').length > 0, 'Product bootstrap timed out')
+    await until(() => appLock.state.initialized && appLock.state.active && !appLock.gated
+        && performance.getEntriesByName('boot:interactive').length > 0, 'Product content did not become ready')
     const index = DBState.db.characters.findIndex(character => character.chaId === 'char-a')
     if (index < 0 || !await changeChar(index)) throw new Error('Synthetic character did not open')
     appLock.beginSetup()

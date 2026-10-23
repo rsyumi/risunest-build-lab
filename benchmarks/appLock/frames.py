@@ -177,7 +177,7 @@ def wait_stage(path, stage, timeout, process=None):
     raise RuntimeError('Timed out waiting for ' + stage)
 
 
-def run_macos(app, artifacts, capture_input, start_capture, finish_capture):
+def run_macos(app, artifacts, capture_input, start_capture, finish_capture, activate_process):
     outcomes = []
     for phase in PHASES:
         report = artifacts / (phase + '.jsonl')
@@ -188,6 +188,10 @@ def run_macos(app, artifacts, capture_input, start_capture, finish_capture):
         with (artifacts / (phase + '.log')).open('w') as log:
             process = subprocess.Popen([str(app / 'Contents/MacOS/risunest-macos-bench')], env=environment, stdout=log, stderr=subprocess.STDOUT)
             try:
+                foreground = activate_process(process, app / 'Contents/MacOS/risunest-macos-bench')
+                (artifacts / (phase + '-foreground.json')).write_text(json.dumps(foreground, indent=2))
+                if foreground.get('confirmed') is not True:
+                    raise RuntimeError('Synthetic app did not become foreground before frame readiness')
                 ready = wait_stage(report, 'app-lock-ready', 120, process)
                 baseline = artifacts / (phase + '-baseline.png')
                 subprocess.run(['screencapture', '-x', str(baseline)], check=True)

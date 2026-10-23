@@ -276,7 +276,7 @@ internal class AndroidAppLock(
       elevation = 100_000f
     }
     val icon = ImageView(activity).apply {
-      setImageDrawable(activity.packageManager.getApplicationIcon(activity.applicationInfo))
+      setImageResource(R.drawable.app_lock_logo)
       scaleType = ImageView.ScaleType.FIT_CENTER
       outlineProvider = object : ViewOutlineProvider() {
         override fun getOutline(view: View, outline: Outline) {

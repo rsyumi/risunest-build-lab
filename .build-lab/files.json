@@ -39,14 +39,14 @@
     {
       "path": "benchmarks/appLock/fixture.ts",
       "mode": "100644",
-      "bytes": 7166,
-      "sha256": "304eb6dc583e87635330507b069513ccd7498b388ac9b9d3a8d4e743ee6a21c2"
+      "bytes": 7225,
+      "sha256": "67b40201e7c312540db56d791c882bef4f14d3b505841dfc336ab4e2d831be21"
     },
     {
       "path": "benchmarks/appLock/frames.py",
       "mode": "100644",
-      "bytes": 14096,
-      "sha256": "06d635966b0b5be6d8f201f0567566e0708800f5d31c7de63d01400523c018ed"
+      "bytes": 14483,
+      "sha256": "7b84916c7ee7080a3e2a78701a8a55288f4449258b0f2bf79176c2079d2a0b7f"
     },
     {
       "path": "benchmarks/appLock/mutationPlugin.ts",
@@ -669,8 +669,8 @@
     {
       "path": "benchmarks/macos/run.py",
       "mode": "100644",
-      "bytes": 35499,
-      "sha256": "72c297e1ce8fd442d22baa1e46dd14bf063d01a1b1756775704bc7d17651d646"
+      "bytes": 35551,
+      "sha256": "d553a42082704f4ad43232bc1d88700c54e768174e9ed9c186c12d6195b6896b"
     },
     {
       "path": "benchmarks/macos/sync.ts",
@@ -5007,8 +5007,8 @@
     {
       "path": "src-tauri/gen/android/app/build.gradle.kts",
       "mode": "100644",
-      "bytes": 10539,
-      "sha256": "864230e22497363dcfa126c33680331b7160fbc3b97f2131622526b3d0fd5bcf"
+      "bytes": 10951,
+      "sha256": "62643dc3d15a6b7c9e0221770d483ee4489e4152ff5162bd2cb9bff7b6e0fa8e"
     },
     {
       "path": "src-tauri/gen/android/app/proguard-rules.pro",
@@ -5025,8 +5025,8 @@
     {
       "path": "src-tauri/gen/android/app/src/main/java/io/github/rsyumi/risunest/AndroidAppLock.kt",
       "mode": "100644",
-      "bytes": 13588,
-      "sha256": "d684bb3a0125347da40fd715c7e8433af3d0f8ce8c452f92a687afa2ac506b49"
+      "bytes": 13544,
+      "sha256": "2360dbaf694e8d4e203d0df4cd7e6d633b8af7bdb6405aedc50b701f1e1d2b09"
     },
     {
       "path": "src-tauri/gen/android/app/src/main/java/io/github/rsyumi/risunest/AndroidCommitBridge.kt",
@@ -6003,8 +6003,8 @@
     {
       "path": "src-tauri/src/app_lock/linux.rs",
       "mode": "100644",
-      "bytes": 10848,
-      "sha256": "ac04b6f3c80a9acd11eb4ed7a7b17a53e06a6b478ced84869979e376db03f83a"
+      "bytes": 11144,
+      "sha256": "37c67d44250390527f651fcfead5e9c9ff57393de79d7f9a0f0cfc321141e463"
     },
     {
       "path": "src-tauri/src/app_lock/macos.rs",

@@ -133,7 +133,7 @@ def start_appearance_capture(directory, label, platform, capture_input, capture_
     log = (directory / f'{label}-capture.log').open('w')
     started = time.monotonic()
     experiment_options = ['-nostdin', '-benchmark', '-t', '6', '-f', 'nut'] if experiment_codec else []
-    process = subprocess.Popen(['ffmpeg', '-hide_banner', '-loglevel', 'info' if experiment_codec else 'warning', '-n', *timestamp_options, *source,
+    process = subprocess.Popen(['ffmpeg', '-hide_banner', '-loglevel', 'info' if experiment_codec else 'warning', '-n', *timestamp_options, '-thread_queue_size', '32', *source,
         '-an', '-c:v', experiment_codec or 'ffv1', '-fps_mode', 'passthrough', '-progress', str(progress),
         *experiment_options, str(video)],
         stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT)
@@ -356,7 +356,7 @@ def main():
             raise RuntimeError('App-lock capture requires an empty artifact directory')
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'appLock'))
         from frames import run_macos
-        run_macos(app, artifacts, args.capture_input, start_appearance_capture, finish_appearance_capture)
+        run_macos(app, artifacts, args.capture_input, start_appearance_capture, finish_appearance_capture, activate_owned_process)
         return
     if args.appearance or args.capture_codec_experiment or args.capture_bgra_experiment:
         if any(artifacts.iterdir()):
