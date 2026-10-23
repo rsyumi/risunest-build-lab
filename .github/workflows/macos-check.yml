@@ -264,6 +264,14 @@ jobs:
           if [[ "$CHECK_SCOPE" == full || "$CHECK_SCOPE" == harness ]]; then
             node ../control/scripts/verify-unicode-results.mjs macos artifacts/wkwebview
           fi
+          if [[ "$CHECK_SCOPE" == full && -f benchmarks/appLock/frames.py ]]; then
+            if ! command -v ffmpeg >/dev/null; then brew install ffmpeg; fi
+            command -v ffprobe
+            ffmpeg -f avfoundation -list_devices true -i "" > artifacts/capture-devices.txt 2>&1 || true
+            capture_input="$(python3 -c 'import pathlib,re; text=pathlib.Path("artifacts/capture-devices.txt").read_text(); screens=re.findall(r"Capture screen [0-9]+",text); assert screens,"No enumerated screen"; print(screens[0]+":none")')"
+            python3 benchmarks/macos/run.py --app "$app" --artifacts artifacts/app-lock-frames \
+              --app-lock --capture-input "$capture_input" 2>&1 | tee artifacts/app-lock-frames.log
+          fi
       - name: Persistence boundary
         if: inputs.scope == 'full' || inputs.scope == 'harness'
         run: |
