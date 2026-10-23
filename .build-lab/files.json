@@ -33,20 +33,20 @@
     {
       "path": "benchmarks/app-lock/android-smoke.mjs",
       "mode": "100644",
-      "bytes": 17545,
-      "sha256": "05e9b8ee08a55d855a6fcd43429dc3e66869e5859cf8fb0c7b1907fae9eaa721"
+      "bytes": 22134,
+      "sha256": "1de072c037f14df410dfb5437edc583ae139565091843377dd77fd73fdc80d54"
     },
     {
       "path": "benchmarks/appLock/fixture.ts",
       "mode": "100644",
-      "bytes": 6897,
-      "sha256": "cc8c9a4a49d08f5d33fbb76209f920543611f2e5f43bb7b417b8cd6daeb6cbda"
+      "bytes": 7166,
+      "sha256": "304eb6dc583e87635330507b069513ccd7498b388ac9b9d3a8d4e743ee6a21c2"
     },
     {
       "path": "benchmarks/appLock/frames.py",
       "mode": "100644",
-      "bytes": 13438,
-      "sha256": "35be8e8a956d04621560cb6ef741d0038b8a9c662f891e808fafe454b93aa557"
+      "bytes": 13972,
+      "sha256": "ebc8b3bfc2c049dfeb33cd488049ac4baaa76897a35734283c7f6b0a38041a0d"
     },
     {
       "path": "benchmarks/appLock/mutationPlugin.ts",
@@ -93,8 +93,8 @@
     {
       "path": "benchmarks/device-backup/main.ts",
       "mode": "100644",
-      "bytes": 21950,
-      "sha256": "ddc2f3d4f7e1f33da7b71d81ef173b7f6d2e2f285e94fd37a0a8acef63077ab7"
+      "bytes": 22031,
+      "sha256": "87ced72dce4a3f0944a4269e7baffc7cafbca70c1ce199480d1f19716a57fc7e"
     },
     {
       "path": "benchmarks/device-backup/plugin-sync-driver.mjs",
@@ -279,8 +279,8 @@
     {
       "path": "benchmarks/ios/native/Cargo.lock",
       "mode": "100644",
-      "bytes": 187769,
-      "sha256": "9f731b57a1a7d4b1b8b6700f30baa847e350e70193e90a0ce0e47314cd95f476"
+      "bytes": 187778,
+      "sha256": "5c24de4a19158d2e4775ad2e2c3a7bfe2879b4ce1d6d51aae42bd5492bf69a80"
     },
     {
       "path": "benchmarks/ios/native/Cargo.toml",
@@ -417,14 +417,14 @@
     {
       "path": "benchmarks/linux/main.ts",
       "mode": "100644",
-      "bytes": 17036,
-      "sha256": "c76819c2d7ddd4d14299ab3c2b4d6307f7ab909dbcef5f72119217980743c281"
+      "bytes": 17576,
+      "sha256": "2848307b70852d7959485ce0853f721b6bc8ff4f78ca8371145beedd06ef669e"
     },
     {
       "path": "benchmarks/linux/run.py",
       "mode": "100644",
-      "bytes": 19249,
-      "sha256": "5228ee095f6ace4d862da402cb12b48292f35e74890eaaf962ffb5d561c27531"
+      "bytes": 24647,
+      "sha256": "e62c0f37148331278014bbb1eaf9e055565dfdac046ca481c6d66e333ee9d8c6"
     },
     {
       "path": "benchmarks/linux/summarize.mjs",
@@ -441,8 +441,8 @@
     {
       "path": "benchmarks/linux/vite.config.ts",
       "mode": "100644",
-      "bytes": 888,
-      "sha256": "cd2858835b66f7e8f2106dae79c4851c29619881fb07e2eea6d4fda50b75e813"
+      "bytes": 1032,
+      "sha256": "be1eb23125c4917267b14bb10fd54d39616f9fe7884dc8250e09413ff4a9568b"
     },
     {
       "path": "benchmarks/lww-native/Cargo.lock",
@@ -627,8 +627,8 @@
     {
       "path": "benchmarks/macos/native/Cargo.lock",
       "mode": "100644",
-      "bytes": 187599,
-      "sha256": "697a8a4d08f1c4e7b1e67536ebddf97da1dd3b6b388374cb8d7644ce2f0052a5"
+      "bytes": 187608,
+      "sha256": "5a4c322048f9e1e57769ad9883972e1870cae933fde25435232b37c98617609e"
     },
     {
       "path": "benchmarks/macos/native/Cargo.toml",
@@ -771,8 +771,8 @@
     {
       "path": "benchmarks/plugin-review/main.ts",
       "mode": "100644",
-      "bytes": 10281,
-      "sha256": "68515ddcd0c31264faa53fe54369602ecd4c81f12891157512b99b944ec646b0"
+      "bytes": 10368,
+      "sha256": "8e17c1bc44020019d01bbe2fe8726622482b26d6bc0b968d85a0c4d6104af163"
     },
     {
       "path": "benchmarks/plugin-review/tauri.android.conf.json",
@@ -807,8 +807,8 @@
     {
       "path": "benchmarks/regex-native-pilot/main.ts",
       "mode": "100644",
-      "bytes": 5687,
-      "sha256": "38631aff4272729434d2f15629230ad26b518e113770099bac6a02fb09028e49"
+      "bytes": 5832,
+      "sha256": "2b18402a1daf8127a1fbb1ec2a1d7f1eb22fe09452840fa7c8d747d9af3be574"
     },
     {
       "path": "benchmarks/regex-native-pilot/runner.mjs",
@@ -1029,8 +1029,8 @@
     {
       "path": "benchmarks/streaming/main.ts",
       "mode": "100644",
-      "bytes": 513,
-      "sha256": "fcc6b2f627b0333a8664f8ff6c1f36caab7bb01e5e64a22b38aa649d15ad8d38"
+      "bytes": 607,
+      "sha256": "4918bbc8f4bc8a92a130fe5a0378d67d64c3fa3cabd321814a70d3285cdb4b3e"
     },
     {
       "path": "benchmarks/streaming/parserContext.svelte.ts",
@@ -4881,14 +4881,14 @@
     {
       "path": "src-tauri/Cargo.lock",
       "mode": "100644",
-      "bytes": 192270,
-      "sha256": "8d474c9850cfef378106d3c9725b0ab3e9a2063da2919177ec2ed0abeb111828"
+      "bytes": 192279,
+      "sha256": "20d0536fe86cf27eb63efa84f2d4e38f71376986e519fac54e9b83fb257bdf84"
     },
     {
       "path": "src-tauri/Cargo.toml",
       "mode": "100644",
-      "bytes": 8621,
-      "sha256": "da87d25c1e875eae46f67ae8127559809ac5f3c1f1eb50aeefdac6ed108c004f"
+      "bytes": 8629,
+      "sha256": "783a7df052db8603412244f9a9c8329907efc62cd24b9b0c9f2cd272599729a3"
     },
     {
       "path": "src-tauri/Info.plist",
@@ -8955,14 +8955,14 @@
     {
       "path": "src/lib/AppLock/AppLockGate.svelte",
       "mode": "100644",
-      "bytes": 2614,
-      "sha256": "6b5525623ee31b899754b71aa76d59a36bd0b801b5fe8c5ca40cbf681e39d83c"
+      "bytes": 3101,
+      "sha256": "d86cf2568020abd5cb42ba4421288a9c9606cad8df537c7a982228b3c5fd71dd"
     },
     {
       "path": "src/lib/AppLock/AppLockScreen.svelte",
       "mode": "100644",
-      "bytes": 11457,
-      "sha256": "4d7d039481d662eb64a37654314b0fbf329c3fe517bc6cfe48cccfea32be8a7a"
+      "bytes": 11483,
+      "sha256": "b7f841fc53b5f1d23f1756b389a53768891460d86e42c1dfc31674e09aa6119b"
     },
     {
       "path": "src/lib/AppLock/AppLockScreen.test.ts",
@@ -8973,8 +8973,8 @@
     {
       "path": "src/lib/AppLock/AppLockSettings.test.ts",
       "mode": "100644",
-      "bytes": 6292,
-      "sha256": "3b89038cc74187bb94f8dae776493d62b0fc994f5f83bf6e175ad499305c7031"
+      "bytes": 7000,
+      "sha256": "0a9b708a8967fcfd31bcc293097aa0b417d0885385368ae56d7540201c301cc8"
     },
     {
       "path": "src/lib/ChatScreens/AssetInput.svelte",
@@ -10414,7 +10414,7 @@
       "path": "src/lib/Setting/Pages/RisuNestAppLockSettings.svelte",
       "mode": "100644",
       "bytes": 7498,
-      "sha256": "aaf2636da9afb5dc3d202953c3b98309d36c30d1cf57406cb3931c06af82416f"
+      "sha256": "fca0efea753b5f3d481a3ad97c0dadbdcc645faaa5ebf6efe92f4c98d3c2287b"
     },
     {
       "path": "src/lib/Setting/Pages/RisuNestAttachmentGallery.svelte",
@@ -11757,14 +11757,14 @@
     {
       "path": "src/ts/appLock/appLock.svelte.ts",
       "mode": "100644",
-      "bytes": 6013,
-      "sha256": "73ec0b8e30205db227617c204fa4fe4342b89d8b21b8bbecc56ec2c8a4fdb79b"
+      "bytes": 6151,
+      "sha256": "40b7253b7394814bf530618b9fd152450c7cdc5f110e5167686e9c2443d16dad"
     },
     {
       "path": "src/ts/appLock/appLock.test.ts",
       "mode": "100644",
-      "bytes": 2756,
-      "sha256": "41fde3d570b5714ee962b7956c20f8513c3b750d5cc50f39a3aac6d28cd5043b"
+      "bytes": 4916,
+      "sha256": "f25a34773ace09469baaa889f5ed2b207593a5473fe20cb762662e6d7ee5e4f0"
     },
     {
       "path": "src/ts/appLock/controller.test.ts",
@@ -11775,14 +11775,14 @@
     {
       "path": "src/ts/appLock/controller.ts",
       "mode": "100644",
-      "bytes": 20686,
-      "sha256": "d351fb25ac39c24d227fb94f5b71219b024c9c35f58eb08c15bce23c742826bb"
+      "bytes": 20729,
+      "sha256": "5062514b64b60bf4b9c36ef0d7e75be9cfa55f4bb79398fd84c854479d20b3c1"
     },
     {
       "path": "src/ts/appLock/input.ts",
       "mode": "100644",
-      "bytes": 4259,
-      "sha256": "4ae16cf269e4d621e4510e32b6312d63b057622e51261aca95231207b0ffdcc3"
+      "bytes": 5147,
+      "sha256": "a530aff59cd8a2e373bca3c13fb5f2ef6b984fe2b3428283b99d2f5be3d753b3"
     },
     {
       "path": "src/ts/appLock/native.ts",
@@ -19107,8 +19107,8 @@
     {
       "path": "tests/browser/lazyApp.browser.spec.ts",
       "mode": "100644",
-      "bytes": 11893,
-      "sha256": "83edeb4297e299c1f142c2635ecb688d586af74a03e848cd4b3f6c7b8ffe8b17"
+      "bytes": 17564,
+      "sha256": "4d8620777008081e25c7e216a3d81803ca59305f4ae3dd618622b726e246c250"
     },
     {
       "path": "tests/browser/lazyApp.html",
@@ -19125,8 +19125,8 @@
     {
       "path": "tests/browser/lazyAppMain.ts",
       "mode": "100644",
-      "bytes": 1736,
-      "sha256": "9631042ad75d0efb8c064a9dfab49fa12f61c1bb1e70b1b5867fe1ee229ab7bc"
+      "bytes": 1779,
+      "sha256": "eaaa9239156a39dfdcff00182e39eaa79b844cb80db8cd45d7fa788588a8e990"
     },
     {
       "path": "tests/browser/lazyAppPlugin.ts",
@@ -19479,8 +19479,8 @@
     {
       "path": "tests/native/native/Cargo.lock",
       "mode": "100644",
-      "bytes": 187577,
-      "sha256": "4c85e6c14ecc874a2be1685837fa60c8d22491f3a0bacd9a2d5fd2af75512025"
+      "bytes": 187586,
+      "sha256": "5c638d29e78aa9ad1106b24faed28e7c0b4ea77a339014e8705d3c7dba0c6e84"
     },
     {
       "path": "tests/native/native/Cargo.toml",
@@ -20078,8 +20078,8 @@
     {
       "path": "benchmarks/app-lock/README.md",
       "mode": "100644",
-      "bytes": 2446,
-      "sha256": "5acee836dd4319e43c27097b9d33db4f59d1be30981f1c162b65915fea530e72",
+      "bytes": 2651,
+      "sha256": "26cb0fc868378485e5b23c13e5d8936c5bb200cb9a3f85f359ed1770accdba98",
       "reason": "explanatory-document"
     },
     {

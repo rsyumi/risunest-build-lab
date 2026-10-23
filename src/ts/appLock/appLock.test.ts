@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { appLock } from './appLock.svelte'
-import { createPinRecord, defaultAppLockRecord } from './record'
+import { APP_LOCK_KEY, createPinRecord, defaultAppLockRecord } from './record'
+import { createNativeDeviceMarkers, DEVICE_MARKER_KEYS, installDeviceMarkers } from '../storage/deviceMarkers'
+import type { NativeDeviceSettings } from '../storage/nativeDeviceSettings'
 import type { AppLockLifecycle, AppLockNativePolicy } from './native'
 
 const boundary = vi.hoisted(() => ({
@@ -51,5 +53,45 @@ describe('app lock startup facade', () => {
         await appLock.initialize({ read: () => record, commit: async () => {} })
         expect(appLock.state.locked).toBe(true)
         expect(boundary.policy).toMatchObject({ gateRequired: true, enabled: true })
+    })
+
+    it('refreshes persisted lock data on read retry and retains effective state when the refresh fails', async () => {
+        const pin = await createPinRecord('123456')
+        const previous = { ...defaultAppLockRecord(), enabled: true, pin, timing: 'immediate' as const }
+        await appLock.initialize({ read: () => JSON.stringify(previous), commit: async () => {} })
+        await appLock.retryRead()
+        let persisted = 'malformed'
+        let failRead = false
+        let wrote = false
+        const backend: NativeDeviceSettings = {
+            get: async () => persisted,
+            readMany: async keys => {
+                if (failRead) throw new Error('synthetic read failure')
+                return keys.map(key => key === APP_LOCK_KEY ? persisted : null)
+            },
+            set: async () => { wrote = true },
+            patch: async () => {},
+        }
+        const markers = createNativeDeviceMarkers(backend, await backend.readMany(DEVICE_MARKER_KEYS))
+        installDeviceMarkers(markers)
+        try {
+            await appLock.initialize()
+            await appLock.retryRead()
+            expect(appLock.state.readFailed).toBe(true)
+            expect(appLock.state.record).toEqual(previous)
+            persisted = JSON.stringify({ ...previous, timing: 'after-5m' })
+            failRead = true
+            await appLock.retryRead()
+            expect(appLock.state.readFailed).toBe(true)
+            expect(appLock.state.record).toEqual(previous)
+            expect(markers.getItem(APP_LOCK_KEY)).toBe('malformed')
+            failRead = false
+            await appLock.retryRead()
+            expect(appLock.state.readFailed).toBe(false)
+            expect(appLock.state.record.timing).toBe('after-5m')
+            expect(appLock.state.locked).toBe(true)
+            expect(markers.getItem(APP_LOCK_KEY)).toBe(persisted)
+            expect(wrote).toBe(false)
+        } finally { installDeviceMarkers(null) }
     })
 })

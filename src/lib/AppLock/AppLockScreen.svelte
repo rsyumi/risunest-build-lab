@@ -105,7 +105,7 @@
                 <h2 class="title">{title}</h2>
             {/if}
             <div class="instruction" aria-live="polite">{instruction}</div>
-            <div class="dots" class:shake={issue === 'wrongPin' && count === 6}
+            <div class="dots" class:shake={issue === 'mismatch' || (issue === 'wrongPin' && count === 6)}
                 role="img" aria-label={text.progress.replace('{0}', String(count))}>
                 {#each [0, 1, 2, 3, 4, 5] as index}
                     <span class="dot" class:filled={index < count}></span>

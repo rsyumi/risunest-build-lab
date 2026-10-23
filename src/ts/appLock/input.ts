@@ -10,6 +10,7 @@ let gate: AppLockSurface | null = null
 let exit: AppLockSurface | null = null
 let previousFocus: HTMLElement | null = null
 let focusGeneration = 0
+let interactionRevision = 0
 
 export const isAppLockInputBlocked = (): boolean => blocked
 export function setAppLockInputBlocked(value: boolean): void {
@@ -44,6 +45,20 @@ export function registerAppLockExitSurface(surface: AppLockSurface | null): void
     })
 }
 
+export function captureAppLockPresentationFocus(): () => void {
+    const surface = gate
+    const generation = focusGeneration
+    const interaction = interactionRevision
+    return () => {
+        if (!blocked || gate !== surface || !surface?.element.isConnected || exit?.element.isConnected
+            || generation !== focusGeneration || interaction !== interactionRevision) return
+        const current = document.activeElement
+        if (current === document.body || current === document.documentElement || surface.element.contains(current)) {
+            surface.element.focus({ preventScroll: true })
+        }
+    }
+}
+
 export function handleAppLockSurfaceNavigation(event: KeyboardEvent, root: HTMLElement): void {
     if (event.key === 'Tab') {
         const buttons = [...root.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], summary, [tabindex="0"]')]
@@ -72,6 +87,7 @@ export function installAppLockInput(): () => void {
     const active = () => exit?.element.isConnected ? exit : gate?.element.isConnected ? gate : null
     const keydown = (event: KeyboardEvent) => {
         if (!blocked) return
+        interactionRevision++
         const surface = active()
         if (surface) surface.keydown(event)
         else event.preventDefault()
@@ -79,6 +95,7 @@ export function installAppLockInput(): () => void {
         event.stopImmediatePropagation()
     }
     const keyup = (event: KeyboardEvent) => { if (blocked) event.stopImmediatePropagation() }
+    const pointerdown = () => { if (blocked) interactionRevision++ }
     const focusin = (event: FocusEvent) => {
         if (!blocked) return
         const surface = active()
@@ -89,10 +106,12 @@ export function installAppLockInput(): () => void {
     }
     window.addEventListener('keydown', keydown, true)
     window.addEventListener('keyup', keyup, true)
+    window.addEventListener('pointerdown', pointerdown, true)
     window.addEventListener('focusin', focusin, true)
     return () => {
         window.removeEventListener('keydown', keydown, true)
         window.removeEventListener('keyup', keyup, true)
+        window.removeEventListener('pointerdown', pointerdown, true)
         window.removeEventListener('focusin', focusin, true)
     }
 }

@@ -150,7 +150,7 @@ dbus = "0.9.7"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "NSApplication", "NSWorkspace", "NSWindow", "NSView", "NSImageView", "NSImage", "NSColor", "NSRunningApplication", "NSResponder", "NSBox", "NSControl", "NSCell", "NSGraphics"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "libc", "objc2-core-foundation", "NSApplication", "NSWorkspace", "NSWindow", "NSView", "NSImageView", "NSImage", "NSColor", "NSRunningApplication", "NSResponder", "NSBox", "NSControl", "NSCell", "NSGraphics"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSNotification", "NSOperation", "NSString", "NSError", "NSArray", "NSDictionary", "NSObject", "NSGeometry", "objc2-core-foundation"] }
 block2 = "0.6"
 

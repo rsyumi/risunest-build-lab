@@ -46,6 +46,7 @@ async function attach() {
     assert.match(pid, /^\d+$/)
     adb(['forward', `tcp:${cdpPort}`, `localabstract:webview_devtools_remote_${pid}`])
     client = await connectSyntheticAndroid(cdpPort, android)
+    await client.evaluate(`window.__syntheticFocusCalls = []; const originalFocus = HTMLElement.prototype.focus; HTMLElement.prototype.focus = function (...args) { window.__syntheticFocusCalls.push({tag:this.tagName,className:this.className,atMs:performance.now()}); return originalFocus.apply(this,args); }; window.__syntheticFocusEvents = []; document.addEventListener('focusin', event => window.__syntheticFocusEvents.push({tag:event.target.tagName,className:event.target.className,atMs:performance.now()})); true`)
     return pid
 }
 async function restart() {
@@ -138,6 +139,37 @@ async function returnVideo() {
     return file
 }
 
+async function captureSettings() {
+    await marker()
+    await waitFor(async () => greenPixels(await screenshot('settings-content-ready')) > 1000, 'Native cover did not release content before settings navigation')
+    await client.evaluate(`document.getElementById('synthetic-app-lock-marker').remove()` )
+    await client.evaluate(`(async () => {
+        const visible = selector => [...document.querySelectorAll(selector)].filter(element => element.getClientRects().length);
+        let settings = visible('svg.lucide-settings')[0];
+        if (!settings) {
+            visible('button').find(button => button.querySelector('svg.lucide-arrow-right') && !button.closest('.rs-sidebar'))?.click();
+            await new Promise(resolve => setTimeout(resolve, 600));
+            settings = visible('svg.lucide-settings')[0];
+        }
+        if (!settings) {
+            visible('svg.lucide-list')[0]?.closest('button')?.click();
+            await new Promise(resolve => setTimeout(resolve, 600));
+            settings = visible('svg.lucide-settings')[0];
+        }
+        if (!settings) throw new Error('Settings action missing');
+        settings.closest('button').click();
+    })()`)
+    await waitFor(() => client.evaluate(`[...document.querySelectorAll('button')].some(button => button.getClientRects().length && button.textContent.trim() === 'RisuNest')`), 'RisuNest settings menu missing')
+    await client.evaluate(`[...document.querySelectorAll('button')].find(button => button.getClientRects().length && button.textContent.trim() === 'RisuNest').click()`)
+    await waitFor(() => client.evaluate(`!!document.querySelector('#risunest-app-lock')`), 'App lock settings missing')
+    await delay(700)
+    await waitFor(async () => client.evaluate(`(() => { const group = document.querySelector('#risunest-app-lock'); group.scrollIntoView({block:'start',behavior:'instant'}); const box = group.getBoundingClientRect(); return box.top >= 0 && box.top < innerHeight / 3; })()`), 'App lock settings did not scroll into view')
+    await delay(1000)
+    results.settingsBounds = await client.evaluate(`(() => {const rect = document.querySelector('#risunest-app-lock').getBoundingClientRect(); return {top:rect.top,height:rect.height,viewport:innerHeight};})()`)
+    await screenshot('settings')
+    results.settingsCaptured = true
+}
+
 async function nativeAuthCancellation() {
     stage = 'native authentication cancellation'
     if (results.capabilities.auth.status === 'notEnrolled') {
@@ -194,16 +226,36 @@ try {
         stage = 'seed'
         await client.evaluate(seedExpression({ characters: 1, bytes: 10_000, compatibility: false, pluginBytes: 0, locale: 'en' }))
         await saveRecord(record())
-    } else {
-        await attach()
     }
     stage = 'launch gate'
     const pid = await restart()
     await waitFor(gated, 'Cold launch did not show PIN gate')
     results.capabilities = await client.evaluate(`window.__TAURI_INTERNALS__.invoke('app_lock_check')`)
+    await delay(700)
+    results.initialFocus = await client.evaluate(`({tag:document.activeElement?.tagName,className:document.activeElement?.className,events:window.__syntheticFocusEvents,calls:window.__syntheticFocusCalls})`)
     await screenshot('launch-gate')
     if (options.phase === 'seed') {
         results.seed = true
+    } else if (options.phase === 'keyboard') {
+        assert.ok(results.initialFocus.className?.includes('app-lock-screen'), 'Initial focus is not the gate root')
+        adb(['shell', 'input', 'keyevent', 'KEYCODE_TAB'])
+        await waitFor(() => client.evaluate(`document.activeElement?.textContent.trim() === '1'`), 'First Tab did not focus digit1')
+        adb(['shell', 'input', 'keyevent', 'KEYCODE_ENTER'])
+        await waitFor(() => client.evaluate(`document.querySelectorAll('.app-lock-screen .dot.filled').length === 1`), 'Enter did not activate focused digit')
+        adb(['shell', 'input', 'keyevent', 'KEYCODE_DEL'])
+        await waitFor(() => client.evaluate(`document.querySelectorAll('.app-lock-screen .dot.filled').length === 0`), 'Hardware Backspace did not clear digit')
+        adb(['shell', 'input', 'keyevent', 'KEYCODE_1', 'KEYCODE_2', 'KEYCODE_3', 'KEYCODE_4', 'KEYCODE_5', 'KEYCODE_6'])
+        await waitFor(() => client.evaluate(`!document.querySelector('.app-lock-screen,.app-lock-cover')`), 'Hardware PIN did not unlock')
+        results.hardwarePin = true
+        adb(['shell', 'input', 'keyevent', 'KEYCODE_HOME'])
+        await foreground()
+        await waitFor(() => client.evaluate(`document.activeElement?.classList.contains('app-lock-screen')`), 'Return focus did not remain on gate root')
+        await screenshot('keyboard-return-gate')
+        results.returnFocus = true
+        await unlock()
+    } else if (options.phase === 'settings') {
+        await unlock()
+        await captureSettings()
     } else if (options.phase === 'timed') {
         await unlock()
         await saveRecord(record(false, false, 'after-1m'))

@@ -12,8 +12,10 @@ async function until(condition: () => boolean, message: string, timeout = 90_000
 }
 const frame = () => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
 
-export async function appLockFixture(platform: 'ios' | 'macos', phase: string, initialize: () => Promise<unknown>) {
-    const report = (stage: string, result: unknown) => invoke(`${platform}_bench_report`, { stage, result })
+export async function appLockFixture(platform: 'ios' | 'macos' | 'linux', phase: string, initialize: () => Promise<unknown>,
+    sendReport?: (stage: string, result: unknown) => Promise<unknown>) {
+    if (platform === 'linux' && !sendReport) throw new Error('Linux fixture requires an external report reader')
+    const report = sendReport ?? ((stage: string, result: unknown) => invoke(`${platform}_bench_report`, { stage, result }))
     const timed = phase === 'app-lock-timed'
     const ui = phase === 'app-lock-ui'
     const mutant = phase === 'app-lock-immediate-mutant'
@@ -56,7 +58,7 @@ export async function appLockFixture(platform: 'ios' | 'macos', phase: string, i
     for (const digit of '123456123456') await appLock.digit(digit)
     if (!appLock.state.record.enabled || appLock.gated) throw new Error('Public PIN setup did not complete')
     if (!await appLock.setTiming(timed ? 'after-1m' : 'immediate')) throw new Error('Lock timing did not save')
-    if (platform === 'ios' && !await appLock.setHideRecentsPreview(timed)) throw new Error('Preview policy did not save')
+    if (platform === 'ios' && !await appLock.setHideRecentsPreview(!ui)) throw new Error('Preview policy did not save')
     const main = document.querySelector('main')!
     const retained = document.createElement('section')
     retained.style.cssText = 'position:fixed;left:24px;top:96px;z-index:500;display:grid;gap:12px;background:#202020;padding:8px'
@@ -73,7 +75,7 @@ export async function appLockFixture(platform: 'ios' | 'macos', phase: string, i
     await appLock.rendered('Synthetic app lock')
     armed = true
     await report('app-lock-ready', { timed, mutant, pin: '123456', viewport: { width: innerWidth, height: innerHeight },
-        marker: marker.getBoundingClientRect().toJSON(), epoch: appLock.state.epoch })
+        marker: marker.getBoundingClientRect().toJSON(), epoch: appLock.state.epoch, hideRecentsPreview: appLock.state.record.hideRecentsPreview })
     await until(() => returned !== null && appLock.state.locked && appLock.state.flow === 'unlock'
         && !appLock.state.returnPending && !appLock.state.busy, 'Current return gate did not settle', timed ? 120_000 : 60_000)
     const away = departure as AppLockLifecycle | null

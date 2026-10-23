@@ -1,9 +1,9 @@
 """Synthetic native return-frame verification, using product gates and native lifecycle."""
 import argparse
 import json
+import importlib.util
 import os
 from pathlib import Path
-import signal
 import subprocess
 import time
 
@@ -217,11 +217,21 @@ def run_macos(app, artifacts, capture_input, start_capture, finish_capture):
     (artifacts / 'app-lock-result.json').write_text(json.dumps({'passed': True, 'observations': outcomes}, indent=2))
 
 
-def run_ios(device, artifacts):
+def run_ios(device, artifacts, capture_input):
     if os.environ.get('GITHUB_ACTIONS') != 'true':
         raise RuntimeError('Simulator capture requires the fresh hosted synthetic CI profile')
     identifier = 'io.github.rsyumi.risunest.ios.bench'
     container = Path(output(['xcrun', 'simctl', 'get_app_container', device, identifier, 'data']))
+    devices = json.loads(output(['xcrun', 'simctl', 'list', 'devices', 'booted', '--json']))['devices']
+    booted = [item for runtime in devices.values() for item in runtime if item['state'] == 'Booted']
+    if len(booted) != 1 or booted[0]['udid'] != device or not booted[0]['name'].startswith('RisuNest synthetic'):
+        raise RuntimeError('Hosted capture requires only the owned synthetic Simulator to be booted')
+    (artifacts / 'simulator-selection.json').write_text(json.dumps({
+        'udid': device, 'name': booted[0]['name'], 'onlyBootedDevice': True, 'captureInput': capture_input}, indent=2))
+    specification = importlib.util.spec_from_file_location('appearance_capture', Path(__file__).resolve().parents[1] / 'macos/run.py')
+    capture_tools = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(capture_tools)
+    subprocess.run(['open', '-a', 'Simulator'], check=True)
     outcomes = []
     for phase in PHASES:
         if list(container.rglob('verification-' + phase + '.jsonl')):
@@ -239,35 +249,29 @@ def run_ios(device, artifacts):
             time.sleep(.1)
         ready = wait_stage(report, 'app-lock-ready', 120)
         baseline = artifacts / (phase + '-baseline.png')
-        subprocess.run(['xcrun', 'simctl', 'io', device, 'screenshot', str(baseline)], check=True)
+        subprocess.run(['open', '-a', 'Simulator'], check=True)
+        deadline = time.monotonic() + 15
+        while True:
+            subprocess.run(['screencapture', '-x', str(baseline)], check=True)
+            try:
+                find_marker(*rgb_image(baseline))
+                break
+            except RuntimeError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('Owned Simulator synthetic content is not visible on the captured host display')
+                time.sleep(.1)
         subprocess.run(['xcrun', 'simctl', 'launch', device, 'com.apple.Preferences'], check=True)
         time.sleep(.4)
         if phase == 'app-lock-timed':
             time.sleep(65)
-        video = artifacts / (phase + '.mov')
-        with (artifacts / (phase + '-capture.log')).open('w') as log:
-            recorder = subprocess.Popen(['xcrun', 'simctl', 'io', device, 'recordVideo', '--codec=h264', str(video)], stdout=log, stderr=subprocess.STDOUT)
-            try:
-                started = time.monotonic()
-                while not video.exists() or video.stat().st_size < 32:
-                    if recorder.poll() is not None or time.monotonic() - started > 5:
-                        raise RuntimeError('Simulator recorder did not start')
-                    time.sleep(.025)
-                time.sleep(.15)
-                subprocess.run(['xcrun', 'simctl', 'launch', device, identifier], check=True)
-                locked = wait_stage(report, 'app-lock-locked', 45)
-                time.sleep(.6)
-            finally:
-                if recorder.poll() is None:
-                    recorder.send_signal(signal.SIGINT)
-                try:
-                    recorder.wait(timeout=15)
-                except subprocess.TimeoutExpired:
-                    recorder.kill()
-                    recorder.wait(timeout=5)
-                    raise RuntimeError('Simulator recorder did not finish')
-        if recorder.returncode != 0:
-            raise RuntimeError('Simulator recording failed')
+        capture = capture_tools.start_appearance_capture(artifacts, phase, 'macos', capture_input)
+        try:
+            subprocess.run(['xcrun', 'simctl', 'launch', device, identifier], check=True)
+            locked = wait_stage(report, 'app-lock-locked', 45)
+            time.sleep(.6)
+        finally:
+            capture_tools.finish_appearance_capture(capture)
+        video = capture['video']
         (artifacts / (phase + '.jsonl')).write_text(report.read_text())
         outcomes.append(assess(video, baseline, ready, locked, phase.endswith('mutant')))
         subprocess.run(['xcrun', 'simctl', 'terminate', device, identifier], check=True)
@@ -278,11 +282,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--device', required=True)
     parser.add_argument('--artifacts', type=Path, required=True)
+    parser.add_argument('--capture-input', required=True)
     args = parser.parse_args()
     args.artifacts.mkdir(parents=True, exist_ok=True)
     if any(args.artifacts.iterdir()):
         parser.error('Use an empty frame artifact directory')
-    run_ios(args.device, args.artifacts.resolve())
+    run_ios(args.device, args.artifacts.resolve(), args.capture_input)
 
 
 if __name__ == '__main__':

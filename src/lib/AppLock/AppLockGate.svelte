@@ -3,6 +3,7 @@
     import { language } from 'src/lang'
     import { MobileGUI } from 'src/ts/stores.svelte'
     import { appLock } from 'src/ts/appLock/appLock.svelte'
+    import { captureAppLockPresentationFocus } from 'src/ts/appLock/input'
     import AppLockScreen from './AppLockScreen.svelte'
     import AppLockCover from './AppLockCover.svelte'
 
@@ -21,13 +22,21 @@
         const pending = state.returnPending
         const readFailed = state.readFailed
         const revision = state.presentationRevision
-        if (!appLock.gated || !state.initialized) return
+        if (!appLock.gated || !state.initialized || !state.active) return
         let cancelled = false
-        void tick().then(() => requestAnimationFrame(() => requestAnimationFrame(() => {
-            if (!cancelled && state.epoch === epoch && state.flow === flow && state.returnPending === pending && state.readFailed === readFailed && state.presentationRevision === revision) {
-                void appLock.rendered(text.promptUnlock)
-            }
-        })))
+        const current = () => !cancelled && state.active && state.epoch === epoch && state.flow === flow
+            && state.returnPending === pending && state.readFailed === readFailed && state.presentationRevision === revision
+        void tick().then(() => {
+            const restoreFocus = captureAppLockPresentationFocus()
+            requestAnimationFrame(() => requestAnimationFrame(async () => {
+                if (!current()) return
+                await appLock.rendered(text.promptUnlock)
+                // Removing a native cover can focus the WebView's first button after mount.
+                requestAnimationFrame(() => {
+                    if (current() && !state.nativeBusy) restoreFocus()
+                })
+            }))
+        })
         return () => { cancelled = true }
     })
 </script>

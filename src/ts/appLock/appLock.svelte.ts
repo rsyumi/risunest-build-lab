@@ -5,7 +5,11 @@ import { APP_LOCK_KEY } from './record'
 
 function markerStorage(): AppLockStorage {
     return {
-        read: () => getDeviceMarkers().getItem(APP_LOCK_KEY),
+        read: async (refresh = false) => {
+            const markers = getDeviceMarkers()
+            if (refresh) await markers.reload?.()
+            return markers.getItem(APP_LOCK_KEY)
+        },
         commit: async (serialized) => {
             const markers = getDeviceMarkers()
             if (!markers.commitItem) throw new Error('App lock requires durable device markers')
