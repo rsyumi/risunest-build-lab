@@ -11,8 +11,8 @@ import {
 import path from "node:path";
 import assert from "node:assert/strict";
 
-export const rulesVersion = "risunest-build-inputs-v2";
-const previousRulesVersion = "risunest-build-inputs-v1";
+export const rulesVersion = "risunest-build-inputs-v3";
+const legacyRulesVersions = ["risunest-build-inputs-v1", "risunest-build-inputs-v2"];
 export const sha256 = (bytes) =>
   createHash("sha256").update(bytes).digest("hex");
 export const json = (value) => JSON.stringify(value, null, 2) + "\n";
@@ -67,13 +67,14 @@ export function exclusion(name, rules = rulesVersion) {
     return "private-data-or-signing";
   if (
     /\.(?:md|mdx|rst)$/i.test(name) &&
-    (name !== "server/sync/README.md" || rules === previousRulesVersion) &&
+    (name !== "server/sync/README.md" || rules === "risunest-build-inputs-v1") &&
     !/(?:^|\/)(?:LICENSE|COPYING|NOTICE|COPYRIGHT|SOURCE)(?:\.|$)/i.test(name)
   )
     return "explanatory-document";
   if (
     name === "src-tauri/src/mainx.txt" ||
-    name.startsWith("src-tauri/icon-src/")
+    (name.startsWith("src-tauri/icon-src/") &&
+      (name !== "src-tauri/icon-src/logo.svg" || rules !== rulesVersion))
   )
     return "unused-source";
   const roots = [
@@ -202,7 +203,7 @@ export function verifySnapshot(root, lane) {
   assert.equal(metadata.lane, lane, "snapshot lane mismatch");
   assert.match(metadata.source_commit, /^[0-9a-f]{40}$/);
   assert.match(metadata.source_tree, /^[0-9a-f]{40}$/);
-  assert([rulesVersion, previousRulesVersion].includes(metadata.exclusion_rules_version));
+  assert([rulesVersion, ...legacyRulesVersions].includes(metadata.exclusion_rules_version));
   const bytes = readFileSync(path.join(root, ".build-lab/files.json"));
   assert.equal(
     sha256(bytes),

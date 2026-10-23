@@ -97,6 +97,36 @@ test("exports only the selected commit, reproducibly, with licenses and every la
     first,
   );
 });
+test("exports the runtime SVG logo while preserving older snapshot rules", (t) => {
+  const f = fixture(t);
+  const logoPath = "src-tauri/icon-src/logo.svg";
+  f.put(logoPath, '<svg xmlns="http://www.w3.org/2000/svg"/>');
+  f.put("src-tauri/icon-src/fg.svg", '<svg xmlns="http://www.w3.org/2000/svg"/>');
+  git(f.repo, ["add", "--all"]);
+  git(f.repo, ["commit", "-qm", "test: runtime logo input"]);
+  const commit = git(f.repo, ["rev-parse", "HEAD"]).toString().trim();
+  exportSnapshot(f.repo, commit, "macos", f.destination);
+  assert.equal(readFileSync(path.join(f.destination, logoPath), "utf8"), '<svg xmlns="http://www.w3.org/2000/svg"/>');
+  verifySnapshot(f.destination, "macos");
+  const filesPath = path.join(f.destination, ".build-lab/files.json");
+  const sourcePath = path.join(f.destination, ".build-lab/source.json");
+  const manifest = JSON.parse(readFileSync(filesPath));
+  const logo = manifest.included.find(record => record.path === logoPath);
+  manifest.included = manifest.included.filter(record => record !== logo);
+  manifest.excluded.push({ ...logo, reason: "unused-source" });
+  manifest.excluded.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  const bytes = Buffer.from(JSON.stringify(manifest));
+  writeFileSync(filesPath, bytes);
+  rmSync(path.join(f.destination, logoPath));
+  const metadata = JSON.parse(readFileSync(sourcePath));
+  metadata.exclusion_rules_version = "risunest-build-inputs-v2";
+  metadata.file_list_sha256 = sha256(bytes);
+  writeFileSync(sourcePath, JSON.stringify(metadata));
+  verifySnapshot(f.destination, "macos");
+  assert.equal(exclusion(logoPath, "risunest-build-inputs-v1"), "unused-source");
+  assert.equal(exclusion(logoPath), null);
+  assert.equal(exclusion("src-tauri/icon-src/fg.svg"), "unused-source");
+});
 test("rejects wrong lane and abbreviated source revision", (t) => {
   const f = fixture(t);
   exportSnapshot(f.repo, f.commit, "macos", f.destination);
