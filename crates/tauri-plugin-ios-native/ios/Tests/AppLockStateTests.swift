@@ -3,6 +3,44 @@ import XCTest
 @testable import tauri_plugin_ios_native
 
 final class AppLockStateTests: XCTestCase {
+    private final class AccessibilityContent {
+        var tracksExposure = false
+        private(set) var exposed = false
+        var hidden = false { didSet { if tracksExposure && !hidden { exposed = true } } }
+    }
+
+    func testNativeCoverHidesContentUntilRestoringItsPreviousAccessibility() {
+        for previous in [false, true] {
+            let content = AccessibilityContent()
+            content.hidden = previous
+            let mask = AppLockAccessibilityMask<AccessibilityContent>()
+            mask.hide(content, isHidden: { $0.hidden }, setHidden: { $0.hidden = $1 })
+            XCTAssertTrue(content.hidden)
+            content.tracksExposure = true
+            mask.hide(content, isHidden: { $0.hidden }, setHidden: { $0.hidden = $1 })
+            XCTAssertFalse(content.exposed)
+            content.tracksExposure = false
+            mask.restore()
+            XCTAssertEqual(content.hidden, previous)
+            content.hidden = !previous
+            mask.restore()
+            XCTAssertEqual(content.hidden, !previous)
+        }
+    }
+
+    func testReplacingAndReleasingNativeCoverRestoresTheCoveredContent() {
+        let oldContent = AccessibilityContent()
+        let newContent = AccessibilityContent()
+        var mask: AppLockAccessibilityMask<AccessibilityContent>? = AppLockAccessibilityMask()
+        mask?.hide(oldContent, isHidden: { $0.hidden }, setHidden: { $0.hidden = $1 })
+        XCTAssertTrue(oldContent.hidden)
+        mask?.hide(newContent, isHidden: { $0.hidden }, setHidden: { $0.hidden = $1 })
+        XCTAssertFalse(oldContent.hidden)
+        XCTAssertTrue(newContent.hidden)
+        mask = nil
+        XCTAssertFalse(newContent.hidden)
+    }
+
     func testUnlockedFrameCannotReplaceARequiredGateInTheSameEpoch() {
         var state = AppLockState()
         state.policy.gateRequired = true

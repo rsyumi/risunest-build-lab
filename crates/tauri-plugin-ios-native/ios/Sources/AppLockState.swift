@@ -61,3 +61,25 @@ struct AppLockState {
         return true
     }
 }
+
+final class AppLockAccessibilityMask<Content: AnyObject> {
+    private weak var content: Content?
+    private var restoreContent: ((Content) -> Void)?
+
+    func hide(_ content: Content, isHidden: (Content) -> Bool, setHidden: @escaping (Content, Bool) -> Void) {
+        guard self.content !== content else { return }
+        restore()
+        let previous = isHidden(content)
+        self.content = content
+        restoreContent = { setHidden($0, previous) }
+        setHidden(content, true)
+    }
+
+    func restore() {
+        if let content = content { restoreContent?(content) }
+        content = nil
+        restoreContent = nil
+    }
+
+    deinit { restore() }
+}

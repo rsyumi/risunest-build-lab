@@ -63,6 +63,8 @@ async_commands![
     app_lock::app_lock_authenticate,
     app_lock::app_lock_set_policy,
     app_lock::app_lock_ready,
+    app_lock_record::app_lock_read_record,
+    app_lock_record::app_lock_write_record,
     app_cleanup::app_cleanup_request,
     app_cleanup::app_cleanup_resume,
     app_cleanup::app_cleanup_cancel,

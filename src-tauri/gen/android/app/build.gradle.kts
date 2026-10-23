@@ -122,6 +122,14 @@ rust {
     rootDirRel = "../../../"
 }
 
+val prepareAppLockLogo = tasks.register<Copy>("prepareAppLockLogo") {
+    from(rootProject.file("../../icons/icon.png"))
+    into(layout.buildDirectory.dir("generated/appLock/res/drawable-nodpi"))
+    rename("icon.png", "app_lock_logo.png")
+}
+android.sourceSets.getByName("main").res.srcDir(layout.buildDirectory.dir("generated/appLock/res"))
+tasks.named("preBuild").configure { dependsOn(prepareAppLockLogo) }
+
 // Native TLS verifies servers through Android with the Kotlin half of
 // rustls-platform-verifier, published to that project's Maven archive. Its
 // version must equal rustls-platform-verifier-android in the Cargo lock.

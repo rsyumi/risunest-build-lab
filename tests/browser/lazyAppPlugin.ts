@@ -8,7 +8,7 @@ const lazyScreens = new Map([
     ['Settings.svelte', 'settings'], ['GridCatalog.svelte', 'grid'], ['botpreset.svelte', 'presets'],
     ['listedPersona.svelte', 'personas'], ['CustomGUISettingMenu.svelte', 'custom'],
 ])
-const retained = new Set(['MobileBody.svelte', 'MobileFooter.svelte', 'MobileHeader.svelte', 'Settings.svelte', 'LazyScreenError.svelte', 'LoadingIndicator.svelte', 'AppLockGate.svelte', 'AppLockScreen.svelte', 'AppLockCover.svelte', 'SyncExitDialog.svelte', 'ErrorDetails.svelte', 'SettingButton.svelte', 'BootFailurePanel.svelte'])
+const retained = new Set(['MobileBody.svelte', 'MobileFooter.svelte', 'MobileHeader.svelte', 'Settings.svelte', 'LazyScreenError.svelte', 'LoadingIndicator.svelte', 'AppLockGate.svelte', 'AppLockScreen.svelte', 'AppLockCover.svelte', 'SyncExitDialog.svelte', 'ErrorDetails.svelte', 'SettingButton.svelte', 'BootFailurePanel.svelte', 'AlertComp.svelte', 'Button.svelte'])
 
 export function lazyAppBoundaries(): Plugin {
     return {
@@ -33,6 +33,7 @@ export function lazyAppBoundaries(): Plugin {
                 if (retained.has(file)) return null
                 return `${fixture}/${file === 'Sidebar.svelte' ? 'LazyAppSidebar.svelte' : 'Empty.svelte'}`
             }
+            if (source.endsWith('?url')) return null
             if (source === '@lucide/svelte' || source.endsWith('.mp3') || source.includes('?svelte&type=style') || file === 'dragTypes' || file === 'platform') return null
             return stubbed(this, `${fixture}/lazyAppAdapters.ts`, source, importer!, options)
         },

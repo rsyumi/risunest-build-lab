@@ -1,7 +1,7 @@
 import { test, expect } from './fixture'
 import { languageKorean as language } from '../../src/lang/ko'
 
-declare global { interface Window { appLockNative: { holdReady(): void; pendingReady(): boolean; finishReady(focusFirst: boolean): void }; lazyApp: { open(route: string): void; layout(mobile: boolean): void; read(): { sidebarClosing: boolean; entries: number }; lock: { initialize(): Promise<void>; bootFailure(loaded: boolean): void; requestExit(): void; changePin(): void } }; lazyImportBoundary: { arm(route: string): void; hold(route: string): void; rejectHeld(): void; attempts(): number } } }
+declare global { interface Window { appLockNative: { holdReady(): void; pendingReady(): boolean; finishReady(focusFirst: boolean): void; available(): void; presentations(): boolean[]; authScreens(): boolean[] }; lazyApp: { open(route: string): void; layout(mobile: boolean): void; read(): { sidebarClosing: boolean; entries: number }; lock: { initialize(nativeUnlock?: boolean): Promise<void>; bootFailure(loaded: boolean): void; requestExit(): void; changePin(): void; loading(value: boolean): void; loadingAlert(): void }; plugin: { load(script: string): Promise<void>; writes: { key: string; value: unknown }[] } }; lazyImportBoundary: { arm(route: string): void; hold(route: string): void; rejectHeld(): void; attempts(): number } } }
 
 const hosts = ['settings', 'custom', 'grid', 'presets', 'personas', 'mobile'] as const
 for (const back of ['header', 'Escape', 'history'] as const) {
@@ -129,19 +129,31 @@ test.describe('actual App lock integration', () => {
         await page.addInitScript(() => {
             let callback = 0
             let holdReady = false
+            let available = false
+            const presentations: boolean[] = []
+            const authScreens: boolean[] = []
             let finishReady: ((focusFirst: boolean) => void) | undefined
             Object.assign(window, {
                 appLockNative: {
                     holdReady: () => { holdReady = true },
+                    available: () => { available = true },
+                    presentations: () => presentations,
+                    authScreens: () => authScreens,
                     pendingReady: () => !!finishReady,
                     finishReady: (focusFirst: boolean) => { finishReady!(focusFirst); finishReady = undefined; holdReady = false },
                 },
                 __TAURI_INTERNALS__: {
+                    metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
                     transformCallback: () => ++callback,
-                    invoke: async (command: string) => {
-                        if (command === 'app_lock_check') return { auth: { status: 'unsupported' }, previewSupported: false }
+                    invoke: async (command: string, args?: { locked: boolean }) => {
+                        if (command === 'app_lock_check') return { auth: available ? { status: 'available', method: 'windowsHello' } : { status: 'unsupported' }, previewSupported: false }
+                        if (command === 'app_lock_authenticate') {
+                            authScreens.push(!!document.querySelector('.app-lock-screen') && !!document.querySelector('main')?.inert)
+                            return 'cancelled'
+                        }
                         if (command === 'app_lock_set_policy') return { active: true, epoch: 0, atMs: 0, departedAtMs: null }
                         if (command === 'app_lock_ready') {
+                            presentations.push(args!.locked)
                             if (!holdReady) return true
                             return new Promise(resolve => {
                                 finishReady = focusFirst => {
@@ -164,6 +176,39 @@ test.describe('actual App lock integration', () => {
         requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
     }))
 
+    test('presents loading and its confirmation before markers and delays native unlock until the PIN screen', async ({ page }) => {
+        await page.goto('/lazyApp.html?loading')
+        const loading = page.getByRole('status').filter({ hasText: language.loading })
+        await expect(loading).toBeVisible()
+        await expect.poll(() => page.evaluate(() => window.appLockNative.presentations().length)).toBeGreaterThan(0)
+        await page.evaluate(() => { window.appLockNative.available(); window.lazyApp.lock.loadingAlert() })
+        await expect(page.getByText('Synthetic startup confirmation')).toBeVisible()
+        await page.getByRole('button', { name: 'YES', exact: true }).click()
+        await expect(page.getByText('Synthetic startup confirmation')).toHaveCount(0)
+        const before = await page.evaluate(() => window.appLockNative.presentations().length)
+        await page.evaluate(() => window.lazyApp.lock.initialize(true))
+        await expect(loading).toBeVisible()
+        await expect(page.locator('main')).not.toHaveAttribute('inert')
+        await expect.poll(() => page.evaluate(() => window.appLockNative.presentations().length)).toBeGreaterThan(before)
+        expect(await page.evaluate(() => window.appLockNative.presentations().at(-1))).toBe(true)
+        expect(await page.evaluate(() => window.appLockNative.authScreens())).toEqual([])
+        await page.evaluate(() => window.lazyApp.plugin.load(`
+            document.body.textContent = 'Synthetic plugin during startup';
+            await risuai.showContainer('fullscreen');
+            await risuai.pluginStorage.setItem('startup-shown', true);
+        `))
+        await expect.poll(() => page.evaluate(() => window.lazyApp.plugin.writes)).toContainEqual({ key: 'startup-shown', value: true })
+        const startupPlugin = page.locator('iframe[data-risu-plugin-frame]')
+        await expect(startupPlugin).toBeHidden()
+        expect(await startupPlugin.ariaSnapshot()).toBe('')
+        await page.evaluate(() => window.lazyApp.lock.loadingAlert())
+        await page.getByRole('button', { name: 'YES', exact: true }).click()
+        await page.evaluate(() => window.lazyApp.lock.loading(false))
+        await expect(page.getByRole('dialog', { name: 'RisuNest' })).toBeVisible()
+        await expect(page.locator('main')).toHaveAttribute('inert', '')
+        await expect.poll(() => page.evaluate(() => window.appLockNative.authScreens())).toEqual([true])
+    })
+
     test('restores initial dialog focus after the native cover automatically focuses the first PIN button', async ({ page }) => {
         await page.evaluate(() => window.appLockNative.holdReady())
         await page.evaluate(() => window.lazyApp.lock.initialize())
@@ -171,10 +216,20 @@ test.describe('actual App lock integration', () => {
         await expect.poll(() => page.evaluate(() => window.appLockNative.pendingReady())).toBe(true)
         await page.evaluate(() => window.appLockNative.finishReady(true))
         await expect(gate).toBeFocused()
+        const presentations = await page.evaluate(() => window.appLockNative.presentations().length)
         await page.keyboard.press('Tab')
         await expect(gate.getByRole('button', { name: '1', exact: true })).toBeFocused()
         await page.keyboard.press('Enter')
         await expect(gate.getByRole('img', { name: language.risuNest.appLock.progress.replace('{0}', '1') })).toBeVisible()
+        await painted(page)
+        await painted(page)
+        await expect(gate.getByRole('button', { name: '1', exact: true })).toBeFocused()
+        await page.keyboard.press('Space')
+        await expect(gate.getByRole('img', { name: language.risuNest.appLock.progress.replace('{0}', '2') })).toBeVisible()
+        await painted(page)
+        await painted(page)
+        await expect(gate.getByRole('button', { name: '1', exact: true })).toBeFocused()
+        expect(await page.evaluate(() => window.appLockNative.presentations().length)).toBe(presentations)
     })
 
     test('preserves user keyboard focus when native presentation finishes late', async ({ page }) => {
@@ -252,6 +307,48 @@ test.describe('actual App lock integration', () => {
         await page.keyboard.type(' preserved')
         await expect(draft).toHaveValue('Retained draft preserved')
         expect(errors).toEqual([])
+    })
+
+    test('isolates fullscreen plugin input during locking and resumes its retained UI after unlock', async ({ page }) => {
+        await page.evaluate(() => window.lazyApp.plugin.load(`
+            const input = document.createElement('input');
+            input.setAttribute('aria-label', 'Synthetic plugin draft');
+            document.body.append(input);
+            window.addEventListener('message', async event => {
+                if (event.data === 'focus-input') input.focus();
+                if (event.data === 'background-work') {
+                    await risuai.hideContainer();
+                    await risuai.showContainer('fullscreen');
+                    await risuai.pluginStorage.setItem('background-work', 'saved');
+                }
+            });
+            await risuai.showContainer('fullscreen');
+            await risuai.pluginStorage.setItem('shown', true);
+        `))
+        await expect.poll(() => page.evaluate(() => window.lazyApp.plugin.writes)).toContainEqual({ key: 'shown', value: true })
+        const frame = page.locator('iframe[data-risu-plugin-frame]')
+        const draft = frame.contentFrame().getByRole('textbox', { name: 'Synthetic plugin draft' })
+        await draft.fill('Retained plugin draft')
+        await frame.evaluate(node => { node.dataset.retained = 'original' })
+        await page.evaluate(() => window.lazyApp.lock.initialize())
+        const gate = page.getByRole('dialog', { name: 'RisuNest' })
+        await expect(gate).toBeVisible()
+        await expect(frame).toBeHidden()
+        expect(await frame.ariaSnapshot()).toBe('')
+        await frame.evaluate(node => (node as HTMLIFrameElement).contentWindow!.postMessage('focus-input', '*'))
+        await painted(page)
+        await page.keyboard.type('4')
+        await expect(gate.getByRole('img', { name: language.risuNest.appLock.progress.replace('{0}', '1') })).toBeVisible()
+        await expect(frame.contentFrame().locator('input')).toHaveValue('Retained plugin draft')
+        await frame.evaluate(node => (node as HTMLIFrameElement).contentWindow!.postMessage('background-work', '*'))
+        await expect.poll(() => page.evaluate(() => window.lazyApp.plugin.writes)).toContainEqual({ key: 'background-work', value: 'saved' })
+        await expect(frame).toBeHidden()
+        await page.keyboard.press('Backspace')
+        await page.keyboard.type('123456')
+        await expect(gate).toHaveCount(0)
+        await expect(frame).toHaveAttribute('data-retained', 'original')
+        await draft.fill('Retained plugin draft resumed')
+        await expect(draft).toHaveValue('Retained plugin draft resumed')
     })
 
     test('shows the startup failure panel without a PIN gate when normal content never loaded', async ({ page }) => {

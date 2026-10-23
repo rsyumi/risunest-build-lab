@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, WebviewWindow};
+use tauri::{AppHandle, Manager, WebviewWindow};
 
 #[cfg(target_os = "android")]
 mod android;
@@ -100,24 +100,38 @@ pub(crate) struct LifecycleSnapshot {
     pub departed_at_ms: Option<u64>,
 }
 
-pub(crate) fn setup(app: &AppHandle) -> Result<(), String> { platform::setup(app) }
+struct SetupState(Result<(), String>);
+
+pub(crate) fn setup(app: &AppHandle) {
+    let result = platform::setup(app);
+    if let Err(error) = &result { crate::nlog!("warn", "app-lock setup unavailable: {error}"); }
+    app.manage(SetupState(result));
+}
+
+fn ensure_ready(app: &AppHandle) -> Result<(), String> {
+    app.try_state::<SetupState>().ok_or("app-lock setup is unavailable")?.0.clone()
+}
 
 #[tauri::command]
 pub(crate) async fn app_lock_check(app: AppHandle) -> Result<Capabilities, String> {
+    ensure_ready(&app)?;
     platform::check(&app).await
 }
 
 #[tauri::command]
 pub(crate) async fn app_lock_authenticate(window: WebviewWindow, reason: String) -> Result<AuthOutcome, String> {
+    ensure_ready(window.app_handle())?;
     platform::authenticate(&window, reason).await
 }
 
 #[tauri::command]
 pub(crate) async fn app_lock_set_policy(app: AppHandle, policy: CoverPolicy) -> Result<LifecycleSnapshot, String> {
+    ensure_ready(&app)?;
     platform::set_policy(&app, &policy).await
 }
 
 #[tauri::command]
 pub(crate) async fn app_lock_ready(app: AppHandle, epoch: u64, locked: bool) -> Result<bool, String> {
+    ensure_ready(&app)?;
     platform::ready(&app, epoch, locked).await
 }

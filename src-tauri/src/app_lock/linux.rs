@@ -1,5 +1,5 @@
 use std::{cell::RefCell, collections::HashMap, time::Duration};
-use gtk::{prelude::*, gdk_pixbuf::{Colorspace, InterpType, Pixbuf}, glib};
+use gtk::{prelude::*, gdk::prelude::GdkPixbufExt, gdk_pixbuf::{InterpType, Pixbuf}, glib};
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 use super::{desktop::{Lifecycle, color_rgb}, *};
 
@@ -133,14 +133,21 @@ pub(super) fn setup(app: &AppHandle) -> Result<(), String> {
         cover.set_valign(gtk::Align::Fill);
         let style = gtk::CssProvider::new();
         cover.style_context().add_provider(&style, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
-        if let Some(icon) = app.default_window_icon() {
-            let image = Pixbuf::from_mut_slice(icon.rgba().to_vec(), Colorspace::Rgb, true, 8, icon.width() as i32, icon.height() as i32, (icon.width() * 4) as i32);
-            if let Some(image) = image.scale_simple(56, 56, InterpType::Bilinear) {
-                let icon = gtk::Image::from_pixbuf(Some(&image));
-                icon.set_halign(gtk::Align::Center);
-                icon.set_valign(gtk::Align::Center);
-                cover.add(&icon);
-            }
+        if let Ok(source) = Pixbuf::from_read(std::io::Cursor::new(include_bytes!("../../icons/icon.png").as_slice())) {
+            let icon = gtk::Image::new();
+            icon.set_halign(gtk::Align::Center);
+            icon.set_valign(gtk::Align::Center);
+            let refresh = move |icon: &gtk::Image| {
+                let scale = icon.scale_factor().max(1);
+                if let Some(image) = source.scale_simple(56 * scale, 56 * scale, InterpType::Bilinear) {
+                    if let Some(surface) = image.create_surface(scale, None::<&gtk::gdk::Window>) {
+                        icon.set_from_surface(Some(&surface));
+                    }
+                }
+            };
+            refresh(&icon);
+            icon.connect_scale_factor_notify(refresh);
+            cover.add(&icon);
         }
         overlay.add_overlay(&cover);
         overlay.set_overlay_pass_through(&cover, false);

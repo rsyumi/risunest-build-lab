@@ -12,11 +12,13 @@ const officialAccount = process.argv.includes('--official-account-benchmark')
 const assetBenchmark = officialAccount || smallAssets || process.argv.includes('--asset-benchmark')
 const debug = process.argv.includes('--debug')
 const reuseBuild = process.argv.includes('--reuse-build')
+const appLockUnavailable = process.argv.includes('--expect-app-lock-unavailable')
 const binaryInput = process.argv.find(arg => arg.startsWith('--binary='))?.slice(9)
-if (binaryInput && (!assetBenchmark || !reuseBuild)) throw new Error('An explicit benchmark binary requires --reuse-build')
+if (binaryInput && !reuseBuild) throw new Error('An explicit binary requires --reuse-build')
+if (appLockUnavailable && (process.platform !== 'win32' || assetBenchmark || !binaryInput)) throw new Error('App-lock setup failure verification requires an explicit Windows contract binary')
 const repetitions = Number(process.argv.find(arg => arg.startsWith('--runs='))?.slice(7) ?? 1)
-if ((!assetBenchmark && (reuseBuild || repetitions !== 1)) || !Number.isSafeInteger(repetitions) || repetitions < 1 || repetitions > 10) {
-    throw new Error('Build reuse and repeated runs require an asset benchmark with 1 to 10 runs')
+if ((!assetBenchmark && ((reuseBuild && !binaryInput) || repetitions !== 1)) || !Number.isSafeInteger(repetitions) || repetitions < 1 || repetitions > 10) {
+    throw new Error('Contract build reuse requires an explicit binary; repeated runs require an asset benchmark with 1 to 10 runs')
 }
 const require = createRequire(import.meta.url)
 function command(file, args, env = process.env) {
@@ -79,6 +81,7 @@ for (const phases of Array.from({ length: repetitions }, () => phaseGroups).flat
             const status = await new Promise((accept, reject) => {
                 const child = spawn(executable, [], { cwd: root, windowsHide: true, stdio: 'inherit', detached: process.platform !== 'win32', env: {
                     ...env, RISUNEST_BOUNDARY_ID: runId, RISUNEST_BOUNDARY_ROOT: ownedRoot,
+                    RISUNEST_BOUNDARY_APP_LOCK_UNAVAILABLE: appLockUnavailable ? '1' : '0',
                     ...(accountServer ? { RISUNEST_BOUNDARY_ACCOUNT_ORIGIN: accountServer.origin } : {}),
                     RISUNEST_BOUNDARY_PHASE: phase, RISUNEST_BOUNDARY_REPORT: reportPath,
                 } })
