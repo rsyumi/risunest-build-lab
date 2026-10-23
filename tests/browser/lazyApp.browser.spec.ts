@@ -1,7 +1,7 @@
 import { test, expect } from './fixture'
 import { languageKorean as language } from '../../src/lang/ko'
 
-declare global { interface Window { lazyApp: { open(route: string): void; layout(mobile: boolean): void; read(): { sidebarClosing: boolean; entries: number }; lock: { initialize(): Promise<void>; bootFailure(loaded: boolean): void; requestExit(): void } }; lazyImportBoundary: { arm(route: string): void; hold(route: string): void; rejectHeld(): void; attempts(): number } } }
+declare global { interface Window { appLockNative: { holdReady(): void; pendingReady(): boolean; finishReady(focusFirst: boolean): void }; lazyApp: { open(route: string): void; layout(mobile: boolean): void; read(): { sidebarClosing: boolean; entries: number }; lock: { initialize(): Promise<void>; bootFailure(loaded: boolean): void; requestExit(): void } }; lazyImportBoundary: { arm(route: string): void; hold(route: string): void; rejectHeld(): void; attempts(): number } } }
 
 const hosts = ['settings', 'custom', 'grid', 'presets', 'personas', 'mobile'] as const
 for (const back of ['header', 'Escape', 'history'] as const) {
@@ -128,13 +128,28 @@ test.describe('actual App lock integration', () => {
     test.beforeEach(async ({ page }) => {
         await page.addInitScript(() => {
             let callback = 0
+            let holdReady = false
+            let finishReady: ((focusFirst: boolean) => void) | undefined
             Object.assign(window, {
+                appLockNative: {
+                    holdReady: () => { holdReady = true },
+                    pendingReady: () => !!finishReady,
+                    finishReady: (focusFirst: boolean) => { finishReady!(focusFirst); finishReady = undefined; holdReady = false },
+                },
                 __TAURI_INTERNALS__: {
                     transformCallback: () => ++callback,
                     invoke: async (command: string) => {
                         if (command === 'app_lock_check') return { auth: { status: 'unsupported' }, previewSupported: false }
                         if (command === 'app_lock_set_policy') return { active: true, epoch: 0, atMs: 0, departedAtMs: null }
-                        if (command === 'app_lock_ready') return true
+                        if (command === 'app_lock_ready') {
+                            if (!holdReady) return true
+                            return new Promise(resolve => {
+                                finishReady = focusFirst => {
+                                    if (focusFirst) document.querySelector<HTMLElement>('.app-lock-screen button')?.focus()
+                                    resolve(true)
+                                }
+                            })
+                        }
                         if (command === 'plugin:event|listen') return 1
                         if (command === 'diagnostic_device_info') return { model: 'Synthetic', arch: 'synthetic' }
                         throw new Error(`Unexpected synthetic native command: ${command}`)
@@ -145,13 +160,60 @@ test.describe('actual App lock integration', () => {
         await page.goto('/lazyApp.html')
     })
 
+    const painted = (page: import('@playwright/test').Page) => page.evaluate(() => new Promise<void>(resolve => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    }))
+
+    test('restores initial dialog focus after the native cover automatically focuses the first PIN button', async ({ page }) => {
+        await page.evaluate(() => window.appLockNative.holdReady())
+        await page.evaluate(() => window.lazyApp.lock.initialize())
+        const gate = page.getByRole('dialog', { name: 'RisuNest' })
+        await expect.poll(() => page.evaluate(() => window.appLockNative.pendingReady())).toBe(true)
+        await page.evaluate(() => window.appLockNative.finishReady(true))
+        await expect(gate).toBeFocused()
+        await page.keyboard.press('Tab')
+        await expect(gate.getByRole('button', { name: '1', exact: true })).toBeFocused()
+        await page.keyboard.press('Enter')
+        await expect(gate.getByRole('img', { name: language.risuNest.appLock.progress.replace('{0}', '1') })).toBeVisible()
+    })
+
+    test('preserves user keyboard focus when native presentation finishes late', async ({ page }) => {
+        await page.evaluate(() => window.appLockNative.holdReady())
+        await page.evaluate(() => window.lazyApp.lock.initialize())
+        const gate = page.getByRole('dialog', { name: 'RisuNest' })
+        await expect.poll(() => page.evaluate(() => window.appLockNative.pendingReady())).toBe(true)
+        await page.keyboard.press('Tab')
+        const digit = gate.getByRole('button', { name: '1', exact: true })
+        await expect(digit).toBeFocused()
+        await page.evaluate(() => window.appLockNative.finishReady(false))
+        await painted(page)
+        await expect(digit).toBeFocused()
+        await page.keyboard.press('Enter')
+        await expect(gate.getByRole('img', { name: language.risuNest.appLock.progress.replace('{0}', '1') })).toBeVisible()
+    })
+
+    test('preserves user pointer focus when native presentation finishes late', async ({ page }) => {
+        await page.evaluate(() => window.appLockNative.holdReady())
+        await page.evaluate(() => window.lazyApp.lock.initialize())
+        const gate = page.getByRole('dialog', { name: 'RisuNest' })
+        await expect.poll(() => page.evaluate(() => window.appLockNative.pendingReady())).toBe(true)
+        const digit = gate.getByRole('button', { name: '2', exact: true })
+        await digit.dispatchEvent('pointerdown')
+        await digit.focus()
+        await page.evaluate(() => window.appLockNative.finishReady(false))
+        await painted(page)
+        await expect(digit).toBeFocused()
+    })
+
     test('retains the mounted draft and restores focus after PIN unlock despite a post-load boot failure', async ({ page }) => {
         const errors: string[] = []
         page.on('pageerror', error => errors.push(error.message))
         const draft = page.getByRole('textbox', { name: 'Synthetic retained draft' })
         await draft.fill('Retained draft')
         await draft.evaluate(node => { node.dataset.retained = 'original' })
+        await page.evaluate(() => window.appLockNative.holdReady())
         await page.evaluate(() => window.lazyApp.lock.initialize())
+        await expect.poll(() => page.evaluate(() => window.appLockNative.pendingReady())).toBe(true)
         const gate = page.getByRole('dialog', { name: 'RisuNest' })
         await expect(gate).toBeVisible()
         await expect(page.locator('main')).toHaveAttribute('inert', '')
@@ -161,6 +223,8 @@ test.describe('actual App lock integration', () => {
         await expect(page.locator('main')).toHaveAttribute('inert', '')
         await page.keyboard.type('123456')
         await expect(gate).toHaveCount(0)
+        await page.evaluate(() => window.appLockNative.finishReady(false))
+        await painted(page)
         await expect(draft).toBeFocused()
         await expect(draft).toHaveValue('Retained draft')
         await expect(draft).toHaveAttribute('data-retained', 'original')
@@ -178,11 +242,16 @@ test.describe('actual App lock integration', () => {
     })
 
     test('tabs through visible exit actions and returns focus to the locked screen on cancel', async ({ page }) => {
+        await page.evaluate(() => window.appLockNative.holdReady())
         await page.evaluate(() => window.lazyApp.lock.initialize())
+        await expect.poll(() => page.evaluate(() => window.appLockNative.pendingReady())).toBe(true)
         const gate = page.getByRole('dialog', { name: 'RisuNest' })
         await expect(gate).toBeVisible()
         await page.evaluate(() => window.lazyApp.lock.requestExit())
         const exit = page.getByTestId('sync-exit-dialog')
+        await expect(exit).toBeFocused()
+        await page.evaluate(() => window.appLockNative.finishReady(false))
+        await painted(page)
         await expect(exit).toBeFocused()
         const summary = exit.locator('summary')
         await page.keyboard.press('Tab')
