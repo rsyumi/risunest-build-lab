@@ -72,6 +72,9 @@ let persistedBinding: BindingContext['state'] | undefined
 let context: BindingContext | undefined
 let activationPending: BindingContext | undefined
 let activating: Promise<void> | undefined
+let startupIdentity = ''
+let initialReceive = true
+let startupFailure: unknown
 let error = ''
 let serverUnavailable = false
 const recordFailure = (value: unknown) => {
@@ -244,12 +247,39 @@ const checkContext = (captured: BindingContext) => {
     captured.signal.throwIfAborted()
     if (captured !== context) throw new Error('Sync binding changed')
 }
+const bindingIdentity = (state: BindingContext['state']) => JSON.stringify([state.libraryId, state.targetAuthority, state.selectionEpoch, state.target])
+const checkReceiveContext = (c: BindingContext) => {
+    c.signal.throwIfAborted()
+    if (!context || bindingIdentity(context.state) !== bindingIdentity(c.state)) throw new Error('Sync binding changed')
+    context.signal.throwIfAborted()
+}
+async function startupRequest<T>(captured: BindingContext, command: string, args: Record<string, unknown>): Promise<T> {
+    try {
+        const result = await invoke<T>(command, args)
+        if (captured === context) startupFailure = undefined
+        return result
+    } catch (value) {
+        if (captured === context && initialReceive) {
+            const activationReady = typeof value === 'object' && value !== null && 'startupLocalReady' in value && value.startupLocalReady === true
+            startupFailure = command !== 'server_sync_lww_activate' || activationReady ? value : undefined
+        }
+        throw value
+    }
+}
+function canStartPluginsOffline(value: unknown): boolean {
+    if (!initialReceive || binding || bindingIncomplete || heldForCommittedRestore || isLibraryFileOperationReserved()
+        || scheduler.isBlocked() || !context || !persistedBinding || bindingIdentity(persistedBinding) !== bindingIdentity(context.state)) return false
+    if (typeof value !== 'object' || !value || ('retryable' in value && value.retryable === false)) return false
+    const code = serverSyncErrorCode(value)
+    if (['server-unreachable', 'server-timeout', 'directory-unreachable', 'directory-response-error', 'directory-incomplete-response', 'request-timeout', 'server-updating'].includes(code)) return true
+    return code === 'server-response-error' && isServerSyncUnavailable(value)
+}
 async function ensureActivated(captured: BindingContext): Promise<void> {
     checkContext(captured)
     if (activationPending !== captured) return
     if (!activating) {
         activating = during('applying', async () => {
-            await invoke('server_sync_lww_activate', { request: header() })
+            await startupRequest(captured, 'server_sync_lww_activate', { request: header(), startup: initialReceive && !binding })
             checkContext(captured)
             if (remoteAssetsRequested(captured)) await keepAssetsRemote(captured)
             activationPending = undefined
@@ -376,9 +406,11 @@ const scheduler = createServerSyncScheduler({
         for (;;) {
             captured.signal.throwIfAborted()
             if (captured !== context) throw new Error('Sync binding changed')
-            const request = await during('downloading', () => invoke<LwwStageReceive & { receiveFrontier?: string; more?: boolean }>('server_sync_lww_pull', { request: header() }))
+            const request = await during('downloading', () => startupRequest<LwwStageReceive & { receiveFrontier?: string; more?: boolean }>(captured, 'server_sync_lww_pull', { request: header(), startup: initialReceive }))
             receiveFrontier ??= request.receiveFrontier
             captured.signal.throwIfAborted()
+            checkContext(captured)
+            initialReceive = false
             // A page is applied under the stage that received it, so reading many pages shows one stage.
             try { await during('downloading', () => applyPersistentLwwReceive(request)) }
             catch (value) { throw localApplyFailure(value) }
@@ -421,6 +453,8 @@ async function keepAssetsRemote(c: BindingContext): Promise<void> {
 }
 // Scheduler blocks and errors belong to one binding authority and never carry over to another.
 const adoptSchedulerAuthority = (c: BindingContext) => {
+    const identity = bindingIdentity(c.state)
+    if (startupIdentity !== identity) { startupIdentity = identity; initialReceive = true; startupFailure = undefined }
     if (schedulerAuthority === c.state.targetAuthority) return
     scheduler.reset(); error = ''; hydrationError = ''; schedulerAuthority = c.state.targetAuthority
 }
@@ -436,7 +470,13 @@ const transport: SyncBindingTransport = {
         if (code !== 'cancelled') { recordFailure(failures(value)[0]); changed() }
     },
     async fenceOldJobs(c) { halt(); context = undefined; persistedBinding = undefined; await scheduler.fence(); await hydrating; activationPending = undefined; await invoke('server_sync_lww_fence', { newDevice: c.mode === 'new-device' || c.mode === 'fresh-writer' }); hydrationPending = false; representativesPending = false; hydrationAgain = false },
-    async receiveAvailableChanges(c) { c.signal.throwIfAborted(); if (!context || context.state.targetAuthority !== c.state.targetAuthority || context.state.selectionEpoch !== c.state.selectionEpoch) throw new Error('Sync binding changed'); await receiveAvailableServerChanges(); c.signal.throwIfAborted() },
+    async receiveAvailableChanges(c) { checkReceiveContext(c); await receiveAvailableServerChanges(); checkReceiveContext(c) },
+    async preparePluginStartup(c) {
+        checkReceiveContext(c)
+        if (canStartPluginsOffline(startupFailure)) return
+        try { await transport.receiveAvailableChanges!(c) }
+        catch (value) { checkReceiveContext(c); if (startupFailure !== value || !canStartPluginsOffline(value)) throw value }
+    },
     async publishInitialSharedState(c) {
         context = c
         await invoke('server_sync_lww_activate', { request: header() })

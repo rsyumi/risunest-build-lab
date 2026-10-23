@@ -28,7 +28,7 @@ export function createLuaFactoryLoader(
         }
 
         const { LuaFactory } = wasmoonModule
-        const factory = new LuaFactory(typeof process !== 'undefined' && process.versions?.node ? undefined : wasmUrl)
+        const factory = new LuaFactory(wasmUrl)
         const createEngine = factory.createEngine
         factory.createEngine = async (options) => {
             const { getLuaExecutionBudget } = await import('./luaExecutionBudget')

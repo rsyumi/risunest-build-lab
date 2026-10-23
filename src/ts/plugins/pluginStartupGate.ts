@@ -163,8 +163,9 @@ export const pluginStartupGate = createPluginStartupGate({
             heldByRestore: transport?.heldForCommittedRestore?.() ?? false,
             replacementPending: isSyncBindingReplacementPending(state),
             async receive(signal) {
-                if (!transport?.receiveAvailableChanges) throw new Error('Sync is unavailable')
-                await transport.receiveAvailableChanges({ state, signal })
+                const prepare = transport?.preparePluginStartup ?? transport?.receiveAvailableChanges
+                if (!prepare) throw new Error('Sync is unavailable')
+                await prepare.call(transport, { state, signal })
             },
             async assertCurrent() {
                 await native.assertAuthority(state)

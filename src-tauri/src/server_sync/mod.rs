@@ -46,6 +46,9 @@ pub(crate) struct SyncError {
     /// False for a rejection the same request would receive again. The scheduler
     /// stops automatic retries on it instead of backing off forever.
     pub retryable: bool,
+    /// An activation failed before changing an already usable local library.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub startup_local_ready: Option<bool>,
     /// Where the error was raised. Kept for the device log, never sent.
     #[serde(skip)]
     pub at: &'static std::panic::Location<'static>,
@@ -62,6 +65,7 @@ impl SyncError {
             code,
             status,
             retryable,
+            startup_local_ready: None,
             at: std::panic::Location::caller(),
             cause: None,
         }

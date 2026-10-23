@@ -1,3 +1,4 @@
+import { initializeAppLock } from './appLock/appLock.svelte'
 import { classifyBootFailure, type BootStage } from './bootFailureClassification'
 import {
     writeFile,
@@ -239,6 +240,7 @@ export async function loadData() {
         if (isTauri) {
             stage = 'device-settings'
             await initializeDeviceMarkers()
+            await initializeAppLock()
         }
         const markers = getDeviceMarkers()
         // Chats whose display work the last run left recorded open in recovery.

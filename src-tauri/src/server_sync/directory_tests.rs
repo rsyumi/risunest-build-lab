@@ -258,6 +258,27 @@ fn offline_clients_share_registry_admission() {
     request.respond(tiny_http::Response::empty(503)).unwrap();
     assert_eq!(task.join().unwrap().unwrap_err().code, "directory-response-error");
 }
+
+#[test]
+fn startup_directory_recovery_keeps_the_first_failure_policy() {
+    let old = ResponseServer::new("<html>error 1033</html>".into(), 530);
+    let candidate = ResponseServer::new(r#"{"error":"server-updating"}"#.into(), 503);
+    let mut directory = directory();
+    let envelope = risunest_sync_connect::seal_endpoint(&directory.uuid, &directory.key, &candidate.endpoint).unwrap();
+    let registry = ResponseServer::new(envelope, 200);
+    directory.base_url = registry.endpoint.clone();
+    let mut config = tests::config(&old.endpoint);
+    config.directory = Some(directory);
+    let now = Arc::new(std::sync::Mutex::new(Instant::now()));
+    let clock = now.clone();
+    let budget = RetryBudget::with_driver(None, Arc::new(move || *clock.lock().unwrap()), Arc::new(move |duration| *now.lock().unwrap() += duration));
+    let mut client = ServerClient::with_retry_budget(config, None, Arc::new(budget)).unwrap();
+    client.retry_transient = false;
+    let error = client.resolve_identity().unwrap_err();
+    assert_eq!(error.code, "server-updating");
+    assert_eq!(client.config().endpoint, old.endpoint);
+    assert_eq!(candidate.requests(), 1);
+}
 #[test]
 fn configuring_through_directory_persists_only_the_verified_endpoint() {
     use crate::server_sync::{binding, credentials::StoredConfig, lww_client::OperationLog, lww_tests::local};

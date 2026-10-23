@@ -379,8 +379,8 @@ pub(crate) async fn server_sync_lww_push(app:AppHandle,request:crate::persistent
     logged_blocking("push",move|| within(&LANES.send,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"send")?;let mut store=job_store(&app)?;with_lww_client(&mut store,Some(cancelled),|core,store|core.push(store,&request,&generating))})).await
 }
 #[tauri::command]
-pub(crate) async fn server_sync_lww_pull(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<super::lww_client::ReceivePage> {
-    logged_blocking("pull",move|| within(&LANES.receive,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"receive")?;let mut store=job_store(&app)?;with_lww_client(&mut store,Some(cancelled),|core,store|core.receive_page_with_frontier(store,&request))})).await
+pub(crate) async fn server_sync_lww_pull(app:AppHandle,request:crate::persistent_store::lww::Header,startup:Option<bool>)->Result<super::lww_client::ReceivePage> {
+    logged_blocking("pull",move|| within(&LANES.receive,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"receive")?;let mut store=job_store(&app)?;with_lww_client(&mut store,Some(cancelled),|core,store|{core.client.retry_transient=!startup.unwrap_or(false);core.receive_page_with_frontier(store,&request)})})).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_lww_ack(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<()> {
@@ -394,8 +394,8 @@ pub(crate) async fn server_sync_lww_fence(app:AppHandle,new_device:bool)->Result
 }
 
 #[tauri::command]
-pub(crate) async fn server_sync_lww_activate(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<()> {
-    logged_blocking("activate",move|| within(&LANES.binding,|| {super::binding::activate(&mut job_store(&app)?,&request,None)})).await
+pub(crate) async fn server_sync_lww_activate(app:AppHandle,request:crate::persistent_store::lww::Header,startup:Option<bool>)->Result<()> {
+    logged_blocking("activate",move|| within(&LANES.binding,|| {let mut store=job_store(&app)?;if startup.unwrap_or(false) {super::binding::activate_for_startup(&mut store,&request)} else {super::binding::activate(&mut store,&request,None)}})).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_lww_pending_binding(app:AppHandle)->Result<Option<super::binding::PendingBinding>> {logged_blocking("pending-binding",move||{super::binding::pending_binding(&job_store(&app)?)}).await}

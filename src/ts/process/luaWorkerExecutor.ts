@@ -1,5 +1,5 @@
 import { LuaWorkerStrings, decodeLuaFailure, encodeLuaFailure, type LuaWorkerCommand, type LuaWorkerEvent } from './luaWorkerProtocol'
-import { LuaWorkerTransport } from './luaWorkerTransport'
+import { LuaWorkerInterruptedError, LuaWorkerTransport } from './luaWorkerTransport'
 
 type HostBoundary = { run<T>(callback: () => T): T; flush(): void }
 
@@ -8,8 +8,8 @@ export class LuaWorkerUnavailableError extends Error {
 }
 
 export class LuaWorkerExecutor {
-    private readonly transport: LuaWorkerTransport
-    private readonly engine: number
+    private transport: LuaWorkerTransport
+    private engine: number
     private readonly callbacks = new Map<string, Function>()
     private sequence = 0
     private promise = 0
@@ -18,7 +18,7 @@ export class LuaWorkerExecutor {
     private startupTimer?: ReturnType<typeof setInterval>
     private readonly strings = new LuaWorkerStrings()
 
-    constructor(private readonly timeout: number, private readonly boundary?: HostBoundary, createWorker?: () => Worker) {
+    constructor(private readonly timeout: number, private readonly boundary?: HostBoundary, private readonly createWorker?: () => Worker) {
         let connection: ReturnType<typeof LuaWorkerTransport.connect>
         try { connection = LuaWorkerTransport.connect({ receive: event => this.receive(event), fail: error => this.fail(error) }, createWorker) }
         catch (error) { throw new LuaWorkerUnavailableError(error) }
@@ -30,16 +30,30 @@ export class LuaWorkerExecutor {
 
     async initialize(source: string, json: string, signal?: AbortSignal): Promise<unknown> {
         signal?.throwIfAborted()
-        try {
-            const started = this.transport.startupClock()
-            this.startupTimer = setInterval(() => {
-                if (this.transport.startupClock() - started > 10_000) this.fail(new Error('Lua Worker startup timed out'))
-            }, 250)
-            await this.command({ kind: 'prepare', json, names: [...this.callbacks.keys()], timeout: this.timeout, sequence: ++this.sequence })
-        } catch (error) {
-            this.close()
-            throw new LuaWorkerUnavailableError(error)
-        } finally { clearInterval(this.startupTimer) }
+        const callbacks = [...this.callbacks]
+        for (let attempt = 0; ; attempt++) {
+            try {
+                const started = this.transport.startupClock()
+                this.startupTimer = setInterval(() => {
+                    if (this.transport.startupClock() - started > 10_000) this.fail(new Error('Lua Worker startup timed out'))
+                }, 250)
+                await this.command({ kind: 'prepare', json, names: [...this.callbacks.keys()], timeout: this.timeout, sequence: ++this.sequence })
+                break
+            } catch (error) {
+                this.close()
+                if (!(error instanceof LuaWorkerInterruptedError)) throw new LuaWorkerUnavailableError(error)
+                signal?.throwIfAborted()
+                if (attempt > 0) throw error
+                // Preparation runs no user code, so only this phase can safely be retried.
+                try {
+                    const connection = LuaWorkerTransport.connect({ receive: event => this.receive(event), fail: error => this.fail(error) }, this.createWorker)
+                    this.transport = connection.transport
+                    this.engine = connection.engine
+                    this.closed = false
+                    for (const [name, callback] of callbacks) this.callbacks.set(name, callback)
+                } catch (cause) { throw new LuaWorkerUnavailableError(cause) }
+            } finally { clearInterval(this.startupTimer) }
+        }
         signal?.throwIfAborted()
         // Finish source evaluation so a superseded render retains initialized globals.
         return this.command({ kind: 'initialize', source, sequence: ++this.sequence })
@@ -68,7 +82,7 @@ export class LuaWorkerExecutor {
 
     private receive(message: LuaWorkerEvent): void {
         if (this.closed) return
-        if (message.kind === 'heartbeat' || message.kind === 'disposed' || message.kind === 'execution') return
+        if (message.kind === 'heartbeat' || message.kind === 'pong' || message.kind === 'disposed' || message.kind === 'execution') return
         const pending = this.pending
         if (!pending || pending.sequence !== message.sequence) return
         if (message.kind === 'result') {

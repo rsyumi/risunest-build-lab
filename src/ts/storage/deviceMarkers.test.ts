@@ -74,7 +74,48 @@ describe('device markers', () => {
         await expect(markers.flush()).rejects.toThrow('device file is read only')
     })
 
-    it('rejects a key that is not a device marker', () => {
+    it('keeps durable cache values unchanged on failure and persists an identical retry across reopening', async () => {
+        const { stored, settings } = settingsBackend()
+        stored.set('risuNestAppLock', 'previous')
+        const markers = await initializeDeviceMarkers(settings)
+        vi.mocked(settings.set).mockRejectedValueOnce(new Error('synthetic storage failure'))
+        await expect(markers.commitItem!('risuNestAppLock', 'next')).rejects.toThrow('synthetic storage failure')
+        expect(markers.getItem('risuNestAppLock')).toBe('previous')
+        expect(stored.get('risuNestAppLock')).toBe('previous')
+        await markers.flush()
+        await markers.commitItem!('risuNestAppLock', 'next')
+        expect(markers.getItem('risuNestAppLock')).toBe('next')
+        installDeviceMarkers(null)
+        expect((await initializeDeviceMarkers(settings)).getItem('risuNestAppLock')).toBe('next')
+    })
+
+    it('publishes durable values only once native storage has accepted them', async () => {
+        const { stored, settings } = settingsBackend()
+        let complete: () => void
+        vi.mocked(settings.set).mockImplementationOnce(async (key, value) => {
+            await new Promise<void>((resolve) => { complete = resolve })
+            stored.set(key, value)
+        })
+        const markers = await initializeDeviceMarkers(settings)
+        const pending = markers.commitItem!('risuNestAppLock', 'next')
+        await Promise.resolve()
+        expect(markers.getItem('risuNestAppLock')).toBeNull()
+        complete!()
+        await pending
+        expect(markers.getItem('risuNestAppLock')).toBe('next')
+    })
+
+    it('keeps a malformed app lock marker invalid without breaking unrelated startup markers', async () => {
+        const { stored, settings } = settingsBackend()
+        stored.set('risuNestAppLock', { wrongType: true })
+        stored.set('hub', 'nightly')
+        const markers = await initializeDeviceMarkers(settings)
+        expect(markers.getItem('risuNestAppLock')).not.toBeNull()
+        expect(() => JSON.parse(markers.getItem('risuNestAppLock')!)).toThrow()
+        expect(markers.getItem('hub')).toBe('nightly')
+    })
+
+    it('rejects a key that is not a device marker' , () => {
         const { settings } = settingsBackend()
         const markers = createNativeDeviceMarkers(settings, DEVICE_MARKER_KEYS.map(() => null))
         expect(() => markers.setItem('fallbackRisuToken', 'x')).toThrow('not a device marker')

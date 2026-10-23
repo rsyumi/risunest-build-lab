@@ -29,6 +29,7 @@
     import RisuNestNetworkLog from './RisuNestNetworkLog.svelte'
     import RisuNestLogViewer from './RisuNestLogViewer.svelte'
     import RisuNestUpdateSettings from './RisuNestUpdateSettings.svelte'
+    import RisuNestAppLockSettings from './RisuNestAppLockSettings.svelte'
     import ExternalStorageSettings from '../ExternalStorage/ExternalStorageSettings.svelte'
     import LocalDataReset from '../RisuNest/LocalDataReset.svelte'
     import RisuNestStartupExclusions from './RisuNestStartupExclusions.svelte'
@@ -110,6 +111,7 @@
             <RisuNestSettingRows items={risuNestStreamingSettingsItems} />
             <RisuNestSettingRows items={risuNestInlaySettingsItems} />
             {#if isTauri}
+                <RisuNestAppLockSettings />
                 <RisuNestUpdateSettings />
             {/if}
             {#if isTauri && !isTauriAndroid && !isTauriIOS}

@@ -10,6 +10,7 @@ import {
 import corpus from "../tokenizer/native-tokenizer-corpus.json";
 import { createNativeTokenizerBenchmarkSeam } from "../tokenizer/nativeTokenizerBenchmark";
 import { persistence, reload, regex, guard, check, pause } from "./contracts";
+import { showNativeHarness } from "../nativeAppLock";
 
 const report = (stage: string, result: unknown) =>
   invoke("macos_bench_report", { stage, result });
@@ -354,6 +355,17 @@ async function startupAppearance(seed: boolean, theme: "light" | "dark") {
 async function main() {
   await guard();
   const phase = await invoke<string>("macos_bench_phase");
+  if (/^app-lock-(immediate|timed|immediate-mutant)$/.test(phase)) {
+    const { appLockFixture } = await import('../appLock/fixture');
+    const { initialize } = await import('./contracts');
+    await appLockFixture('macos', phase, initialize);
+    return;
+  }
+  if (phase !== "app" && !/^appearance-(seed|app)-(light|dark)$/.test(phase)
+    && !/^sync-(publish|receive|pull)$/.test(phase)
+    && !/^(external-storage|external-sync|backup-file)(-restart)?$/.test(phase)) {
+    await showNativeHarness();
+  }
   if (phase.startsWith("session-dispatch-")) {
     await (await import("./terminationDispatch")).terminationDispatch(phase);
   } else if (/^appearance-(seed|app)-(light|dark)$/.test(phase)) {

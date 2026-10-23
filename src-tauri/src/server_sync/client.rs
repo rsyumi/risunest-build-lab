@@ -188,6 +188,8 @@ pub(crate) struct ServerClient {
     config: RwLock<ServerConfig>,
     cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     retry_budget: Arc<RetryBudget>,
+    // Initial receives leave retries to the scheduler so plugins can start offline.
+    pub(crate) retry_transient: bool,
     pub(crate) verified_bytes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     pub(crate) retryable_failure: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
     /// The cycle's activity slot. The transfer layer raises it while object
@@ -417,6 +419,7 @@ impl ServerClient {
         let mut candidate = Self::with_cancellation(config, self.cancelled.clone())?;
         candidate.http = self.http.clone();
         candidate.retry_budget = self.retry_budget.clone();
+        candidate.retry_transient = self.retry_transient;
         candidate.verified_bytes = self.verified_bytes.clone();
         candidate.retryable_failure = self.retryable_failure.clone();
         candidate.activity = self.activity.clone();
@@ -519,6 +522,7 @@ impl ServerClient {
             config: RwLock::new(config),
             cancelled,
             retry_budget,
+            retry_transient: true,
             verified_bytes: None,
             retryable_failure: None,
             activity: None,
@@ -674,7 +678,7 @@ impl ServerClient {
                     let maintenance =
                         reply.status == 503 && code.as_deref() == Some("server-updating");
                     let transient = retryable_response(&reply);
-                    if maintenance || (retry_generic && replay_safe && transient) {
+                    if self.retry_transient && (maintenance || (retry_generic && replay_safe && transient)) {
                         self.report_retryable_failure(if maintenance {
                             Some("server-updating")
                         } else {
@@ -695,7 +699,7 @@ impl ServerClient {
                     }
                     return Ok(reply);
                 }
-                Err(error) if retry_generic && replay_safe && is_ambiguous_transient(&error) => {
+                Err(error) if self.retry_transient && retry_generic && replay_safe && is_ambiguous_transient(&error) => {
                     self.report_retryable_failure(Some(&error.code));
                     let _ = self.resolve_identity();
                     recovering = true;
@@ -1723,6 +1727,48 @@ mod tests {
             seen
         });
         (endpoint, task)
+    }
+
+    #[test]
+    fn initial_receive_returns_the_first_failure_without_spending_the_retry_budget() {
+        for identity in [false, true] {
+            for (status, body, code) in [
+                (503, "", "server-response-error"),
+                (521, "<html>origin unavailable</html>", "server-response-error"),
+                (530, "<html>error 1033</html>", "server-response-error"),
+                (408, r#"{"error":"request-timeout"}"#, "request-timeout"),
+                (503, r#"{"error":"server-updating"}"#, "server-updating"),
+                (401, r#"{"error":"unauthorized"}"#, "unauthorized"),
+            ] {
+                let (endpoint, task) = respond_in_order(vec![(status, body)]);
+                let mut client = ServerClient::new(config(&endpoint)).unwrap();
+                client.retry_budget = no_sleep_budget();
+                client.retry_transient = false;
+                let error = if identity { client.resolve_identity().unwrap_err() }
+                    else { client.json::<serde_json::Value>(Method::GET, "changes", &[], None::<&()>, &[]).unwrap_err() };
+                assert_eq!(error.code, code);
+                assert_eq!(error.status, status);
+                assert_eq!(client.retry_budget.remaining().unwrap(), RETRY_BUDGET);
+                assert_eq!(task.join().unwrap(), 1);
+            }
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let mut client = ServerClient::new(config(&endpoint)).unwrap();
+        client.retry_budget = no_sleep_budget();
+        client.retry_transient = false;
+        let error = client.json::<serde_json::Value>(Method::GET, "changes", &[], None::<&()>, &[]).unwrap_err();
+        assert_eq!(error.code, "server-unreachable");
+        assert_eq!(client.retry_budget.remaining().unwrap(), RETRY_BUDGET);
+
+        let silent = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let mut client = ServerClient::new(config(&format!("http://{}", silent.server_addr()))).unwrap();
+        client.retry_transient = false;
+        *client.retry_budget.spent.lock().unwrap() = RETRY_BUDGET - Duration::from_millis(50);
+        let error = client.resolve_identity().unwrap_err();
+        assert_eq!(error.code, "server-timeout");
+        assert_eq!(client.retry_budget.remaining().unwrap(), Duration::from_millis(50));
     }
 
     #[test]

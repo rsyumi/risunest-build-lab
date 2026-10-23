@@ -568,6 +568,14 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   @androidx.annotation.Keep
   fun cleanupWebviewStatus(): Int = webviewCleanup.status()
 
+  @androidx.annotation.Keep
+  private external fun appLockReply(id: Long, response: String)
+
+  private val appLock = AndroidAppLock(this, ::appLockReply)
+
+  @androidx.annotation.Keep
+  fun appLockCommand(id: Long, operation: String, payload: String) = appLock.command(id, operation, payload)
+
   private val backNavigationPolicy = BackNavigationPolicy()
   private var lifecycleWebView: WebView? = null
   private var frontendReady = AndroidFrontendReady()
@@ -635,6 +643,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   private val postNotificationsPermissionLauncher = registerForActivityResult(
     ActivityResultContracts.RequestPermission(),
   ) {
+    appLock.finishOwnedActivity(Int.MAX_VALUE)
     notificationPermissionResult?.complete(CompletionNotifications.enabled(this))
     notificationPermissionResult = null
     dispatchNotificationStateRefresh()
@@ -767,6 +776,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     }
     frontendReady = AndroidFrontendReady()
     lifecycleWebView = webView
+    appLock.attach(webView)
     exitListenerReady = false
     deliveredLegacyPaths.clear()
     exitWaitDialog?.dismiss()
@@ -816,6 +826,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
       object : OnBackPressedCallback(true) {
         override fun handleOnBackPressed() {
           if (lifecycleWebView !== webView) return
+          if (appLock.backgroundForBack()) return
           val pressedAt = SystemClock.elapsedRealtime()
           if (webView.canGoBack()) {
             navigateBack(webView, canGoBack = true, pressedAt)
@@ -860,6 +871,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   }
 
   override fun onStop() {
+    appLock.onStop()
     // Promote first, so a hold the hide flush begins starts protected.
     if (!isFinishing) GenerationForegroundService.setVisible(this, false)
     lifecycleFlushDispatcher.onStop()
@@ -868,13 +880,46 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
 
   override fun onResume() {
     super.onResume()
+    appLock.onResume()
     rendererRestartGate.onResume()
     dispatchNotificationStateRefresh()
   }
 
   override fun onPause() {
+    appLock.onPause()
     rendererRestartGate.onPause()
     super.onPause()
+  }
+
+  override fun onWindowFocusChanged(hasFocus: Boolean) {
+    super.onWindowFocusChanged(hasFocus)
+    appLock.onWindowFocusChanged(hasFocus)
+  }
+
+  override fun onUserLeaveHint() {
+    appLock.onUserLeaveHint()
+    super.onUserLeaveHint()
+  }
+
+  @Suppress("DEPRECATION")
+  override fun startActivityForResult(intent: Intent, requestCode: Int, options: Bundle?) {
+    val owned = requestCode >= 0 && (intent.action in setOf(
+      Intent.ACTION_OPEN_DOCUMENT, Intent.ACTION_CREATE_DOCUMENT, Intent.ACTION_GET_CONTENT,
+      Intent.ACTION_OPEN_DOCUMENT_TREE, "android.app.action.CONFIRM_DEVICE_CREDENTIAL",
+    ) || intent.component?.packageName == packageName)
+    if (owned) appLock.beginOwnedActivity(requestCode)
+    try {
+      super.startActivityForResult(intent, requestCode, options)
+    } catch (error: Exception) {
+      if (owned) appLock.finishOwnedActivity(requestCode)
+      throw error
+    }
+  }
+
+  @Suppress("DEPRECATION")
+  override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+    appLock.finishOwnedActivity(requestCode)
+    super.onActivityResult(requestCode, resultCode, data)
   }
 
   private fun dispatchNotificationStateRefresh() {
@@ -916,6 +961,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   }
 
   override fun onDestroy() {
+    appLock.close()
     exitWaitDialog?.dismiss()
     exitWaitDialog = null
     notificationPermissionResult?.cancel()
@@ -1163,8 +1209,10 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     val result = CompletableDeferred<Boolean>()
     notificationPermissionResult = result
     try {
+      appLock.beginOwnedActivity(Int.MAX_VALUE)
       postNotificationsPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
     } catch (error: Exception) {
+      appLock.finishOwnedActivity(Int.MAX_VALUE)
       result.complete(false)
       notificationPermissionResult = null
     }
@@ -1183,10 +1231,12 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
         if (notificationPermissionResult == null) {
           notificationPermissionResult = CompletableDeferred()
           runCatching {
+            appLock.beginOwnedActivity(Int.MAX_VALUE)
             postNotificationsPermissionLauncher.launch(
               android.Manifest.permission.POST_NOTIFICATIONS,
             )
           }.onFailure {
+            appLock.finishOwnedActivity(Int.MAX_VALUE)
             notificationPermissionResult?.complete(false)
             notificationPermissionResult = null
           }

@@ -8,7 +8,7 @@ const lazyScreens = new Map([
     ['Settings.svelte', 'settings'], ['GridCatalog.svelte', 'grid'], ['botpreset.svelte', 'presets'],
     ['listedPersona.svelte', 'personas'], ['CustomGUISettingMenu.svelte', 'custom'],
 ])
-const retained = new Set(['MobileBody.svelte', 'MobileFooter.svelte', 'MobileHeader.svelte', 'Settings.svelte', 'LazyScreenError.svelte', 'LoadingIndicator.svelte'])
+const retained = new Set(['MobileBody.svelte', 'MobileFooter.svelte', 'MobileHeader.svelte', 'Settings.svelte', 'LazyScreenError.svelte', 'LoadingIndicator.svelte', 'AppLockGate.svelte', 'AppLockScreen.svelte', 'AppLockCover.svelte', 'SyncExitDialog.svelte', 'ErrorDetails.svelte', 'SettingButton.svelte', 'BootFailurePanel.svelte'])
 
 export function lazyAppBoundaries(): Plugin {
     return {
@@ -25,6 +25,7 @@ export function lazyAppBoundaries(): Plugin {
             const owner = importer?.replaceAll('\\', '/')
             if (!owner?.startsWith(`${root}/src/`) || !(owner === `${root}/src/App.svelte` || [...retained].some(file => owner.endsWith(`/${file}`)))) return null
             if (!(source.startsWith('.') || source.startsWith('src/') || source.replaceAll('\\', '/').startsWith(`${root}/src/`))) return null
+            if (/appLock\/(?:input|appLock\.svelte)$/.test(source) || /(?:syncExitProduction|diagnostics)$/.test(source)) return null
             const file = source.split('/').at(-1)!
             const route = lazyScreens.get(file)
             if (route) return `\0lazy-app-${route}`

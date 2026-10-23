@@ -803,6 +803,7 @@ fn device_settings_accept_only_the_assigned_keys() {
             "nightlyWarned",
             "mcpStdioApprovals",
             "risuNestDeviceSettings",
+            "risuNestAppLock",
             "risuNestStartupExclusions",
             "risuNestPluginSyncSettings",
             "risuNestDefaultPluginsAttempted",
@@ -1477,6 +1478,7 @@ mod section_exchange {
     fn coordination_settings_never_enter_local_setting_rows() {
         let (_directory, mut store) = open();
         for key in [
+            "risuNestAppLock",
             "official-account.association.v1",
             "official-account.asset-ledger.v1",
             "official-account.pending-assets.v1",
@@ -1502,6 +1504,29 @@ mod section_exchange {
             rows.iter().map(|row| row.key2.as_str()).collect::<Vec<_>>(),
             vec!["risuNestDeviceSettings"]
         );
+    }
+
+    #[test]
+    fn app_lock_stays_local_across_backup_capture_and_device_restore() {
+        let (directory, mut source) = open();
+        let (_target_directory, mut target) = open();
+        let source_lock = serde_json::json!("synthetic-source-lock");
+        let target_lock = serde_json::json!("synthetic-target-lock");
+        source.write_setting("risuNestAppLock", &source_lock).unwrap();
+        target.write_setting("risuNestAppLock", &target_lock).unwrap();
+        source.write_setting("risuNestDeviceSettings", &serde_json::json!({ "restored": true })).unwrap();
+        let captured = source.capture_backup_sections(&[SectionKind::LocalSettings, SectionKind::Hypa, SectionKind::LocalPlugins], directory.path()).unwrap();
+        let mut keys = Vec::new();
+        captured[0].visit_entries(|entry, _| { let key: [String; 3] = serde_json::from_str(&entry.key)?; keys.push(key[1].clone()); Ok(()) }).unwrap();
+        assert_eq!(keys, vec!["risuNestDeviceSettings"]);
+        let frozen = super::super::sections::freeze_backup_sections(&captured.iter().collect::<Vec<_>>()).unwrap();
+        let tx = target.transaction().unwrap();
+        let stamp = risunest_sync_wire::stamp::Stamp { physical_ms: 1.into(), logical: 0, writer_id: uuid::Uuid::new_v4().to_string() };
+        super::super::sections::restore_frozen_backup_sections(&tx, &frozen, &stamp).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(target.read_setting("risuNestAppLock").unwrap(), Some(target_lock));
+        assert_eq!(target.read_setting("risuNestDeviceSettings").unwrap(), Some(serde_json::json!({ "restored": true })));
+        assert_eq!(source.read_setting("risuNestAppLock").unwrap(), Some(source_lock));
     }
 
     #[test]

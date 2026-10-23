@@ -14,6 +14,7 @@ import { isTauriIOS, isTauriDesktop } from "../../src/ts/platform";
 import { nativeDataPath } from "../../src/ts/storage/nativePaths";
 import { persistence, reload, regex, guard, check, pause } from "./contracts";
 import { PersistentBenchmarkMarker } from "./persistentMarker";
+import { showNativeHarness } from "../nativeAppLock";
 
 const report = (stage: string, result: unknown) =>
   invoke("ios_bench_report", { stage, result });
@@ -80,10 +81,17 @@ async function main() {
   await guard();
   check(isTauriIOS && !isTauriDesktop, "iOS runtime classification");
   const phase = await invoke<string>("ios_bench_phase");
+  if (/^app-lock-(immediate|timed|immediate-mutant|ui)$/.test(phase)) {
+    const { appLockFixture } = await import('../appLock/fixture');
+    const { initialize } = await import('./contracts');
+    await appLockFixture('ios', phase, initialize);
+    return;
+  }
   if (phase === "sidebar-touch") {
     document.getElementById("app")!.style.display = "none";
     const { mountSidebarTouchFixture } = await import("../sidebar-touch/fixture");
     mountSidebarTouchFixture(document.getElementById("benchmark")!, true);
+    await showNativeHarness();
     return;
   }
   if (
@@ -100,6 +108,7 @@ async function main() {
     // Keep native-contract status/results visible to older WebKit accessibility.
     document.getElementById("app")!.style.display = "none";
     document.body.style.color = "var(--risu-theme-textcolor)";
+    await showNativeHarness();
   }
   await initializeIOSNative();
   const generationReloadKey = "ios-synthetic-generation-reload";

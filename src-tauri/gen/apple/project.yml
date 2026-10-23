@@ -62,6 +62,7 @@ targets:
               public.filename-extension: [risudat]
         LSRequiresIPhoneOS: true
         UILaunchStoryboardName: LaunchScreen
+        NSFaceIDUsageDescription: RisuNest uses Face ID to unlock the app.
         NSCameraUsageDescription: Scan a QR code you choose to connect RisuNest.
         NSLocalNetworkUsageDescription: Connect to a local AI provider or RisuNest sync server that you choose.
         LSSupportsOpeningDocumentsInPlace: false

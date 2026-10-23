@@ -9,10 +9,11 @@ export type LuaWorkerEvent =
     | { kind: 'result'; sequence: number; value?: unknown; error?: string; failure?: LuaWorkerFailure; fatal?: boolean }
     | { kind: 'call'; sequence: number; call: number; name: string; args: unknown[] }
     | { kind: 'heartbeat' }
+    | { kind: 'pong'; token: number }
     | { kind: 'execution'; running: boolean }
     | { kind: 'disposed' }
 
-export type LuaWorkerRequest = { engine: number; command: LuaWorkerCommand | { kind: 'dispose' } }
+export type LuaWorkerRequest = { engine: number; command: LuaWorkerCommand | { kind: 'dispose' } | { kind: 'ping'; token: number } }
 export type LuaWorkerResponse = { engine: number; event: LuaWorkerEvent }
 
 export type LuaWorkerFailure = { kind: 'error'; message: string } | { kind: 'value'; value: unknown }

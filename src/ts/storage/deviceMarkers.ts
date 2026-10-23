@@ -21,6 +21,7 @@ export const DEVICE_MARKER_KEYS = [
     'risuNestUpdateSettings',
     'mcpStdioApprovals',
     'risuNestDisplayRecovery',
+    'risuNestAppLock',
 ] as const
 
 export type DeviceMarkerKey = (typeof DEVICE_MARKER_KEYS)[number]
@@ -29,6 +30,8 @@ export interface DeviceMarkerStorage {
     getItem(key: string): string | null
     setItem(key: string, value: string): void
     removeItem(key: string): void
+    /** Publishes this value only after its own durable write succeeds. */
+    commitItem?(key: string, value: string | null): Promise<void>
     /** Resolves once every queued change has committed. */
     flush(): Promise<void>
     /** Resolves once every queued change has finished, leaving a failure for the next `flush` to report. */
@@ -45,7 +48,10 @@ function requireKey(key: string): DeviceMarkerKey {
 
 function readLoaded(key: string, loaded: unknown): string | null {
     if (loaded === null || loaded === undefined) return null
-    if (typeof loaded !== 'string') throw new Error(`Device marker ${key} is unreadable`)
+    if (typeof loaded !== 'string') {
+        if (key === 'risuNestAppLock') return ''
+        throw new Error(`Device marker ${key} is unreadable`)
+    }
     return loaded
 }
 
@@ -64,6 +70,12 @@ export function createNativeDeviceMarkers(
         const value = readLoaded(key, loaded[index])
         if (value !== null) values.set(key, value)
     })
+    const revisions = new Map<string, number>()
+    const revise = (key: string) => {
+        const revision = (revisions.get(key) ?? 0) + 1
+        revisions.set(key, revision)
+        return revision
+    }
     let tail = Promise.resolve()
     let failure: unknown = null
     const enqueue = (operation: () => Promise<void>): void => {
@@ -80,14 +92,30 @@ export function createNativeDeviceMarkers(
         setItem(key, value) {
             requireKey(key)
             if (values.get(key) === value) return
+            revise(key)
             values.set(key, value)
             enqueue(() => settings.set(key, value))
         },
         removeItem(key) {
             requireKey(key)
             if (!values.has(key)) return
+            revise(key)
             values.delete(key)
             enqueue(() => settings.set(key, null))
+        },
+        commitItem(key, value) {
+            requireKey(key)
+            const revision = revise(key)
+            const commit = tail.then(async () => {
+                await settings.set(key, value)
+                if (revisions.get(key) === revision) {
+                    if (value === null) values.delete(key)
+                    else values.set(key, value)
+                }
+            })
+            // Durable callers receive their own failure; legacy flush failures stay independent.
+            tail = commit.then(() => undefined, () => undefined)
+            return commit
         },
         async reload() {
             await this.flush()
@@ -117,6 +145,10 @@ export function createLocalDeviceMarkers(storage: Storage): DeviceMarkerStorage 
         getItem: (key) => storage.getItem(requireKey(key)),
         setItem: (key, value) => storage.setItem(requireKey(key), value),
         removeItem: (key) => storage.removeItem(requireKey(key)),
+        async commitItem(key, value) {
+            if (value === null) storage.removeItem(requireKey(key))
+            else storage.setItem(requireKey(key), value)
+        },
         async flush() {},
     }
 }

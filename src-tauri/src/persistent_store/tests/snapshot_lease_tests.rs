@@ -120,23 +120,188 @@ fn schema_configures_the_documented_sqlite_profile() {
     );
 }
 
+fn commit_snapshot_plugin(store: &mut PersistentStore, body_bytes: usize) -> Value {
+    use crate::persistent_store::lww::UnitMutation;
+    use risunest_sync_wire::{payload_value, unit::UnitKey};
+    let mut plugin=json!({"name":"synthetic-snapshot-plugin","script":"","version":"3.0","enabled":false});
+    let overhead=payload_value::encode(&plugin).unwrap().len();
+    plugin["script"]=json!("x".repeat(body_bytes-overhead));
+    assert_eq!(payload_value::encode(&plugin).unwrap().len(),body_bytes);
+    store.commit(&WorkingSetCommit {
+        expected_revision:store.revision().unwrap(),
+        unit_mutations:Some(vec![
+            UnitMutation::Set {key:UnitKey::new(&["record","plugins","synthetic-snapshot-plugin"]).unwrap(),value:plugin.clone()},
+            UnitMutation::Set {key:UnitKey::new(&["order","plugins"]).unwrap(),value:json!(["synthetic-snapshot-plugin"])},
+        ]),
+        ..Default::default()
+    }).unwrap();
+    plugin
+}
+
 #[test]
 fn snapshots_create_list_and_restore_before_reopen() {
-    let (directory, mut store, database) = open_fixture();
-    let snapshot=store.snapshot_create("contract-test").unwrap();
-    assert!(snapshot.bytes>0);
-    assert_eq!(store.snapshot_list().unwrap().len(),1);
-    store.commit(&WorkingSetCommit {root:Some(json!({"username":"Changed after snapshot"})),..empty_working_set_commit(1)}).unwrap();
-    let stage=store.snapshot_restore_stage(&snapshot.id,"contract-restore").unwrap();
-    let authority=store.lww_binding_authority().unwrap();
-    let receipt=store.snapshot_restore_activate(&stage.staging_id,2,authority).unwrap();
-    assert_eq!(receipt.revision,3);
+    let metadata_bound=risunest_sync_wire::MAX_METADATA_BYTES;
+    for plugin_bytes in [0,metadata_bound-1,metadata_bound+1,5*metadata_bound] {
+        let (directory, mut store, mut database) = open_fixture();
+        if plugin_bytes>0 {
+            database["plugins"]=json!([commit_snapshot_plugin(&mut store,plugin_bytes)]);
+        }
+        if plugin_bytes==5*metadata_bound {
+            let username="u".repeat(metadata_bound+1);
+            store.commit(&WorkingSetCommit {
+                unit_mutations:Some(vec![crate::persistent_store::lww::UnitMutation::Set {
+                    key:risunest_sync_wire::unit::UnitKey::new(&["root","username"]).unwrap(),value:json!(username),
+                }]),
+                ..empty_working_set_commit(store.revision().unwrap())
+            }).unwrap();
+            database["username"]=json!(username);
+        }
+        let snapshot=store.snapshot_create("contract-test").unwrap();
+        assert!(snapshot.bytes>0);
+        assert_eq!(store.snapshot_list().unwrap().len(),1);
+        store.commit(&WorkingSetCommit {root:Some(json!({"username":"Changed after snapshot"})),..empty_working_set_commit(store.revision().unwrap())}).unwrap();
+        let revision=store.revision().unwrap();
+        let stage=store.snapshot_restore_stage(&snapshot.id,"contract-restore")
+            .unwrap_or_else(|error|panic!("plugin bytes={plugin_bytes}: {error}"));
+        let authority=store.lww_binding_authority().unwrap();
+        let receipt=store.snapshot_restore_activate(&stage.staging_id,revision,authority).unwrap();
+        assert_eq!(receipt.revision,revision+1);
+        assert!(store.materialize(None).unwrap()==database,"restored data differs, plugin bytes={plugin_bytes}");
+        drop(store);
+        let restored=PersistentStore::open(directory.path()).unwrap();
+        assert_eq!(restored.revision().unwrap(),receipt.revision);
+        assert!(restored.materialize(None).unwrap()==database,"reopened data differs, plugin bytes={plugin_bytes}");
+        assert!(restored.snapshot_list().unwrap().iter().any(|s|s.id==snapshot.id));
+    }
+}
+
+#[test]
+fn snapshot_restore_recovers_large_units_without_cached_bodies() {
+    let (_source_directory,mut source,mut expected)=open_fixture();
+    expected["plugins"]=json!([commit_snapshot_plugin(&mut source,risunest_sync_wire::MAX_METADATA_BYTES-1)]);
+    let snapshot=source.snapshot_create("uncached-plugin").unwrap();
+    let (directory,mut target,_)=open_fixture();
+    let source_archive=Archive::open(&source.snapshots_dir).unwrap();
+    let scratch=source_archive.scratch().unwrap();
+    source_archive.restore(&snapshot.id,&scratch.path).unwrap();
+    let mut target_archive=Archive::open(&target.snapshots_dir).unwrap();
+    let imported=target_archive.insert(&scratch.path,source.revision().unwrap(),"uncached-plugin",Default::default()).unwrap();
+    drop(target_archive);
+    drop(source_archive);
+    let stage=target.snapshot_restore_stage(&imported.id,"uncached-plugin").unwrap();
+    target.snapshot_restore_activate(&stage.staging_id,target.revision().unwrap(),target.lww_binding_authority().unwrap()).unwrap();
+    assert_eq!(target.materialize(None).unwrap(),expected);
+    drop(target);
+    let reopened=PersistentStore::open(directory.path()).unwrap();
+    assert_eq!(reopened.materialize(None).unwrap(),expected);
+}
+
+#[test]
+fn snapshot_restore_stages_large_message_manifests_and_archive_metadata() {
+    use risunest_external_storage_format::message_pages::{MessageManifest,ManifestPage,MANIFEST_SCHEMA,MAX_PAGE_BYTES};
+    use risunest_sync_wire::{descriptor::RecordDescriptor,unit::{UnitKey,UnitValue}};
+    let (_directory,mut store,database)=open_fixture();
+    let mut archive=Archive::open(&store.snapshots_dir).unwrap();
+    let (scratch,_)=super::super::snapshot::capture_scratch(&mut store,&archive).unwrap();
+    let source=Connection::open(&scratch.path).unwrap();
+    source.execute_batch("BEGIN").unwrap();
+    let (mut units,mut bodies,large)=super::super::external_capture::large_metadata_fixture();
+    // One indivisible page can occur repeatedly without materializing the logical history.
+    let page=risunest_external_storage_format::logical_records::encode_message_page(&[json!({"role":"user","data":"x".repeat(MAX_PAGE_BYTES)})]).unwrap();
+    let manifest=MessageManifest {schema:MANIFEST_SCHEMA.into(),message_count:9500u64.into(),pages:vec![ManifestPage {hash:page.hash.clone(),message_count:1,byte_length:page.size.into()};9500]}.encode().unwrap();
+    assert!(manifest.bytes.len()>risunest_sync_wire::MAX_METADATA_BYTES);
+    let mut descriptor=RecordDescriptor::content(manifest.hash.clone());
+    descriptor.dependencies=vec![page.hash.clone()];
+    units.insert(UnitKey::new(&["messages","synthetic-character","synthetic-chat"]).unwrap(),UnitValue::object(descriptor).unwrap());
+    bodies.insert(manifest.hash.clone(),manifest.bytes.clone());
+    bodies.insert(page.hash,page.bytes);
+    let archived:super::super::archive::ArchivedObject=serde_json::from_slice(&bodies[&large[0]]).unwrap();
+    for hash in archived.object_roots().collect::<std::collections::BTreeSet<_>>() {
+        source.execute("INSERT INTO asset_objects VALUES(?1,1,0)",[hash]).unwrap();
+    }
+    for (hash,body) in &bodies {super::super::message_pages::put_object(&source,hash,body).unwrap();}
+    for (key,value) in &units {
+        source.execute("INSERT INTO snapshot_original_units VALUES(?1,?2)",params![key.as_str(),serde_json::to_string(value).unwrap()]).unwrap();
+    }
+    source.execute_batch("COMMIT").unwrap();
+    drop(source);
+    let snapshot=archive.insert(&scratch.path,store.revision().unwrap(),"large-originals",Default::default()).unwrap();
+    drop(archive);
+    let stage=store.snapshot_restore_stage(&snapshot.id,"large-originals").unwrap();
+    for (key,value) in &units {
+        let staged:String=store.connection.query_row("SELECT value FROM replacement_source_units WHERE generation=?1 AND layer=0 AND key=?2",params![stage.staging_id,key.as_str()],|row|row.get(0)).unwrap();
+        assert_eq!(serde_json::from_str::<UnitValue>(&staged).unwrap(),*value);
+    }
+    for hash in [&large[0],&manifest.hash] {assert_eq!(store.lww_object_body(hash).unwrap().unwrap(),bodies[hash]);}
+    store.snapshot_restore_abort(&stage.staging_id).unwrap();
     assert_eq!(store.materialize(None).unwrap(),database);
-    drop(store);
-    let restored=PersistentStore::open(directory.path()).unwrap();
-    assert_eq!(restored.revision().unwrap(),receipt.revision);
-    assert_eq!(restored.materialize(None).unwrap(),database);
-    assert!(restored.snapshot_list().unwrap().iter().any(|s|s.id==snapshot.id));
+}
+
+#[test]
+fn snapshot_restore_rejects_damaged_large_units_and_oversized_reference_pages() {
+    use risunest_sync_wire::{descriptor::{RecordDescriptor,ReferencePage},unit::{UnitKey,UnitValue}};
+    for (damage,expected_error) in [
+        ("missing","unit-object-body-required"),
+        ("hash","message object hash mismatch"),
+        ("noncanonical","invalid-large-unit"),
+        ("reference-page","Backup reference tree integrity failed"),
+    ] {
+        let (directory,mut store,_)=open_fixture();
+        commit_snapshot_plugin(&mut store,risunest_sync_wire::MAX_METADATA_BYTES+1);
+        let expected=store.materialize(None).unwrap();
+        let revision=store.revision().unwrap();
+        let clock=serde_json::to_value(store.lww_clock_state().unwrap()).unwrap();
+        let mut archive=Archive::open(&store.snapshots_dir).unwrap();
+        let (scratch,_)=super::super::snapshot::capture_scratch(&mut store,&archive).unwrap();
+        let source=Connection::open(&scratch.path).unwrap();
+        let key=UnitKey::new(&["record","plugins","synthetic-snapshot-plugin"]).unwrap();
+        let encoded:String=source.query_row("SELECT value FROM snapshot_original_units WHERE key=?1",[key.as_str()],|row|row.get(0)).unwrap();
+        let UnitValue::Object {descriptor,..}=serde_json::from_str(&encoded).unwrap() else {panic!("large plugin must have a body")};
+        match damage {
+            "missing"=>{source.execute("DELETE FROM message_page_objects WHERE hash=?1",[&descriptor.object_hash]).unwrap();},
+            "hash"=>{
+                source.execute("DELETE FROM message_page_objects WHERE hash=?1",[&descriptor.object_hash]).unwrap();
+                source.execute("INSERT INTO message_page_objects(hash,body) VALUES(?1,?2)",params![descriptor.object_hash,b"{}".as_slice()]).unwrap();
+            },
+            "noncanonical"=>{
+                let mut body:Vec<u8>=source.query_row("SELECT body FROM message_page_objects WHERE hash=?1",[&descriptor.object_hash],|row|row.get(0)).unwrap();
+                body.push(b' ');
+                let hash=risunest_sync_wire::hash(&body);
+                super::super::message_pages::put_object(&source,&hash,&body).unwrap();
+                let value=UnitValue::object(RecordDescriptor::content(hash)).unwrap();
+                source.execute("UPDATE snapshot_original_units SET value=?2 WHERE key=?1",params![key.as_str(),serde_json::to_string(&value).unwrap()]).unwrap();
+            },
+            "reference-page"=>{
+                let page=ReferencePage::Relations {keys:(0..17).map(|i|format!("{i:02}{}","x".repeat(risunest_sync_wire::MAX_KEY_BYTES-2))).collect()};
+                let body=risunest_sync_wire::canonical::encode(&page).unwrap();
+                assert!(body.len()>risunest_sync_wire::MAX_METADATA_BYTES);
+                let hash=risunest_sync_wire::hash(&body);
+                super::super::message_pages::put_object(&source,&hash,&body).unwrap();
+                let mut descriptor=RecordDescriptor::content(descriptor.object_hash);
+                descriptor.relation_root=Some(hash);
+                let value=UnitValue::object(descriptor).unwrap();
+                source.execute("INSERT INTO snapshot_original_units VALUES(?1,?2)",params![UnitKey::new(&["future","synthetic"]).unwrap().as_str(),serde_json::to_string(&value).unwrap()]).unwrap();
+            },
+            _=>unreachable!(),
+        }
+        drop(source);
+        let snapshot=archive.insert(&scratch.path,store.revision().unwrap(),"damaged-originals",Default::default()).unwrap();
+        drop(archive);
+        for _ in 0..2 {
+            match store.snapshot_restore_stage(&snapshot.id,"damaged-originals") {
+                Err(StoreError::Validation {message})=>assert_eq!(message,expected_error,"{damage}"),
+                Err(error)=>panic!("unexpected error for {damage}: {error:?}"),
+                Ok(_)=>panic!("damaged snapshot was accepted: {damage}"),
+            }
+            assert_eq!(store.materialize(None).unwrap(),expected);
+            assert_eq!(store.revision().unwrap(),revision);
+            assert_eq!(serde_json::to_value(store.lww_clock_state().unwrap()).unwrap(),clock);
+            assert_eq!(store.snapshot_restore_leftovers().unwrap(),(Vec::new(),Vec::new()));
+        }
+        drop(store);
+        let reopened=PersistentStore::open(directory.path()).unwrap();
+        assert_eq!(reopened.materialize(None).unwrap(),expected);
+    }
 }
 
 #[test]

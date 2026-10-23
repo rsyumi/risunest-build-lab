@@ -1525,8 +1525,7 @@ impl super::PersistentStore {
                     Ok((key,value))
                 });
                 let inventory=super::external_capture::streamed_unit_dependency_inventory(original_units,&|hash| {
-                    let length:Option<i64>=source.query_row("SELECT length(body) FROM message_page_objects WHERE hash=?1",[hash],|row|row.get(0)).optional()?;
-                    if length.is_some_and(|length|length<0 || length as u64>risunest_sync_wire::MAX_METADATA_BYTES as u64) {return Err(validation("snapshot control exceeds its byte limit"));}
+                    // Content bodies may exceed the Sync reference-page bound; the inventory validates each format.
                     Ok(source.query_row("SELECT body FROM message_page_objects WHERE hash=?1",[hash],|row|row.get(0)).optional()?)
                 },&|hash| {
                     let size:Option<i64>=source.query_row("SELECT byte_size FROM asset_objects WHERE object_hash=?1 UNION ALL SELECT length(body) FROM message_page_objects WHERE hash=?1 LIMIT 1",[hash],|row|row.get(0)).optional()?;
@@ -1560,11 +1559,20 @@ impl super::PersistentStore {
                     super::lww::insert_replacement_source(&tx,&stage.staging_id,super::lww::STAGED_SOURCE,&key,&value)?;
                 }
                 drop(cursor);
+                // Inventory validation includes controls that do not receive message-page verification marks.
+                let mut controls=source.prepare("SELECT body FROM message_page_objects WHERE hash=?1")?;
+                for hash in inventory.controls.keys() {
+                    cancelled(probe)?;
+                    let body:Option<Vec<u8>>=controls.query_row([hash],|row|row.get(0)).optional()?;
+                    if let Some(body)=body {super::message_pages::put_object(&tx,hash,&body)?;}
+                }
                 let mut statement = source.prepare("SELECT o.hash,o.body FROM message_page_objects o JOIN message_page_verified_objects v ON v.hash=o.hash")?;
                 let mut rows = statement.query([])?;
                 while let Some(row) = rows.next()? {
                     cancelled(probe)?;
-                    super::message_pages::put_object(&tx,&row.get::<_,String>(0)?,&row.get::<_,Vec<u8>>(1)?)?;
+                    let hash:String=row.get(0)?;
+                    if inventory.controls.contains_key(&hash) {continue;}
+                    super::message_pages::put_object(&tx,&hash,&row.get::<_,Vec<u8>>(1)?)?;
                 }
                 cancelled(probe)?;
                 tx.commit()?;

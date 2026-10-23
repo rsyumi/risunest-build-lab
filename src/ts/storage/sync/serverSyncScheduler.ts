@@ -28,7 +28,7 @@ const isCancellation = (error: unknown) => serverSyncErrorCode(error) === 'cance
 export function isServerSyncUnavailable(error: unknown): boolean {
     if (typeof error === 'object' && error && 'retryable' in error && error.retryable === false) return false
     const code = serverSyncErrorCode(error)
-    if (['server-unreachable', 'server-timeout', 'request-timeout', 'incomplete-response', 'directory-unreachable', 'directory-response-error', 'directory-incomplete-response', 'sync-retry-budget-exhausted'].includes(code)) return true
+    if (['server-unreachable', 'server-timeout', 'server-updating', 'request-timeout', 'incomplete-response', 'directory-unreachable', 'directory-response-error', 'directory-incomplete-response', 'sync-retry-budget-exhausted'].includes(code)) return true
     // Tunnel/gateway HTML responses have no Sync error body.
     return code === 'server-response-error' && typeof error === 'object' && error !== null
         && 'status' in error && typeof error.status === 'number' && error.status >= 500 && error.status < 600

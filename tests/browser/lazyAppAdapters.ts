@@ -6,6 +6,12 @@ export const DBState = { db: { didFirstSetup: true, characters: [{ name: 'Synthe
 export const DynamicGUI = writable(false), settingsOpen = writable(false), sideBarStore = writable(true), sideBarClosing = writable(false)
 export const ShowRealmFrameStore = writable(false), openPresetList = writable(false), openPersonaList = writable(false)
 export const MobileGUI = writable(false), CustomGUISettingMenuStore = writable(false), loadedStore = writable(true)
+export const bootFailure = writable<import('../../src/ts/stores.svelte').BootFailure | null>(null)
+export const recoveryStart = writable(null)
+export const serverSyncNavigation = { subscribe: (_listener: unknown) => () => {} }
+export const dataHealthNavigation = serverSyncNavigation
+export const getStartupExclusions = () => ['autoUpdate']
+export const isStartupExcluded = () => true
 export { alertStore }
 export const bookmarkListOpen = writable(false)
 export const LoadingStatusState = { startedAt: null, text: '' }

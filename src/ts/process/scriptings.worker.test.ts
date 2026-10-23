@@ -6,6 +6,7 @@ import { nodeLuaWorkers } from './tests/luaWorkerNode'
 import type { Chat } from '../storage/database.svelte'
 import { LuaWorkerExecutor } from './luaWorkerExecutor'
 import { luaCodeWrapper } from './luaCodeWrapper'
+import type { LuaWorkerResponse } from './luaWorkerProtocol'
 
 vi.mock('../storage/persistentDataRuntime.svelte', async () => (await import('./tests/scriptingsTestHarness')).persistentRuntimeModule())
 vi.mock('../parser/parser.svelte', async () => (await import('./tests/scriptingsTestHarness')).parserModule())
@@ -34,6 +35,17 @@ beforeAll(async () => {
     runScripted = (await import('./scriptings')).runScripted
 })
 afterAll(async () => { await workers.close(); vi.unstubAllGlobals() })
+
+test('answers a fresh watchdog probe without requiring a Lua engine', async () => {
+    const worker = new workers.Worker()
+    try {
+        const response = new Promise<LuaWorkerResponse>(resolve => {
+            worker.onmessage = event => resolve(event.data as LuaWorkerResponse)
+        })
+        worker.postMessage({ engine: 0, command: { kind: 'ping', token: 7 } })
+        expect(await response).toEqual({ engine: 0, event: { kind: 'pong', token: 7 } })
+    } finally { worker.terminate() }
+})
 
 test('runs real host APIs in C callbacks, preserves independent views and read-after-write', async () => {
     const chat = { message: [{ role: 'user', data: 'before', chatId: 'a' }] } as Chat
@@ -99,7 +111,7 @@ test('keeps the handler deadline separate from a genuine async wait', async () =
         await executor.initialize(luaCodeWrapper('onOutput=async(function() return wait():await() end)'), await readFile('public/lua/json.lua', 'utf8'))
         const result = executor.invoke('onOutput', [])
         await ready
-        await new Promise(resolve => setTimeout(resolve, 60))
+        await new Promise(resolve => setTimeout(resolve, 180))
         finish('completed')
         expect(await result).toBe('completed')
     } finally { executor.close() }
@@ -271,6 +283,9 @@ test('does not charge another engine computation to a synchronous host caller', 
 test('recovers on the next request after a Worker cannot run its instruction hook', async () => {
     const executor = new LuaWorkerExecutor(30)
     const waiting = new LuaWorkerExecutor(1_000)
+    const preparing = new LuaWorkerExecutor(1_000)
+    const writes: string[] = []
+    preparing.register('write', value => { writes.push(value); return 'prepared' })
     let started!: () => void
     let finish!: () => void
     const ready = new Promise<void>(resolve => { started = resolve })
@@ -281,14 +296,19 @@ test('recovers on the next request after a Worker cannot run its instruction hoo
         const collateral = expect(waitingResult).rejects.toThrow('another engine')
         await ready
         await executor.initialize('function run() debug.sethook(); while true do end end', await readFile('public/lua/json.lua', 'utf8'))
-        await Promise.all([expect(executor.invoke('run', [])).rejects.toThrow('thread timeout exceeded'), collateral])
+        const failed = expect(executor.invoke('run', [])).rejects.toThrow('thread timeout exceeded')
+        const recovered = expect(preparing.initialize('value=write("once"); function run() return value end',
+            await readFile('public/lua/json.lua', 'utf8'))).resolves.toBeUndefined()
+        await Promise.all([failed, collateral, recovered])
+        expect(await preparing.invoke('run', [])).toBe('prepared')
+        expect(writes).toEqual(['once'])
         expect(executor.isClosed()).toBe(true)
         const next = new LuaWorkerExecutor(1_000)
         try {
             await next.initialize('function run() return "recovered" end', await readFile('public/lua/json.lua', 'utf8'))
             expect(await next.invoke('run', [])).toBe('recovered')
         } finally { next.close() }
-    } finally { finish?.(); waiting.close(); executor.close() }
+    } finally { finish?.(); waiting.close(); preparing.close(); executor.close() }
 }, 15_000)
 
 test('charges synchronous main-thread API work and keeps globals after the budget expires', async () => {

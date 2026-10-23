@@ -1782,18 +1782,22 @@ localRuntimeTest.each([
   }
 })
 
-localRuntimeTest('shows one Lua timeout notice for queued display pipelines and another for a later refresh', async () => {
+test('shows one Lua timeout notice for queued display pipelines and another for a later refresh', async () => {
   const fixture = operationCharacterFixture('display-timeout-notice')
   fixture.char.customscript = []
   let now = 0
+  const worker = inject('luaWorker') === true
   diagnosticEngineSetup.next = (engine) => {
     engine.global.set('slowDisplay', () => {
       now += 5_001
     })
   }
   fixture.char.triggerscript = luaTriggerScript(`
+    count = 0
     listenEdit('editDisplay', function(id, value)
-      slowDisplay()
+      count = count + 1
+      if value == 'fast' then return value .. count end
+      ${worker ? 'while true do end' : 'slowDisplay()'}
       local total = 0
       for i = 1, 10000 do total = total + i end
       return value .. total
@@ -1807,7 +1811,7 @@ localRuntimeTest('shows one Lua timeout notice for queued display pipelines and 
   vi.stubGlobal('localStorage', { getItem: () => null })
   vi.mocked(risuChatParser).mockImplementation(value => value)
   const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined)
-  const deadlineClock = vi.spyOn(performance, 'now').mockImplementation(() => now)
+  const deadlineClock = worker ? undefined : vi.spyOn(performance, 'now').mockImplementation(() => now)
   vi.mocked(alertToast).mockClear()
   try {
     const { processScriptFull } = await import('./scripts')
@@ -1819,11 +1823,13 @@ localRuntimeTest('shows one Lua timeout notice for queued display pipelines and 
     expect(errors.mock.calls.filter(([error]) => error?.code === 'lua-listener-timeout')).toHaveLength(1)
     expect(alertToast).toHaveBeenCalledExactlyOnceWith(language.risuNest.scriptTimeout)
 
+    expect((await processScriptFull(fixture.char, 'fast', 'editdisplay', 0)).data).toBe('fast2')
+
     await processScriptFull(fixture.char, 'later', 'editdisplay', 0)
     expect(alertToast).toHaveBeenCalledTimes(2)
   } finally {
     diagnosticEngineSetup.next = null
-    deadlineClock.mockRestore()
+    deadlineClock?.mockRestore()
     errors.mockRestore()
     continuationRuntime.session = null
     vi.mocked(risuChatParser).mockReset()
@@ -1928,18 +1934,20 @@ localRuntimeTest('runs a timed-out display listener again only for a new row, me
   }
 })
 
-localRuntimeTest('spends one source budget on the display rows queued behind top-level code that timed out', async () => {
-  const fixture = operationCharacterFixture('display-timeout-source', undefined, [
+test.each(['runtime', 'pipeline'] as const)('spends one source budget on the display rows queued behind top-level code that timed out (%s)', async boundary => {
+  const worker = inject('luaWorker') === true
+  const fixture = operationCharacterFixture(`display-timeout-source-${boundary}`, undefined, [
     { role: 'char', data: 'zero', chatId: 'message-zero' },
     { role: 'char', data: 'one', chatId: 'message-one' },
   ])
   fixture.char.customscript = []
-  fixture.char.triggerscript = luaTriggerScript(`
-    noteSource()
+  const code = `
+    ${worker ? 'while true do end' : 'noteSource()'}
     local total = 0
     for i = 1, 10000 do total = total + i end
     listenEdit('editDisplay', function(id, value) return value .. '!' end)
-  `)
+  `
+  fixture.char.triggerscript = luaTriggerScript(code)
   let now = 0
   let sourceRuns = 0
   const setupEngine = (engine: LuaEngine) => {
@@ -1957,25 +1965,32 @@ localRuntimeTest('spends one source budget on the display rows queued behind top
   const previousLocalStorage = globalThis.localStorage
   vi.stubGlobal('localStorage', { getItem: () => null })
   vi.mocked(risuChatParser).mockImplementation(value => value)
-  const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined)
-  const deadlineClock = vi.spyOn(performance, 'now').mockImplementation(() => now)
-  const { processScriptFull } = await import('./scripts')
+  const deadlineClock = worker ? undefined : vi.spyOn(performance, 'now').mockImplementation(() => now)
   const { nextDisplayListenerOrder } = await import('./luaDisplayTimeouts')
-  const render = async (data: string, index: number, displayRequestOrder?: number) =>
-    (await processScriptFull(fixture.char, data, 'editdisplay', index, {}, { displayRequestOrder })).data
+  const { processScriptFull } = await import('./scripts')
+  const render = async (data: string, index: number, displayRequestOrder?: number) => {
+    if (boundary === 'pipeline') {
+      return (await processScriptFull(fixture.char, data, 'editdisplay', index, {}, { displayRequestOrder })).data
+    }
+    return (await runScripted(code, { char: fixture.char, chat: fixture.chat, mode: 'editDisplay', data,
+      displayListener: { order: displayRequestOrder ?? nextDisplayListenerOrder(), row: {
+        conversationId: fixture.chat.id, index, messageId: fixture.chat.message[index].chatId!,
+      } },
+    })).res
+  }
   try {
     // Both rows asked for their display before the source ran.
     const first = nextDisplayListenerOrder()
     const second = nextDisplayListenerOrder()
-    expect(await render('zero', 0, first)).toBe('zero')
-    expect(await render('one', 1, second)).toBe('one')
+    if (boundary === 'pipeline') expect(await render('zero', 0, first)).toBe('zero')
+    else await expect(render('zero', 0, first)).rejects.toThrow(/thread timeout exceeded/)
+    expect(await render('one', 1, second)).toBe(boundary === 'pipeline' ? 'one' : undefined)
     // Rendering the same row again later skips it too.
-    expect(await render('zero', 0)).toBe('zero')
-    expect(sourceRuns).toBe(1)
+    expect(await render('zero', 0)).toBe(boundary === 'pipeline' ? 'zero' : undefined)
+    if (!worker) expect(sourceRuns).toBe(1)
   } finally {
     diagnosticEngineSetup.next = null
-    deadlineClock.mockRestore()
-    errors.mockRestore()
+    deadlineClock?.mockRestore()
     continuationRuntime.session = null
     vi.mocked(risuChatParser).mockReset()
     vi.stubGlobal('localStorage', previousLocalStorage)

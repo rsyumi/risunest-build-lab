@@ -172,8 +172,14 @@ class BarcodeScannerPlugin: Plugin, AVCaptureMetadataOutputObjectsDelegate {
   @objc override func requestPermissions(_ invoke: Invoke) {
     let state = getPermissionState()
     if state == "prompt" {
-      AVCaptureDevice.requestAccess(for: .video) { (authorized) in
-        invoke.resolve(["camera": authorized ? "granted" : "denied"])
+      DispatchQueue.main.async {
+        NotificationCenter.default.post(name: Notification.Name("risunest-owned-prompt-begin"), object: nil)
+        AVCaptureDevice.requestAccess(for: .video) { (authorized) in
+          DispatchQueue.main.async {
+            NotificationCenter.default.post(name: Notification.Name("risunest-owned-prompt-end"), object: nil)
+            invoke.resolve(["camera": authorized ? "granted" : "denied"])
+          }
+        }
       }
     } else {
       invoke.resolve(["camera": state])

@@ -28,6 +28,7 @@ private struct WebAuthenticationArgs: Decodable {
 
 final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticationPresentationContextProviding {
     private weak var webView: WKWebView?
+    private let appLock = AppLockCoordinator()
     private var tasks: [String: UIBackgroundTaskIdentifier] = [:]
     private var expired = Set<String>()
     private var observers: [NSObjectProtocol] = []
@@ -65,6 +66,11 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
         }
         sourceOwnerLoaded = true
         webView = webview
+        appLock.hasOwnedFlow = { [weak self] in
+            guard let self = self else { return false }
+            return self.pickerCall != nil || self.authenticationSession != nil
+        }
+        appLock.load(webview)
         #if compiler(>=6.2)
         if #available(iOS 26.0, *) {
             continuedRegistered = BGTaskScheduler.shared.register(forTaskWithIdentifier: taskIdentifier, using: .main) { [weak self] task in
@@ -284,9 +290,40 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
     }
 
     @objc func requestNotifications(_ invoke: Invoke) {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
-            if let error = error { invoke.reject(error.localizedDescription) }
-            else { invoke.resolve(["granted": granted]) }
+        DispatchQueue.main.async { [weak self] in
+            self?.appLock.beginOwnedPrompt()
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
+                DispatchQueue.main.async {
+                    self?.appLock.endOwnedPrompt()
+                    if let error = error { invoke.reject(error.localizedDescription) }
+                    else { invoke.resolve(["granted": granted]) }
+                }
+            }
+        }
+    }
+
+    @objc func appLockCheck(_ invoke: Invoke) {
+        DispatchQueue.main.async { self.appLock.check(invoke) }
+    }
+
+    @objc func appLockAuthenticate(_ invoke: Invoke) {
+        DispatchQueue.main.async {
+            do { try self.appLock.authenticate(invoke) }
+            catch { invoke.reject(error.localizedDescription) }
+        }
+    }
+
+    @objc func appLockSetPolicy(_ invoke: Invoke) {
+        DispatchQueue.main.async {
+            do { try self.appLock.setPolicy(invoke) }
+            catch { invoke.reject(error.localizedDescription) }
+        }
+    }
+
+    @objc func appLockReady(_ invoke: Invoke) {
+        DispatchQueue.main.async {
+            do { try self.appLock.ready(invoke) }
+            catch { invoke.reject(error.localizedDescription) }
         }
     }
 

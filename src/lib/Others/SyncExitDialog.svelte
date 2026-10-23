@@ -2,12 +2,14 @@
     import { AlertTriangleIcon, LoaderCircleIcon, SaveIcon } from '@lucide/svelte'
     import { language } from 'src/lang'
     import ErrorDetails from './ErrorDetails.svelte'
+    import { registerAppLockExitSurface, handleAppLockSurfaceNavigation } from 'src/ts/appLock/input'
     import SettingButton from 'src/lib/Setting/RisuNest/SettingButton.svelte'
     import {
         decideSyncExit,
         syncExitDialogState,
     } from 'src/ts/storage/syncExitProduction'
 
+    let { aboveAppLock = false }: { aboveAppLock?: boolean } = $props()
     let panel = $state<HTMLDivElement | undefined>()
     const dialogState = $derived($syncExitDialogState)
     const open = $derived(![
@@ -49,20 +51,29 @@
         }
     })
 
+    function handleKeydown(event: KeyboardEvent): void {
+        if (!open) return
+        if (needsChoice && event.key === 'Escape') {
+            event.preventDefault()
+            decideSyncExit('cancel-exit')
+        } else if (aboveAppLock && panel) handleAppLockSurfaceNavigation(event, panel)
+    }
+
+    $effect(() => {
+        if (!aboveAppLock || !open || !panel) return
+        registerAppLockExitSurface({ element: panel, keydown: handleKeydown })
+        return () => registerAppLockExitSurface(null)
+    })
+
     $effect(() => {
         if (open) panel?.focus()
     })
 </script>
 
-<svelte:window onkeydown={(event) => {
-    if (open && needsChoice && event.key === 'Escape') {
-        event.preventDefault()
-        decideSyncExit('cancel-exit')
-    }
-}} />
+<svelte:window onkeydown={handleKeydown} />
 
 {#if open}
-    <div class="fixed inset-0 z-[1200] flex items-center justify-center bg-black/65 p-4 backdrop-blur-[2px]">
+    <div class="fixed inset-0 {aboveAppLock ? 'z-[3100]' : 'z-[1200]'} flex items-center justify-center bg-black/65 p-4 backdrop-blur-[2px]">
         <div
             bind:this={panel}
             tabindex="-1"

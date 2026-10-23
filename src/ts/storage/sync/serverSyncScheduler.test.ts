@@ -11,7 +11,7 @@ function fixture() {
 describe('server LWW foreground scheduler', () => {
     it('classifies tunnel outages and timeouts without masking authentication or local failures', () => {
         for (const status of [502, 503, 504, 530]) expect(isServerSyncUnavailable({ code: 'server-response-error', status })).toBe(true)
-        for (const code of ['server-timeout', 'incomplete-response', 'sync-retry-budget-exhausted']) expect(isServerSyncUnavailable({ code })).toBe(true)
+        for (const code of ['server-timeout', 'server-updating', 'incomplete-response', 'sync-retry-budget-exhausted']) expect(isServerSyncUnavailable({ code })).toBe(true)
         for (const error of [{ code: 'server-response-error', status: 401 }, { code: 'local-storage', status: 503 }, { code: 'server-unreachable', status: 409, retryable: false }, new TypeError('Load failed')]) {
             expect(isServerSyncUnavailable(error)).toBe(false)
         }

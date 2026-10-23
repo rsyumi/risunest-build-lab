@@ -10,6 +10,8 @@ mod cleanup_secrets;
 mod device_secrets;
 mod cleanup_webview;
 mod app_cleanup;
+mod app_lock;
+mod app_lock_record;
 mod app_update;
 #[cfg(desktop)]
 mod appimage_integration;
@@ -645,6 +647,7 @@ fn builder_with_main_window(
                             .to_owned(),
                     ))
                     .map_err(|error| format!("iOS native initialization failed: {error}"))?;
+                app_lock::setup(app.handle())?;
                 let app_data_dir = app_paths::data_root(app)?;
                 app.state::<external_storage::job_store::JobCommandState>()
                     .root
@@ -753,6 +756,12 @@ fn builder_with_main_window(
 pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
     let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync> = Box::new(tauri::generate_handler![
         app_paths::app_paths_roots,
+        app_lock::app_lock_check,
+        app_lock::app_lock_authenticate,
+        app_lock::app_lock_set_policy,
+        app_lock::app_lock_ready,
+        app_lock_record::app_lock_read_record,
+        app_lock_record::app_lock_write_record,
         app_cleanup::app_cleanup_status,
         app_cleanup::app_cleanup_request,
         app_cleanup::app_cleanup_resume,

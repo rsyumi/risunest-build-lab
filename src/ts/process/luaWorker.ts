@@ -131,6 +131,10 @@ const engines = new Map<number, WorkerEngine>()
 setInterval(() => { for (const engine of engines.values()) if (engine.active) engine.send({ kind: 'heartbeat' }) }, 250)
 self.onmessage = (event: MessageEvent<LuaWorkerRequest>) => {
     const { engine: id, command } = event.data
+    if (command.kind === 'ping') {
+        postMessage({ engine: id, event: { kind: 'pong', token: command.token } } satisfies LuaWorkerResponse)
+        return
+    }
     if (command.kind === 'dispose') {
         engines.get(id)?.dispose()
         engines.delete(id)

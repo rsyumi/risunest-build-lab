@@ -2,6 +2,7 @@ import { LUA_REGISTRYINDEX, LuaEventMasks, LuaReturn, type LuaEngine, type LuaWa
 
 const DEFAULT_TIMEOUT_MS = 5_000
 const INSTRUCTION_HOOK_COUNT = 1_000
+const WORKER_SEGMENT_WALL_MULTIPLIER = 4
 
 type EngineBudget = {
     timeoutMs: number
@@ -9,6 +10,7 @@ type EngineBudget = {
     formatter: number
     remaining?: number
     sourceDeadline?: number
+    segmentDeadline?: number
     timedOut?: boolean
     clock: () => number
     resumable: boolean
@@ -76,6 +78,7 @@ class LuaExecutionBudget {
         const sourceDeadline = this.sourceDeadlines.get(address) ?? owner.sourceDeadline
         // Frequent yields may never reach the instruction hook between resumes.
         if ((checkSourceDeadline && sourceDeadline !== undefined && now > sourceDeadline)
+            || (owner.segmentDeadline !== undefined && now > owner.segmentDeadline)
             || (owner.remaining !== undefined && owner.remaining <= 0)) {
             owner.timedOut = true
             // Asyncify must rewind into Lua before raising, keeping the native stack usable.
@@ -83,6 +86,7 @@ class LuaExecutionBudget {
         }
         const deadline = Math.min(
             sourceDeadline ?? now + owner.timeoutMs,
+            owner.segmentDeadline ?? Infinity,
             owner.remaining === undefined ? Infinity : now + owner.remaining,
             this.deadlines.at(-1) ?? Infinity,
         )
@@ -103,6 +107,8 @@ class LuaExecutionBudget {
     startSegment(engine: LuaEngine, timeoutMs: number): void {
         const owner = this.owner(engine.global.address)!
         owner.remaining = timeoutMs
+        // Include synchronous RPC latency, with headroom for a busy UI thread.
+        owner.segmentDeadline = owner.resumable ? owner.clock() + timeoutMs * WORKER_SEGMENT_WALL_MULTIPLIER : undefined
         owner.timedOut = false
     }
 
@@ -114,6 +120,7 @@ class LuaExecutionBudget {
     expired(engine: LuaEngine): boolean {
         const owner = this.owner(engine.global.address)!
         if ((owner.remaining !== undefined && owner.remaining <= 0)
+            || (owner.segmentDeadline !== undefined && owner.clock() > owner.segmentDeadline)
             || (owner.sourceDeadline !== undefined && owner.clock() > owner.sourceDeadline)) owner.timedOut = true
         return owner.timedOut === true
     }

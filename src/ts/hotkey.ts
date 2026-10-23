@@ -1,4 +1,5 @@
 import { get } from "svelte/store"
+import { isAppLockInputBlocked } from "./appLock/input"
 import { alertMd, alertSelect, alertToast, alertWait, doingAlert, alertRequestLogs } from "./alert"
 import { changeToPreset as changeToPreset2, getDatabase  } from "./storage/database.svelte"
 import { alertStore, DBState, loadoutModalStore, MobileGUIStack, MobileSideBar, openPersonaList, openPresetList, OpenRealmStore, PlaygroundStore, QuickSettings, SafeModeStore, selectedCharID, settingsOpen } from "./stores.svelte"
@@ -229,6 +230,7 @@ export function initHotkey(){
     let touchStartTime = 0
     //check for triple touch
     document.addEventListener('touchstart', (ev) => {
+        if (isAppLockInputBlocked()) { touchs = 0; return }
         touchs++
         if(touchs > 2){
             if(Date.now() - touchStartTime > 300){
@@ -352,6 +354,7 @@ export function initMobileGesture(){
     let pressingPointers = new Map<number, {x:number, y:number}>()
 
     document.addEventListener('touchstart', (ev) => {
+        if (isAppLockInputBlocked()) { pressingPointers.clear(); return }
         for(const touch of ev.changedTouches){
             const ele = touch.target instanceof Element ? touch.target : null
             if (ele?.closest('button, input, select, textarea, a, label, [role="button"], [contenteditable]:not([contenteditable="false"])')) {
@@ -364,6 +367,7 @@ export function initMobileGesture(){
         passive: true
     })
     document.addEventListener('touchend', (ev) => {
+        if (isAppLockInputBlocked()) { pressingPointers.clear(); return }
         for(const touch of ev.changedTouches){
             const d = pressingPointers.get(touch.identifier)
             pressingPointers.delete(touch.identifier)

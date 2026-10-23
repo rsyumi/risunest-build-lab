@@ -10,13 +10,16 @@ import { luaCodeWrapper } from './luaCodeWrapper'
 const runtimes: LuaAsyncifyRuntime[] = []
 afterEach(() => { for (const runtime of runtimes.splice(0)) runtime.abandon() })
 
-async function create(source: string, callbacks: Record<string, (...args: any[]) => unknown> = {}) {
+async function create(source: string, callbacks: Record<string, (...args: any[]) => unknown> = {},
+    options: { timeout?: number; now?: () => number } = {}) {
     const factory = new LuaFactory(resolve('src/ts/process/lua/worker.wasm'))
     await factory.mountFile('json.lua', await readFile('public/lua/json.lua', 'utf8'))
     const engine = await factory.createEngine({ injectObjects: true, enableProxy: false })
     const promises = new Map<number, Promise<unknown>>()
     let sequence = 0
-    const runtime = new LuaAsyncifyRuntime(engine, 1_000, async (name, args) => {
+    const runtime = new LuaAsyncifyRuntime(engine, options.timeout ?? 1_000, async (name, args) => {
+        // A host reply arrives outside the native entry in the real Worker.
+        await Promise.resolve()
         const result = callbacks[name](...structuredClone(args))
         if (result instanceof Promise) {
             const id = ++sequence
@@ -25,12 +28,28 @@ async function create(source: string, callbacks: Record<string, (...args: any[])
             return { promise: id }
         }
         return { value: structuredClone(result) }
-    }, id => promises.get(id)!)
+    }, id => promises.get(id)!, { now: options.now ?? (() => performance.now()), run: run => run() })
     runtimes.push(runtime)
     for (const name of Object.keys(callbacks)) runtime.register(name)
     await runtime.initialize(luaCodeWrapper(source))
     return runtime
 }
+
+test('bounds synchronous reply latency without discarding Lua globals', async () => {
+    let now = 0
+    const runtime = await create(`
+        count=0
+        function run()
+            count=count+1
+            for i=1,10 do ping() end
+            return 'completed'
+        end
+        function read() return count end
+    `, { ping: () => { now += 150; return 'pong' } }, { timeout: 100, now: () => now })
+    await expect(runtime.invoke('run', [])).rejects.toThrow('thread timeout exceeded')
+    expect(runtime.isTainted()).toBe(false)
+    expect(await runtime.invoke('read', [])).toBe(1)
+})
 
 test('keeps synchronous host calls inside C callbacks, metamethods and nested coroutines', async () => {
     const runtime = await create(`

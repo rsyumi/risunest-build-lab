@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { get } from 'svelte/store'
+import { setAppLockInputBlocked } from './appLock/input'
 
 const mocks = vi.hoisted(() => {
     function store<T>(initial: T, onSet?: (value: T) => void) {
@@ -52,7 +53,7 @@ const mocks = vi.hoisted(() => {
 
 vi.mock('./alert', async (importOriginal) => ({
     alertMd: vi.fn(),
-    alertSelect: vi.fn(),
+    alertSelect: (await importOriginal<typeof import('./alert')>()).alertSelect,
     alertToast: mocks.alertToast,
     alertWait: vi.fn(),
     doingAlert: (await importOriginal<typeof import('./alert')>()).doingAlert,
@@ -273,6 +274,7 @@ describe('Escape', () => {
 })
 
 describe('mobile gesture ownership', () => {
+    afterEach(() => setAppLockInputBlocked(false))
     function gestures() {
         const handlers = new Map<string, (event: TouchEvent) => void>()
         vi.spyOn(document, 'addEventListener').mockImplementation((type, handler) => {
@@ -304,6 +306,42 @@ describe('mobile gesture ownership', () => {
             { identifier: 11, clientX: 100, target: parent },
         ])
         dispatch('touchend', [{ identifier: 11, clientX: 0, target: parent }])
+        expect(get(mocks.MobileGUIStack)).toBe(1)
+    })
+
+    it('does not open the three-finger quick menu while locked', async () => {
+        let touchstart!: (event: Event) => void
+        vi.spyOn(document, 'addEventListener').mockImplementation((type, handler) => {
+            if (type === 'touchstart') touchstart = handler as typeof touchstart
+        })
+        initHotkey()
+        alertStore.set({ type: 'none', msg: '' })
+        setAppLockInputBlocked(true)
+        for (let index = 0; index < 3; index++) touchstart(new Event('touchstart'))
+        expect(get(alertStore).type).toBe('none')
+        setAppLockInputBlocked(false)
+        for (let index = 0; index < 3; index++) touchstart(new Event('touchstart'))
+        expect(get(alertStore).type).toBe('select')
+        alertStore.set({ type: 'none', msg: '' })
+        await Promise.resolve()
+    })
+
+    it('ignores lock-screen swipes and a touch that crosses the lock boundary', () => {
+        const dispatch = gestures()
+        const target = document.createElement('div')
+        dispatch('touchstart', [{ identifier: 1, clientX: 100, target }])
+        setAppLockInputBlocked(true)
+        dispatch('touchend', [{ identifier: 1, clientX: 0, target }])
+        expect(get(mocks.MobileGUIStack)).toBe(0)
+        dispatch('touchstart', [{ identifier: 2, clientX: 100, target }])
+        dispatch('touchend', [{ identifier: 2, clientX: 0, target }])
+        expect(get(mocks.MobileGUIStack)).toBe(0)
+        dispatch('touchstart', [{ identifier: 3, clientX: 100, target }])
+        setAppLockInputBlocked(false)
+        dispatch('touchend', [{ identifier: 3, clientX: 0, target }])
+        expect(get(mocks.MobileGUIStack)).toBe(0)
+        dispatch('touchstart', [{ identifier: 4, clientX: 100, target }])
+        dispatch('touchend', [{ identifier: 4, clientX: 0, target }])
         expect(get(mocks.MobileGUIStack)).toBe(1)
     })
 

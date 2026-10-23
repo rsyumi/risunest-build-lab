@@ -25,6 +25,9 @@ copyFileSync(new URL('../crates/tauri-plugin-ios-native/ios/Tests/PortableSource
 const fileState = join(sources, 'NativeFileState.swift')
 copyFileSync(new URL('../crates/tauri-plugin-ios-native/ios/Sources/NativeFileState.swift', import.meta.url), fileState)
 copyFileSync(new URL('../crates/tauri-plugin-ios-native/ios/Tests/NativeFileStateTests.swift', import.meta.url), join(tests, 'NativeFileStateTests.swift'))
+const appLockState = join(sources, 'AppLockState.swift')
+copyFileSync(new URL('../crates/tauri-plugin-ios-native/ios/Sources/AppLockState.swift', import.meta.url), appLockState)
+copyFileSync(new URL('../crates/tauri-plugin-ios-native/ios/Tests/AppLockStateTests.swift', import.meta.url), join(tests, 'AppLockStateTests.swift'))
 writeFileSync(join(root, 'Package.swift'), `// swift-tools-version:5.3
 import PackageDescription
 let package = Package(
@@ -58,6 +61,16 @@ function run(filter, fails = false, cleanupInvariant = false) {
 try {
     run('PortableSourceCustodyTests')
     run('NativeFileStateTests')
+    run('AppLockStateTests')
+    const originalAppLockState = readFileSync(appLockState, 'utf8')
+    const epochGuard = 'guard active && epoch == renderedEpoch && (locked || !policy.gateRequired) else { return false }'
+    assert.equal(originalAppLockState.split(epochGuard).length, 2)
+    writeFileSync(appLockState, originalAppLockState.replace(epochGuard, 'guard active && (locked || !policy.gateRequired) else { return false }'))
+    try { run('AppLockStateTests/testDepartureAndReturnKeepCoverUntilCurrentFrameIsReady', true) }
+    finally { writeFileSync(appLockState, originalAppLockState) }
+    writeFileSync(appLockState, originalAppLockState.replace(' && (locked || !policy.gateRequired)', ''))
+    try { run('AppLockStateTests/testUnlockedFrameCannotReplaceARequiredGateInTheSameEpoch', true) }
+    finally { writeFileSync(appLockState, originalAppLockState) }
     const original = readFileSync(source, 'utf8')
     for (const [before, after, test, occurrence = 0, count = 1] of [
         ['source.copyCancelled = true', 'source.copyCancelled = false', 'testCopyCancelledBeforeOrDuringTheCopyRemovesPartialFiles', 0, 2],
