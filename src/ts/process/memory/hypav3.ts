@@ -2020,16 +2020,19 @@ export class HypaProcesserEx extends HypaProcesser {
         const keysOf: string[][] = [];
         for (let i = 0; i < groups.length; i++) {
             const contextSuffix = provider.getCacheKeySuffix(groupTextsOf[i]);
-            keysOf.push(
-                await hypaCacheKeys(
-                    groups[i].map(chunk => ({
-                        producer: 'hypa-v3-group' as const,
-                        content: chunk.text,
-                        identity,
-                        contextSuffix,
-                    }))
-                )
-            );
+            const keyInputs = (positional: boolean) => groups[i].map((chunk, position) => ({
+                producer: 'hypa-v3-group' as const,
+                content: chunk.text,
+                identity,
+                contextSuffix: positional ? `${contextSuffix}|index:${position}` : contextSuffix,
+            }));
+            let keys = await hypaCacheKeys(keyInputs(false));
+            // Repeated text in one group gets a different vector at each position, so a
+            // group whose keys collide keys every chunk by its position.
+            if (new Set(keys).size !== keys.length) {
+                keys = await hypaCacheKeys(keyInputs(true));
+            }
+            keysOf.push(keys);
         }
 
         const cached = consistentEmbeddings(await cache.read(keysOf.flat()));
@@ -2062,7 +2065,12 @@ export class HypaProcesserEx extends HypaProcesser {
             let dimensions = 0;
             for (let i = 0; i < indexes.length; i++) {
                 const group = groups[indexes[i]];
-                const embeddings = results[i];
+                const embeddings = results[i] ?? [];
+                if (embeddings.length !== group.length) {
+                    throw new Error(
+                        `Contextual embedding count mismatch: expected ${group.length}, received ${embeddings.length}`
+                    );
+                }
                 for (let j = 0; j < group.length; j++) {
                     const chunk = group[j];
                     const embedding = embeddings[j];

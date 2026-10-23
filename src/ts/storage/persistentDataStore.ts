@@ -99,6 +99,7 @@ export interface AssetAliasPage {
 }
 
 interface AssetAliasBase {
+    metadata?: Record<string, unknown>
     key: string
     objectHash: string | null
     size: number

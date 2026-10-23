@@ -8,6 +8,59 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AndroidControlBridgeTest {
+  @Test fun documentReadinessClearsOldHoldsOnceWithoutEndingCurrentWorkOnReplay() {
+    val ready = AndroidDocumentReadyGate()
+    val tasks = BackgroundTaskRegistry()
+    val service = GenerationForegroundLifecycle()
+    var starts = 0
+    var stops = 0
+    val start: () -> String? = { if (service.begin { starts++; true }) null else BACKGROUND_FAILED }
+    val stop: () -> Boolean = { service.end { stops++; true } }
+    fun announce(document: Any) {
+      if (ready.admit(document)) {
+        tasks.clearAll()
+        service.stopAll { stops++; true }
+      }
+    }
+    fun begin(index: Int) = tasks.begin(
+      "00000000-0000-4000-8000-%012d".format(index), "sync", true, false, start, {},
+    )
+    val first = Any()
+    val second = Any()
+    val third = Any()
+
+    announce(first)
+    begin(1)
+    tasks.promote(start)
+    assertEquals(1, starts)
+    announce(first)
+    assertEquals(listOf(BackgroundTaskStatus("sync")), tasks.snapshot())
+    assertEquals(0, stops)
+
+    announce(second)
+    assertTrue(tasks.snapshot().isEmpty())
+    assertEquals(1, stops)
+    begin(2)
+    assertEquals(2, starts)
+    announce(first)
+    announce(second)
+    assertEquals(listOf(BackgroundTaskStatus("sync")), tasks.snapshot())
+    assertEquals(1, stops)
+
+    announce(third)
+    assertTrue(tasks.snapshot().isEmpty())
+    assertEquals(2, stops)
+    tasks.demote(stop)
+    tasks.promote(start)
+    assertEquals(2, starts)
+    begin(3)
+    announce(second)
+    announce(third)
+    assertEquals(listOf(BackgroundTaskStatus("sync")), tasks.snapshot())
+    assertEquals(3, starts)
+    assertEquals(2, stops)
+  }
+
   /** The same golden messages drive the JavaScript control client test. */
   private fun progressFixture(): String {
     var current: File? = File(System.getProperty("user.dir")).absoluteFile
@@ -91,11 +144,13 @@ class AndroidControlBridgeTest {
     assertTrue(androidControlNotification("lifecycle.onFlushHold"))
     assertTrue(androidControlNotification("saf.copyExport"))
     assertFalse(androidControlNotification("saf.acknowledgeExport"))
-    assertFalse(androidControlNotification("generation.begin"))
+    assertFalse(androidControlNotification("background.defer"))
   }
 
   @Test fun dispatchSurfaceIsExplicitAndKeepsExistingArgumentShapes() {
-    assertEquals(0, androidControlArgumentCount("generation.begin"))
+    assertEquals(0, androidControlArgumentCount("generation.notificationsEnabled"))
+    assertEquals(3, androidControlArgumentCount("background.begin"))
+    assertEquals(2, androidControlArgumentCount("background.defer"))
     assertEquals(1, androidControlArgumentCount("lifecycle.onFlushHold"))
     assertEquals(1, androidControlArgumentCount("saf.acknowledgeExport"))
     assertEquals(1, androidControlArgumentCount("saf.pickPortableBackupSource"))

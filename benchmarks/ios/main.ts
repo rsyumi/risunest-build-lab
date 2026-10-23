@@ -1,4 +1,5 @@
 import { streaming, tokenizer, snapshotRestore } from "./runtimeContracts";
+import { runLuaWorkerContract } from "../../tests/browser/luaWorkerContract";
 import { installPickerContracts } from "./pickerContracts";
 import { invoke } from "@tauri-apps/api/core";
 import { join } from "@tauri-apps/api/path";
@@ -13,6 +14,7 @@ import { isTauriIOS, isTauriDesktop } from "../../src/ts/platform";
 import { nativeDataPath } from "../../src/ts/storage/nativePaths";
 import { persistence, reload, regex, guard, check, pause } from "./contracts";
 import { PersistentBenchmarkMarker } from "./persistentMarker";
+import { showNativeHarness } from "../nativeAppLock";
 
 const report = (stage: string, result: unknown) =>
   invoke("ios_bench_report", { stage, result });
@@ -79,10 +81,17 @@ async function main() {
   await guard();
   check(isTauriIOS && !isTauriDesktop, "iOS runtime classification");
   const phase = await invoke<string>("ios_bench_phase");
+  if (/^app-lock-(immediate|timed|immediate-mutant|ui)$/.test(phase)) {
+    const { appLockFixture } = await import('../appLock/fixture');
+    const { initialize } = await import('./contracts');
+    await appLockFixture('ios', phase, initialize);
+    return;
+  }
   if (phase === "sidebar-touch") {
     document.getElementById("app")!.style.display = "none";
     const { mountSidebarTouchFixture } = await import("../sidebar-touch/fixture");
     mountSidebarTouchFixture(document.getElementById("benchmark")!, true);
+    await showNativeHarness();
     return;
   }
   if (
@@ -99,6 +108,7 @@ async function main() {
     // Keep native-contract status/results visible to older WebKit accessibility.
     document.getElementById("app")!.style.display = "none";
     document.body.style.color = "var(--risu-theme-textcolor)";
+    await showNativeHarness();
   }
   await initializeIOSNative();
   const generationReloadKey = "ios-synthetic-generation-reload";
@@ -245,6 +255,7 @@ async function main() {
     await report("regex", await regex());
     await report("streaming", await streaming());
     await report("tokenizer", await tokenizer());
+    await report("lua-worker", await runLuaWorkerContract());
     const root = await nativeDataPath();
     const folder = await join(root, "ios-file-staging", crypto.randomUUID());
     const path = await join(folder, "synthetic.bin");

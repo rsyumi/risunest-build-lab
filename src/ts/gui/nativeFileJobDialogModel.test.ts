@@ -1,3 +1,4 @@
+import { language } from 'src/lang'
 import { describe, expect, it } from 'vitest'
 
 import { languageEnglish } from 'src/lang/en'
@@ -47,6 +48,16 @@ it('orders account asset download after refresh and plugins and exposes separate
     expect(finishing.cancelEnabled).toBe(false)
     const stopped = buildNativeFileJobDialogModel(null, outcome({ state: 'cancelled', status: { ...current, officialAssets: { ...current.officialAssets!, state: 'cancelled' } }, observedStages: history }), 2000)
     expect(stopped.terminal?.summary).toBe(copy.resultAccountAssetsStopped)
+    const missing = buildNativeFileJobDialogModel(null, outcome({ state: 'succeeded', status: { ...current, officialAssets: {
+        ...current.officialAssets!, state: 'succeeded', counts: { required: 2, alreadyPresent: 0, installed: 1, missing: 1, failed: 0, notAttempted: 0 },
+    } } }), 2000)
+    expect(missing.terminal?.summary).toBe(copy.resultAccountAssetsMissing)
+    for (const [reason, expected] of [['receipt', copy.reasonAccountAssetReceipt], ['checking', copy.reasonAccountAssetChecking]] as const) {
+        const rejected = buildNativeFileJobDialogModel(null, outcome({ state: 'failed', status: {
+            ...current, officialAssets: { ...current.officialAssets!, state: 'failed', reason },
+        } }), 2000)
+        expect(rejected.terminal?.reason).toBe(expected)
+    }
 })
 
 it('explains that a busy Android destination requires waiting for the current export', () => {
@@ -203,6 +214,7 @@ describe('nativeFileJobDialogModel', () => {
         ['server-status-unavailable', 'reasonServerStatus'],
         ['remote-asset-unavailable', 'reasonRemoteAssetUnavailable'],
         ['asset-missing', 'reasonAssetMissing'],
+        ['unsupported-projection', 'reasonCompatibleUnsupportedValue'],
     ] as const)('presents actionable file failure %s while keeping diagnostics secondary', (code, key) => {
         const model = buildNativeFileJobDialogModel(null, outcome({ state: 'failed', error: { code, message: 'synthetic detail', recoveryRequired: false } }), 0)
         expect(model.terminal?.reason).toBe(copy[key])
@@ -929,6 +941,7 @@ describe('nativeFileJobDialogModel', () => {
             expect(reason.length).toBeGreaterThan(0)
             expect(reason).not.toContain(code)
         }
+        expect(failureReason('damaged-image')).toBe(language.risuNest.imageFormats.damaged)
         expect(failureReason('whatever')).toBe(copy.reasonUnknown)
     })
 
@@ -1165,6 +1178,15 @@ it.each([
     ] as const)('maps official publication phase %s to its visible %s stage', (phase, expected) => {
         expect(resolveNativeFileJobStage(status({ kind: 'official-publication-upload', phase }))).toBe(expected)
     })
+
+    it.each([['succeeded', 'finalizing-export'], ['failed', null], ['cancelled', null]] as const)(
+        'leaves the stopped stage current when an export job ends %s',
+        (state, expected) => {
+            for (const kind of ['export-compatible-local-backup', 'official-publication-upload'] as const) {
+                expect(resolveNativeFileJobStage(status({ kind, phase: 'complete', state }))).toBe(expected)
+            }
+        },
+    )
 
     it('shows official asset counts followed by database byte progress in the active upload stage', () => {
         const assetStatus = status({

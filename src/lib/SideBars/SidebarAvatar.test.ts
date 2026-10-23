@@ -190,7 +190,7 @@ describe('SidebarAvatar lazy sources', () => {
         component.$set({ src: beforeVisible })
         await tick()
         const avatar = target.querySelector('.avatar')!
-        TestIntersectionObserver.instances[0].setVisible(avatar)
+        TestIntersectionObserver.instances.find(observer => observer.observed.has(avatar))!.setVisible(avatar)
         await tick()
 
         expect(initial).not.toHaveBeenCalled()

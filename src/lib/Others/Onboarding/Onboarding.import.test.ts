@@ -64,7 +64,7 @@ vi.mock('src/lib/Setting/ExternalStorage/ConnectionForm.svelte', () => ({ defaul
 vi.mock('src/lib/Others/Onboarding/onboardingWeave', () => ({ observeOnboardingWeave: () => () => {} }))
 import { language } from 'src/lang'
 import type { Database } from 'src/ts/storage/database.svelte'
-import { dismissNativeFileOperationOutcome, nativeFileOperationOutcome } from 'src/ts/storage/nativeFileJobManager'
+import { dismissNativeFileOperationOutcome, nativeFileOperationOutcome, type NativeFileOperationOutcome } from 'src/ts/storage/nativeFileJobManager'
 import { createNativeJobHost as jobHost, restoreRuntime, status } from 'src/ts/storage/nativeFileJobs.testSupport'
 import { capturePersistentRoot, createPersistentDataRuntime } from 'src/ts/storage/persistentDataRuntime'
 import { encodeRisuSaveLegacy } from 'src/ts/storage/risuSave'
@@ -233,6 +233,52 @@ it.each([
     }
     expect(h.host.commands().filter(c => c === 'native_file_job_start')).toHaveLength(1)
     expect(h.host.commands().filter(c => c === 'native_file_job_finalize')).toHaveLength(1)
+})
+
+it.each([false, true])('continues after an account restore cancellation only when assets were stopped (%s)', async assetsStopped => {
+    h.platform = { runtime: 'tauri', os: 'windows' }
+    const database = { ...library('Restored', 'restored'), language: 'en', didFirstSetup: true }
+    h.state.db = database
+    const outcome = {
+        kind: 'import', format: 'library-backup', state: 'cancelled', startedAt: 0, finishedAt: 1000,
+        observedStages: assetsStopped ? ['downloading-account-assets', 'finishing-account-restore'] : ['downloading-account-backup'],
+        warningCodes: [], partialWritesPossible: assetsStopped,
+        status: {
+            ...status('cancelled'), kind: 'restore-official-account-snapshot',
+            ...(assetsStopped ? {
+                activationRevision: 18,
+                officialAssets: {
+                    operationId: 'synthetic-account-restore', phase: 'finishing', state: 'cancelled',
+                    counts: { required: 10, alreadyPresent: 2, installed: 3, missing: 0, failed: 0, notAttempted: 5 },
+                },
+            } : {}),
+        },
+    } satisfies NativeFileOperationOutcome
+    nativeFileOperationOutcome.set(outcome)
+    h.refreshRevision!.set(assetsStopped ? 18 : null)
+    component = mount(Onboarding, { target })
+    await tick()
+    const buttons = () => [...target.querySelectorAll('button')]
+    const labels = () => buttons().map(button => button.textContent?.trim())
+    expect(get(onboardingHold)).toBe(true)
+    expect(labels()).not.toContain(language.risuNest.onboarding.import.next)
+    if (!assetsStopped) {
+        expect(labels()).toContain(language.risuNest.importDialog.close)
+        return
+    }
+    expect(target.textContent).toContain(language.risuNest.importDialog.resultAccountAssetsStopped)
+    expect(labels()).toContain(language.retry)
+    h.refreshRevision!.set(null)
+    await tick()
+    expect(labels()).toEqual(expect.arrayContaining([language.retry, language.risuNest.onboarding.import.next]))
+    expect(labels()).not.toContain(language.risuNest.importDialog.close)
+    buttons().find(button => button.textContent?.trim() === language.risuNest.onboarding.import.next)!.click()
+    await tick()
+    expect(get(onboardingHold)).toBe(false)
+    expect(get(nativeFileOperationOutcome)).toBeNull()
+    expect(target.textContent).toContain(language.risuNest.onboarding.done.title)
+    expect(h.state.db).toBe(database)
+    expect(h.error).not.toHaveBeenCalled()
 })
 
 it('restores a backup picked during onboarding over a library with characters without asking', async () => {

@@ -22,8 +22,10 @@ use std::{
     io::Cursor,
     pin::Pin,
     sync::Arc,
-    time::{Duration, Instant},
+    time::Instant,
 };
+#[cfg(test)]
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 #[cfg(test)]
 use super::worker_observation::spawn_blocking;
@@ -434,8 +436,11 @@ pub(crate) struct Admission {
 }
 impl Admission {
     pub(crate) fn from_sample(sample: &HttpClockSample) -> Result<Self> {
-        if !sample.usable() || sample.observed_at.elapsed() > Duration::from_secs(15 * 60) {
-            return Err(ProviderError::new(ErrorKind::ClockSkew));
+        sample.validate()?;
+        let age = sample.observed_at.elapsed().as_millis();
+        if age > u128::from(super::clock::SAMPLE_LIFETIME_MS) {
+            return Err(super::clock::failure("admission", "sample-expired",
+                format_args!("sample_age_ms={age} limit_ms={}", super::clock::SAMPLE_LIFETIME_MS)));
         }
         let upper = sample
             .date_ms
@@ -470,8 +475,14 @@ impl Admission {
         self.upper_at(now, elapsed)
     }
     fn upper_at(self, now: u64, elapsed: u64) -> Result<u64> {
-        if elapsed > 15 * 60_000 || now.abs_diff(self.wall_ms.saturating_add(elapsed)) > 1000 {
-            return Err(ProviderError::new(ErrorKind::ClockSkew));
+        if elapsed > super::clock::SAMPLE_LIFETIME_MS {
+            return Err(super::clock::failure("admission", "sample-expired",
+                format_args!("sample_age_ms={elapsed} limit_ms={}", super::clock::SAMPLE_LIFETIME_MS)));
+        }
+        let delta = super::clock::movement(self.wall_ms, now, elapsed);
+        if delta.abs() > i128::from(super::clock::MAX_DISCONTINUITY_MS) {
+            return Err(super::clock::failure("admission", "wall-clock-jump",
+                format_args!("delta_ms={delta} limit_ms={} sample_age_ms={elapsed}", super::clock::MAX_DISCONTINUITY_MS)));
         }
         self.upper_ms
             .checked_add(elapsed)
@@ -506,18 +517,25 @@ mod admission_clock_tests {
     }
 
     #[test]
-    fn admission_rejects_forward_and_backward_jumps_beyond_one_second() {
+    fn admission_rejects_forward_and_backward_jumps_beyond_five_seconds() {
         let start = 1_700_000_000_000;
-        for (offset, accepted) in [(-1001_i64, false), (-1000, true), (0, true), (1000, true), (1001, false)] {
+        for (offset, accepted) in [(-5001_i64, false), (-5000, true), (-4999, true), (0, true), (4999, true), (5000, true), (5001, false)] {
             let mut admission = Admission::synthetic(start);
             admission.set_reading_for_test((start as i64 + 60_000 + offset) as u64, 60_000);
             let result = admission.upper();
             if accepted {
                 assert_eq!(result.unwrap(), start + 60_000, "{offset}");
             } else {
-                assert_eq!(result.unwrap_err().kind, ErrorKind::ClockSkew, "{offset}");
+                let error = result.unwrap_err();
+                assert_eq!(error.kind, ErrorKind::ClockSkew, "{offset}");
+                let detail = error.cause.0.unwrap();
+                assert!(detail.contains("stage=admission reason=wall-clock-jump"));
+                assert!(detail.contains(&format!("delta_ms={offset}")));
             }
         }
+        let mut admission = Admission::synthetic(start);
+        admission.set_reading_for_test(start - 4900, 100);
+        assert_eq!(admission.upper().unwrap(), start + 100);
     }
 
     #[test]
@@ -552,6 +570,14 @@ pub(crate) struct PublicationResult {
     pub segments: DecimalU64,
     pub units: DecimalU64,
     pub bytes: DecimalU64,
+    pub more: bool,
+}
+/// The receive pages one listing produced.
+#[derive(Debug)]
+pub(crate) struct ReceiveBatch {
+    /// Ids of the unfinished pages in order.
+    pub pages: Vec<String>,
+    /// The listing holds segments after the ones this batch stopped at.
     pub more: bool,
 }
 impl Default for PublicationResult {
@@ -659,7 +685,7 @@ impl ExternalLwwEngine {
     }
     pub(crate) fn admitted_upper(&self) -> Result<u64> {
         self.admission
-            .ok_or_else(|| ProviderError::new(ErrorKind::ClockSkew))?
+            .ok_or_else(|| super::clock::failure("admission", "sample-missing", ""))?
             .upper()
     }
     pub(super) fn intent(&self, id: &str, role: ObjectRole, bytes: &[u8]) -> ObjectIntent {
@@ -704,12 +730,24 @@ impl ExternalLwwEngine {
         turn_limit: Option<u32>,
         cancel: &Cancellation,
     ) -> Result<PublicationResult> {
+        let mut result = PublicationResult::default();
+        self.publish_accumulating(store, authority, generating, turn_limit, cancel, &mut result).await?;
+        Ok(result)
+    }
+    pub(crate) async fn publish_accumulating(
+        &mut self,
+        store: &mut PersistentStore,
+        authority: DecimalU64,
+        generating: &[MessageLocator],
+        turn_limit: Option<u32>,
+        cancel: &Cancellation,
+        result: &mut PublicationResult,
+    ) -> Result<()> {
         if turn_limit == Some(0) {
             return Err(ProviderError::new(ErrorKind::PreconditionFailed));
         }
         #[cfg(test)]
         let key_operation = cycle_keys::Operation::start();
-        let mut result = PublicationResult::default();
         let writer = store.lww_clock_state().map_err(store_error)?.writer_id;
         loop {
             cancel.check()?;
@@ -939,13 +977,13 @@ impl ExternalLwwEngine {
                 self.settle_detached(store, publication, sealed, cancel).await?;
                 continue;
             }
-            if publication
+            if let Some(future) = publication
                 .entries
                 .iter()
-                .any(|e| e.stamp.physical_ms.0 > upper)
+                .find(|e| e.stamp.physical_ms.0 > upper)
             {
                 if publication.dispatched {
-                    return Err(ProviderError::new(ErrorKind::ClockSkew));
+                    return Err(super::clock::future_change("publish", future.stamp.physical_ms.0, upper));
                 }
                 self.repair_unsent(store, authority, &publication.entries)?;
                 store
@@ -994,7 +1032,7 @@ impl ExternalLwwEngine {
         result.more = !store.lww_read_outbox(authority, 1).map_err(store_error)?.entries.is_empty();
         #[cfg(test)]
         key_operation.finish();
-        Ok(result)
+        Ok(())
     }
     /// The plaintext length a captured segment can reach once sealing adds its
     /// catalogs and fills its large-body placeholders.
@@ -1601,7 +1639,7 @@ impl ExternalLwwEngine {
             .map_err(store_error)?;
         store
             .lww_retry_unpublished(&header, &proof, DecimalU64(self.admitted_upper()?))
-            .map_err(|_| ProviderError::new(ErrorKind::ClockSkew))?;
+            .map_err(super::clock::repair_failure)?;
         Ok(())
     }
     pub(crate) async fn settle_publication(
@@ -1970,7 +2008,7 @@ impl ExternalLwwEngine {
         if let Some(rooted_at_ms)=payload.changes.iter().map(|change|change.stamp.physical_ms.0).max() {
             // Original unit clocks bound publication age; downloading does not renew it.
             let upper=self.admitted_upper()?.checked_add(300_000).ok_or_else(segment::corrupt)?;
-            if rooted_at_ms>upper {return Err(ProviderError::new(ErrorKind::ClockSkew));}
+            if rooted_at_ms>upper {return Err(super::clock::future_change("receive-objects",rooted_at_ms,upper));}
             self.authorize_dependencies(store,payload,rooted_at_ms)?;
         }
         Ok(())
@@ -2082,22 +2120,23 @@ impl ExternalLwwEngine {
         authority: DecimalU64,
         cancel: &Cancellation,
     ) -> Result<Vec<StageReceive>> {
-        let ids = self.receive_requests_cached(store, authority, &Default::default(), cancel).await?;
+        let ids = self.receive_requests_cached(store, authority, &Default::default(), cancel).await?.pages;
         ids.iter()
             .map(|id| store.external_lww_unfinished_receive(id).map_err(store_error)?.ok_or_else(segment::corrupt))
             .collect()
     }
     /// Stores the receive pages of what this device has not applied and
-    /// returns the ids of the unfinished ones in order. Covered segments are
-    /// never read, and each segment's pages are stored before the next one is
-    /// read. Snapshots `checkpoints` has classified are not read again.
+    /// returns the ids of the unfinished ones in order, and whether the
+    /// listing holds more segments than the batch received. Covered segments
+    /// are never read, and each segment's pages are stored before the next one
+    /// is read. Snapshots `checkpoints` has classified are not read again.
     pub(crate) async fn receive_requests_cached(
         &self,
         store: &mut PersistentStore,
         authority: DecimalU64,
         checkpoints: &tokio::sync::Mutex<super::lww_compaction::CheckpointSummaries>,
         cancel: &Cancellation,
-    ) -> Result<Vec<String>> {
+    ) -> Result<ReceiveBatch> {
         self.receive_requests_limited(store, authority, checkpoints, RECEIVE_SEGMENT_LIMIT, cancel).await
     }
     async fn receive_requests_limited(
@@ -2107,7 +2146,7 @@ impl ExternalLwwEngine {
         checkpoints: &tokio::sync::Mutex<super::lww_compaction::CheckpointSummaries>,
         segment_limit: usize,
         cancel: &Cancellation,
-    ) -> Result<Vec<String>> {
+    ) -> Result<ReceiveBatch> {
         let target = self.target_scope();
         store.external_lww_seed_activation(&target, authority).map_err(store_error)?;
         let progress=store.lww_receive_progress(authority).map_err(store_error)?;
@@ -2125,20 +2164,22 @@ impl ExternalLwwEngine {
             .map_err(store_error)?;
         let upper=DecimalU64(self.admitted_upper()?.checked_add(300_000).ok_or_else(segment::corrupt)?);
         let mut offered = Vec::new();
-        if !behind(&covered, &reachable(&current, &groups)) {
+        let listed = reachable(&current, &groups);
+        if !behind(&covered, &listed) {
             let (reached, stopped) = self.receive_segments(store, authority, &current, groups, upper, &mut offered, segment_limit, cancel).await?;
             if stopped {
-                return Ok(offered);
+                let more = listed.iter().any(|(writer, seq)| reached.get(writer).copied().unwrap_or(0) < *seq);
+                return Ok(ReceiveBatch { pages: offered, more });
             }
             if !behind(&covered, &reached) {
                 store.external_lww_retain_receives(&target, &offered.iter().cloned().collect()).map_err(store_error)?;
-                return Ok(offered);
+                return Ok(ReceiveBatch { pages: offered, more: false });
             }
             offered.clear();
         }
         self.receive_published(store, authority, &current, upper, &mut offered, cancel).await?;
         store.external_lww_retain_receives(&target, &offered.iter().cloned().collect()).map_err(store_error)?;
-        Ok(offered)
+        Ok(ReceiveBatch { pages: offered, more: false })
     }
     /// Receives each writer's next consecutive segments and returns the
     /// sequence each writer reached. A writer whose clock runs ahead of the
@@ -2159,6 +2200,7 @@ impl ExternalLwwEngine {
         let target = self.target_scope();
         let mut prefixes = current.iter().map(|(writer, cursor)| (writer.clone(), cursor.0)).collect::<BTreeMap<_, _>>();
         let mut held = BTreeSet::new();
+        let mut future_error = None;
         let mut received = 0;
         let mut staged = 0;
         for ((writer, seq), (hash, receipt)) in groups {
@@ -2179,7 +2221,8 @@ impl ExternalLwwEngine {
             }
             let payload = segment::open(&bytes, &self.library, &writer, seq, &self.root_key)?;
             store.external_lww_verify_seen(&target, &writer, seq, &hash).map_err(store_error)?;
-            if payload.changes.iter().any(|change| change.stamp.physical_ms.0 > upper.0) {
+            if let Some(change) = payload.changes.iter().find(|change| change.stamp.physical_ms.0 > upper.0) {
+                future_error = Some(super::clock::future_change("receive", change.stamp.physical_ms.0, upper.0));
                 held.insert(writer);
                 continue;
             }
@@ -2212,8 +2255,8 @@ impl ExternalLwwEngine {
                 return Ok((prefixes, true));
             }
         }
-        if received == 0 && !held.is_empty() {
-            return Err(ProviderError::new(ErrorKind::ClockSkew));
+        if received == 0 {
+            if let Some(error) = future_error { return Err(error); }
         }
         Ok((prefixes, false))
     }

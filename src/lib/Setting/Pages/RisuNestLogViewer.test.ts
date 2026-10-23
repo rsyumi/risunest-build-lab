@@ -106,7 +106,7 @@ describe('RisuNestLogViewer', () => {
         expect(commands.native_log_tail).toHaveBeenCalledWith({ limit: 500 })
         expect(wrappedDialogs).toEqual([true])
         expect(dialogs).toContain(
-            '~~~~\n' + header + '[1970-01-01T00:00:01.000Z] [error] newer\n[1970-01-01T00:00:00.000Z] [warn] older\n~~~~',
+            '~~~~\n' + header + '[1970-01-01T00:00:01.000Z] [error] [native] newer\n[1970-01-01T00:00:00.000Z] [warn] [native] older\n~~~~',
         )
     })
 
@@ -120,7 +120,7 @@ describe('RisuNestLogViewer', () => {
         await settleAction()
 
         expect(dialogs).toContain(
-            '~~~~~~\n' + header + '[1970-01-01T00:00:00.000Z] [error] <b>raw</b> ~~~~~ "quoted"\n~~~~~~',
+            '~~~~~~\n' + header + '[1970-01-01T00:00:00.000Z] [error] [native] <b>raw</b> ~~~~~ "quoted"\n~~~~~~',
         )
     })
 
@@ -199,7 +199,7 @@ describe('RisuNestLogViewer', () => {
         await settleAction()
 
         expect(writeText).toHaveBeenCalledWith(
-            header + '[1970-01-01T00:00:01.000Z] [error] post-mount failure',
+            header + '[1970-01-01T00:00:01.000Z] [error] [native] post-mount failure',
         )
         expect(document.querySelector('textarea')).toBeNull()
         expect(execCommand).toHaveBeenCalledWith('copy')
@@ -222,7 +222,7 @@ describe('RisuNestLogViewer', () => {
         await settleAction()
 
         expect(dialogs).toHaveLength(1)
-        expect(dialogs).toContain('~~~~\n' + header + '[1970-01-01T00:00:02.000Z] [error] newest\n~~~~')
+        expect(dialogs).toContain('~~~~\n' + header + '[1970-01-01T00:00:02.000Z] [error] [native] newest\n~~~~')
     })
 
     it('ignores a stale copy result when a newer copy finishes first', async () => {
@@ -243,7 +243,7 @@ describe('RisuNestLogViewer', () => {
         await settleAction()
 
         expect(writeText).toHaveBeenCalledOnce()
-        expect(writeText).toHaveBeenCalledWith(header + '[1970-01-01T00:00:02.000Z] [error] newest')
+        expect(writeText).toHaveBeenCalledWith(header + '[1970-01-01T00:00:02.000Z] [error] [native] newest')
     })
 
     it('serializes clipboard writes so a late fallback cannot overwrite the newest copy', async () => {
@@ -287,7 +287,7 @@ describe('RisuNestLogViewer', () => {
         await vi.waitFor(() => expect(writeText).toHaveBeenCalledTimes(2))
         await settleAction()
 
-        expect(clipboardText).toBe(header + '[1970-01-01T00:00:02.000Z] [error] newest')
+        expect(clipboardText).toBe(header + '[1970-01-01T00:00:02.000Z] [error] [native] newest')
     })
 
     it('synchronizes file logging with native state and device settings', async () => {

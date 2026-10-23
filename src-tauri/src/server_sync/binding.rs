@@ -750,6 +750,17 @@ pub(crate) fn activate(
     header: &Header,
     authorization: Option<(&str, &str)>,
 ) -> Result<()> {
+    activate_with_retry(store, header, authorization, true)
+}
+pub(crate) fn activate_for_startup(store: &mut PersistentStore, header: &Header) -> Result<()> {
+    activate_with_retry(store, header, None, false)
+}
+fn activate_with_retry(
+    store: &mut PersistentStore,
+    header: &Header,
+    authorization: Option<(&str, &str)>,
+    retry_transient: bool,
+) -> Result<()> {
     assert_authority(store, header)?;
     let state = store.lww_binding_state()?;
     if state.target != SyncTarget::Server("server".into()) {
@@ -836,7 +847,20 @@ pub(crate) fn activate(
         target.config.resolve(store.repository_root())?,
     )?;
     core.access = Some(target.config.clone());
-    if core.client.resolve_identity()?.epoch != target.epoch {
+    core.client.retry_transient = retry_transient;
+    let head = core.client.resolve_identity().map_err(|mut error| {
+        let active = log.verified::<VerifiedTarget>("bindings", "active").ok();
+        let applied = stage.as_ref().is_none_or(|stage| {
+            store.lww_receive_progress(header.binding_authority).is_ok_and(|progress| {
+                progress.iter().any(|progress| progress.kind == "server" && progress.cursor >= stage.cursor)
+            })
+        });
+        error.startup_local_ready = Some(authorization.is_none() && applied && active.is_some_and(|active| {
+            active.target_id == target.target_id && active.config == target.config
+        }));
+        error
+    })?;
+    if head.epoch != target.epoch {
         return Err(SyncError::new("server-epoch-changed", 409));
     }
     target.config.endpoint = core.client.config().endpoint;
@@ -1040,6 +1064,51 @@ mod tests {
         };
         activate(store, &request, None).unwrap();
         request
+    }
+    #[test]
+    fn offline_activation_reports_local_readiness_only_for_an_established_binding() {
+        use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
+        for (status, body, code) in [
+            (503, "", "server-response-error"),
+            (530, "<html>error 1033</html>", "server-response-error"),
+            (503, r#"{"error":"server-updating"}"#, "server-updating"),
+        ] {
+            let offline = Arc::new(AtomicBool::new(false));
+            let requests = Arc::new(AtomicUsize::new(0));
+            let unavailable = offline.clone();
+            let count = requests.clone();
+            let server = LocalServerFixture::with_router(move |router| {
+                router.layer(axum::middleware::from_fn(move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let unavailable = unavailable.clone();
+                    let count = count.clone();
+                    async move {
+                        if unavailable.load(Ordering::SeqCst) {
+                            let (status, body) = if count.fetch_add(1, Ordering::SeqCst) == 0 { (status, body) }
+                                else { (401, r#"{"error":"unauthorized"}"#) };
+                            return axum::response::Response::builder().status(status).body(axum::body::Body::from(body)).unwrap();
+                        }
+                        next.run(request).await
+                    }
+                }))
+            });
+            let (_ready_root, mut ready) = local();
+            configure(&server, &ready);
+            let ready_header = bind(&mut ready);
+            let (_pending_root, mut pending) = local();
+            configure(&server, &pending);
+            let inspected = inspect(&pending, &header(&pending), false).unwrap();
+            switch_to(&mut pending, SyncTarget::Server("server".into()), Some(inspected.inspection_id));
+            let pending_header = header(&pending);
+            offline.store(true, Ordering::SeqCst);
+            for (store, request, expected) in [(&mut ready, &ready_header, true), (&mut pending, &pending_header, false)] {
+                requests.store(0, Ordering::SeqCst);
+                let error = activate_for_startup(store, request).unwrap_err();
+                assert_eq!(error.code, code);
+                assert_eq!(error.status, status);
+                assert_eq!(serde_json::to_value(error).unwrap()["startupLocalReady"], expected);
+                assert_eq!(requests.load(Ordering::SeqCst), 1);
+            }
+        }
     }
     #[test]
     fn first_binding_is_database_first_and_remote_assets_are_held_before_activation() {

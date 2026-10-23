@@ -16,10 +16,7 @@ const getPersistentDataRuntime = vi.fn()
 const runNativeKeiBackupJob = vi.fn()
 const nativeInvoke = vi.fn()
 vi.mock('@tauri-apps/api/core', () => ({ invoke: nativeInvoke }))
-vi.mock('../mobileBackgroundTask', () => ({
-    runWithMobileBackgroundTask: async (_kind: string, operation: (background: unknown) => Promise<unknown>, signal?: AbortSignal) => operation({ signal, progress: vi.fn() }),
-    measuredTaskPercent: () => undefined,
-}))
+vi.mock('../mobileBackgroundTask', async () => (await import('../mobileBackgroundTask.testSupport')).mobileBackgroundTaskModule())
 
 vi.mock('../storage/database.svelte', () => ({
     getDatabase: () => database,

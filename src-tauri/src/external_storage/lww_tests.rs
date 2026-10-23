@@ -1806,6 +1806,21 @@ fn native_unpublished_clock_repair_preserves_values_and_never_repairs_dispatched
             serde_json::json!("same-value"),
         );
         let original = f.a.lww_read_outbox(0.into(), 100).unwrap().entries;
+        f.a.device_store().unwrap().connection().execute("UPDATE lww_clock SET accepted=?1",
+            [serde_json::to_string(&future).unwrap()]).unwrap();
+        let error = f.sender.publish(&mut f.a, 0.into(), &[], &Cancellation::default()).await.err().unwrap();
+        assert_eq!(error.kind, ErrorKind::ClockSkew);
+        assert_eq!(serde_json::to_value(&error).unwrap()["detail"],
+            "stage=publish reason=clock-repair-failed repair_error=accepted-clock-correction-required");
+        f.a.device_store().unwrap().connection().execute("UPDATE lww_clock SET accepted=NULL", []).unwrap();
+        f.a.device_store().unwrap().connection().execute_batch(
+            "CREATE TEMP TRIGGER refuse_clock_repair BEFORE UPDATE ON lww_clock
+             BEGIN SELECT RAISE(ABORT, 'synthetic-private-value'); END;").unwrap();
+        let error = f.sender.publish(&mut f.a, 0.into(), &[], &Cancellation::default()).await.err().unwrap();
+        assert_eq!(serde_json::to_value(&error).unwrap()["detail"],
+            "stage=publish reason=clock-repair-failed repair_error=store-error");
+        f.a.device_store().unwrap().connection().execute_batch("DROP TRIGGER refuse_clock_repair").unwrap();
+        assert_eq!(f.a.lww_read_outbox(0.into(), 100).unwrap().entries, original);
         f.a.device_store_mut().unwrap().write_plugin_device_values("inactive", &[crate::persistent_store::device_store::plugin_values::PluginDeviceMutation::Set {space:"string".into(),key:"synthetic".into(),value:"kept".into()}]).unwrap();
         f.publish_a().await;
         assert_eq!(f.a.read_root(None).unwrap().value["language"], "same-value");

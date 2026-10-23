@@ -21,6 +21,7 @@ vi.mock('src/ts/stores.svelte', async () => {
         moduleBackgroundEmbedding: writable(''),
         ReloadGUIPointer: writable(0),
         ScriptDisplayRefreshPointer: writable(0),
+        ScriptDisplayRebuildPointer: writable(0),
     }
 })
 vi.mock('src/ts/storage/database.svelte', () => ({
@@ -52,7 +53,7 @@ vi.mock('src/ts/process/files/inlayRenderSource', () => ({
 }))
 
 import BackgroundDom from './BackgroundDom.svelte'
-import { ReloadGUIPointer, ScriptDisplayRefreshPointer } from 'src/ts/stores.svelte'
+import { ReloadGUIPointer, ScriptDisplayRebuildPointer, ScriptDisplayRefreshPointer } from 'src/ts/stores.svelte'
 
 function deferred<T>() {
     let resolve!: (value: T) => void
@@ -72,6 +73,7 @@ afterEach(async () => {
     vi.resetAllMocks()
     ReloadGUIPointer.set(0)
     ScriptDisplayRefreshPointer.set(0)
+    ScriptDisplayRebuildPointer.set(0)
     state.selection = 'conversation-one'
 })
 
@@ -130,6 +132,27 @@ test('keeps shared CSS through delayed admission, repeated reloads and stale par
     state.notify?.(state.selection)
     await tick()
     expect(host.querySelector('style')).toBeNull()
+})
+
+test('rebuilds identical markup on an explicit script reload and keeps it on a variable refresh', async () => {
+    state.acquire.mockResolvedValue({ release: vi.fn() })
+    state.parse.mockResolvedValue('<input type="checkbox">')
+    const host = document.createElement('div')
+    document.body.append(host)
+    component = mount(BackgroundDom, { target: host })
+    await vi.waitFor(() => expect(host.querySelector('input')).not.toBeNull())
+    const panel = host.querySelector('input')
+
+    ScriptDisplayRebuildPointer.update((value) => value + 1)
+    ScriptDisplayRefreshPointer.update((value) => value + 1)
+    await vi.waitFor(() => expect(host.querySelector('input')).not.toBe(panel))
+    expect(state.parse).toHaveBeenCalledTimes(2)
+
+    const rebuilt = host.querySelector('input')
+    ScriptDisplayRefreshPointer.update((value) => value + 1)
+    await vi.waitFor(() => expect(state.parse).toHaveBeenCalledTimes(3))
+    await new Promise((resolve) => setTimeout(resolve))
+    expect(host.querySelector('input')).toBe(rebuilt)
 })
 
 test('retains the last stylesheet on a failed refresh and recovers on a script variable refresh', async () => {

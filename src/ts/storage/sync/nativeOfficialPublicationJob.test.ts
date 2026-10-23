@@ -526,7 +526,7 @@ describe('native official publication job publisher', () => {
 it('uses indeterminate mobile progress for reauthentication retries and forwards both statuses', async () => {
     const progress = vi.fn()
     const status = { jobId: 'publication-1', kind: 'official-publication-upload' as const, state: 'running' as const, phase: 'uploading-database' as const, progress: { completedBytes: 50, totalBytes: 100, completedItems: 1 } }
-    const lease = vi.spyOn(mobileTasks, 'runWithMobileBackgroundTask').mockImplementationOnce(async (_kind, operation, signal) => operation({ signal, progress, dispose: async () => {} }))
+    const lease = vi.spyOn(mobileTasks, 'runWithDeferredMobileBackgroundTask').mockImplementationOnce(async (_kind, operation, signal) => operation({ signal, progress, dispose: async () => {} }))
     const onStatus = vi.fn()
     const terminal = receipt({ kind: 'written', accountId: 'account-1', session: 'session-1', saveDate: 'date', status: 200, replacementKey: 'database/database.bin', warning: null, reloadSession: false })
     try {
@@ -545,4 +545,24 @@ it('uses indeterminate mobile progress for reauthentication retries and forwards
         expect(progress.mock.calls).toEqual([[50], [null]])
         expect(onStatus).toHaveBeenCalledTimes(2)
     } finally { lease.mockRestore() }
+})
+
+it('holds a user-started publication immediately and a save-driven one only once the app leaves the screen', async () => {
+    const deferredHold = vi.spyOn(mobileTasks, 'runWithDeferredMobileBackgroundTask')
+    const immediateHold = vi.spyOn(mobileTasks, 'runWithMobileBackgroundTask')
+    try {
+        const publish = createNativeOfficialPublicationJobPublisher({
+            ...accountHarness(), baseUrl: 'https://hub.invalid',
+            runAttempt: async () => ({ kind: 'completed', receipt: receipt({ kind: 'written', accountId: 'account-1', session: 'session-1', saveDate: 'date', status: 200, replacementKey: 'database/database.bin', warning: null, reloadSession: false }) }),
+        })
+        await publish({ revision: 7, accountId: 'account-1', lease: pinnedLease(), resourceReplacements: {} })
+        expect(deferredHold).toHaveBeenCalledExactlyOnceWith('sync', expect.any(Function), undefined)
+        expect(immediateHold).not.toHaveBeenCalled()
+        await publish({ revision: 8, accountId: 'account-1', lease: pinnedLease(), resourceReplacements: {}, userInitiated: true })
+        expect(immediateHold).toHaveBeenCalledExactlyOnceWith('sync', expect.any(Function), undefined, true)
+        expect(deferredHold).toHaveBeenCalledOnce()
+    } finally {
+        deferredHold.mockRestore()
+        immediateHold.mockRestore()
+    }
 })

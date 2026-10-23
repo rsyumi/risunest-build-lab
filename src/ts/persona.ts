@@ -1,3 +1,4 @@
+import { imageAliases } from './media/imageFormats'
 import { getDatabase, saveImage, flushEffectivePersonaEdits, deriveEffectivePersonaMirrors } from "./storage/database.svelte"
 import { selectSingleFile, sleep } from "./util"
 import { alertError, alertNormal, alertStore } from "./alert"
@@ -11,7 +12,7 @@ import { DBState } from "./stores.svelte"
 export async function selectUserImg() {
     const persona = DBState.db.personas[DBState.db.selectedPersona]
     if (!persona) return
-    const selected = await selectSingleFile(['png'])
+    const selected = await selectSingleFile(imageAliases, { image: true })
     if (!selected) {
         return
     }

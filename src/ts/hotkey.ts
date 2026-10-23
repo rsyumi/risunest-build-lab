@@ -1,4 +1,5 @@
 import { get } from "svelte/store"
+import { isAppLockInputBlocked } from "./appLock/input"
 import { alertMd, alertSelect, alertToast, alertWait, doingAlert, alertRequestLogs } from "./alert"
 import { changeToPreset as changeToPreset2, getDatabase  } from "./storage/database.svelte"
 import { alertStore, DBState, loadoutModalStore, MobileGUIStack, MobileSideBar, openPersonaList, openPresetList, OpenRealmStore, PlaygroundStore, QuickSettings, SafeModeStore, selectedCharID, settingsOpen } from "./stores.svelte"
@@ -19,8 +20,7 @@ export function initHotkey(){
             !shortcutModifier(ev) &&
             !ev.altKey &&
             !ev.shiftKey &&
-            (['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName) ||
-                document.activeElement.getAttribute('contenteditable'))
+            isTypingTarget(document.activeElement)
         ) {
             return
         }
@@ -230,6 +230,7 @@ export function initHotkey(){
     let touchStartTime = 0
     //check for triple touch
     document.addEventListener('touchstart', (ev) => {
+        if (isAppLockInputBlocked()) { touchs = 0; return }
         touchs++
         if(touchs > 2){
             if(Date.now() - touchStartTime > 300){
@@ -304,9 +305,32 @@ export function hotkeyMatches(hotkey: typeof DBState.db.hotkeys[number], ev: Key
     if(hotkey.shift !== ev.shiftKey) return false
     if(hotkey.key.toLowerCase() !== ev.key.toLowerCase()) return false
     if(!hotkey.ctrl && !hotkey.alt && !hotkey.shift){
-        if(['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return false
+        return !isTypingTarget(document.activeElement)
     }
     return true
+}
+
+/**
+ * Whether `el` accepts text input.
+ */
+function isTypingTarget(el: Element | null): boolean {
+    if(!el){
+        return false
+    }
+    if(['INPUT', 'TEXTAREA'].includes(el.tagName)){
+        return true
+    }
+    // The nearest explicit contenteditable state decides; an empty value means editable.
+    for(let node: Element | null = el; node; node = node.parentElement){
+        const state = node.getAttribute('contenteditable')?.toLowerCase()
+        if(state === '' || state === 'true' || state === 'plaintext-only'){
+            return true
+        }
+        if(state === 'false'){
+            break
+        }
+    }
+    return 'editContext' in el && el.editContext != null
 }
 
 function clickQuery(query:string){
@@ -330,6 +354,7 @@ export function initMobileGesture(){
     let pressingPointers = new Map<number, {x:number, y:number}>()
 
     document.addEventListener('touchstart', (ev) => {
+        if (isAppLockInputBlocked()) { pressingPointers.clear(); return }
         for(const touch of ev.changedTouches){
             const ele = touch.target instanceof Element ? touch.target : null
             if (ele?.closest('button, input, select, textarea, a, label, [role="button"], [contenteditable]:not([contenteditable="false"])')) {
@@ -342,6 +367,7 @@ export function initMobileGesture(){
         passive: true
     })
     document.addEventListener('touchend', (ev) => {
+        if (isAppLockInputBlocked()) { pressingPointers.clear(); return }
         for(const touch of ev.changedTouches){
             const d = pressingPointers.get(touch.identifier)
             pressingPointers.delete(touch.identifier)

@@ -8,6 +8,7 @@ const customSidebarConfig = readFileSync('src/lib/Others/CustomSidebarConfig.sve
 const categoryManagerModal = readFileSync('src/lib/Others/HypaV3Modal/category-manager-modal.svelte', 'utf8')
 const tagManagerModal = readFileSync('src/lib/Others/HypaV3Modal/tag-manager-modal.svelte', 'utf8')
 const irisModal = readFileSync('src/lib/Others/IrisModal.svelte', 'utf8')
+const onboardingModal = readFileSync('src/lib/Others/OnboardingModal.svelte', 'utf8')
 const nativeFileJobDialog = readFileSync('src/lib/Others/NativeFileJobDialog.svelte', 'utf8')
 const persistentWorkingSetRecovery = readFileSync('src/lib/Others/PersistentWorkingSetRecovery.svelte', 'utf8')
 const updatePopup = readFileSync('src/lib/Others/UpdatePopup.svelte', 'utf8')
@@ -44,6 +45,7 @@ const modalSources: Record<string, string> = {
     'PopupEditor.svelte': popupEditor,
     'TextEditorPopup.svelte': textEditorPopup,
     'IrisModal.svelte': irisModal,
+    'OnboardingModal.svelte': onboardingModal,
     'CustomSidebarConfig.svelte': customSidebarConfig,
     'HypaV3Modal/category-manager-modal.svelte': categoryManagerModal,
     'HypaV3Modal/tag-manager-modal.svelte': tagManagerModal,
@@ -106,10 +108,12 @@ describe('modal layering', () => {
         expect(checkboxDialog).toContain('aria-describedby="checkbox-confirm-description"')
     })
 
-    it('mounts the text editor popup before the alerts so alerts cover it', () => {
+    it('mounts the text editor popup and the onboarding before the alerts so alerts cover them', () => {
         const app = readFileSync('src/App.svelte', 'utf8')
-        expect(app.indexOf('<TextEditorPopup ')).toBeGreaterThan(-1)
-        expect(app.indexOf('<TextEditorPopup ')).toBeLessThan(app.indexOf('<AlertComp />'))
+        for (const mount of ['<TextEditorPopup ', '<OnboardingModal />']) {
+            expect(app.indexOf(mount), mount).toBeGreaterThan(-1)
+            expect(app.indexOf(mount), mount).toBeLessThan(app.indexOf('<AlertComp />'))
+        }
     })
 
     it('leaves in-screen layers on their local z-index', () => {

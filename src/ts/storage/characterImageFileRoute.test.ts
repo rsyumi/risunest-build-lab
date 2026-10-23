@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
+import { imageFixture } from '../../../tests/support/imageFixtures'
+import { language } from 'src/lang'
+import { requireImage } from '../media/imageFormats'
 
 import {
     archiveCurrentCharacterImage,
@@ -6,6 +9,38 @@ import {
 } from './characterImageFileRoute'
 
 describe('character image file route', () => {
+    it('reports unsupported desktop images through the selection error message', async () => {
+        const messages: string[] = []
+        const result = await selectCharacterImageFile('character-1', {
+            isTauriDesktop: true,
+            chooseDesktopPath: async () => '/chosen/portrait.png',
+            readDesktopHeader: async () => new Uint8Array(),
+            readDesktopPath: async () => new Uint8Array([1, 2, 3]),
+            chooseLegacyFile: async () => null,
+            nativeImport: async () => { throw new Error('unexpected native import') },
+            legacyImport: async data => requireImage(data).ext,
+            onImageError: message => { messages.push(message) },
+        })
+        expect(result).toEqual({ kind: 'cancelled' })
+        expect(messages).toEqual([language.risuNest.imageFormats.unsupported])
+    })
+
+    it.each([['png', 'photo.jpg'], ['jpg', 'photo.png']] as const)('routes %s content named %s by its bytes', async (ext, name) => {
+        const bytes = imageFixture(ext)
+        const nativeImport = vi.fn()
+        const result = await selectCharacterImageFile('character-1', {
+            isTauriDesktop: true,
+            chooseDesktopPath: async () => `/chosen/${name}`,
+            readDesktopHeader: async () => bytes.slice(0, 3),
+            readDesktopPath: async () => bytes,
+            chooseLegacyFile: async () => null,
+            nativeImport,
+            legacyImport: async data => (await import('../media/imageFormats')).requireImage(data).ext,
+        })
+        expect(result).toMatchObject({ kind: 'selected', logicalId: ext })
+        expect(nativeImport).not.toHaveBeenCalled()
+    })
+
     it.each([
         ['assets/first.JPG', 'jpg'],
         ['assets/second.JPEG?download=1#portrait', 'jpeg'],
@@ -37,6 +72,7 @@ describe('character image file route', () => {
             isTauriDesktop: true,
             chooseDesktopPath: vi.fn(async () => 'C:\\chosen\\portrait.jpeg'),
             readDesktopPath,
+            readDesktopHeader: async () => new Uint8Array([255, 216, 255]),
             chooseLegacyFile: vi.fn(),
             nativeImport,
             legacyImport,
@@ -61,6 +97,7 @@ describe('character image file route', () => {
             isTauriDesktop: true,
             chooseDesktopPath: vi.fn(async () => 'C:\\chosen\\portrait.png'),
             readDesktopPath: vi.fn(async () => bytes),
+            readDesktopHeader: async () => new Uint8Array([255, 216, 255]),
             chooseLegacyFile: vi.fn(),
             nativeImport,
             legacyImport,
@@ -80,6 +117,7 @@ describe('character image file route', () => {
             isTauriDesktop: false,
             chooseDesktopPath: vi.fn(),
             readDesktopPath: vi.fn(),
+            readDesktopHeader: async () => new Uint8Array([255, 216, 255]),
             chooseLegacyFile: vi.fn(async () => ({ name: 'portrait.jpg', data: bytes })),
             nativeImport,
             legacyImport,

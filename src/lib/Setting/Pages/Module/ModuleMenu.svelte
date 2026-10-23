@@ -1,4 +1,10 @@
 <script lang="ts">
+    import { imageAliases, selectedImageFormat } from "src/ts/media/imageFormats"
+    import { mapSelectedFiles } from "src/ts/util"
+    import AssetGallery from "src/lib/Gallery/AssetGallery.svelte";
+    import { galleryText } from "src/ts/gallery/strings";
+    import Button from "src/lib/UI/GUI/Button.svelte";
+    let galleryModuleId = $state<string | null>(null)
     import ListPager from "src/lib/UI/GUI/ListPager.svelte"
     import { language } from "src/lang";
     import TextInput from "src/lib/UI/GUI/TextInput.svelte";
@@ -257,6 +263,7 @@
 {/if}
 
 {#if submenu === 5 && (Array.isArray(currentModule.assets))}
+    <div class="flex justify-end mb-2"><Button styled="outlined" size="sm" onclick={() => galleryModuleId = currentModule.id}>{galleryText().gallery}</Button></div>
     <div class="w-full max-w-full border border-selected rounded-md p-2">
         <ListPager bind:page={assetPage} total={allAssets.length} />
         <table class="contain w-full max-w-full tabler mt-2">
@@ -266,20 +273,21 @@
                 <th class="font-medium cursor-pointer w-10">
                     <button class="hover:text-green-500" onclick={async () => {
                         const moduleId = currentModule.id
-                        const da = await selectMultipleFile(['png', 'webp', 'mp4', 'mp3', 'gif', 'jpeg', 'jpg', 'ttf', 'otf', 'css', 'webm', 'woff', 'woff2', 'svg', 'avif'])
+                        const failures: string[] = []
+                        const da = await selectMultipleFile([...imageAliases, 'mp4', 'mp3', 'ttf', 'otf', 'css', 'webm', 'woff', 'woff2', 'svg'], { failures })
                         if(!da){
                             return
                         }
-                        for(const f of da){
+                        await mapSelectedFiles(da, async f => {
                             const img = f.data
                             const name = f.name
-                            const extension = name.split('.').pop().toLowerCase()
+                            const extension = selectedImageFormat(img, name)?.ext ?? name.split('.').pop().toLowerCase()
                             const imgp = await saveAsset(img,'', extension)
                             const module = DBState.db.modules.find(module => module.id === moduleId)
                             if (!module) return
                             module.assets ??= []
                             module.assets.push([name, imgp, extension])
-                        }
+                        }, failures)
                     }}>
                         <PlusIcon />
                     </button>
@@ -330,4 +338,8 @@
         <Check bind:check={currentModule.lowLevelAccess} name={language.lowLevelAccess}/>
         <span> <Help key="lowLevelAccess" name={language.lowLevelAccess}/></span>
     </div>
+{/if}
+
+{#if galleryModuleId}
+    <AssetGallery owner={{ kind: 'module', id: galleryModuleId }} onclose={() => galleryModuleId = null}/>
 {/if}

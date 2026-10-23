@@ -22,6 +22,7 @@
         acquireConversationStartParserLease,
         selectedConversationOperations,
         onDisplaySettled,
+        displayRequestOrder,
     }: {
         currentCharacter: character
         resolvedImage: string
@@ -36,6 +37,7 @@
         ) => Promise<{ projection?: BoundedLiveChatParserProjection; release(): void } | null>
         selectedConversationOperations?: SelectedConversationOperations
         onDisplaySettled?: () => void
+        displayRequestOrder?: number
     } = $props()
 
     let currentChat = $derived(
@@ -182,6 +184,7 @@
             totalPages={alternateGreetings.length + 1}
             {selectedConversationOperations}
             {onDisplaySettled}
+            {displayRequestOrder}
             parserAbortSignal={parserController?.signal}
             {parserProjection}
         />

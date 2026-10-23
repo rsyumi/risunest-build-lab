@@ -20,6 +20,7 @@ const defaults = {
     generationHistoryLimitEnabled: false,
     generationHistoryLimitMultiplier: 2,
     messageSendKey: 'enter',
+    pluginOutputCurrentChatOnly: false,
 }
 
 describe('device settings', () => {
@@ -277,6 +278,25 @@ describe('device settings', () => {
         }))
         const { getDeviceSettings } = await loadDeviceSettings()
         expect(getDeviceSettings()).toEqual(defaults)
+    })
+
+    it('keeps settings stored before the plugin output history field and sends the full history', async () => {
+        const { pluginOutputCurrentChatOnly: _currentOnly, ...released } = defaults
+        localStorage.setItem('risuNestDeviceSettings', JSON.stringify({
+            ...released,
+            performanceProfile: 'low-spec',
+            generationHistoryLimitEnabled: true,
+        }))
+        const { getDeviceSettings, updateDeviceSettings } = await loadDeviceSettings()
+        expect(getDeviceSettings()).toEqual({
+            ...defaults,
+            performanceProfile: 'low-spec',
+            generationHistoryLimitEnabled: true,
+        })
+
+        updateDeviceSettings({ pluginOutputCurrentChatOnly: true })
+        const reloaded = await loadDeviceSettings()
+        expect(reloaded.getDeviceSettings()).toMatchObject({ performanceProfile: 'low-spec', pluginOutputCurrentChatOnly: true })
     })
 
     it('ignores a runtime schema override while applying valid settings', async () => {

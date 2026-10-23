@@ -41,6 +41,7 @@ vi.mock('../stores.svelte', async () => {
         CurrentTriggerIdStore: writable(null),
         ReloadChatPointer: writable({}),
         ScriptDisplayRefreshPointer: writable(0),
+        ScriptDisplayRebuildPointer: writable(0),
     }
 })
 vi.mock('../globalApi.svelte', () => ({
@@ -54,7 +55,13 @@ vi.mock('./modules', () => ({
     getModuleAssets: () => [],
     getModuleRegexScripts: () => [],
 }))
-vi.mock('./memory/hypamemory', () => ({ HypaProcesser: class {} }))
+// Dynamic asset matching: every unknown asset name resolves to the one synthetic asset.
+vi.mock('./memory/hypamemory', () => ({
+    HypaProcesser: class {
+        async addText() {}
+        async similaritySearch() { return ['synthetic-portrait'] }
+    },
+}))
 // The Lua host: a display listener that runs the given reads and keeps the text.
 vi.mock('./scriptings', () => ({
     runLuaEditTrigger: async (_char: unknown, _mode: unknown, data: string) => {
@@ -67,10 +74,13 @@ vi.mock('./triggers', () => ({ runTrigger: vi.fn() }))
 vi.mock('../alert', () => ({ alertError: vi.fn(), alertNormal: vi.fn() }))
 
 const { processScriptFull, resetScriptCache } = await import('./scripts')
-const { requestScriptDisplayRefresh } = await import('./scriptDisplayRefresh')
+const { createScriptDisplayRefreshBatch, rebuildScriptDisplayRow, requestScriptDisplayRefresh } = await import('./scriptDisplayRefresh')
 const { DisplayReadRecord, registerDisplayRow } = await import('./scriptVariableReads')
 const { getChatVar, getGlobalChatVar } = await import('../parser/chatVar.svelte')
-const { ReloadChatPointer } = await import('../stores.svelte')
+const { ReloadChatPointer, ScriptDisplayRebuildPointer, ScriptDisplayRefreshPointer } = await import('../stores.svelte')
+const { runTrigger } = await import('./triggers')
+const { installDisplayRecovery, isDisplayRecoveryMarked } = await import('../displayRecovery.svelte')
+const { recoveryStore } = await import('../displayRecovery.testSupport')
 
 const statusPanel: customscript = {
     comment: 'status panel on the last message only',
@@ -176,12 +186,150 @@ test('refreshes only the rows whose display read a changed chat variable', async
 
     expect(await refreshedRows({ keys: ['hp'] })).toEqual([2])
     expect(await refreshedRows({ keys: ['mood'] })).toEqual([])
-    expect(await refreshedRows({ all: true })).toEqual([2])
+    // An explicit reload reaches every mounted row.
+    expect(await refreshedRows({ all: true })).toEqual([0, 1, 2])
 
     // A row rendered again from the cached regex result keeps its reads.
     rendered[2].row.dispose()
     expect((await renderRow(char, chat, 2)).data).toBe('turn 2 <b>HP 10</b>')
     expect(await refreshedRows({ keys: ['hp'] })).toEqual([2])
+})
+
+test('coalesces Worker transport tasks until a script boundary without capturing unrelated refreshes', async () => {
+    const { char, chat } = installConversation([statusPanel])
+    for (const index of [0, 1, 2]) await renderRow(char, chat, index)
+    const batch = createScriptDisplayRefreshBatch()
+    const before = { ...get(ReloadChatPointer) }
+    for (let i = 0; i < 4; i++) {
+        batch.run(() => requestScriptDisplayRefresh({ all: true }))
+        await Promise.resolve()
+    }
+    expect(get(ReloadChatPointer)).toEqual(before)
+    // Another invocation is free to refresh while this one waits for transport.
+    expect(await refreshedRows({ keys: ['hp'] })).toEqual([2])
+    const prior = { ...get(ReloadChatPointer) }
+    batch.flush()
+    await Promise.resolve()
+    for (const index of [0, 1, 2]) expect(get(ReloadChatPointer)[index]).toBe((prior[index] ?? 0) + 1)
+    const after = { ...get(ReloadChatPointer) }
+    batch.flush()
+    await Promise.resolve()
+    expect(get(ReloadChatPointer)).toEqual(after)
+    for (let i = 0; i < 4; i++) {
+        batch.run(() => rebuildScriptDisplayRow(i % 2 ? '1' : 1))
+        await Promise.resolve()
+    }
+    expect(get(ReloadChatPointer)).toEqual(after)
+    batch.flush()
+    expect(get(ReloadChatPointer)[1]).toBe((after[1] ?? 0) + 1)
+})
+
+test('rebuilds the rows an explicit reload reaches, and not the rows a variable change refreshes', async () => {
+    const { char, chat } = installConversation([statusPanel])
+    const rendered = []
+    for (const index of [0, 1, 2]) rendered.push(await renderRow(char, chat, index))
+    const revisions = () => rendered.map(({ row }) => row.rebuildRevision)
+    const initial = revisions()
+    const background = get(ScriptDisplayRebuildPointer)
+
+    expect(await refreshedRows({ keys: ['hp'] })).toEqual([2])
+    expect(revisions()).toEqual(initial)
+    expect(get(ScriptDisplayRebuildPointer)).toBe(background)
+
+    await refreshedRows({ all: true })
+    const reloaded = revisions()
+    expect(reloaded.map((revision, index) => revision !== initial[index])).toEqual([true, true, true])
+    expect(get(ScriptDisplayRebuildPointer)).not.toBe(background)
+
+    // A reload of one message rebuilds the rows at its index at once.
+    const before = { ...get(ReloadChatPointer) }
+    rebuildScriptDisplayRow(1)
+    expect(get(ReloadChatPointer)[1]).not.toBe(before[1])
+    expect(get(ReloadChatPointer)[0]).toBe(before[0])
+    expect(revisions().map((revision, index) => revision !== reloaded[index])).toEqual([false, true, false])
+})
+
+test('keeps the reload and refresh scope of a chat opened without Modify Display, and its mark', async () => {
+    const { char, chat } = installConversation([statusPanel])
+    chat.message[1].data = 'turn 1 {{getvar::mood}} [상태창]'
+    char.firstMessage = 'hello {{getvar::mood}} {{img::synthetic-portrai}} [상태창]'
+    char.additionalAssets = [['synthetic-portrait', 'synthetic-portrait.png', 'png']]
+    live.database.dynamicAssets = true
+    live.database.dynamicAssetsEditDisplay = true
+    const listened: string[] = []
+    lua.displayListener = async (data) => { listened.push(data) }
+    plugins.editdisplay.add(async (data) => `${data} plugin`)
+    vi.mocked(runTrigger).mockClear()
+    const target = { characterId: char.chaId, conversationId: chat.id! }
+    const device = recoveryStore({ working: [target], marked: [] }, { commitAtOnce: true })
+    await installDisplayRecovery(device.store)
+    try {
+        const rendered = []
+        for (const index of [0, 1, 2]) rendered.push(await renderRow(char, chat, index))
+        // The background, and a greeting rendered without a parser projection, take the same path.
+        const background = await processScriptFull(char, 'background {{getvar::hp}} {{bg::synthetic-portrai}} [상태창]', 'editdisplay', -1, {}, { regexWorker: false })
+        const greeting = await processScriptFull(char, char.firstMessage, 'editdisplay', -1, {}, {
+            regexWorker: false,
+            cache: 'bypass',
+            captureContext: {
+                presetRegex: [],
+                moduleRegexScripts: [],
+                moduleAssets: [],
+                dynamicAssets: true,
+                dynamicAssetsEditDisplay: true,
+                parserContext: {
+                    database: live.database,
+                    character: char,
+                    userName: 'User',
+                    personaPrompt: '',
+                    modules: [],
+                    moduleLorebooks: [],
+                    selectedCharID: 0,
+                    chatVariables: { mood: 'calm' },
+                    globalChatVariables: {},
+                    currentTime: 1,
+                },
+            },
+        })
+        expect(rendered.map(({ data }) => data)).toEqual(['turn 0 [상태창]', 'turn 1 calm [상태창]', 'turn 2 [상태창]'])
+        expect(background.data).toBe('background 10 {{bg::synthetic-portrai}} [상태창]')
+        expect(greeting.data).toBe('hello calm {{img::synthetic-portrai}} [상태창]')
+        const revisions = () => rendered.map(({ row }) => row.rebuildRevision)
+        const initial = revisions()
+        const backgroundRebuilds = get(ScriptDisplayRebuildPointer)
+        const backgroundRefreshes = get(ScriptDisplayRefreshPointer)
+
+        // A variable change refreshes the rows that read it and the background, without a rebuild.
+        expect(await refreshedRows({ keys: ['mood'] })).toEqual([1])
+        expect(await refreshedRows({ keys: ['hp'] })).toEqual([])
+        expect(revisions()).toEqual(initial)
+        expect(get(ScriptDisplayRebuildPointer)).toBe(backgroundRebuilds)
+        expect(get(ScriptDisplayRefreshPointer)).toBe(backgroundRefreshes + 2)
+
+        // A full reload rebuilds every row and the background.
+        expect(await refreshedRows({ all: true })).toEqual([0, 1, 2])
+        const reloaded = revisions()
+        expect(reloaded.map((revision, index) => revision !== initial[index])).toEqual([true, true, true])
+        expect(get(ScriptDisplayRebuildPointer)).toBe(backgroundRebuilds + 1)
+
+        // A row reload by number or by string, as a clicked message uses, rebuilds that row.
+        const before = { ...get(ReloadChatPointer) }
+        rebuildScriptDisplayRow(1)
+        rebuildScriptDisplayRow('2')
+        expect(get(ReloadChatPointer)[1]).not.toBe(before[1])
+        expect(get(ReloadChatPointer)['2' as never]).not.toBe(before['2' as never])
+        expect(revisions().map((revision, index) => revision !== reloaded[index])).toEqual([false, true, true])
+
+        // Rendering after the reloads still skips Modify Display, and the chat stays marked.
+        rendered[1].row.dispose()
+        expect((await renderRow(char, chat, 1)).data).toBe('turn 1 calm [상태창]')
+        expect(listened).toEqual([])
+        expect(runTrigger).not.toHaveBeenCalled()
+        expect(isDisplayRecoveryMarked(target)).toBe(true)
+        expect(device.record?.marked).toEqual([target])
+    } finally {
+        await installDisplayRecovery(null)
+    }
 })
 
 test.each(['chat', 'global', 'local global'])('records the %s variables a Lua display listener reads', async (source) => {

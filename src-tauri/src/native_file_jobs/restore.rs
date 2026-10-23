@@ -3,6 +3,7 @@ mod upstream_import;
 #[path = "pocket_features.rs"]
 pub(super) mod pocket_features;
 mod historical;
+mod cold_plugin_storage;
 use super::{
     ImportCounts, JobControl, JobDetail, JobPhase, JobProgress, JobResultSummary, JobStage,
     NativeJobError, OpenedJobSource, StageUnit,
@@ -49,6 +50,13 @@ impl Default for RestoreLimits {
     }
 }
 
+/// Why an archive's cold payload entry was staged without a readable body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ColdPayloadUnavailable {
+    Damaged,
+    TooLarge,
+}
+
 pub(crate) trait ReplacementSink: Send + Sync {
     fn prepare_activation_receipt(&self, _staging_id: &str, _job: &JobControl, _result: &JobResultSummary) -> StoreResult<Option<String>> { Ok(None) }
     fn activation_receipt(&self, _staging_id: &str, _authority: &str) -> StoreResult<Option<i64>> { Ok(None) }
@@ -69,6 +77,10 @@ pub(crate) trait ReplacementSink: Send + Sync {
         false
     }
     fn cold_payload_path(&self, _key: &str) -> Option<PathBuf> {
+        None
+    }
+    /// Set for a key whose entry the archive holds but could not stage.
+    fn unavailable_cold_payload_reason(&self, _key: &str) -> Option<ColdPayloadUnavailable> {
         None
     }
     fn unavailable_cold_payload(&self, _key: &str, _character_name: &str) -> StoreResult<()> {
@@ -556,7 +568,7 @@ fn parse_and_stage_legacy<R: Read>(
     let mut input = BufReader::with_capacity(READ_CHUNK_BYTES, decoded);
     let database = stream_legacy_database(&mut input, staging_id, job, sink, spool_directory.as_deref())?;
     reader.complete_item()?;
-    finish_legacy_database(database, staging_id, job, reader, sink)
+    finish_legacy_database(database, staging_id, job, reader, sink, limits)
 }
 
 fn parse_and_stage_compressed_legacy<R: Read>(
@@ -600,7 +612,7 @@ fn parse_and_stage_compressed_legacy<R: Read>(
         return Err(corrupt("trailing data in legacy RisuSave gzip stream"));
     }
     reader.complete_item()?;
-    finish_legacy_database(database, staging_id, job, reader, sink)
+    finish_legacy_database(database, staging_id, job, reader, sink, limits)
 }
 
 // The nesting a root entry and a `characters` element had left when the
@@ -839,6 +851,7 @@ fn finish_legacy_database<R: Read>(
     job: &JobControl,
     reader: &mut TrackedReader<'_, R>,
     sink: &dyn ReplacementSink,
+    limits: RestoreLimits,
 ) -> Result<ParsedCounts, NativeJobError> {
     let (root, character_count, excluded) = match database {
         LegacyDatabase::Root {
@@ -882,11 +895,16 @@ fn finish_legacy_database<R: Read>(
     if root.kind("pluginCustomStorage").map_err(store_error)?.is_none() {
         root.begin("pluginCustomStorage",FieldKind::Object).map_err(|error|legacy_staging_error(job,error))?;
     }
-    for marker in ["_coldplugin", "_coldpluginIndex"] {
-        if root.member("pluginCustomStorage", marker).map_err(store_error)?.is_some() {
-            root.remove_member("pluginCustomStorage", marker).map_err(store_error)?;
-            job.record_restore_omission("pluginStorage", 1).map_err(|error| job_error(job, error))?;
-        }
+    let pointer = root.member("pluginCustomStorage", cold_plugin_storage::INDEX_KEY).map_err(store_error)?;
+    let legacy = root.member("pluginCustomStorage", cold_plugin_storage::LEGACY_MAP_KEY).map_err(store_error)?;
+    for marker in [cold_plugin_storage::INDEX_KEY, cold_plugin_storage::LEGACY_MAP_KEY] {
+        root.remove_member("pluginCustomStorage", marker).map_err(store_error)?;
+    }
+    if !sink.expands_cold_payloads() {
+        let markers = u64::from(pointer.is_some()) + u64::from(legacy.is_some());
+        if markers != 0 { job.record_restore_omission("pluginStorage", markers).map_err(|error| job_error(job, error))?; }
+    } else if cold_plugin_storage::references(pointer.as_ref(), legacy.as_ref()) {
+        cold_plugin_storage::import(&mut LegacyPluginStorage(&root), pointer, legacy, sink, job, limits)?;
     }
     reader.counts.presets = preset_count;
 
@@ -905,6 +923,18 @@ fn finish_legacy_database<R: Read>(
         character_count,
         preset_count,
     })
+}
+
+struct LegacyPluginStorage<'a>(&'a RootSpool);
+
+impl cold_plugin_storage::Target for LegacyPluginStorage<'_> {
+    fn contains(&self, key: &str) -> Result<bool, NativeJobError> {
+        Ok(self.0.member("pluginCustomStorage", key).map_err(store_error)?.is_some())
+    }
+
+    fn insert(&mut self, key: &str, value: Value) -> Result<(), NativeJobError> {
+        self.0.put_member("pluginCustomStorage", key, Some(&value)).map_err(store_error)
+    }
 }
 
 // PocketRisu stores a root field that became undefined as null, and upstream
@@ -1389,7 +1419,7 @@ fn parse_and_stage<R: Read>(
             || matches!(block_type, 2 | 7);
         if !interpreted {
             skip_block(reader, &name, compression, encoded_length, limits, job)?;
-            let kind = if block_type == 6 { "remote" } else if block_type == 12 && name.starts_with("kv:") { "pluginStorage" } else { "data" };
+            let kind = if block_type == 6 { "remote" } else { "data" };
             job.record_restore_omission(kind, 1).map_err(|error| job_error(job, error))?;
             reader.counts.blocks += 1;
             reader.complete_item()?;
@@ -1418,6 +1448,9 @@ fn parse_and_stage<R: Read>(
                 };
                 if let Some(value) = object.shift_remove("__directory") {
                     directory = Some(parse_directory(Some(value))?);
+                }
+                if reject_cold_references && object.get("pluginCustomStorage").and_then(Value::as_object).is_some_and(cold_plugin_storage::storage_references) {
+                    return Err(cold_expansion_required());
                 }
                 root = Some(object);
             }
@@ -1487,8 +1520,11 @@ fn parse_and_stage<R: Read>(
                 loadouts = Some(value);
             }
             11 if name == "pluginStorage" => {
-                if !value.is_object() {
+                let Some(storage) = value.as_object() else {
                     return Err(invalid("pluginStorage block must be a JSON object"));
+                };
+                if reject_cold_references && cold_plugin_storage::storage_references(storage) {
+                    return Err(cold_expansion_required());
                 }
                 plugin_storage = Some(value);
             }
@@ -1529,10 +1565,13 @@ fn parse_and_stage<R: Read>(
         root.insert(key.to_owned(), value);
     }
     if let Some(Value::Object(storage)) = root.get_mut("pluginCustomStorage") {
-        for marker in ["_coldplugin", "_coldpluginIndex"] {
-            if storage.shift_remove(marker).is_some() {
-                job.record_restore_omission("pluginStorage", 1).map_err(|error| job_error(job, error))?;
-            }
+        let pointer = storage.shift_remove(cold_plugin_storage::INDEX_KEY);
+        let legacy = storage.shift_remove(cold_plugin_storage::LEGACY_MAP_KEY);
+        if !sink.expands_cold_payloads() {
+            let markers = u64::from(pointer.is_some()) + u64::from(legacy.is_some());
+            if markers != 0 { job.record_restore_omission("pluginStorage", markers).map_err(|error| job_error(job, error))?; }
+        } else if cold_plugin_storage::references(pointer.as_ref(), legacy.as_ref()) {
+            cold_plugin_storage::import(storage, pointer, legacy, sink, job, limits)?;
         }
     }
     if let Some(meta) = plugin_storage_meta {
@@ -3024,6 +3063,7 @@ mod tests {
         max_message_page: AtomicUsize,
         message_pages: Mutex<Vec<usize>>,
         cold_payloads: Option<std::collections::HashMap<String, PathBuf>>,
+        unavailable_cold_payloads: std::collections::HashMap<String, ColdPayloadUnavailable>,
         unavailable_cold: Mutex<Vec<(String, String)>>,
         cancel_after_page: Option<(Arc<JobRegistry>, String)>,
     }
@@ -3086,6 +3126,10 @@ mod tests {
 
         fn cold_payload_path(&self, key: &str) -> Option<PathBuf> {
             self.cold_payloads.as_ref().and_then(|payloads| payloads.get(key)).cloned()
+        }
+
+        fn unavailable_cold_payload_reason(&self, key: &str) -> Option<ColdPayloadUnavailable> {
+            self.unavailable_cold_payloads.get(key).copied()
         }
 
         fn unavailable_cold_payload(&self, key: &str, name: &str) -> StoreResult<()> {
@@ -3225,6 +3269,7 @@ mod tests {
                 max_message_page: AtomicUsize::new(0),
                 message_pages: Mutex::new(Vec::new()),
                 cold_payloads: None,
+                unavailable_cold_payloads: Default::default(),
                 unavailable_cold: Mutex::new(Vec::new()),
                 cancel_after_page: None,
             },
@@ -3698,6 +3743,7 @@ mod tests {
                     "coldPayloads": cold_keys,
                 });
                 self.sink.cold_payloads = Some(payloads.cold_payloads);
+                self.sink.unavailable_cold_payloads = payloads.unavailable_cold_payloads;
                 durable.seal(&mut self.sink.store.lock().unwrap(), 0).unwrap();
                 let path = plaintext.as_ref().map(|file| file.path()).unwrap_or_else(|| database.staged_path.as_deref().unwrap());
                 self.result = Some(restore_block_risu_save_path_with_limits(path, 1, self.job, self.sink, self.limits)
@@ -3754,47 +3800,120 @@ mod tests {
         assert_eq!(sink.incremental_character_calls.load(Ordering::Acquire), 1);
     }
 
-    #[test]
-    fn cold_plugin_payloads_are_omitted_without_rejecting_readable_backups() {
-        for marker in ["_coldplugin", "_coldpluginIndex"] {
-            for corrupt in [false, true] {
-                let (directory, mut sink) = fixture();
-                let mut blocks = valid_blocks();
-                let mut storage = json!({"inline":{"enabled":true}});
-                storage[marker] = if marker == "_coldplugin" { json!({"plugin":"value"}) } else { json!("index") };
-                blocks[5] = block(11, false, "pluginStorage", &storage);
-                let database = directory.path().join("database.risudat");
-                fs::write(&database, save_bytes(blocks)).unwrap();
-                let archive = directory.path().join("plugins.bin");
-                let mut output = File::create(&archive).unwrap();
-                write_container_entry(&mut output, "database.risudat", &database);
-                for (index, value) in [
-                    json!(null), json!(true), json!(42), json!("synthetic"),
-                    json!({"type":"risu-plugin-storage-index","version":1,"entries":[{"k":"plugin","l":"value"}],"trash":[]}),
-                    json!({"character":"x".repeat(192 * 1024)}),
-                    json!([{"message":"x".repeat(192 * 1024)}]),
-                ].into_iter().enumerate() {
-                    let path = directory.path().join(format!("payload-{index}.json"));
-                    fs::write(&path, if corrupt && index == 0 { b"{broken".to_vec() } else { serde_json::to_vec(&value).unwrap() }).unwrap();
-                    let key = match index { 4 => "index".to_owned(), 5 => "value".to_owned(), _ => format!("payload-{index}") };
-                    write_container_entry(&mut output, &format!("coldstorage/{key}.json"), &path);
-                }
-                drop(output);
-                let job = JobRegistry::default().create(JobKind::RestoreLegacyLocalBackup).unwrap();
-                let outcome = restore_container_payloads_with_limits(&archive, directory.path(), &mut sink, &job, RestoreLimits { max_record_bytes: 64 * 1024, ..Default::default() });
-                if corrupt {
-                    assert!(outcome.unwrap_err().message.contains("cold payload is invalid"));
-                    assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 1);
-                    continue;
-                }
-                let result = outcome.unwrap().0;
-                assert_eq!(result.warning_codes, vec!["skipped-plugin-storage:1"]);
-                assert_eq!(job.status().incomplete_restore_preview.unwrap().warning_codes(), result.warning_codes);
-                let restored = sink.store.lock().unwrap().materialize(None).unwrap();
-                assert_eq!(restored["pluginCustomStorage"], json!({"inline":{"enabled":true}}));
-                assert_eq!(restored["characters"][0]["chats"][0]["message"][0]["data"], "hello");
-            }
+    /// An upstream cold storage id, in the form upstream names its items.
+    fn cold_id(index: u16) -> String {
+        format!("00000000-0000-4000-8000-{index:012}")
+    }
 
+    /// The archive entry upstream writes for a cold storage item.
+    fn cold_entry(index: u16, body: &[u8]) -> (String, Vec<u8>) {
+        (format!("coldstorage_{}.json", cold_id(index)), body.to_vec())
+    }
+
+    fn cold_plugin_index(index: u16, entries: Value) -> (String, Vec<u8>) {
+        let body = json!({"type":"risu-plugin-storage-index","version":1,"entries":entries,"trash":[{"id":cold_id(999),"at":0}]});
+        cold_entry(index, &serde_json::to_vec(&body).unwrap())
+    }
+
+    struct ColdPluginRestore {
+        _directory: TempDir,
+        sink: StoreSink,
+        outcome: Result<JobResultSummary, crate::local_backup::LocalBackupError>,
+    }
+
+    impl ColdPluginRestore {
+        /// A restored value no plugin owns yet, which the assignment flow offers.
+        fn unowned(&self, key: &str) -> Option<Value> {
+            self.sink.store.lock().unwrap()
+                .read_plugin_storage(crate::persistent_store::plugin_owner::UNOWNED_OWNER, key, None)
+                .unwrap().map(|row| row.value)
+        }
+
+        fn restored(&self) -> Value {
+            self.sink.store.lock().unwrap().materialize(None).unwrap()
+        }
+    }
+
+    /// Restores an upstream backup archive through the legacy backup path. Its
+    /// database carries `storage` as plugin storage, in block or MessagePack form,
+    /// beside the given archive entries.
+    fn restore_cold_plugin_archive(storage: &Value, character: Option<Value>, legacy_database: bool, entries: &[(String, Vec<u8>)], limits: RestoreLimits, cut_bytes: u64) -> ColdPluginRestore {
+        let (directory, mut sink) = fixture();
+        let database = directory.path().join("database.risudat");
+        if legacy_database {
+            let character = character.unwrap_or_else(|| json!({"chaId":"char-1","name":"Imported","chats":[]}));
+            let value = json!({"username":"Imported","characters":[character],"botPresets":[],"pluginCustomStorage":storage});
+            fs::write(&database, legacy_wire(7, &super::legacy_stream_tests::messagepack_bytes(&super::legacy_stream_tests::messagepack_from_json(&value)))).unwrap();
+        } else {
+            let mut blocks = valid_blocks();
+            blocks[5] = block(11, false, "pluginStorage", storage);
+            if let Some(character) = character { blocks[6] = block(2, false, "char-1", &character); }
+            fs::write(&database, save_bytes(blocks)).unwrap();
+        }
+        let archive = directory.path().join("backup.bin");
+        let mut output = File::create(&archive).unwrap();
+        write_container_entry(&mut output, "database.risudat", &database);
+        for (index, (name, body)) in entries.iter().enumerate() {
+            let path = directory.path().join(format!("entry-{index}.json"));
+            fs::write(&path, body).unwrap();
+            write_container_entry(&mut output, name, &path);
+        }
+        let length = output.metadata().unwrap().len();
+        output.set_len(length - cut_bytes).unwrap();
+        drop(output);
+        let job = JobRegistry::default().create(JobKind::RestoreLegacyLocalBackup).unwrap();
+        let outcome = restore_container_payloads_with_limits(&archive, directory.path(), &mut sink, &job, limits).map(|(result, _)| result);
+        if let Ok(result) = &outcome {
+            let previewed = job.status().incomplete_restore_preview.map(|preview| preview.warning_codes()).unwrap_or_default();
+            assert_eq!(previewed, result.warning_codes);
+        }
+        ColdPluginRestore { _directory: directory, sink, outcome }
+    }
+
+    #[test]
+    fn cold_plugin_values_import_unowned_from_archive_payloads() {
+        // A large value that reads like a character payload is still any JSON to a plugin.
+        let large = json!({"character": "x".repeat(192 * 1024)});
+        let limits = RestoreLimits { max_record_bytes: 64 * 1024, ..Default::default() };
+        let entries = vec![
+            cold_plugin_index(1, json!([
+                {"k":"object","s":"{\"a\":1}"}, {"k":"null","s":"null"}, {"k":"false","s":"false"}, {"k":"zero","s":"0"}, {"k":"empty","s":"\"\""},
+                {"k":"large","l":cold_id(2)}, {"k":"largeNull","l":cold_id(4)},
+                {"k":"repeated","s":"1"}, {"k":"repeated","s":"2"}, {"k":"both","l":cold_id(5),"s":"\"text loses\""},
+                {"s":"\"no key\""}, {"k":"noValue"},
+            ])),
+            cold_entry(2, &serde_json::to_vec(&large).unwrap()),
+            cold_entry(3, br#"{"legacy":true}"#),
+            cold_entry(4, b"null"),
+            cold_entry(5, br#""item wins""#),
+            cold_entry(6, br#""legacy loses""#),
+            cold_plugin_index(7, json!([{"k":"inline","s":"\"index loses\""}, {"k":"inlineNull","s":"1"}, {"k":"indexed","s":"\"index wins\""}])),
+        ];
+        let index_only = vec![
+            ("object", json!({"a":1})), ("null", Value::Null), ("false", json!(false)), ("zero", json!(0)), ("empty", json!("")),
+            ("large", large), ("largeNull", Value::Null), ("repeated", json!(2)), ("both", json!("item wins")),
+        ];
+        let legacy_only = vec![("legacy", json!({"legacy":true})), ("legacyNull", Value::Null)];
+        let mixed = json!({"inline":"kept","inlineNull":null,"_coldpluginIndex":cold_id(7),"_coldplugin":{"inline":cold_id(6),"indexed":cold_id(6),"legacy":cold_id(3)}});
+        let precedence = vec![("inline", json!("kept")), ("inlineNull", Value::Null), ("indexed", json!("index wins")), ("legacy", json!({"legacy":true}))];
+        for (storage, expected, legacy_database) in [
+            (json!({"_coldpluginIndex": cold_id(1)}), index_only, false),
+            (json!({"_coldplugin": {"legacy": cold_id(3), "legacyNull": cold_id(4), "notAnId": 5}}), legacy_only, false),
+            (mixed.clone(), precedence.clone(), false),
+            (mixed, precedence, true),
+        ] {
+            let restore = restore_cold_plugin_archive(&storage, None, legacy_database, &entries, limits, 0);
+            assert_eq!(restore.outcome.as_ref().unwrap().warning_codes, Vec::<String>::new(), "{storage}");
+            for (key, value) in &expected {
+                assert_eq!(restore.unowned(key).as_ref(), Some(value), "{key} in {storage}");
+            }
+            let restored = restore.restored();
+            assert_eq!(restored["pluginCustomStorage"].as_object().unwrap().len(), expected.len(), "{}", restored["pluginCustomStorage"]);
+            assert_eq!(restored["characters"][0]["name"], "Imported");
+        }
+
+        // A save with no archive around it has nothing to read the markers from.
+        for marker in ["_coldplugin", "_coldpluginIndex"] {
             let (directory, sink) = fixture();
             let mut database = json!({"characters":[],"botPresets":[],"pluginCustomStorage":{"inline":true}});
             database["pluginCustomStorage"][marker] = if marker == "_coldplugin" { json!({"plugin":"value"}) } else { json!("index") };
@@ -3805,6 +3924,68 @@ mod tests {
             let result = restore_risu_save(&source, 1, &job, &sink).unwrap();
             assert_eq!(result.warning_codes, vec!["skipped-plugin-storage:1"]);
             assert_eq!(sink.store.lock().unwrap().materialize(None).unwrap()["pluginCustomStorage"], json!({"inline":true}));
+
+            let (directory, sink) = fixture();
+            let mut blocks = valid_blocks();
+            blocks[5] = block(11, false, "pluginStorage", &database["pluginCustomStorage"]);
+            let source = directory.path().join("block.risudat");
+            fs::write(&source, save_bytes(blocks)).unwrap();
+            let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+            let result = restore_block_risu_save_path(&source, 1, &job, &sink).unwrap();
+            assert_eq!(result.warning_codes, vec!["skipped-plugin-storage:1"]);
+            assert_eq!(sink.store.lock().unwrap().materialize(None).unwrap()["pluginCustomStorage"], json!({"inline":true}));
+        }
+    }
+
+    #[test]
+    fn unreadable_cold_plugin_values_are_reported_while_the_library_restores() {
+        let small = RestoreLimits { max_decoded_block_bytes: 64 * 1024, ..Default::default() };
+        let pointer = json!({"inline": 1, "_coldpluginIndex": cold_id(1)});
+        let index = |entries: Value| cold_plugin_index(1, json!([entries, {"k":"kept","s":"1"}]));
+        // A key the index names never falls back to the older legacy map.
+        let shadowed = json!({"inline": 1, "_coldpluginIndex": cold_id(1), "_coldplugin": {"gone": cold_id(3)}});
+        for (storage, character, entries, limits, warning, absent) in [
+            // The index names an item the archive does not hold, or the archive lacks the index.
+            (&shadowed, None, vec![index(json!({"k":"gone","l":cold_id(9)})), cold_entry(3, b"\"legacy\"")], RestoreLimits::default(), "missing-backup-data:1", "gone"),
+            (&pointer, None, vec![], RestoreLimits::default(), "missing-backup-data:1", "kept"),
+            (&pointer, None, vec![cold_entry(1, br#"{"type":"risu-plugin-storage-index","version":1,"entries":{},"trash":[]}"#)], RestoreLimits::default(), "damaged-plugin-storage:1", "kept"),
+            (&pointer, None, vec![cold_entry(1, br#"{"type":"risu-plugin-storage-index","version":2,"entries":[],"trash":[]}"#)], RestoreLimits::default(), "skipped-plugin-storage:1", "kept"),
+            (&pointer, None, vec![index(json!({"k":"bad","s":"{"}))], RestoreLimits::default(), "damaged-plugin-storage:1", "bad"),
+            (&pointer, None, vec![index(json!({"k":"_coldplugin","s":"1"}))], RestoreLimits::default(), "skipped-plugin-storage:1", "_coldplugin"),
+            (&json!({"inline": 1, "_coldplugin": {"_coldpluginIndex": cold_id(3), "kept": cold_id(3)}}), None, vec![cold_entry(3, b"1")], RestoreLimits::default(), "skipped-plugin-storage:1", "_coldpluginIndex"),
+            // Entries the archive holds but could not stage.
+            (&pointer, None, vec![index(json!({"k":"broken","l":cold_id(2)})), cold_entry(2, b"{broken")], RestoreLimits::default(), "damaged-plugin-storage:1", "broken"),
+            (&pointer, None, vec![index(json!({"k":"trailing","l":cold_id(2)})), cold_entry(2, b"\"value\" trailing")], RestoreLimits::default(), "damaged-plugin-storage:1", "trailing"),
+            (&pointer, None, vec![index(json!({"k":"large","l":cold_id(2)})), cold_entry(2, &serde_json::to_vec(&"x".repeat(96 * 1024)).unwrap())], small, "oversized-plugin-storage:1", "large"),
+            (&json!({"inline": 1, "kept": 1}), Some(json!({"chaId":"char-1","name":"Imported","chats":[cold_chat(&cold_id(2))]})), vec![cold_entry(2, b"{broken")], RestoreLimits::default(), "unavailable-cold-payloads:1", "broken"),
+        ] {
+            let restore = restore_cold_plugin_archive(storage, character, false, &entries, limits, 0);
+            assert_eq!(restore.outcome.as_ref().unwrap().warning_codes, vec![warning], "{entries:?}");
+            assert_eq!(restore.unowned(absent), None, "{absent}");
+            assert_eq!(restore.unowned("inline"), Some(json!(1)));
+            if absent != "kept" { assert_eq!(restore.unowned("kept"), Some(json!(1)), "{warning}"); }
+            let restored = restore.restored();
+            let storage = restored["pluginCustomStorage"].as_object().unwrap();
+            assert!(!storage.contains_key("_coldpluginIndex") && !storage.contains_key("_coldplugin"), "{storage:?}");
+            assert_eq!(restored["characters"][0]["name"], "Imported");
+        }
+    }
+
+    #[test]
+    fn damaged_archives_with_cold_plugin_values_fail_without_changing_the_library() {
+        let storage = json!({"_coldpluginIndex": cold_id(1)});
+        let index = cold_plugin_index(1, json!([{"k":"value","s":"1"}]));
+        let duplicate = (format!("coldstorage/{}.json", cold_id(1)), b"{broken".to_vec());
+        for (entries, cut_bytes, expected) in [
+            (vec![index.clone()], 4, "truncated"),
+            (vec![duplicate, index], 0, "duplicate cold payload key"),
+        ] {
+            let restore = restore_cold_plugin_archive(&storage, None, false, &entries, RestoreLimits::default(), cut_bytes);
+            let error = restore.outcome.as_ref().unwrap_err();
+            assert!(error.message.contains(expected), "{error:?}");
+            let store = restore.sink.store.lock().unwrap();
+            assert_eq!(store.revision().unwrap(), 1);
+            assert_eq!(store.materialize(None).unwrap()["username"], "Old");
         }
     }
 
@@ -3994,13 +4175,27 @@ mod tests {
 
     #[test]
     fn official_cold_references_fail_before_activation() {
+        let mut saves = Vec::new();
         for cold in [
             json!({"chaId":"char-1","name":"Stub","chats":[],"coldstorage":"missing-character"}),
             json!({"chaId":"char-1","name":"Synthetic","chats":[{"id":"chat-1","name":"Chat","message":[{"role":"char","data":"\u{ef01}COLDSTORAGE\u{ef01}missing-chat"}]}]}),
         ] {
-            let (directory, sink) = fixture();
             let mut blocks = valid_blocks();
             blocks[6] = block(2, false, "char-1", &cold);
+            saves.push(blocks);
+        }
+        // Plugin values are the only cold data, in the pluginStorage block or in the root.
+        for storage in [json!({"inline":true,"_coldpluginIndex":"index"}), json!({"_coldplugin":{"plugin":"value"}})] {
+            let mut blocks = valid_blocks();
+            blocks[5] = block(11, false, "pluginStorage", &storage);
+            saves.push(blocks);
+            let mut blocks = valid_blocks();
+            blocks.remove(5);
+            blocks[0] = block(1, true, "root", &json!({"username":"Imported","pluginCustomStorage":storage}));
+            saves.push(blocks);
+        }
+        for blocks in saves {
+            let (directory, sink) = fixture();
             let bytes = save_bytes(blocks);
             let registry = JobRegistry::default();
             let job = registry.create(JobKind::RestoreBlockRisuSave).unwrap();
@@ -5010,6 +5205,7 @@ mod tests {
             max_message_page: AtomicUsize::new(0),
             message_pages: Mutex::new(Vec::new()),
             cold_payloads: None,
+            unavailable_cold_payloads: Default::default(),
             unavailable_cold: Mutex::new(Vec::new()),
             cancel_after_page: None,
         };
@@ -5062,10 +5258,13 @@ mod tests {
             (3, "standalone-chat", "skipped-backup-data:1"),
             (6, "remote", "remote-backup-data:1"),
             (8, "custom-root-component", "skipped-backup-data:1"),
-            (12, "kv:synthetic", "skipped-plugin-storage:1"),
+            (12, "kv:synthetic", "skipped-backup-data:1"),
             (99, "future-content", "skipped-backup-data:1"),
         ] {
         let mut blocks = valid_blocks();
+        // Block type 12 also carries plugin ownership, which must still apply.
+        blocks[5] = block(11, false, "pluginStorage", &json!({"owned":"kept","free":1}));
+        blocks.insert(6, block(12, false, "pluginStorageMeta", &json!({"owned":{"plugin":"synthetic-plugin","updatedAt":1}})));
         blocks.push(block(
             kind,
             true,
@@ -5082,7 +5281,10 @@ mod tests {
         let result = restore_block_risu_save_path(&source, 1, &job, &sink).unwrap();
         assert!(result.warning_codes.contains(&warning.to_owned()), "{:?}", result.warning_codes);
         assert_eq!(job.status().incomplete_restore_preview.unwrap().warning_codes(), vec![warning]);
-        assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 2);
+        let store = sink.store.lock().unwrap();
+        assert_eq!(store.revision().unwrap(), 2);
+        assert_eq!(store.read_plugin_storage("synthetic-plugin", "owned", None).unwrap().map(|row| row.value), Some(json!("kept")));
+        assert_eq!(store.read_plugin_storage(crate::persistent_store::plugin_owner::UNOWNED_OWNER, "free", None).unwrap().map(|row| row.value), Some(json!(1)));
         }
     }
 

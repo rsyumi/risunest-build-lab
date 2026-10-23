@@ -51,6 +51,7 @@
     } from 'src/ts/selectedConversationLiveParserProjection'
     import type { SelectedConversationOperations } from 'src/ts/selectedConversationOperations'
     import { yieldToMainThread } from 'src/ts/ui/yieldToUi'
+    import { nextDisplayListenerOrder } from 'src/ts/process/luaDisplayTimeouts'
     import LoadingIndicator from 'src/lib/UI/GUI/LoadingIndicator.svelte'
     import { language } from 'src/lang'
     import {
@@ -182,6 +183,8 @@
         failed: boolean
         failureCount: number
         retryTimer: ReturnType<typeof setTimeout> | null
+        /** When the row asked for its display, taken by the mount that follows its preparation. */
+        displayRequestOrder?: number
     }
     let rowParserProjections = new Map<string, RowParserProjectionState>()
     interface PendingRowMount {
@@ -192,6 +195,8 @@
         readonly isCurrent: () => boolean
         readonly run: (settled: () => void) => void
         readonly parserProjectionState?: RowParserProjectionState
+        /** When the view asked for this row, kept while the row waits to mount. */
+        readonly displayRequestOrder: number
     }
     interface RowMountWaiter {
         readonly navigationGeneration: number
@@ -1217,6 +1222,10 @@
                 const sourceToken = sourceSnapshot?.sourceToken
                 const sourceVersion = sourceSnapshot?.version
                 const sourceRowVersion = viewportRow?.sourceVersion
+                const queuedMount = pendingRowMounts.get(key)
+                const displayRequestOrder = queuedMount && queuedMount.parserProjectionState === parserProjectionState
+                    ? queuedMount.displayRequestOrder
+                    : takeRowDisplayRequestOrder(parserProjectionState)
                 markRowMountPending(key, element)
                 pendingRowMounts.set(key, {
                     key,
@@ -1231,6 +1240,7 @@
                                 : 3,
                     order: refreshMountedDisplay ? -index : ++mountQueueOrder,
                     parserProjectionState,
+                    displayRequestOrder,
                     isCurrent: () => {
                         if (
                             destroyed ||
@@ -1279,6 +1289,7 @@
                                     parserProjection,
                                     parserAbortSignal: parserProjectionState?.controller.signal,
                                     onDisplaySettled: settled,
+                                    displayRequestOrder,
                                     viewportBinding:
                                         viewportRow && source && sourceToken
                                             ? {
@@ -1309,6 +1320,7 @@
                                 onEditorClose: () => queueProjectionReconcile(),
                                 onBodyRendered: () => reportBodyRendered(instance),
                                 onDisplaySettled: settled,
+                                displayRequestOrder,
                                 message: message.data,
                                 viewportRow,
                                 captureViewportTarget:
@@ -1756,11 +1768,13 @@
         const previous = activeRowPreparations.get(key)
         if (previous) finishRowPreparation(key, previous)
         element.dataset.chatConversationStartSignature = signature
+        const displayRequestOrder = pendingRowMounts.get(key)?.displayRequestOrder ?? nextDisplayListenerOrder()
         markRowMountPending(key, element)
         const request: PendingRowMount = {
             key, element,
             priority: viewportAnchor?.key === key ? 0 : 2,
             order: ++mountQueueOrder,
+            displayRequestOrder,
             isCurrent: () => mountedElements.get(key) === element && element.dataset.chatConversationStartSignature === signature,
             run(settled) {
                 element.replaceChildren()
@@ -1778,6 +1792,7 @@
                         acquireConversationStartParserLease,
                         selectedConversationOperations,
                         onDisplaySettled: settled,
+                        displayRequestOrder,
                     },
                 })
                 mountInstances.set(key, instance)
@@ -2085,9 +2100,17 @@
             failed: false,
             failureCount: 0,
             retryTimer: null,
+            displayRequestOrder: nextDisplayListenerOrder(),
         }
         rowParserProjections.set(key, state)
         return state
+    }
+
+    // A row waits for its projection before it mounts; its display was requested when the wait began.
+    function takeRowDisplayRequestOrder(state: RowParserProjectionState | undefined): number {
+        const order = state?.displayRequestOrder
+        if (state) state.displayRequestOrder = undefined
+        return order ?? nextDisplayListenerOrder()
     }
 
     function resolveRowParserProjection(

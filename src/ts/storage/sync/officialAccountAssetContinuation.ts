@@ -8,6 +8,7 @@ import { collectPinnedReferences } from './officialAccountSnapshot'
 import { nativeOfficialAccountKeys } from './nativeOfficialAccountFlow'
 import type { OfficialAccountAssetOutcome } from './officialAccountAssetOutcome'
 import { OfficialAssetOwnershipError } from '../accountReadError'
+import { isBackgroundExpiryReason } from '../../iosNative'
 export { OfficialAssetOwnershipError } from '../accountReadError'
 
 export interface OfficialAssetContinuation {
@@ -16,10 +17,12 @@ export interface OfficialAssetContinuation {
     accountId: string
     state: 'awaiting-activation' | 'interrupted' | 'stopped' | 'failed'
     library?: string
+    preActivationLibrary?: string
     manifest?: string[]
     manifestId?: string
     failedKeys: string[]
     status?: NativeFileJobStatus
+    previous?: Omit<OfficialAssetContinuation, 'previous'>
 }
 export type OfficialAssetRecovery = { kind: 'none' | 'current-library' | 'retry' | 'interrupted'; operationId?: string }
 const digest = (keys: string[]) => hashPayloadBytes(new TextEncoder().encode(JSON.stringify(keys)))
@@ -47,7 +50,7 @@ export function createOfficialAccountAssetContinuation(dependencies: {
         if (operationId && operationId !== receipt.operationId) throw new OfficialAssetOwnershipError('receipt')
         if (receipt.state === 'awaiting-activation') return null
         await guard(receipt)
-        if (!Array.isArray(receipt.manifest) || receipt.manifest.some(key => typeof key !== 'string' || !key.startsWith('assets/'))
+        if (!Array.isArray(receipt.manifest) || receipt.manifest.some(key => typeof key !== 'string' || !/^assets[/\\]/.test(key))
             || new Set(receipt.manifest).size !== receipt.manifest.length || receipt.manifestId !== await digest(receipt.manifest)) {
             throw new OfficialAssetOwnershipError('receipt')
         }
@@ -59,12 +62,19 @@ export function createOfficialAccountAssetContinuation(dependencies: {
         if (failure?.status === 'rejected') throw failure.reason
     }
     const prepare = async (accountId: string) => {
-        await settings.set(key, { version: 1, operationId: v4(), accountId, state: 'awaiting-activation', failedKeys: [] } satisfies OfficialAssetContinuation)
-        await settings.set(nativeOfficialAccountKeys.pendingAssets, null)
+        const current = await read()
+        const previous = current?.state === 'awaiting-activation' ? current.previous : current ?? undefined
+        const preActivationLibrary = await store.readLibraryIdentity?.()
+        await settings.set(key, { version: 1, operationId: v4(), accountId, state: 'awaiting-activation', failedKeys: [], previous, preActivationLibrary } satisfies OfficialAssetContinuation)
+    }
+    const cancelPreparation = async () => {
+        const receipt = await read()
+        if (receipt?.state === 'awaiting-activation') await settings.set(key, receipt.previous ?? null)
     }
     const bind = async (accountId: string, status?: NativeFileJobStatus) => {
-        const receipt = await read()
-        if (!receipt || receipt.state !== 'awaiting-activation' || receipt.accountId !== accountId) throw new OfficialAssetOwnershipError('receipt')
+        const prepared = await read()
+        if (!prepared || prepared.state !== 'awaiting-activation' || prepared.accountId !== accountId) throw new OfficialAssetOwnershipError('receipt')
+        const { previous: _previous, preActivationLibrary: _preActivationLibrary, ...receipt } = prepared
         receipt.library = await store.readLibraryIdentity?.()
         await guard(receipt)
         const lease = await store.acquireRevision(await readCurrentRevision(store))
@@ -74,6 +84,7 @@ export function createOfficialAccountAssetContinuation(dependencies: {
         await guard(receipt)
         receipt.state = 'interrupted'
         await settings.set(key, receipt)
+        await settings.set(nativeOfficialAccountKeys.pendingAssets, null)
     }
     const inspect = async (accountId: string): Promise<OfficialAssetRecovery> => {
         const raw = await read()
@@ -82,7 +93,15 @@ export function createOfficialAccountAssetContinuation(dependencies: {
             return { kind: legacy?.accountId === accountId ? 'current-library' : 'none' }
         }
         if (raw.accountId !== accountId) { await clear(); return { kind: 'none' } }
-        if (raw.state === 'awaiting-activation') return { kind: 'current-library' }
+        if (raw.state === 'awaiting-activation') {
+            const library = await store.readLibraryIdentity?.()
+            if ((raw.preActivationLibrary && raw.preActivationLibrary === library)
+                || (raw.previous?.accountId === accountId && raw.previous.library && raw.previous.library === library)) {
+                await cancelPreparation()
+                return inspect(accountId)
+            }
+            return { kind: 'current-library' }
+        }
         try {
             const receipt = await load(accountId)
             return { kind: receipt?.state === 'interrupted' ? 'interrupted' : 'retry', operationId: receipt!.operationId }
@@ -92,21 +111,28 @@ export function createOfficialAccountAssetContinuation(dependencies: {
             return { kind: 'none' }
         }
     }
-    return { prepare, bind, clear, load, guard, inspect,
+    return { prepare, bind, cancelPreparation, clear, load, guard, inspect,
         async stop(accountId: string, operationId: string) {
-            const receipt = await load(accountId, operationId)
+            let receipt: Awaited<ReturnType<typeof load>>
+            try { receipt = await load(accountId, operationId) }
+            catch (error) {
+                if (error instanceof OfficialAssetOwnershipError) return
+                throw error
+            }
             if (receipt && receipt.state !== 'stopped') await settings.set(key, { ...receipt, state: 'stopped' })
         },
         async start(receipt: OfficialAssetContinuation) {
             await guard(receipt)
             await settings.set(key, { ...receipt, state: 'interrupted' })
         },
-        async settle(receipt: OfficialAssetContinuation, outcome: OfficialAccountAssetOutcome) {
+        async settle(receipt: OfficialAssetContinuation, outcome: OfficialAccountAssetOutcome, signal?: AbortSignal) {
             const current = await read()
             if (current?.operationId !== receipt.operationId) throw new OfficialAssetOwnershipError('receipt')
             await guard(receipt)
             if (outcome.state === 'succeeded') await clear()
-            else await settings.set(key, { ...receipt, state: outcome.state === 'cancelled' ? 'stopped' : 'failed', failedKeys: outcome.failedKeys })
+            else await settings.set(key, { ...receipt, state: outcome.state === 'cancelled'
+                ? isBackgroundExpiryReason(signal?.reason) ? 'interrupted' : 'stopped'
+                : 'failed', failedKeys: outcome.failedKeys })
         },
     }
 }

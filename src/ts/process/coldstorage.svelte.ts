@@ -1,10 +1,12 @@
 import { DBState } from "../stores.svelte"
-import { decompress as fflateDecompress } from "fflate"
+import { Decompress } from "fflate"
 import { fetchProtectedResource } from "../sionyw"
 import { alertConfirm } from "../alert"
 import { language } from "src/lang"
 import type { Database } from "../storage/database.svelte"
 import { getColdStorageAffectedCharacters, listColdDataKeysFromDb } from "./coldstorageData"
+import type { ColdItemRead } from "./coldPayloadExpansion"
+import { MAX_NATIVE_REQUEST_BYTES } from "../storage/nativePersistenceValue"
 
 export {
     coldStorageHeader,
@@ -15,15 +17,45 @@ export {
     listColdDataKeysFromDb
 } from "./coldstorageData"
 
-async function decompress(data:Uint8Array) {
-    return new Promise<Uint8Array>((resolve, reject) => {
-        fflateDecompress(data, (err, decompressed) => {
-            if (err) {
-                return reject(err)
-            }
-            resolve(decompressed)
-        })
+/**
+ * Decompresses a response while neither the body nor its decoded bytes exceed
+ * `maxBytes`, and returns null once either does.
+ */
+async function decompressBounded(response:Response, maxBytes:number):Promise<Uint8Array|null> {
+    const chunks:Uint8Array[] = []
+    let decoded = 0
+    const inflater = new Decompress((chunk) => {
+        decoded += chunk.length
+        if (decoded <= maxBytes) chunks.push(chunk)
     })
+    const reader = response.body?.getReader()
+    let received = 0
+    const push = (chunk:Uint8Array, final:boolean) => {
+        received += chunk.length
+        if (received > maxBytes) return false
+        inflater.push(chunk, final)
+        return decoded <= maxBytes
+    }
+    if (!reader) {
+        if (!push(new Uint8Array(await response.arrayBuffer()), true)) return null
+    } else {
+        while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            if (!push(value, false)) {
+                await reader.cancel().catch(() => {})
+                return null
+            }
+        }
+        if (!push(new Uint8Array(0), true)) return null
+    }
+    const bytes = new Uint8Array(decoded)
+    let offset = 0
+    for (const chunk of chunks) {
+        bytes.set(chunk, offset)
+        offset += chunk.length
+    }
+    return bytes
 }
 
 async function discardResponseBody(response:Response):Promise<void> {
@@ -33,13 +65,16 @@ async function discardResponseBody(response:Response):Promise<void> {
 }
 
 /**
- * Reads an upstream account cold payload. Import paths expand it into a record
- * body; nothing publishes a cold payload back to the account.
+ * Reads an upstream account cold item. Import paths expand it into a record
+ * body or a plugin value; nothing publishes a cold item back to the account.
+ * 200 is present whatever JSON it holds, 404 is missing, and anything else is unreadable.
+ * An item above the size native storage accepts for one record is too large.
  */
 export async function getAccountColdStorageItem(
     key:string,
     signal?:AbortSignal,
-):Promise<unknown|null> {
+    maxBytes = MAX_NATIVE_REQUEST_BYTES,
+):Promise<ColdItemRead> {
     const d = await fetchProtectedResource('/hub/account/coldstorage', {
         method: 'GET',
         headers: {
@@ -50,11 +85,17 @@ export async function getAccountColdStorageItem(
 
     if(d.status !== 200){
         await discardResponseBody(d)
-        return null
+        return { kind: d.status === 404 ? 'missing' : 'unreadable' }
     }
-    const buf = await d.arrayBuffer()
-    const text = new TextDecoder().decode(await decompress(new Uint8Array(buf)))
-    return JSON.parse(text)
+    try {
+        const bytes = await decompressBounded(d, maxBytes)
+        if (!bytes) return { kind: 'too-large' }
+        return { kind: 'present', value: JSON.parse(new TextDecoder().decode(bytes)) }
+    } catch (error) {
+        if ((error as { name?: string })?.name === 'AbortError') throw error
+        console.error(`Failed to decode the account cold storage item ${key}:`, error)
+        return { kind: 'unreadable' }
+    }
 }
 
 export async function listColdDataKeys(db: Pick<Database, 'characters'> = DBState.db): Promise<string[]> {

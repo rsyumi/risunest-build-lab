@@ -2,7 +2,10 @@ export interface ServerSyncSchedulerDependencies {
     push(): Promise<void>
     pull(completeAvailable?: boolean): Promise<void>
     connect(operationId: string): Promise<void>
+    /** Stops the notification channel and cancels running work. */
     disconnect(): Promise<void>
+    /** Stops only the notification channel, so running work continues while hidden. */
+    stopNotifications?(): Promise<void>
     retryClock?(): Promise<void>
     publishHidden?(): Promise<void>
     automaticSyncAvailable?(): boolean
@@ -25,7 +28,7 @@ const isCancellation = (error: unknown) => serverSyncErrorCode(error) === 'cance
 export function isServerSyncUnavailable(error: unknown): boolean {
     if (typeof error === 'object' && error && 'retryable' in error && error.retryable === false) return false
     const code = serverSyncErrorCode(error)
-    if (['server-unreachable', 'server-timeout', 'request-timeout', 'incomplete-response', 'directory-unreachable', 'directory-response-error', 'directory-incomplete-response', 'sync-retry-budget-exhausted'].includes(code)) return true
+    if (['server-unreachable', 'server-timeout', 'server-updating', 'request-timeout', 'incomplete-response', 'directory-unreachable', 'directory-response-error', 'directory-incomplete-response', 'sync-retry-budget-exhausted'].includes(code)) return true
     // Tunnel/gateway HTML responses have no Sync error body.
     return code === 'server-response-error' && typeof error === 'object' && error !== null
         && 'status' in error && typeof error.status === 'number' && error.status >= 500 && error.status < 600
@@ -68,14 +71,22 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
         }, outageUntil - Date.now())
     }
     const failedLanes = new Set<Lane>()
-    const disconnect = () => {
-        if (!disconnecting) disconnecting = (async () => {
-            await dependencies.disconnect()
+    let disconnectingFully = false
+    const disconnect = (stop = dependencies.disconnect) => {
+        const fully = stop === dependencies.disconnect
+        // A cancel requested while hiding stops only the notification channel still runs after it.
+        if (disconnecting && (disconnectingFully || !fully)) return disconnecting
+        const previous = disconnecting
+        disconnectingFully = fully
+        const current: Promise<void> = (async () => {
+            if (previous) await previous.catch(() => {})
+            await stop()
             const started = connecting
             // A start that was already running may finish after the stop, so stop again once it settles.
-            if (started) { await started; await dependencies.disconnect() }
-        })().finally(() => { disconnecting = undefined })
-        return disconnecting
+            if (started) { await started; await stop() }
+        })().finally(() => { if (disconnecting === current) { disconnecting = undefined; disconnectingFully = false } })
+        disconnecting = current
+        return current
     }
     const code = serverSyncErrorCode
     const succeeded = (lane: Lane, epoch: number) => {
@@ -149,7 +160,10 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
     }
     const connect = () => {
         if (waiting()) { scheduleOutage(); return }
-        if (!foreground || blocked || connecting || !available()) return
+        if (!foreground || blocked || !available()) return
+        // A stop from the previous hidden session must finish before the new channel starts.
+        if (disconnecting) { void disconnecting.then(connect, connect); return }
+        if (connecting) return
         const epoch = outageEpoch
         const attempt: Promise<void> = dependencies.connect(notificationOperationId ??= crypto.randomUUID()).then(() => succeeded('connect', epoch), error => { fail(error, 'connect'); socket(false) })
             .finally(() => { if (connecting === attempt) connecting = undefined })
@@ -204,7 +218,8 @@ export function createServerSyncScheduler(dependencies: ServerSyncSchedulerDepen
             else {
                 connected = false
                 if (publishPending && !blocked && dependencies.publishHidden) await publishHidden()
-                if (!foreground) await disconnect()
+                // Hiding stops checks and the notification channel; sends and receives already running finish.
+                if (!foreground) await disconnect(dependencies.stopNotifications ?? dependencies.disconnect)
             }
         },
         localChange(immediate = false) {

@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { assertInventory, assertListedTestsExist, discoverTestEntries, extendedAppTests, nodeAppTests, ownerOf, selectNodeTests } from './suiteOwnership.mjs'
+import { assertInventory, assertListedTestsExist, discoverTestEntries, extendedAppTests, nodeAppTests, luaWorkerTests, ownerOf, selectNodeTests } from './suiteOwnership.mjs'
 import { parseVitestInventory, webExportInventory } from './testInventory.mjs'
 
 const ordinary = 'src/ts/storage/newRegression.test.ts'
@@ -42,7 +42,7 @@ test('detects exclusions, duplicate ownership and missing runner owners', () => 
 })
 
 test('every listed extended and node entry exists', () => {
-  const listed = [...extendedAppTests, ...nodeAppTests]
+  const listed = [...extendedAppTests, ...nodeAppTests, ...luaWorkerTests]
   assert.doesNotThrow(() => assertListedTestsExist(listed))
   assert.throws(() => assertListedTestsExist(listed.filter(path => path !== nodeOnly)), new RegExp(nodeOnly))
 })
@@ -51,12 +51,20 @@ test('accepts the installed CLI JSON shape and rejects unexpected output', () =>
   const root = join(tmpdir(), 'inventory')
   const listed = [{ file: join(root, ordinary), projectName: 'app' }, { file: join(root, nodeOnly), projectName: 'app-node' }]
   assert.deepEqual(parseVitestInventory(JSON.stringify(listed), root), {
-    app: [ordinary], 'app-node': [nodeOnly], 'app-extended': [], harness: [],
+    app: [ordinary], 'app-node': [nodeOnly], 'app-extended': [], 'app-lua-worker': [], harness: [],
   })
   for (const invalid of ['warning\n[]', '{}', '[]', '[{}]', JSON.stringify([{ file: join(root, ordinary), projectName: 'unknown' }])]) {
     assert.throws(() => parseVitestInventory(invalid, root))
   }
   assert.throws(() => parseVitestInventory(JSON.stringify([{ file: join(root, '..', 'outside.test.ts'), projectName: 'app' }]), root), /outside/)
+})
+
+test('requires the declared Lua Worker reruns without allowing arbitrary duplicate ownership', () => {
+  const inventories = { app: luaWorkerTests, 'app-lua-worker': luaWorkerTests }
+  assert.doesNotThrow(() => assertInventory(luaWorkerTests, inventories))
+  assert.throws(() => assertInventory(luaWorkerTests, { ...inventories, 'app-lua-worker': [] }), /rerun inventory/)
+  assert.throws(() => assertInventory(luaWorkerTests, { ...inventories, 'app-lua-worker': [...luaWorkerTests, luaWorkerTests[0]] }), /rerun inventory/)
+  assert.throws(() => assertInventory([...luaWorkerTests, ordinary], { ...inventories, app: [...luaWorkerTests, ordinary], 'app-lua-worker': [...luaWorkerTests, ordinary] }), /rerun inventory/)
 })
 
 test('the web export inventory matches only what its own test script runs', () => {

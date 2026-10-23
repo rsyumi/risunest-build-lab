@@ -139,7 +139,10 @@ export function getFallbackOSLabel(): string {
 export async function getDetailedOSLabel(): Promise<string> {
     if (isTauri) {
         try {
-            return joinOSLabel(formatOSName(tauriOs.type()), normalizeOSVersion(tauriOs.version()))
+            const osName = formatOSName(tauriOs.type())
+            const version = normalizeOSVersion(tauriOs.version())
+            if (osName === "Windows") return version ? `Windows (NT ${version})` : osName
+            return joinOSLabel(osName, version)
         } catch (error) {
             console.warn("Failed to read native OS details:", error)
         }

@@ -205,6 +205,14 @@ impl<R: Runtime> IosNative<R> {
         response.map(WebAuthenticationResponse::outcome).unwrap_or(WebAuthenticationOutcome::Failed)
     }
 
+    pub async fn app_lock_request<T: serde::de::DeserializeOwned>(
+        &self,
+        command: &str,
+        payload: impl Serialize,
+    ) -> Result<T, String> {
+        self.0.handle.run_mobile_plugin_async(command, payload).await.map_err(|error| error.to_string())
+    }
+
     pub async fn cancel_authentication(&self) {
         let _ = self
             .0

@@ -118,7 +118,8 @@ impl Projector {
             }
             &external
         } else { value };
-        let (mut value, losses) = project_node(&self.schema, node, value, 0)?;
+        let (mut value, losses) =
+            project_node(&self.schema, node, value, 0).map_err(|rejection| rejection.into_error(name))?;
         self.losses.merge(losses);
         if name == "Chat" {
             if let (Some(ids), Some(id)) = (
@@ -305,14 +306,82 @@ fn error(message: &str) -> NativeJobError {
     NativeJobError::new("unsupported-projection", message)
 }
 
+/// A projection failure with the contract path to the rejected value. Segments
+/// are pushed while unwinding, so they are stored innermost first.
+struct Rejection {
+    message: &'static str,
+    path: Vec<String>,
+}
+impl Rejection {
+    fn new(message: &'static str) -> Self {
+        Self { message, path: Vec::new() }
+    }
+    fn at(mut self, segment: String) -> Self {
+        self.path.push(segment);
+        self
+    }
+    fn into_error(self, root: &str) -> NativeJobError {
+        let path: String = self.path.into_iter().rev().collect();
+        error(&format!("{} at {root}{path}", self.message))
+    }
+}
+
+/// Values the target does not define, replaced by the closest value it accepts
+/// instead of failing a required field or dropping an optional one.
+fn fallback(
+    schema: &Value,
+    key: &str,
+    id: &str,
+    value: &Value,
+    depth: usize,
+) -> Option<(Value, Losses)> {
+    let (replacement, replaced) = match (key, value) {
+        // Requests already send High when a model has no XHigh effort.
+        ("adaptiveThinkingEffort" | "adaptive_thinking_effort", Value::String(effort))
+            if effort == "xhigh" =>
+        {
+            (Value::from("high"), 1)
+        }
+        // LLMTokenizer.DeepSeekV4 (14) counts as DeepSeek (13); any other
+        // tokenizer the target lacks becomes Unknown (0).
+        ("tokenizer", Value::Number(tokenizer)) => {
+            (Value::from(if tokenizer.as_u64() == Some(14) { 13 } else { 0 }), 1)
+        }
+        // A model flag the target lacks has no behavior there, so only that flag is removed.
+        ("customFlags" | "flags", Value::Array(flags)) => {
+            // An optional list is a union around the array.
+            let node = &schema["nodes"][id];
+            let item = match node["kind"].as_str()? {
+                "array" => node["items"].as_str(),
+                "union" => node["variants"].as_array()?.iter().find_map(|variant| {
+                    let variant = &schema["nodes"][variant.as_str()?];
+                    (variant["kind"] == "array").then(|| variant["items"].as_str()).flatten()
+                }),
+                _ => None,
+            }?;
+            let kept: Vec<Value> = flags
+                .iter()
+                .filter(|flag| project_node(schema, item, flag, depth + 1).is_ok())
+                .cloned()
+                .collect();
+            let removed = (flags.len() - kept.len()) as u64;
+            (Value::Array(kept), removed)
+        }
+        _ => return None,
+    };
+    let (value, mut losses) = project_node(schema, id, &replacement, depth).ok()?;
+    losses.add("unsupported-option-value", replaced);
+    Some((value, losses))
+}
+
 fn project_node(
     schema: &Value,
     id: &str,
     value: &Value,
     depth: usize,
-) -> Result<(Value, Losses), NativeJobError> {
+) -> Result<(Value, Losses), Rejection> {
     if depth > 256 {
-        return Err(error("compatibility structure exceeds nesting limit"));
+        return Err(Rejection::new("compatibility structure exceeds nesting limit"));
     }
     let node = &schema["nodes"][id];
     let mut losses = Losses::default();
@@ -334,7 +403,7 @@ fn project_node(
             let mut best: Option<(Value, Losses)> = None;
             for branch in node["variants"]
                 .as_array()
-                .ok_or_else(|| error("invalid union contract"))?
+                .ok_or_else(|| Rejection::new("invalid union contract"))?
             {
                 if let Ok(candidate) =
                     project_node(schema, branch.as_str().unwrap_or(""), value, depth + 1)
@@ -348,20 +417,25 @@ fn project_node(
                     }
                 }
             }
-            return best.ok_or_else(|| error("value is not supported by target contract"));
+            return best.ok_or_else(|| Rejection::new("value is not supported by target contract"));
         }
         "object" if value.is_object() => {
             let mut out = Map::new();
             let fields = node["fields"]
                 .as_object()
-                .ok_or_else(|| error("invalid object contract"))?;
+                .ok_or_else(|| Rejection::new("invalid object contract"))?;
             for (key, value) in value.as_object().unwrap() {
                 let field = fields.get(key);
                 let child = field
                     .and_then(|f| f["node"].as_str())
                     .or_else(|| node["additional"].as_str());
                 if let Some(child) = child {
-                    match project_node(schema, child, value, depth + 1) {
+                    let projected = project_node(schema, child, value, depth + 1).or_else(|rejection| {
+                        field
+                            .and_then(|_| fallback(schema, key, child, value, depth + 1))
+                            .ok_or(rejection)
+                    });
+                    match projected {
                         Ok((value, child_losses)) => {
                             out.insert(key.clone(), value);
                             losses.merge(child_losses);
@@ -369,7 +443,14 @@ fn project_node(
                         Err(_) if field.is_some_and(|f| f["optional"].as_bool() == Some(true)) => {
                             losses.add("unsupported-option-value", 1)
                         }
-                        Err(error) => return Err(error),
+                        // Dictionary keys are user data, so the path names only declared fields.
+                        Err(rejection) => {
+                            return Err(rejection.at(if field.is_some() {
+                                format!(".{key}")
+                            } else {
+                                ".*".to_owned()
+                            }))
+                        }
                     }
                 } else if key.starts_with("__") && schema["types"]["Message"].as_str() == Some(id) {
                     // Plugin-owned message fields: both targets keep unknown
@@ -384,10 +465,11 @@ fn project_node(
         "array" if value.is_array() => {
             let child = node["items"]
                 .as_str()
-                .ok_or_else(|| error("invalid array contract"))?;
+                .ok_or_else(|| Rejection::new("invalid array contract"))?;
             let mut out = Vec::new();
-            for item in value.as_array().unwrap() {
-                let (item, l) = project_node(schema, child, item, depth + 1)?;
+            for (index, item) in value.as_array().unwrap().iter().enumerate() {
+                let (item, l) = project_node(schema, child, item, depth + 1)
+                    .map_err(|rejection| rejection.at(format!("[{index}]")))?;
                 losses.merge(l);
                 out.push(item);
             }
@@ -396,33 +478,34 @@ fn project_node(
         "tuple" if value.is_array() => {
             let items = node["items"]
                 .as_array()
-                .ok_or_else(|| error("invalid tuple contract"))?;
+                .ok_or_else(|| Rejection::new("invalid tuple contract"))?;
             let values = value.as_array().unwrap();
             let optional = node["optional"].as_array();
             if (values.len()..items.len())
                 .any(|i| optional.and_then(|v| v.get(i)).and_then(Value::as_bool) != Some(true))
             {
-                return Err(error("tuple length is unsupported by target"));
+                return Err(Rejection::new("tuple length is unsupported by target"));
             }
             losses.add(
                 "unsupported-tuple-elements",
                 values.len().saturating_sub(items.len()) as u64,
             );
             let mut out = Vec::new();
-            for (item, child) in values.iter().zip(items) {
+            for (index, (item, child)) in values.iter().zip(items).enumerate() {
                 let (item, l) =
-                    project_node(schema, child.as_str().unwrap_or(""), item, depth + 1)?;
+                    project_node(schema, child.as_str().unwrap_or(""), item, depth + 1)
+                        .map_err(|rejection| rejection.at(format!("[{index}]")))?;
                 losses.merge(l);
                 out.push(item);
             }
             Value::Array(out)
         }
-        _ => return Err(error("value is not supported by target contract")),
+        _ => return Err(Rejection::new("value is not supported by target contract")),
     };
     Ok((output, losses))
 }
 
-/// Only exact values in declared asset fields (or explicit plugin data) are
+// Only exact values in declared asset fields (or explicit plugin data) are
 /// rewritten. Prompts, scripts and regular expressions are never searched.
 pub(super) fn rewrite_assets(value: &mut Value, replacements: &HashMap<String, String>) {
     fn mapped(value: &mut Value, replacements: &HashMap<String, String>) {
@@ -683,9 +766,56 @@ mod tests {
                     }
                 }
                 let mut projector = Projector::new(target).unwrap();
-                assert!(projector.project(name, &json!({"hypaModel": "unknown-model"})).is_err());
+                let error = projector.project(name, &json!({"hypaModel": "unknown-model"})).unwrap_err();
+                assert_eq!(error.code, "unsupported-projection");
+                assert_eq!(error.message, format!("value is not supported by target contract at {name}.hypaModel"));
             }
         }
+    }
+
+    #[test]
+    fn compatible_projection_replaces_values_pocket_lacks_with_the_closest_supported_value() {
+        let database = json!({
+            "adaptiveThinkingEffort": "xhigh",
+            "customFlags": [21, 23, 26],
+            "customModels": [
+                {"name": "Synthetic V4", "tokenizer": 14, "flags": [0, 24]},
+                {"name": "Synthetic GLM", "tokenizer": 16, "flags": [25]},
+            ],
+            "seperateParameters": {"memory": {"adaptive_thinking_effort": "xhigh"}},
+        });
+        let preset = json!({"adaptiveThinkingEffort": "xhigh", "customFlags": [1, 23]});
+        // RisuAI defines every one of these values, so nothing changes there.
+        let mut projector = Projector::new(CompatibilityTarget::RisuAi).unwrap();
+        assert_eq!(projector.project("DataBase", &database).unwrap(), database);
+        assert_eq!(projector.project("botPreset", &preset).unwrap(), preset);
+        assert!(projector.losses.0.is_empty());
+
+        let mut projector = Projector::new(CompatibilityTarget::PocketRisu).unwrap();
+        assert_eq!(projector.project("DataBase", &database).unwrap(), json!({
+            "adaptiveThinkingEffort": "high",
+            "customFlags": [21],
+            "customModels": [
+                {"name": "Synthetic V4", "tokenizer": 13, "flags": [0]},
+                {"name": "Synthetic GLM", "tokenizer": 0, "flags": []},
+            ],
+            "seperateParameters": {"memory": {"adaptive_thinking_effort": "high"}},
+        }));
+        // Optional preset fields are replaced too instead of being dropped.
+        assert_eq!(
+            projector.project("botPreset", &preset).unwrap(),
+            json!({"adaptiveThinkingEffort": "high", "customFlags": [1]})
+        );
+        // One per replaced value and one per removed flag.
+        assert_eq!(projector.losses.0, BTreeMap::from([("unsupported-option-value".to_owned(), 10)]));
+
+        let error = projector
+            .project("DataBase", &json!({"customModels": [{"name": "Synthetic", "format": -1}]}))
+            .unwrap_err();
+        assert_eq!(
+            error.message,
+            "value is not supported by target contract at DataBase.customModels[0].format"
+        );
     }
 
     #[test]

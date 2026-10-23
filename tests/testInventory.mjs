@@ -9,7 +9,7 @@ import { assertInventory, assertListedTestsExist, discoverTestEntries, normalize
 export function parseVitestInventory(output, root, owner) {
   const entries = JSON.parse(output)
   if (!Array.isArray(entries) || entries.length === 0) throw new Error(`Empty or invalid ${owner ?? 'root'} Vitest inventory`)
-  const result = owner ? { [owner]: [] } : { app: [], 'app-node': [], 'app-extended': [], harness: [] }
+  const result = owner ? { [owner]: [] } : { app: [], 'app-node': [], 'app-extended': [], 'app-lua-worker': [], harness: [] }
   for (const entry of entries) {
     if (!entry || typeof entry.file !== 'string') throw new Error('Unexpected Vitest list output')
     const name = owner ?? entry.projectName

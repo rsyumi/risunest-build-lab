@@ -134,8 +134,8 @@ impl ServerSyncCommandState {
         *slot=Some(spawn(NotificationJob(self.notification_active.clone())));
         Ok(())
     }
-    // The first-binding stage holds the library permit outside the transport lanes. Hiding the
-    // app stops those lanes but not the stage; only a reload of the page that awaits it does.
+    // The first-binding stage holds the library permit outside the transport lanes. A sync cancel
+    // stops those lanes but not the stage; only a reload of the page that awaits it does.
     fn claim_stage(&self) -> Result<(StageJob<'_>, Arc<AtomicBool>)> {
         let flag=Arc::new(AtomicBool::new(false));
         *self.stage.lock().map_err(|_|SyncError::new("server-sync-state-unavailable",503))?=Some(flag.clone());
@@ -361,8 +361,10 @@ fn lww_client_cancelled(store:&PersistentStore,cancelled:Option<Arc<AtomicBool>>
 pub(super) fn with_lww_client<T>(store:&mut PersistentStore,cancelled:Option<Arc<AtomicBool>>,operation:impl FnOnce(&mut super::lww_client::LwwClient,&mut PersistentStore)->Result<T>)->Result<T> {
     let mut core=lww_client_cancelled(store,cancelled)?;
     let result=operation(&mut core,store);
-    let persisted=super::binding::persist_resolved_endpoint(store,&core);
-    result.and_then(|value|persisted.map(|()|value))
+    if let Err(error)=super::binding::persist_resolved_endpoint(store,&core) {
+        record_failure("save-resolved-endpoint",&error);
+    }
+    result
 }
 #[tauri::command]
 pub(crate) async fn server_sync_status(app:AppHandle)->Result<LwwStatus> {
@@ -377,8 +379,8 @@ pub(crate) async fn server_sync_lww_push(app:AppHandle,request:crate::persistent
     logged_blocking("push",move|| within(&LANES.send,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"send")?;let mut store=job_store(&app)?;with_lww_client(&mut store,Some(cancelled),|core,store|core.push(store,&request,&generating))})).await
 }
 #[tauri::command]
-pub(crate) async fn server_sync_lww_pull(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<super::lww_client::ReceivePage> {
-    logged_blocking("pull",move|| within(&LANES.receive,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"receive")?;let mut store=job_store(&app)?;with_lww_client(&mut store,Some(cancelled),|core,store|core.receive_page_with_frontier(store,&request))})).await
+pub(crate) async fn server_sync_lww_pull(app:AppHandle,request:crate::persistent_store::lww::Header,startup:Option<bool>)->Result<super::lww_client::ReceivePage> {
+    logged_blocking("pull",move|| within(&LANES.receive,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"receive")?;let mut store=job_store(&app)?;with_lww_client(&mut store,Some(cancelled),|core,store|{core.client.retry_transient=!startup.unwrap_or(false);core.receive_page_with_frontier(store,&request)})})).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_lww_ack(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<()> {
@@ -392,8 +394,8 @@ pub(crate) async fn server_sync_lww_fence(app:AppHandle,new_device:bool)->Result
 }
 
 #[tauri::command]
-pub(crate) async fn server_sync_lww_activate(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<()> {
-    logged_blocking("activate",move|| within(&LANES.binding,|| {super::binding::activate(&mut job_store(&app)?,&request,None)})).await
+pub(crate) async fn server_sync_lww_activate(app:AppHandle,request:crate::persistent_store::lww::Header,startup:Option<bool>)->Result<()> {
+    logged_blocking("activate",move|| within(&LANES.binding,|| {let mut store=job_store(&app)?;if startup.unwrap_or(false) {super::binding::activate_for_startup(&mut store,&request)} else {super::binding::activate(&mut store,&request,None)}})).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_lww_pending_binding(app:AppHandle)->Result<Option<super::binding::PendingBinding>> {logged_blocking("pending-binding",move||{super::binding::pending_binding(&job_store(&app)?)}).await}
@@ -851,6 +853,20 @@ mod failure_log_tests {
 
     #[test]
     fn routine_refusals_and_transient_codes_are_warnings_without_their_cause() {
+        let (_root, mut store) = super::super::lww_tests::local();
+        let capture = store.prepare_content_capture("synthetic-capture", "synthetic-export",
+            store.revision().unwrap()).unwrap();
+        let failure = recorded("synthetic-capture-status", store.asset_residency_status())
+            .err().expect("a capture keeps the asset inventory unavailable");
+        assert_eq!((failure.code.as_str(), failure.status, failure.retryable),
+            ("library-operation-busy", 409, true));
+        let entry = logged("synthetic-capture-status");
+        assert_eq!(entry.level, "warn");
+        assert!(entry.message.contains("code=library-operation-busy status=409 at="));
+        assert!(!entry.message.contains("cause="));
+        drop(capture);
+        assert!(store.asset_residency_status().is_ok());
+
         for (index, code) in EXPECTED_REFUSALS
             .iter()
             .chain(super::super::TRANSIENT_CODES.iter())

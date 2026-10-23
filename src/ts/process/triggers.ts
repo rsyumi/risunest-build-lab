@@ -7,7 +7,7 @@ import { getCurrentCharacter, getDatabase, setCharacterByIndex, setDatabase, typ
 import { tokenize } from "../tokenizer";
 import { getModuleTriggers } from "./modules";
 import { get } from "svelte/store";
-import { ReloadChatPointer, ReloadGUIPointer, CurrentTriggerIdStore, DBState } from "../stores.svelte";
+import { ReloadGUIPointer, CurrentTriggerIdStore, DBState } from "../stores.svelte";
 import { processMultiCommand, type CommandGeneration } from "./command";
 import { parseKeyValue, sleep } from "../util";
 import { alertError, alertInput, alertNormal, alertSelect } from "../alert";
@@ -23,7 +23,7 @@ import {
     type ConversationCommitObserver,
 } from "./conversationOperationContext";
 import { createScriptConversationAccess, type ScriptConversationAccess } from './scriptConversationAccess';
-import { requestScriptDisplayRefresh } from './scriptDisplayRefresh';
+import { rebuildScriptDisplayRow, requestScriptDisplayRefresh } from './scriptDisplayRefresh';
 import { noteChatVariableRead } from './scriptVariableReads';
 import { peekActiveConversationSession } from "../storage/persistentDataRuntime.svelte";
 import { runSerializedUserTrigger } from './conversationUserTrigger';
@@ -1636,6 +1636,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                     if(!promptbody){
                         promptbody = [{role:'user', content:effectValue}]
                     }
+                    access?.flushVariables()
                     const result = await requestChatData({
                         formated: promptbody,
                         bias: {},
@@ -1658,6 +1659,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                         break
                     }
 
+                    access?.flushVariables()
                     const processer = new HypaProcesser()
                     const effectValue = risuChatParser(effect.value,{chara:char})
                     const source = risuChatParser(effect.source,{chara:char})
@@ -1691,6 +1693,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
 
                     const effectValue = risuChatParser(effect.value,{chara:char})
                     const negValue = risuChatParser(effect.negValue,{chara:char})
+                    access?.flushVariables()
                     const gen = await generateAIImage(effectValue, char, negValue, 'inlay')
                     if(!gen){
                         setVar(effect.inputVar, 'Error: Image generation failed')
@@ -2037,6 +2040,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                     }
                     let value = effect.valueType === 'value' ? risuChatParser(effect.value,{chara:char}) : getVar(risuChatParser(effect.value,{chara:char}))
                     let negValue = effect.negValueType === 'value' ? risuChatParser(effect.negValue,{chara:char}) : getVar(risuChatParser(effect.negValue,{chara:char}))
+                    access?.flushVariables()
                     let gen = await generateAIImage(value, char, negValue, 'inlay')
                     if(!gen){
                         setVar(risuChatParser(effect.outputVar, {chara:char}), 'null')
@@ -2056,6 +2060,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                     }
                     let source = effect.sourceType === 'value' ? risuChatParser(effect.source,{chara:char}) : getVar(risuChatParser(effect.source,{chara:char}))
                     let value = effect.valueType === 'value' ? risuChatParser(effect.value,{chara:char}) : getVar(risuChatParser(effect.value,{chara:char}))
+                    access?.flushVariables()
                     let processer = new HypaProcesser()
                     await processer.addText(value.split('§'))
                     let val = await processer.similaritySearch(source)
@@ -2071,6 +2076,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                     if(!promptbody){
                         promptbody = [{role:'user', content:value}]
                     }
+                    access?.flushVariables()
                     let result = await requestChatData({
                         formated: promptbody,
                         bias: {},
@@ -2534,14 +2540,12 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                 }
                 case 'v2UpdateChatAt':{
                     access?.flushVariables()
-                    ReloadChatPointer.update((v) => {
-                        v[effect.index] = (v[effect.index] ?? 0) + 1
-                        return v
-                    })
+                    rebuildScriptDisplayRow(effect.index)
                     break
                 }
                 case 'v2Wait':{
                     let value = effect.valueType === 'value' ? Number(risuChatParser(effect.value,{chara:char})) : Number(getVar(risuChatParser(effect.value,{chara:char})))
+                    access?.flushVariables()
                     await sleep(value * 1000)
                     break
                 }

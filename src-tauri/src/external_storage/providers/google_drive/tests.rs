@@ -2623,7 +2623,7 @@ fn segment_listing_keeps_logical_names_and_routes_read_stat_delete_to_file_ids()
         replies.extend([control_reply(vec![file("opaque-file-a"), file("opaque-file-b")]),
             json_reply(200, file("opaque-file-a")), json_reply(200, file("opaque-file-a")),
             Reply::Http {status:200,headers:vec![],body:bytes.clone()},
-            json_reply(200, file("opaque-file-a")), Reply::Http {status:204,headers:vec![],body:vec![]}]);
+            json_reply(200, file("opaque-file-a")), Reply::Http {status:204,headers:vec![("content-type".into(), "text/html; charset=UTF-8".into())],body:vec![]}]);
         let server = WireServer::start(replies);
         let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
         let cancel = Cancellation::default();

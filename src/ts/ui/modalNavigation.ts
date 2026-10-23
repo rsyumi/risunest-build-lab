@@ -1,3 +1,4 @@
+import { isAppLockInputBlocked } from '../appLock/input'
 import { get } from 'svelte/store'
 import { alertStore } from '../stores.svelte'
 import { isCompositionKey } from '../hotkeyModifier'
@@ -64,6 +65,7 @@ function navigationLayer(node: HTMLElement, initial: NavigationOptions, trapFocu
     }
     const isTopmost = () => token !== null && [...live].at(-1) === token
     const closeOnBack = () => {
+        if (isAppLockInputBlocked()) return
         if (cleanupInFlight || !isTopmost() || !token || historyTokens().includes(token)) return
         const remaining = [...live].filter((entry) => entry !== token)
         if (cancelVisibleAlert()) {
@@ -127,6 +129,7 @@ function navigationLayer(node: HTMLElement, initial: NavigationOptions, trapFocu
  * A layer whose entry the WebView skips, because it was added without a tap, closes through the page.
  */
 export function handleRootBack(event: Event) {
+    if (isAppLockInputBlocked()) { event.preventDefault(); return }
     if (get(alertStore).type === 'tos') return
     if (cancelVisibleAlert()) event.preventDefault()
     else if (cleanupInFlight) event.preventDefault()

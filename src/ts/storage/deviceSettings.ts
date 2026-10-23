@@ -18,6 +18,7 @@ export interface RisuNestDeviceSettings {
     generationHistoryLimitEnabled: boolean
     generationHistoryLimitMultiplier: number
     messageSendKey: MessageSendKey
+    pluginOutputCurrentChatOnly: boolean
 }
 
 const storageKey = 'risuNestDeviceSettings'
@@ -31,6 +32,7 @@ const defaults: RisuNestDeviceSettings = {
     generationHistoryLimitEnabled: false,
     generationHistoryLimitMultiplier: 2,
     messageSendKey: 'enter',
+    pluginOutputCurrentChatOnly: false,
 }
 
 function snapshot(settings: RisuNestDeviceSettings): RisuNestDeviceSettings {
@@ -50,7 +52,7 @@ function isValidSettings(value: unknown): value is RisuNestDeviceSettings {
     if (!value || typeof value !== 'object') return false
     const settings = value as Record<string, unknown>
     return (
-        Object.keys(settings).length === 7 &&
+        Object.keys(settings).length === 8 &&
         settings.schema === defaults.schema &&
         (settings.performanceProfile === 'normal' ||
             settings.performanceProfile === 'low-spec') &&
@@ -62,8 +64,18 @@ function isValidSettings(value: unknown): value is RisuNestDeviceSettings {
         settings.generationHistoryLimitMultiplier >= 1 &&
         (settings.messageSendKey === 'enter' ||
             settings.messageSendKey === 'ctrl-shift-enter' ||
-            settings.messageSendKey === 'button')
+            settings.messageSendKey === 'button') &&
+        typeof settings.pluginOutputCurrentChatOnly === 'boolean'
     )
+}
+
+// Settings stored before a field existed keep their values and take the
+// field's default.
+function withAddedDefaults(value: unknown): unknown {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value
+    return 'pluginOutputCurrentChatOnly' in value
+        ? value
+        : { ...value, pluginOutputCurrentChatOnly: defaults.pluginOutputCurrentChatOnly }
 }
 
 function readSettings(markers: DeviceMarkerStorage): RisuNestDeviceSettings {
@@ -83,8 +95,9 @@ function readSettings(markers: DeviceMarkerStorage): RisuNestDeviceSettings {
         return snapshot(defaults)
     }
 
-    return isValidSettings(parsed)
-        ? snapshot(parsed)
+    const normalized = withAddedDefaults(parsed)
+    return isValidSettings(normalized)
+        ? snapshot(normalized)
         : snapshot(defaults)
 }
 

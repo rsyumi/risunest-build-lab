@@ -8,6 +8,8 @@ export interface LifecycleFlushDependencies {
     nativePlatform(): string
     forgetInlayProviderImages(): void
     releaseIdleTransformerModels(): Promise<void>
+    /** Removes the record of running display work, which must not outlive the app in the background. */
+    suspendDisplayWork(reason: string): Promise<void>
 }
 
 export function createLifecycleFlush(dependencies: LifecycleFlushDependencies) {
@@ -17,7 +19,8 @@ export function createLifecycleFlush(dependencies: LifecycleFlushDependencies) {
         void dependencies.releaseIdleTransformerModels().catch(() => {
             console.warn('Optional model memory cleanup failed')
         })
-        return locally ? runtime.flushPendingDataLocally(reason) : runtime.flushPendingData(reason)
+        const saved = locally ? runtime.flushPendingDataLocally(reason) : runtime.flushPendingData(reason)
+        return Promise.all([saved, dependencies.suspendDisplayWork(reason)]).then(() => undefined)
     }
     /** Saves locally where the OS may end the process before sync settles. */
     const flushForLifecycle = (reason: LifecycleCommitReason): Promise<void> => flush(

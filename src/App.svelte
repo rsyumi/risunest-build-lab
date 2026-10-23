@@ -1,7 +1,11 @@
 <script lang="ts">
+    import { tick } from 'svelte'
+    import AppLockGate from './lib/AppLock/AppLockGate.svelte'
+    import { appLock } from './ts/appLock/appLock.svelte'
+    import { registerAppLockSurface, setAppLockInputBlocked } from './ts/appLock/input'
     import LazyScreenError from "./lib/UI/LazyScreenError.svelte";
     import ChatBindingLifecycle from './lib/SideBars/ChatBindingLifecycle.svelte'
-    import { DynamicGUI, settingsOpen, sideBarStore, sideBarClosing, ShowRealmFrameStore, openPresetList, openPersonaList, MobileGUI, CustomGUISettingMenuStore, loadedStore, alertStore, LoadingStatusState, bookmarkListOpen, popupStore, easyPanelStore, popUpEditorStore, loadoutModalStore, irisStore, customSideBarConfigDialogStore, bootFailure, recoveryStart } from './ts/stores.svelte';
+    import { DynamicGUI, settingsOpen, sideBarStore, sideBarClosing, ShowRealmFrameStore, openPresetList, openPersonaList, MobileGUI, CustomGUISettingMenuStore, loadedStore, alertStore, LoadingStatusState, bookmarkListOpen, popupStore, easyPanelStore, popUpEditorStore, loadoutModalStore, onboardingModalStore, irisStore, customSideBarConfigDialogStore, bootFailure, recoveryStart } from './ts/stores.svelte';
     import Sidebar from './lib/SideBars/Sidebar.svelte';
     import { DBState } from './ts/stores.svelte';
     import ChatScreen from './lib/ChatScreens/ChatScreen.svelte';
@@ -27,11 +31,12 @@
     import HypaV3Progress from './lib/Others/HypaV3Progress.svelte';
     import PopupList from './lib/UI/PopupList.svelte';
     import EasyPanel from './lib/Others/ProTools/EasyPanel.svelte';
-    import sendSound from './etc/send.mp3'
+    import { createKeepAliveAudio } from './ts/keepAliveAudio';
     import PopupEditor from './lib/Others/PopupEditor.svelte';
     import TextEditorPopup from './lib/Others/TextEditorPopup.svelte';
     import { textEditorPopup } from './ts/gui/textEditorPopup.svelte';
     import LoadoutModal from './lib/Others/LoadoutModal.svelte';
+    import OnboardingModal from './lib/Others/OnboardingModal.svelte';
     import IrisModal from './lib/Others/IrisModal.svelte';
     import Legal from './lib/Others/Legal.svelte';
     import CustomSidebarConfig from './lib/Others/CustomSidebarConfig.svelte';
@@ -66,6 +71,42 @@
         DATA_HEALTH_SECTION_ID,
     } from './ts/storage/dataHealthNavigation'
     import { openRisuNestSettingsTab } from './ts/setting/risuNestSettingsTabs'
+
+    const bootFailureVisible = $derived(!$loadedStore && !$recoveryStart && !!$bootFailure)
+    const appLockVisible = $derived(isTauri && !bootFailureVisible && ($loadedStore || !!$recoveryStart) && appLock.gated)
+
+    $effect.pre(() => {
+        setAppLockInputBlocked(appLockVisible)
+        return () => setAppLockInputBlocked(false)
+    })
+
+    $effect(() => {
+        if (!isTauri || !appLock.state.initialized) return
+        const update = () => {
+            const color = getComputedStyle(document.documentElement).getPropertyValue('--risu-theme-bgcolor').trim()
+            if (color) appLock.setBackgroundColor(color)
+        }
+        update()
+        const observer = new MutationObserver(update)
+        observer.observe(document.documentElement, { attributes: true, attributeFilter: ['style', 'class'] })
+        return () => observer.disconnect()
+    })
+
+    $effect(() => {
+        if (!isTauri) return
+        const failure = bootFailureVisible
+        const ready = $loadedStore || !!$recoveryStart
+        const epoch = appLock.state.epoch
+        const presentation = appLock.state.presentationRevision
+        if (!failure && (!appLock.state.initialized || !ready || appLock.gated)) return
+        let cancelled = false
+        void tick().then(() => requestAnimationFrame(() => requestAnimationFrame(() => {
+            if (cancelled || epoch !== appLock.state.epoch || presentation !== appLock.state.presentationRevision) return
+            if (failure) void appLock.renderBootFailure()
+            else void appLock.rendered(language.risuNest.appLock.promptUnlock)
+        })))
+        return () => { cancelled = true }
+    })
 
     $effect(() => restoreFocusAfterInputBlock(persistentWorkingSetInputBlocked))
 
@@ -157,6 +198,7 @@
     let aprilFools = $state(new Date().getMonth() === 3 && new Date().getDate() === 1)
     let aprilFoolsPage = $state(0)
     let keepingSessionAlive = $state(false)
+    let keepAliveAudio: HTMLAudioElement | null = null
 
     const getMainDropEffect = (e:DragEvent): DataTransfer['dropEffect'] => {
         const types = Array.from(e.dataTransfer?.types ?? [])
@@ -179,7 +221,7 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<main inert={$persistentWorkingSetInputBlocked} class="flex bg-bg w-full h-full max-w-100vw text-textcolor" use:keepFocusedInputVisible={isTauriMobile} ondragover={(e) => {
+<main inert={$persistentWorkingSetInputBlocked || appLockVisible} class="flex bg-bg w-full h-full max-w-100vw text-textcolor" use:keepFocusedInputVisible={isTauriMobile} ondragover={(e) => {
     const dropEffect = getMainDropEffect(e)
     e.preventDefault()
     e.dataTransfer.dropEffect = dropEffect
@@ -230,12 +272,23 @@
             break
         }
         case 'sound':{
-            console.log("Starting silent audio to keep session alive")
-            const silentAudio = new Audio(sendSound);
-            silentAudio.loop = true;
-            silentAudio.volume = 0.000001;
-            silentAudio.play();
-            keepingSessionAlive = true;
+            console.log("Starting inaudible audio to keep session alive")
+            if(!keepAliveAudio){
+                keepAliveAudio = createKeepAliveAudio()
+                // Paused by the OS or by another app taking audio focus; restart on the next click
+                keepAliveAudio.addEventListener('pause', () => {
+                    keepingSessionAlive = false
+                })
+            }
+            keepingSessionAlive = true
+            keepAliveAudio.play().catch(() => {
+                keepingSessionAlive = false
+            })
+            if('mediaSession' in navigator){
+                navigator.mediaSession.metadata = new MediaMetadata({
+                    title: 'RisuNest'
+                })
+            }
             break
         }
     }
@@ -415,6 +468,10 @@
             <TextEditorPopup request={textEditorPopup.request} />
         {/key}
     {/if}
+    <!-- Also before the alerts, so a blocked or failed save shows above it. -->
+    {#if onboardingModalStore.open}
+        <OnboardingModal />
+    {/if}
     {#if $alertStore.type !== 'none'}
         <AlertComp />
     {:else if $alertStore.dialogPending}
@@ -494,10 +551,10 @@
     <NativeFileJobDialog />
     <UpdatePopup />
 </main>
-<SyncExitDialog />
-<PersistentWorkingSetRecovery />
+<SyncExitDialog aboveAppLock={appLockVisible} />
+<div class="contents" inert={appLockVisible}><PersistentWorkingSetRecovery /></div>
 <!-- Open settings place their close button at the top right; the notices start below it. The padding keeps card shadows inside the scroll box. -->
-<div class="pointer-events-none fixed right-0 z-[1000] flex max-h-[calc(100dvh-4rem)] flex-col gap-2 overflow-y-auto px-2 pt-2 pb-4 sm:left-auto sm:w-full sm:max-w-[464px] {$MobileGUI ? 'left-0 top-[64px]' : $settingsOpen ? 'left-0' : 'left-12 top-0'} [&>*]:pointer-events-auto" style:top={$settingsOpen && !$MobileGUI ? `${DBState.db.settingsCloseButtonSize + 8}px` : null}>
+<div inert={appLockVisible} class="pointer-events-none fixed right-0 z-[1000] flex max-h-[calc(100dvh-4rem)] flex-col gap-2 overflow-y-auto px-2 pt-2 pb-4 sm:left-auto sm:w-full sm:max-w-[464px] {$MobileGUI ? 'left-0 top-[64px]' : $settingsOpen ? 'left-0' : 'left-12 top-0'} [&>*]:pointer-events-auto" style:top={$settingsOpen && !$MobileGUI ? `${DBState.db.settingsCloseButtonSize + 8}px` : null}>
     <PersistentLocalSaveFailure />
     <!-- Onboarding shows the sync and plugin state itself. -->
     {#if didFirstSetup && !$onboardingHold}
@@ -505,4 +562,7 @@
         <SyncStoppedNotice />
     {/if}
 </div>
-<SyncStatusPanel />
+<div class="contents" inert={appLockVisible}><SyncStatusPanel /></div>
+{#if appLockVisible}
+    <AppLockGate onSurface={registerAppLockSurface} />
+{/if}

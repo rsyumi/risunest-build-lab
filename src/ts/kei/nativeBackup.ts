@@ -1,4 +1,4 @@
-import { runWithMobileBackgroundTask, measuredTaskPercent } from '../mobileBackgroundTask'
+import { runWithDeferredMobileBackgroundTask, measuredTaskPercent } from '../mobileBackgroundTask'
 import { invoke } from '@tauri-apps/api/core'
 
 import { isTauri } from '../platform'
@@ -87,7 +87,8 @@ export async function runNativeKeiBackupJob(
     if (!dependencies.isTauri()) return false
     if (options.signal?.aborted) throw abortError()
 
-    return runWithMobileBackgroundTask('backup', async background => {
+    // A save starts this backup, so it is protected only if the app leaves the screen while it runs.
+    return runWithDeferredMobileBackgroundTask('backup', async background => {
         options = { ...options, signal: background.signal }
         await request.runtime.flushPendingData('kei-auto-backup')
         const revision = request.runtime.revision

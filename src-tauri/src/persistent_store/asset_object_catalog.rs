@@ -233,6 +233,23 @@ pub(super) fn query(
     Ok(AssetObjectCatalogPage { items, next_cursor })
 }
 
+/// The catalog rows of exactly `hashes`, leaving out the ones the catalog does not hold.
+pub(super) fn query_exact(
+    connection: &Connection,
+    hashes: &std::collections::BTreeSet<String>,
+) -> StoreResult<AssetObjectCatalogPage> {
+    let mut statement = connection.prepare_cached(
+        "SELECT object_hash, byte_size, created_at_ms FROM asset_objects WHERE object_hash = ?1",
+    )?;
+    let mut items = Vec::new();
+    for hash in hashes {
+        if let Some(item) = statement.query_row([hash], read_candidate).optional()? {
+            items.push(item);
+        }
+    }
+    Ok(AssetObjectCatalogPage { items, next_cursor: None })
+}
+
 fn read_candidate(row: &rusqlite::Row<'_>) -> rusqlite::Result<AssetGcCandidate> {
     let byte_size: i64 = row.get(1)?;
     Ok(AssetGcCandidate {

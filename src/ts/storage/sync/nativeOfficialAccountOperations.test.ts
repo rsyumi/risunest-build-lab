@@ -6,18 +6,30 @@ import { cancelActiveNativeFileOperation, dismissNativeFileOperationOutcome, nat
 import { publishNativeOfficialAccountBackup, restoreNativeOfficialAccountBackup, recoverNativeOfficialAccountAssets, resumeNativeOfficialAccountAssets } from './nativeOfficialAccountOperations'
 import { syntheticNativeFileJobStatus } from '../nativeFileJobs'
 import { emptyOfficialAccountAssetCounts } from './officialAccountAssetOutcome'
+import { runWithDeferredMobileBackgroundTask, runWithMobileBackgroundTask } from '../../mobileBackgroundTask'
+import { BackgroundExecutionExpiredError } from '../../iosNative'
+import { unprotectedMobileTask } from '../../mobileBackgroundTask.testSupport'
 
 const mocks = vi.hoisted(() => ({ restore: vi.fn(), publish: vi.fn(), assertAvailable: vi.fn(), resumeAssets: vi.fn(), inspectAssets: vi.fn(), stopAssets: vi.fn() }))
 vi.mock('./nativeOfficialAccountFlow', () => ({ getNativeOfficialAccountFlow: () => mocks }))
 vi.mock('./serverSyncProduction', () => ({ getServerSyncController: () => ({ assertFileOperationAvailable: mocks.assertAvailable }) }))
-vi.mock('../../mobileBackgroundTask', () => ({
-    measuredTaskPercent: () => 0,
-    runWithMobileBackgroundTask: (_kind: string, operation: (task: unknown) => Promise<unknown>, signal: AbortSignal) => operation({ signal, progress: vi.fn() }),
-}))
+vi.mock('../../mobileBackgroundTask', async () => (await import('../../mobileBackgroundTask.testSupport')).mobileBackgroundTaskModule())
 
 beforeEach(() => { vi.clearAllMocks(); dismissNativeFileOperationOutcome(); doingChat.set(false) })
 
 describe('shared official account operations', () => {
+    it('does not turn expired background recovery into a deliberate stop', async () => {
+        const controller = new AbortController()
+        vi.mocked(runWithDeferredMobileBackgroundTask).mockImplementationOnce(async (_kind, operation) =>
+            operation(unprotectedMobileTask(controller.signal)))
+        mocks.resumeAssets.mockImplementationOnce(async options => {
+            controller.abort(new BackgroundExecutionExpiredError())
+            throw options.signal.reason
+        })
+        await expect(resumeNativeOfficialAccountAssets({ operationId: 'expired' }, false)).rejects.toMatchObject({ name: 'AbortError' })
+        expect(mocks.stopAssets).not.toHaveBeenCalled()
+        expect(get(nativeFileOperationOutcome)).toMatchObject({ interruption: 'background-expired' })
+    })
     it.each(['none', 'retry', 'current-library'])('does not auto-run a %s continuation', async kind => {
         mocks.inspectAssets.mockResolvedValue({ kind })
         await recoverNativeOfficialAccountAssets()
@@ -41,6 +53,9 @@ describe('shared official account operations', () => {
         const recovery = recoverNativeOfficialAccountAssets()
         await vi.waitFor(() => expect(get(nativeFileOperation)?.status?.officialAssets?.operationId).toBe('receipt-1'))
         expect(isLibraryFileOperationReserved()).toBe(true)
+        // Automatic recovery is protected only if the app leaves the screen.
+        expect(runWithDeferredMobileBackgroundTask).toHaveBeenCalledExactlyOnceWith('restore', expect.any(Function), expect.any(AbortSignal))
+        expect(runWithMobileBackgroundTask).not.toHaveBeenCalled()
         expect(get(nativeFileOperation)?.presentation).toBe('dialog')
         cancelActiveNativeFileOperation()
         await vi.waitFor(() => expect(mocks.stopAssets).toHaveBeenCalledWith('receipt-1'))
@@ -57,7 +72,8 @@ describe('shared official account operations', () => {
         const first = resumeNativeOfficialAccountAssets({ operationId: 'receipt-2' })
         const second = resumeNativeOfficialAccountAssets({ operationId: 'receipt-2' })
         expect(first).toBe(second)
-        expect(mocks.resumeAssets).toHaveBeenCalledOnce()
+        await vi.waitFor(() => expect(mocks.resumeAssets).toHaveBeenCalledOnce())
+        expect(runWithMobileBackgroundTask).toHaveBeenCalledExactlyOnceWith('restore', expect.any(Function), expect.any(AbortSignal), true)
         finish(); await first
     })
     it('keeps a missing-only retry result visible until it is dismissed', async () => {

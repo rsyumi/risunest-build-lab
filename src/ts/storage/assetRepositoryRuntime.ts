@@ -52,7 +52,7 @@ export type RuntimeAssetRepositoryDispatcher = BlobStore &
         stageNewInlayImage(
             key: string,
             ownedData: Uint8Array,
-            input: { name: string },
+            input: { name: string, metadata?: Record<string, unknown> },
         ): Promise<StagedRuntimeAssetWrite>
         activateStagedWrite(staged: StagedRuntimeAssetWrite, expectedAlias?: AssetAlias): Promise<BlobMetadata>
         abortStagedWrite(staged: StagedRuntimeAssetWrite): Promise<void>
@@ -189,7 +189,7 @@ export function createCoordinatorOwnedAssetBlobStore(
                 const invocation = reserveInvocation(key)
                 let staged: StagedRuntimeAssetWrite | undefined
                 try {
-                    staged = await store.stagePut(key, data.slice(), { ...metadata })
+                    staged = await store.stagePut(key, data.slice(), { ...metadata, ...(metadata.kind === 'inlay' ? { metadata: original.value.metadata } : {}) })
                     await invocation.previous
                     return await mutate(key, async () => {
                         const current = await authority.rawStore.readAssetAlias(identity)

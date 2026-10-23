@@ -39,7 +39,7 @@ vi.mock('src/ts/globalApi.svelte', () => ({
 }))
 vi.mock('src/ts/process/scripts', () => ({ risuChatParser: (value: string) => value }))
 vi.mock('src/ts/model/modellist', () => ({ getModelInfo: (model: string) => ({ shortName: model || 'model' }) }))
-vi.mock('src/ts/process/scriptings', () => ({ runLuaButtonTrigger: vi.fn() }))
+vi.mock('src/ts/process/scriptings', () => ({ runLuaInteractionTrigger: vi.fn() }) satisfies Partial<typeof import('src/ts/process/scriptings')>)
 vi.mock('src/ts/process/triggers', () => ({ runTrigger: vi.fn() }))
 vi.mock('src/ts/process/tts', () => ({ sayTTS: vi.fn() }))
 vi.mock('src/ts/util', () => ({

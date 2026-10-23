@@ -151,6 +151,27 @@ describe('createDataHealthModel', () => {
         expect(model.snapshot().resumable).toBe(true)
     })
 
+    it('keeps one background hold across every deep page and stops between pages when its time runs out', async () => {
+        const expiry = new AbortController()
+        let holds = 0
+        const holdBackground = <T,>(operation: (signal?: AbortSignal) => Promise<T>) => {
+            holds += 1
+            return operation(expiry.signal)
+        }
+        const deepScan = vi.fn(async () => {
+            if (deepScan.mock.calls.length === 2) expiry.abort()
+            return deepPage(1, deepScan.mock.calls.length >= 4)
+        })
+        const cancel = vi.fn(async () => {})
+        const { model } = harness({ deepScan, cancel, holdBackground })
+        await model.deepScan(false)
+        expect(holds).toBe(1)
+        expect(deepScan).toHaveBeenCalledTimes(2)
+        expect(cancel).toHaveBeenCalledOnce()
+        expect(model.snapshot().running).toBeNull()
+        expect(model.snapshot().resumable).toBe(true)
+    })
+
     it('ends quietly when the native scan reports the stop it was asked for', async () => {
         const deepScan = vi
             .fn()

@@ -137,7 +137,7 @@ mod archive_receive_tests;
 #[path = "tests/asset_alias_tests.rs"]
 mod asset_alias_tests;
 #[path = "tests/asset_catalog_gc_tests.rs"]
-mod asset_catalog_gc_tests;
+pub(crate) mod asset_catalog_gc_tests;
 #[path = "tests/content_change_vocabulary_tests.rs"]
 mod content_change_vocabulary_tests;
 #[path = "tests/data_health_tests.rs"]

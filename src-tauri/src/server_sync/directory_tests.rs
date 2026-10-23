@@ -258,6 +258,27 @@ fn offline_clients_share_registry_admission() {
     request.respond(tiny_http::Response::empty(503)).unwrap();
     assert_eq!(task.join().unwrap().unwrap_err().code, "directory-response-error");
 }
+
+#[test]
+fn startup_directory_recovery_keeps_the_first_failure_policy() {
+    let old = ResponseServer::new("<html>error 1033</html>".into(), 530);
+    let candidate = ResponseServer::new(r#"{"error":"server-updating"}"#.into(), 503);
+    let mut directory = directory();
+    let envelope = risunest_sync_connect::seal_endpoint(&directory.uuid, &directory.key, &candidate.endpoint).unwrap();
+    let registry = ResponseServer::new(envelope, 200);
+    directory.base_url = registry.endpoint.clone();
+    let mut config = tests::config(&old.endpoint);
+    config.directory = Some(directory);
+    let now = Arc::new(std::sync::Mutex::new(Instant::now()));
+    let clock = now.clone();
+    let budget = RetryBudget::with_driver(None, Arc::new(move || *clock.lock().unwrap()), Arc::new(move |duration| *now.lock().unwrap() += duration));
+    let mut client = ServerClient::with_retry_budget(config, None, Arc::new(budget)).unwrap();
+    client.retry_transient = false;
+    let error = client.resolve_identity().unwrap_err();
+    assert_eq!(error.code, "server-updating");
+    assert_eq!(client.config().endpoint, old.endpoint);
+    assert_eq!(candidate.requests(), 1);
+}
 #[test]
 fn configuring_through_directory_persists_only_the_verified_endpoint() {
     use crate::server_sync::{binding, credentials::StoredConfig, lww_client::OperationLog, lww_tests::local};
@@ -455,6 +476,42 @@ fn recovered_binding_endpoints_survive_reactivation_without_replacing_credential
         assert_binding_config(&store, &expected);
         assert_eq!(registry.requests(), 1);
     }
+}
+
+#[test]
+fn a_successful_push_survives_endpoint_persistence_failure() {
+    use crate::server_sync::{binding, commands::with_lww_client, credentials::StoredConfig, lww_client::OperationLog, lww_tests::{header, local, save, LocalServerFixture}};
+    let server = LocalServerFixture::new();
+    seed_binding_server(&server);
+    let (root, mut store) = local();
+    let (mut config, _) = server.candidate(&store);
+    let mut directory = directory();
+    let registry = ResponseServer::new(risunest_sync_connect::seal_endpoint(&directory.uuid, &directory.key, &server.endpoint).unwrap(), 200);
+    directory.base_url = registry.endpoint.clone();
+    config.directory = Some(directory);
+    let expected = StoredConfig::persist(root.path(), &config).unwrap();
+    OperationLog::open(root.path()).unwrap().save_config("candidate", &expected).unwrap();
+    binding::first_binding_cycle(&mut store, Arc::new(TestIoCounters::default()), |_| {}).unwrap();
+    let retired = ResponseServer::new(String::new(), 503);
+    let mut outdated = expected.clone();
+    outdated.endpoint = retired.endpoint.clone();
+    install_binding_config(&store, &outdated);
+    save(&mut store, &["root", "language"], serde_json::json!("fr"));
+    let request = header(&store);
+    with_lww_client(&mut store, None, |core, store| {
+        core.client.retry_budget = tests::no_sleep_budget();
+        core.log.0.execute_batch(
+            "CREATE TEMP TRIGGER refuse_endpoint_save BEFORE UPDATE ON configurations
+             BEGIN SELECT RAISE(FAIL, 'synthetic endpoint persistence failure'); END;"
+        )?;
+        core.push(store, &request, &[])
+    }).unwrap().expect("the successful publication returns its receipt");
+    assert_binding_config(&store, &outdated);
+    with_lww_client(&mut store, None, |core, _| {
+        core.client.retry_budget = tests::no_sleep_budget();
+        core.client.resolve_identity()
+    }).unwrap();
+    assert_binding_config(&store, &expected);
 }
 
 #[test]

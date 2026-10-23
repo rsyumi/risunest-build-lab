@@ -375,12 +375,24 @@ pub(super) fn blocking(findings: &Findings) -> Vec<&crate::data_health::Finding>
 
 /// Adds a character whose additional asset is listed by an owner manifest, as the app stores one.
 pub(crate) fn add_character_with_additional_asset(store: &mut PersistentStore, character_id: &str) -> String {
+    let key = format!("assets/{character_id}-extra.png");
+    add_character_with_owner_manifest(store, character_id, &key, &key)
+}
+
+/// Adds a character whose additional assets name only `key`, with `image` as its image, and
+/// returns the hash of its owner manifest.
+pub(crate) fn add_character_with_owner_manifest(
+    store: &mut PersistentStore,
+    character_id: &str,
+    key: &str,
+    image: &str,
+) -> String {
     use crate::asset_repository::{
         job_pins::{CasJobKind, CasObjectRole, CasReleaseOutcome, DurableCasJob},
         owner_manifest_codec::{encode_owner_manifest, OwnerManifestEntry},
     };
-    let key = format!("assets/{character_id}-extra.png");
-    let asset = crate::server_sync::lww_tests::put_asset(store, &key, b"synthetic additional asset body")
+    let key = key.to_owned();
+    let asset = crate::server_sync::lww_tests::put_asset(store, &key, format!("synthetic body of {key}").as_bytes())
         .object_hash
         .expect("store the additional asset");
     let canonical = encode_owner_manifest(&[OwnerManifestEntry {
@@ -406,7 +418,7 @@ pub(crate) fn add_character_with_additional_asset(store: &mut PersistentStore, c
             expected_revision: store.revision().expect("read revision"),
             add_character: Some(json!({
                 "chaId": character_id, "type": "character", "name": "Synthetic owner",
-                "image": key, "creatorNotes": "synthetic notes", "lastInteraction": 500,
+                "image": image, "creatorNotes": "synthetic notes", "lastInteraction": 500,
                 "additionalAssets": [["extra", key, "png"]],
                 "chats": [{"id": format!("{character_id}-chat"), "name": "Chat", "message": [
                     {"role": "user", "data": "synthetic first", "chatId": "synthetic-message"}

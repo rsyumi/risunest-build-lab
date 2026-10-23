@@ -1,13 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import type { Chat, Message } from '../storage/database.svelte'
-import { ActiveConversationSession, ConversationSessionStaleError } from '../storage/activeConversationSession'
+import { ActiveConversationSession, ConversationSessionStaleError, MessageLocatorMismatchError } from '../storage/activeConversationSession'
 import { beginPinnedConversationHistoryOperation } from '../storage/conversationHistoryOperation'
 import {
     adoptTriggeredChat,
     createLivePromptHistoryCompatibilitySnapshot,
     ensurePromptHistoryEntryId,
-    iteratePromptHistory,
+    iteratePromptHistoryTargets,
     selectPromptHistory,
 } from './promptHistory'
 
@@ -48,7 +48,7 @@ describe('prompt history paging', () => {
         const operation = beginPinnedConversationHistoryOperation(session)
 
         const selection = selectPromptHistory(operation, 2)
-        const entries = [...iteratePromptHistory(operation, selection, 2)]
+        const entries = [...iteratePromptHistoryTargets(operation, selection, 2)]
 
         expect(selection).toEqual({
             startIndex: 2,
@@ -57,12 +57,10 @@ describe('prompt history paging', () => {
             messageCount: 3,
             resetByAllBefore: true,
         })
-        expect(entries.map(({ absoluteIndex, relativeIndex, message: value }) => ({
-            absoluteIndex,
-            relativeIndex,
-            data: value.data,
-            role: value.role,
-        }))).toEqual([
+        expect(entries.map((entry) => {
+            const value = ensurePromptHistoryEntryId(operation, entry, () => 'unused')
+            return { absoluteIndex: entry.absoluteIndex, relativeIndex: entry.relativeIndex, data: value.data, role: value.role }
+        })).toEqual([
             { absoluteIndex: 2, relativeIndex: 0, data: 'duplicate', role: 'user' },
             { absoluteIndex: 4, relativeIndex: 1, data: 'duplicate', role: 'char' },
             { absoluteIndex: 5, relativeIndex: 2, data: 'tail', role: 'user' },
@@ -78,14 +76,14 @@ describe('prompt history paging', () => {
             chatId: `fixture-${index}`,
         }))
         const session = sessionFor(messages)
-        const backward = vi.spyOn(session, 'scanBackward')
-        const range = vi.spyOn(session, 'readRange')
+        const backward = vi.spyOn(session, 'scanMetadataBackward')
+        const range = vi.spyOn(session, 'readMetadataRange')
         const operation = beginPinnedConversationHistoryOperation(session)
 
         const selection = selectPromptHistory(operation, 3)
-        const entries = [...iteratePromptHistory(operation, selection, 3)]
+        const entries = [...iteratePromptHistoryTargets(operation, selection, 3)]
 
-        expect(entries.map((entry) => entry.message)).toEqual(messages)
+        expect(entries.map((entry) => ensurePromptHistoryEntryId(operation, entry, () => 'unused'))).toEqual(messages)
         expect(backward.mock.calls.every(([, limit]) => limit <= 3)).toBe(true)
         expect(range.mock.calls.every(([, limit]) => limit <= 3)).toBe(true)
         expect(backward.mock.calls.length).toBeGreaterThan(1)
@@ -101,9 +99,9 @@ describe('prompt history paging', () => {
         ])
         const operation = beginPinnedConversationHistoryOperation(session)
         const selection = selectPromptHistory(operation, 1)
-        const iterator = iteratePromptHistory(operation, selection, 1)
+        const iterator = iteratePromptHistoryTargets(operation, selection, 1)
 
-        expect(iterator.next().value?.message.data).toBe('zero')
+        expect(ensurePromptHistoryEntryId(operation, iterator.next().value!, () => 'unused').data).toBe('zero')
         session.append(message('new-tail'))
 
         expect(() => iterator.next()).toThrow(ConversationSessionStaleError)
@@ -115,16 +113,94 @@ describe('prompt history paging', () => {
         const session = sessionFor(messages)
         const operation = beginPinnedConversationHistoryOperation(session)
         const selection = selectPromptHistory(operation)
-        const iterator = iteratePromptHistory(operation, selection)
+        const iterator = iteratePromptHistoryTargets(operation, selection)
 
         const firstEntry = iterator.next().value!
         const first = ensurePromptHistoryEntryId(operation, firstEntry, vi.fn())
+        expect(first).toBe(messages[0])
         expect(first.data).toBe('first')
         messages[1].data = 'after-update'
         const secondEntry = iterator.next().value!
         const second = ensurePromptHistoryEntryId(operation, secondEntry, vi.fn())
 
+        expect(second).toBe(messages[1])
         expect(second.data).toBe('after-update')
+        operation.dispose()
+    })
+
+    it('selects and locates prompt messages without reading their bodies or extension payloads', () => {
+        const messages = [
+            message('old'),
+            message('reset', 'char', 'allBefore'),
+            message('hidden', 'char', true),
+            message('selected'),
+        ]
+        const session = sessionFor(messages)
+        const reads = vi.fn(() => { throw new Error('Message payload was read') })
+        for (const value of messages) {
+            Object.defineProperty(value, 'data', { enumerable: true, get: reads })
+            Object.defineProperty(value, 'extensionPayload', { enumerable: true, get: reads })
+        }
+        const operation = beginPinnedConversationHistoryOperation(session)
+        const selection = selectPromptHistory(operation, 2)
+        const targets = [...iteratePromptHistoryTargets(operation, selection, 2)]
+
+        expect(selection).toEqual({
+            startIndex: 2, endIndex: 4, totalMessages: 4, messageCount: 1, resetByAllBefore: true,
+        })
+        expect(targets.map(({ absoluteIndex, relativeIndex }) => [absoluteIndex, relativeIndex]))
+            .toEqual([[3, 0]])
+        expect(ensurePromptHistoryEntryId(operation, targets[0], () => 'unused')).toBe(messages[3])
+        expect(reads).not.toHaveBeenCalled()
+        operation.dispose()
+    })
+
+    it.each([true, 'allBefore'] as const)('snapshots disabled=%s per target page and resolves bodies after an awaited script', async (disabled) => {
+        const messages = [message('first'), message('second'), message('third'), message('fourth')]
+        const session = sessionFor(messages)
+        const operation = beginPinnedConversationHistoryOperation(session)
+        const iterator = iteratePromptHistoryTargets(operation, selectPromptHistory(operation), 2)
+
+        expect(iterator.next().value?.absoluteIndex).toBe(0)
+        await Promise.resolve()
+        messages[1].disabled = disabled
+        messages[1].data = 'updated-second'
+        messages[2].disabled = disabled
+        const second = iterator.next().value!
+        expect([second.absoluteIndex, second.relativeIndex]).toEqual([1, 1])
+        expect(ensurePromptHistoryEntryId(operation, second, () => 'unused').data).toBe('updated-second')
+        expect(iterator.next().value?.absoluteIndex).toBe(3)
+        expect(iterator.next().done).toBe(true)
+        operation.dispose()
+    })
+
+    it('rejects stale target pages and a stale completed traversal', () => {
+        for (const pageSize of [1, 2]) {
+            const session = sessionFor([message('first'), message('second')])
+            const operation = beginPinnedConversationHistoryOperation(session)
+            const iterator = iteratePromptHistoryTargets(operation, selectPromptHistory(operation), pageSize)
+            iterator.next()
+            if (pageSize === 2) iterator.next()
+            session.append(message('new-tail'))
+
+            expect(() => iterator.next()).toThrow(ConversationSessionStaleError)
+            operation.dispose()
+        }
+    })
+
+    it('reselects changed boundaries after a trigger and rejects a replaced target identity', () => {
+        const messages = [message('first'), message('second'), message('third')]
+        const session = sessionFor(messages)
+        const operation = beginPinnedConversationHistoryOperation(session)
+        expect(selectPromptHistory(operation).messageCount).toBe(3)
+        messages[1].disabled = 'allBefore'
+        const selection = selectPromptHistory(operation)
+        expect(selection).toMatchObject({ startIndex: 2, messageCount: 1, resetByAllBefore: true })
+        const target = iteratePromptHistoryTargets(operation, selection).next().value!
+        messages[2] = message('third')
+
+        expect(() => ensurePromptHistoryEntryId(operation, target, () => 'unused'))
+            .toThrow(MessageLocatorMismatchError)
         operation.dispose()
     })
 
@@ -141,7 +217,7 @@ describe('prompt history paging', () => {
         const selection = selectPromptHistory(operation)
         const generated = ['generated-empty']
 
-        for (const entry of iteratePromptHistory(operation, selection)) {
+        for (const entry of iteratePromptHistoryTargets(operation, selection)) {
             ensurePromptHistoryEntryId(operation, entry, () => generated.shift()!)
         }
 
@@ -158,7 +234,7 @@ describe('prompt history paging', () => {
         const repeatedOperation = beginPinnedConversationHistoryOperation(session)
         const repeatedSelection = selectPromptHistory(repeatedOperation)
         const generateAgain = vi.fn(() => 'different-id')
-        for (const entry of iteratePromptHistory(repeatedOperation, repeatedSelection)) {
+        for (const entry of iteratePromptHistoryTargets(repeatedOperation, repeatedSelection)) {
             ensurePromptHistoryEntryId(repeatedOperation, entry, generateAgain)
         }
 

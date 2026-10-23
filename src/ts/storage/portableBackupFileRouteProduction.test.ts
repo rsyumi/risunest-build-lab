@@ -24,13 +24,16 @@ const m = vi.hoisted(() => ({
     resume: vi.fn(),
     hold: vi.fn(),
     manager: vi.fn(),
+    protect: vi.fn(),
+    pickAndroid: vi.fn(),
+    os: 'windows' as 'windows' | 'android',
     controller: new AbortController(),
     runtime: { revision: 4 },
 }))
 vi.mock('../drive/backuplocal', () => ({ importLegacyBackupWithWebView: m.fallback }))
 vi.mock('@tauri-apps/api/core', async original => ({ ...(await original<typeof import('@tauri-apps/api/core')>()), invoke: m.invoke } satisfies typeof import('@tauri-apps/api/core')))
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: m.open, save: m.save }))
-vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule({ runtime: 'tauri', os: 'windows' }))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule(() => ({ runtime: 'tauri', os: m.os })))
 vi.mock('../alert', () => ({ alertConfirm: m.confirm, alertNormal: vi.fn() }))
 vi.mock('../plugins/plugins.svelte', () => ({
     loadPluginsAfterAuthoritativeRestore: m.after,
@@ -38,7 +41,7 @@ vi.mock('../plugins/plugins.svelte', () => ({
 vi.mock('./androidSafBridge', async original => ({
     ...(await original<typeof import('./androidSafBridge')>()),
     discardAndroidSafSource: m.discard,
-    pickAndroidPortableBackupSource: vi.fn(),
+    pickAndroidPortableBackupSource: m.pickAndroid,
     materializeAndroidBackupSource: m.materializeAndroid,
 } satisfies typeof import('./androidSafBridge')))
 vi.mock('./iosFiles', async (original) => ({...(await original<object>()),pickIOSBackupSource:vi.fn(),materializeIOSBackupSource:m.materializeIOS,discardIOSFile:m.discardIOS}))
@@ -91,6 +94,7 @@ describe('common backup file production route', () => {
         vi.stubGlobal('window', Object.assign(new EventTarget(), { crypto: globalThis.crypto }))
         mockIPC(() => undefined)
         m.controller = new AbortController()
+        m.os = 'windows'
         m.manager.mockImplementation(async (_kind, _label, run) =>
             run({
                 signal: m.controller.signal,
@@ -98,6 +102,7 @@ describe('common backup file production route', () => {
                 setBlocking: vi.fn(),
                 setSource: vi.fn(),
                 setPartialWritesPossible: vi.fn(),
+                protect: m.protect,
             }),
         )
         m.invoke.mockResolvedValue('portable')
@@ -412,6 +417,36 @@ describe('common backup file production route', () => {
             'risudat',
         ])
         expect(m.invoke).not.toHaveBeenCalled()
+        expect(m.protect).not.toHaveBeenCalled()
+    })
+    it('holds a picked restore only once its picker returns and a given source from the start', async () => {
+        m.open.mockImplementation(async () => {
+            expect(m.protect).not.toHaveBeenCalled()
+            return 'C:\\synthetic\\backup.risunest'
+        })
+        m.invoke.mockImplementation(async () => {
+            expect(m.protect).toHaveBeenCalledOnce()
+            return 'portable'
+        })
+        await expect(restoreBackupFromSystemPicker()).resolves.toEqual(result)
+        expect(m.manager.mock.calls[0][3]).toMatchObject({ protectAfterPicker: true })
+
+        m.invoke.mockResolvedValue('portable')
+        await restoreBackupFromNativeSource({ type: 'desktopPath', path: 'C:\\synthetic\\backup.risunest' })
+        expect(m.manager.mock.calls[1][3]).toMatchObject({ protectAfterPicker: false })
+    })
+    it('holds an Android picked restore from its first copied bytes', async () => {
+        m.os = 'android'
+        m.pickAndroid.mockImplementation(async ({ onProgress }) => {
+            expect(m.protect).not.toHaveBeenCalled()
+            onProgress({ requestId: 'synthetic-copy', copiedBytes: 64, totalBytes: 128 })
+            expect(m.protect).toHaveBeenCalled()
+            return { type: 'androidSeekable', token: 'synthetic-custody' }
+        })
+        await expect(restoreBackupFromSystemPicker()).resolves.toEqual(result)
+        expect(m.status).toHaveBeenCalledWith(expect.objectContaining({
+            detail: expect.objectContaining({ stage: 'copying-source', stageCompleted: 64, stageTotal: 128 }),
+        }))
     })
     it('passes selected device sections and own extension to native full export', async () => {
         expect(await exportPortableBackupFromSystemPicker()).toEqual(result)
@@ -436,5 +471,34 @@ describe('common backup file production route', () => {
         expect(await exportPortableBackupFromSystemPicker()).toBeNull()
         expect(m.export).not.toHaveBeenCalled()
         expect(m.save).not.toHaveBeenCalled()
+    })
+    it('holds a backup export only once the export reports its chosen destination', async () => {
+        m.export.mockImplementation(async (_runtime, _destination, _selection, options) => {
+            expect(m.protect).not.toHaveBeenCalled()
+            options.onDestinationChosen()
+            expect(m.protect).toHaveBeenCalledOnce()
+            return result
+        })
+        expect(await exportPortableBackupFromSystemPicker()).toEqual(result)
+        expect(m.manager.mock.calls[0][3]).toMatchObject({ protectAfterPicker: true })
+    })
+    it('ends quietly when the Android save picker is backed out of and rejects every other cancellation', async () => {
+        m.os = 'android'
+        const cancelled = () => new DOMException('Android SAF export was cancelled', 'AbortError')
+        m.export.mockRejectedValueOnce(cancelled())
+        await expect(exportPortableBackupFromSystemPicker()).resolves.toBeNull()
+        expect(m.protect).not.toHaveBeenCalled()
+        m.export.mockRejectedValueOnce(new Error('synthetic reservation failure'))
+        await expect(exportPortableBackupFromSystemPicker()).rejects.toThrow('synthetic reservation failure')
+        m.export.mockImplementationOnce(async (_runtime, _destination, _selection, options) => {
+            options.onDestinationChosen()
+            throw cancelled()
+        })
+        await expect(exportPortableBackupFromSystemPicker()).rejects.toMatchObject({ name: 'AbortError' })
+        m.export.mockImplementationOnce(async () => {
+            m.controller.abort()
+            throw cancelled()
+        })
+        await expect(exportPortableBackupFromSystemPicker()).rejects.toMatchObject({ name: 'AbortError' })
     })
 })

@@ -128,13 +128,13 @@ interface CheckpointEntry {
     due: number | null
     timer?: ReturnType<typeof setTimeout>
     pending?: Promise<void>
-    failure?: unknown
 }
 
 /** Native snapshots are serialized only at a checkpoint or an explicit settlement. */
 export async function createNativeOfficialAssetLedger(
     settings: {
         get(key: string): Promise<unknown | null>
+        set(key: string, value: unknown | null): Promise<void>
         patch(key: string, entries: Record<string, string | null>): Promise<void>
     },
     storageKey: string,
@@ -175,7 +175,7 @@ export async function createNativeOfficialAssetLedger(
         if (entry.pending || entry.timer !== undefined || entry.generation === entry.persisted) return
         entry.timer = setTimeout(() => {
             entry.timer = undefined
-            void write(entry).catch(error => { entry.failure ??= error })
+            void write(entry).catch(() => {})
         }, Math.max(0, (entry.due ?? Date.now() + interval) - Date.now()))
     }
     const write = (entry: CheckpointEntry): Promise<void> => {
@@ -209,13 +209,8 @@ export async function createNativeOfficialAssetLedger(
     const flush = async () => {
         const results = await Promise.allSettled([...entries.values()].map(async entry => {
             disarm(entry)
-            try {
-                if (entry.pending) await entry.pending
-                while (entry.generation !== entry.persisted) await write(entry)
-                if (entry.failure !== undefined) throw entry.failure
-            } finally {
-                entry.failure = undefined
-            }
+            if (entry.pending) await entry.pending.catch(() => {})
+            while (entry.generation !== entry.persisted) await write(entry)
         }))
         const errors = results.flatMap(result => result.status === 'rejected' ? [result.reason] : [])
         if (loadFailure !== undefined) { errors.push(loadFailure); loadFailure = undefined }
@@ -239,7 +234,16 @@ export async function createNativeOfficialAssetLedger(
         async clearAll() {
             for (const key of Object.keys(loaded)) entryFor(key)
             for (const entry of entries.values()) clearEntry(entry)
-            await flush()
+            await Promise.allSettled([...entries.values()].flatMap(entry => entry.pending ? [entry.pending] : []))
+            for (const entry of entries.values()) disarm(entry)
+            try {
+                await settings.set(storageKey, null)
+                entries.clear()
+                loaded = {}
+                loadFailure = undefined
+            } finally {
+                for (const entry of entries.values()) arm(entry)
+            }
         },
     }
 }

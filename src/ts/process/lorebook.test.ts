@@ -201,7 +201,7 @@ describe('loadLoreBookV3Prompt characterization', () => {
         await expect(activePrompts()).resolves.toEqual(['AAAA'])
     })
 
-    test('preserves slash regex parsing and matches repeated global and sticky tests', async () => {
+    test('matches repeated global and sticky regex tests and skips invalid flags', async () => {
         setLorebook(
             [
                 { key: '/foo/g', useRegex: true, content: 'global-one' },
@@ -211,7 +211,7 @@ describe('loadLoreBookV3Prompt characterization', () => {
                 { key: '/foo/z', useRegex: true, content: 'invalid' },
                 { key: 'alpha', content: 'after-invalid' },
             ],
-            [{ role: 'user', data: '/foo alpha' }],
+            [{ role: 'user', data: 'foo alpha' }],
         )
 
         await expect(activePrompts()).resolves.toEqual([
@@ -221,6 +221,22 @@ describe('loadLoreBookV3Prompt characterization', () => {
             'global-two',
             'global-one',
         ])
+    })
+
+    test.each([
+        { case: 'a message without a slash', key: '/alpha beta/i', messages: ['ALPHA BETA'], activates: true },
+        { case: 'a flagless pattern', key: '/alpha/', messages: ['alpha'], activates: true },
+        { case: 'a match in a later message', key: '/alpha/i', messages: ['beta', 'ALPHA'], activates: true },
+        { case: 'a match of the second key', key: '/absent/,/alpha/', messages: ['alpha'], activates: true },
+        { case: 'a key without slashes', key: 'alpha', messages: ['alpha'], activates: false },
+        { case: 'an invalid pattern', key: '/alpha(/,/alpha/', messages: ['alpha'], activates: false },
+    ])('activates a regex entry for $case: $activates', async ({ key, messages, activates }) => {
+        setLorebook(
+            [{ key, useRegex: true, content: 'regex-entry' }],
+            messages.map((data) => ({ role: 'user', data })),
+        )
+
+        await expect(activePrompts()).resolves.toEqual(activates ? ['regex-entry'] : [])
     })
 
     test('normalizes each depth view once', async () => {

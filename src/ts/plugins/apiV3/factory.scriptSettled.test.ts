@@ -469,20 +469,23 @@ describe('sandbox script completion', () => {
         const saved = vi.fn()
         const host = new SandboxHost({
             ...bridgeStubs(),
-            readSyntheticImage: () => ({ bytes: new Uint8Array(1024 * 1024), chat }),
+            readSyntheticImage: () => ({ bytes: new Uint8Array([17, 29, 43]), chat }),
             saveSyntheticImage: saved,
         })
         const child = await runGuest(host, `
-            const started = performance.now();
+            const entries = Object.entries;
+            Object.entries = function (value) {
+                if (ArrayBuffer.isView(value)) throw new Error('Byte arrays must not be enumerated');
+                return entries(value);
+            };
             const read = await risuai.readSyntheticImage();
             await risuai.saveSyntheticImage(read.bytes, read.chat);
-            window.roundTripMs = performance.now() - started;
+            window.finishedWrite = true;
         `)
-        await vi.waitFor(() => expect((child as any).roundTripMs).toBeDefined())
-        expect(saved.mock.calls[0][0]).toHaveLength(1024 * 1024)
+        await vi.waitFor(() => expect((child as any).finishedWrite).toBe(true))
+        expect(Array.from(saved.mock.calls[0][0])).toEqual([17, 29, 43])
         const sent = vi.mocked(child.parent.postMessage).mock.calls.map(call => call[0] as any).find(message => message.method === 'saveSyntheticImage')
         expect(sent.argProvenance).toEqual([[], [{ path: [], token: collectPluginReadProvenance(chat)[0].token }]])
-        expect((child as any).roundTripMs).toBeLessThan(100)
         host.terminate()
     })
 

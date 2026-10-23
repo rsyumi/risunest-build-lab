@@ -274,6 +274,7 @@ def main():
     parser.add_argument('--app', type=Path, required=True)
     parser.add_argument('--artifacts', type=Path, required=True)
     parser.add_argument('--appearance', action='store_true')
+    parser.add_argument('--app-lock', action='store_true')
     parser.add_argument('--capture-codec-experiment', action='store_true')
     parser.add_argument('--capture-bgra-experiment', action='store_true')
     parser.add_argument('--capture-input')
@@ -282,6 +283,8 @@ def main():
     parser.add_argument('--webdav-server', type=Path)
     parser.add_argument('--webdav-scheme', choices=['https', 'http'], default='https')
     args = parser.parse_args()
+    if args.app_lock and (args.appearance or args.capture_codec_experiment or args.capture_bgra_experiment):
+        parser.error('Select one native frame capture mode')
     if args.appearance and args.capture_codec_experiment:
         parser.error('Select appearance capture or the paired codec experiment')
     if args.capture_codec_experiment and args.system_theme != 'light':
@@ -299,6 +302,13 @@ def main():
         raise RuntimeError('Harness requires a fresh CI user profile; refusing existing data')
     artifacts = args.artifacts.resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
+    if args.app_lock:
+        if any(artifacts.iterdir()):
+            raise RuntimeError('App-lock capture requires an empty artifact directory')
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'appLock'))
+        from frames import run_macos
+        run_macos(app, artifacts, args.capture_input, start_appearance_capture, finish_appearance_capture)
+        return
     if args.appearance or args.capture_codec_experiment or args.capture_bgra_experiment:
         if any(artifacts.iterdir()):
             raise RuntimeError('Appearance capture requires an empty artifact directory')

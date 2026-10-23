@@ -1164,14 +1164,7 @@ fn apply_value(
                     .and_then(Value::as_str)
                     .unwrap_or("character"),
             );
-            tx.execute(
-                "DELETE FROM messages WHERE generation=?1 AND character_id=?2",
-                params![generation, p[1]],
-            )?;
-            tx.execute(
-                "DELETE FROM conversations WHERE generation=?1 AND character_id=?2",
-                params![generation, p[1]],
-            )?;
+            commit::delete_character_contents(tx, generation, &p[1])?;
             tx.execute("UPDATE characters SET archived_object=?3,detail=?4,conversation_count=0 WHERE generation=?1 AND character_id=?2",params![generation,p[1],serde_json::to_string(&archived)?,serde_json::to_string(&marker)?])?;
         }
         return Ok(());

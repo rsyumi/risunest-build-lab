@@ -5,13 +5,13 @@ import { createPluginStartupGate } from '../../plugins/pluginStartupGate'
 afterEach(() => vi.useRealTimers())
 function fixture() {
     vi.useFakeTimers()
-    const dependencies = { push: vi.fn(async () => {}), pull: vi.fn(async () => {}), connect: vi.fn(async (_operationId: string) => {}), disconnect: vi.fn(async () => {}), retryClock: vi.fn(async () => {}), failed: vi.fn(), recovered: vi.fn() }
+    const dependencies = { push: vi.fn(async () => {}), pull: vi.fn(async () => {}), connect: vi.fn(async (_operationId: string) => {}), disconnect: vi.fn(async () => {}), stopNotifications: vi.fn(async () => {}), retryClock: vi.fn(async () => {}), failed: vi.fn(), recovered: vi.fn() }
     return { ...dependencies, scheduler: createServerSyncScheduler(dependencies) }
 }
 describe('server LWW foreground scheduler', () => {
     it('classifies tunnel outages and timeouts without masking authentication or local failures', () => {
         for (const status of [502, 503, 504, 530]) expect(isServerSyncUnavailable({ code: 'server-response-error', status })).toBe(true)
-        for (const code of ['server-timeout', 'incomplete-response', 'sync-retry-budget-exhausted']) expect(isServerSyncUnavailable({ code })).toBe(true)
+        for (const code of ['server-timeout', 'server-updating', 'incomplete-response', 'sync-retry-budget-exhausted']) expect(isServerSyncUnavailable({ code })).toBe(true)
         for (const error of [{ code: 'server-response-error', status: 401 }, { code: 'local-storage', status: 503 }, { code: 'server-unreachable', status: 409, retryable: false }, new TypeError('Load failed')]) {
             expect(isServerSyncUnavailable(error)).toBe(false)
         }
@@ -157,12 +157,13 @@ describe('server LWW foreground scheduler', () => {
         await scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0); f.push.mockClear()
         scheduler.localChange()
         const hidden = scheduler.foreground(false, true); await vi.advanceTimersByTimeAsync(0)
-        expect(publishHidden).toHaveBeenCalledOnce(); expect(f.disconnect).not.toHaveBeenCalled()
+        expect(publishHidden).toHaveBeenCalledOnce(); expect(f.stopNotifications).not.toHaveBeenCalled()
         await scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0)
         expect(f.push).not.toHaveBeenCalled()
         finish(); await hidden; await vi.advanceTimersByTimeAsync(0)
-        expect(f.disconnect).not.toHaveBeenCalled(); expect(f.push).toHaveBeenCalledOnce()
-        await scheduler.foreground(false); expect(publishHidden).toHaveBeenCalledOnce(); expect(f.disconnect).toHaveBeenCalledOnce()
+        expect(f.stopNotifications).not.toHaveBeenCalled(); expect(f.push).toHaveBeenCalledOnce()
+        await scheduler.foreground(false); expect(publishHidden).toHaveBeenCalledOnce(); expect(f.stopNotifications).toHaveBeenCalledOnce()
+        expect(f.disconnect).not.toHaveBeenCalled()
         scheduler.dispose()
     })
     it('keeps a stalled receive independent from publication', async () => {
@@ -171,14 +172,59 @@ describe('server LWW foreground scheduler', () => {
         f.scheduler.localChange(true); await vi.advanceTimersByTimeAsync(0)
         expect(f.push).toHaveBeenCalledTimes(1); release(); f.scheduler.dispose()
     })
-    it('uses foreground fallback and connected safety intervals and stops all work in background', async () => {
+    it('uses foreground fallback and connected safety intervals and stops checks and notifications in background without cancelling', async () => {
         const f = fixture(); await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0); f.pull.mockClear()
         await vi.advanceTimersByTimeAsync(5000); expect(f.pull).toHaveBeenCalledTimes(1)
         f.scheduler.socket(true); f.pull.mockClear(); await vi.advanceTimersByTimeAsync(59_999); expect(f.pull).not.toHaveBeenCalled()
         await vi.advanceTimersByTimeAsync(1); expect(f.pull).toHaveBeenCalledTimes(1)
         await f.scheduler.foreground(false); f.pull.mockClear(); f.push.mockClear(); f.connect.mockClear()
         await vi.advanceTimersByTimeAsync(120_000); f.scheduler.localChange(true); f.scheduler.remoteHint()
-        expect(f.pull).not.toHaveBeenCalled(); expect(f.push).not.toHaveBeenCalled(); expect(f.connect).not.toHaveBeenCalled(); expect(f.disconnect).toHaveBeenCalledTimes(1)
+        expect(f.pull).not.toHaveBeenCalled(); expect(f.push).not.toHaveBeenCalled(); expect(f.connect).not.toHaveBeenCalled()
+        expect(f.stopNotifications).toHaveBeenCalledOnce(); expect(f.disconnect).not.toHaveBeenCalled()
+    })
+    it('still cancels when a fence arrives while hiding stops only the notification channel', async () => {
+        const f = fixture(); let stopped!: () => void
+        f.stopNotifications.mockImplementationOnce(() => new Promise<void>(resolve => { stopped = resolve }))
+        await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0)
+        const hidden = f.scheduler.foreground(false); await vi.advanceTimersByTimeAsync(0)
+        const fenced = f.scheduler.fence(); await vi.advanceTimersByTimeAsync(0)
+        expect(f.disconnect).not.toHaveBeenCalled()
+        stopped(); await Promise.all([hidden, fenced])
+        expect(f.disconnect).toHaveBeenCalledOnce()
+        f.scheduler.dispose()
+    })
+    it.each([
+        { pendingStart: false, stopFails: false },
+        { pendingStart: true, stopFails: false },
+        { pendingStart: false, stopFails: true },
+        { pendingStart: true, stopFails: true },
+    ])('reconnects after returning while the hidden notification stop is pending (old start pending: $pendingStart, stop fails: $stopFails)', async ({ pendingStart, stopFails }) => {
+        const f = fixture()
+        const stopFailure = new Error('notification stop failed')
+        let stopped!: () => void
+        let started: (() => void) | undefined
+        let notificationsRunning = false
+        f.connect.mockImplementation(async () => { notificationsRunning = true })
+        if (pendingStart) f.connect.mockImplementationOnce(() => new Promise<void>(resolve => {
+            started = () => { notificationsRunning = true; resolve() }
+        }))
+        f.stopNotifications.mockImplementation(async () => { notificationsRunning = false })
+        f.stopNotifications.mockImplementationOnce(() => new Promise<void>((resolve, reject) => {
+            stopped = () => { notificationsRunning = false; if (stopFails) reject(stopFailure); else resolve() }
+        }))
+        await f.scheduler.foreground(true)
+        await vi.advanceTimersByTimeAsync(0)
+        const hidden = f.scheduler.foreground(false).catch(error => error)
+        await vi.advanceTimersByTimeAsync(0)
+        const returned = f.scheduler.foreground(true)
+        await vi.advanceTimersByTimeAsync(0)
+        stopped()
+        started?.()
+        expect(await hidden).toBe(stopFails ? stopFailure : undefined)
+        await returned
+        await vi.advanceTimersByTimeAsync(0)
+        expect(notificationsRunning).toBe(true)
+        f.scheduler.dispose()
     })
     it('immediately pulls on notification, conversation open, foreground return and socket loss', async () => {
         const f = fixture(); await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0); f.pull.mockClear()

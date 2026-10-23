@@ -270,12 +270,16 @@ impl S3Provider {
 
     /// Default S3 status meanings with the documented per-service overrides.
     fn classify(&self, profile: &Profile, response: &HttpResponse) -> ProviderError {
+        const CLOCK_SKEW_LIMIT_MS: u128 = 14 * 60 * 1000;
         let mut error = common::classify_status(response.status, &response.headers, self.now_ms());
-        if response.status == 403 && response.headers.get("date")
+        if let Some(offset) = response.headers.get("date")
             .and_then(|date| httpdate::parse_http_date(date).ok())
             .and_then(|date| date.duration_since(std::time::UNIX_EPOCH).ok())
-            .is_some_and(|date| date.as_millis().abs_diff(u128::from(self.now_ms())) > 14 * 60 * 1000) {
-            error.kind = ErrorKind::ClockSkew;
+            .map(|date| date.as_millis().abs_diff(u128::from(self.now_ms())))
+            .filter(|offset| response.status == 403 && *offset > CLOCK_SKEW_LIMIT_MS) {
+            error = crate::external_storage::clock::failure("provider", "server-offset",
+                format_args!("offset_ms={offset} limit_ms={CLOCK_SKEW_LIMIT_MS}"));
+            error.http_status = Some(response.status);
         }
         if response.status == 503 && profile.slow_down_is_rate_limit {
             error.kind = ErrorKind::RateLimited;

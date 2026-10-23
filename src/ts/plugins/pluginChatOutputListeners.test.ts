@@ -304,4 +304,55 @@ describe('plugin chat output listeners', () => {
 
         expect(second).not.toHaveBeenCalled()
     })
+
+    it('saves pending data before building the event', async () => {
+        const listener = vi.fn()
+        let saved = false
+        const projectScalable = vi.fn(async () => {
+            expect(saved).toBe(true)
+            return { char: exactChar, chat: exactChat }
+        })
+        const onError = vi.fn()
+        await dispatchChatOutputListeners({
+            listeners: new Set([listener]), char: liveChar, chat: liveChat, messageIndex: 0,
+            resolvePosition: async () => {
+                saved = true
+                return { characterIndex: 0, chatIndex: 0 }
+            },
+            projectScalable, onError,
+        })
+        expect(onError).not.toHaveBeenCalled()
+        expect(listener).toHaveBeenCalledOnce()
+    })
+
+    it('builds only the current-conversation event when no listener receives the full history', async () => {
+        const { listeners } = registry()
+        const optedOut = vi.fn()
+        const defaultListener = vi.fn()
+        registerChatOutputListener(listeners, optedOut, { history: 'current' })
+        registerChatOutputListener(listeners, defaultListener)
+        const projectScalable = projector()
+        const payloads: unknown[] = []
+        const common = {
+            listeners, char: liveChar, chat: liveChat, messageIndex: 0, windowStart: 7,
+            resolvePosition: async () => ({ characterIndex: 0, chatIndex: 0 }),
+            projectScalable, onError: (error: unknown) => { throw error },
+            onPayload: (payload: unknown) => { payloads.push(payload) },
+        }
+
+        await dispatchChatOutputListeners({ ...common, fullHistory: true })
+        expect(projectScalable).toHaveBeenLastCalledWith(expect.objectContaining({ history: 'full', windowStart: 7 }))
+        expect(defaultListener.mock.calls[0][0].char).toBe(exactChar)
+        expect(optedOut.mock.calls[0][0].char.chats).toEqual([{ id: 'chat-a', name: 'Live', note: '', localLore: [] }])
+        expect(optedOut.mock.calls[0][0].chat).toBe(exactChat)
+        expect(payloads).toEqual([
+            { listeners: 2, fullHistoryListeners: 1 },
+            { listeners: 2, fullHistoryListeners: 1, conversations: 1, messages: 2, messageCharacters: 8 },
+        ])
+
+        await dispatchChatOutputListeners({ ...common, fullHistory: false })
+        expect(projectScalable).toHaveBeenLastCalledWith(expect.objectContaining({ history: 'current' }))
+        expect(defaultListener.mock.calls[1][0].char).toBe(exactChar)
+        expect(optedOut.mock.calls[1][0].char).toBe(exactChar)
+    })
 })

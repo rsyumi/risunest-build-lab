@@ -418,6 +418,32 @@ function __postToParent(message) {
         expect(state).toMatchObject({ targetClicks: 1, documentClicks: 3 })
     })
 
+    it('removes exactly the listener its ID names even when the removal type and options differ', async () => {
+        const name = 'listener-removal'
+        await startFixture(name, `
+            globalThis.counts = { captured: 0, kept: 0 };
+            globalThis.rpcReady = (async () => {
+                const root = await risuai.getRootDocument();
+                globalThis.target = await root.querySelector('#plugin-target');
+                globalThis.capturedId = await globalThis.target.addEventListener('click', () => {
+                    globalThis.counts.captured += 1;
+                }, { capture: true });
+                await globalThis.target.addEventListener('click', () => {
+                    globalThis.counts.kept += 1;
+                });
+            })();
+        `)
+        const counts = () => guest(name, 'return JSON.stringify(globalThis.counts)').then(value => JSON.parse(String(value)))
+        const click = () => document.querySelector('#plugin-target')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+
+        click()
+        await waitFor(counts, (value) => value.kept === 1)
+        await guest(name, "await globalThis.target.removeEventListener('dblclick', globalThis.capturedId, false); return true")
+        click()
+
+        expect(await waitFor(counts, (value) => value.kept === 2)).toEqual({ captured: 1, kept: 2 })
+    })
+
     it('delivers MutationObserver records as callable remote proxies', async () => {
         await startFixture()
         const child = document.createElement('span')

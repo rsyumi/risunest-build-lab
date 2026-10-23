@@ -4,6 +4,9 @@ import { createConversationOperationContext, type ConversationCommitObserver } f
 
 const mocks = vi.hoisted(() => ({
     iosDependencies: undefined as any,
+    ios: false,
+    diagnosticEvents: [] as Record<string, unknown>[],
+    diagnosticMode: 'record' as 'record' | 'throw' | 'reject' | 'noop',
     session: null as any,
     currentCharacter: null as any,
     events: [] as string[],
@@ -11,6 +14,8 @@ const mocks = vi.hoisted(() => ({
     modelRequestCount: 0,
     realTriggers: false,
     authorityEpoch: 0,
+    diagnosticAuthorityError: null as Error | null,
+    completionRequest: null as null | (() => Promise<string>),
     modelRequests: [] as any[],
     presetActivationCount: 0,
     presetActivation: null as null | (() => Promise<void> | void),
@@ -57,6 +62,19 @@ const mocks = vi.hoisted(() => ({
     trimUntilPunctuation: vi.fn((value: string) => value),
 }))
 
+vi.mock('../generationDiagnostics', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('../generationDiagnostics')>()
+    return (await import('./tests/sendChatTestHarness')).generationDiagnosticsModule(actual, (_command, args) => {
+        const event = args.event as Record<string, unknown>
+        if (event.kind === 'document-start') return Promise.resolve(1)
+        if (mocks.diagnosticMode === 'throw') throw new Error('native diagnostic unavailable')
+        if (mocks.diagnosticMode === 'reject') return Promise.reject(new Error('native diagnostic unavailable'))
+        if (mocks.diagnosticMode === 'record') mocks.diagnosticEvents.push(event)
+        return Promise.resolve(undefined)
+    })
+})
+
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule(() => mocks.ios ? { runtime: 'tauri', os: 'ios' } : { runtime: 'web', os: 'windows' }))
 vi.mock('../iosNative', async (importOriginal) => {
     const original = await importOriginal<typeof import('../iosNative')>()
     return { ...original,
@@ -82,7 +100,7 @@ vi.mock('../util', async () => (await import('./tests/sendChatTestHarness')).uti
 vi.mock('./request/request', async () => (await import('./tests/sendChatTestHarness')).requestModule(vi.fn(async (request: unknown, purpose: string) => {
     if (purpose === 'emotion') {
         mocks.events.push('igp-request')
-        return '|igp'
+        return mocks.completionRequest ? await mocks.completionRequest() : '|igp'
     }
     mocks.modelRequestCount += 1
     mocks.modelRequests.push(request)
@@ -165,6 +183,11 @@ vi.mock('./presetChain', () => ({
 }))
 vi.mock('../storage/persistentDataRuntime.svelte', async () => (await import('./tests/sendChatTestHarness')).persistentRuntimeModule({
     assertPersistentMutationAllowed: (epoch = mocks.authorityEpoch) => {
+        if (mocks.diagnosticAuthorityError) {
+            const error = mocks.diagnosticAuthorityError
+            mocks.diagnosticAuthorityError = null
+            throw error
+        }
         if (epoch !== mocks.authorityEpoch) throw new PersistentMutationFencedError()
     },
     getPersistentStorageAuthorityEpoch: () => mocks.authorityEpoch,
@@ -193,6 +216,7 @@ import { createLeaseStub } from '../storage/persistentDataStore.testSupport'
 import { PersistentMutationFencedError } from '../storage/saveCoordinator'
 import { DBState, selectedCharID } from '../stores.svelte'
 import { doingChat, sendChat } from './index.svelte'
+import { isGenerationReserved } from './generationState'
 import type { triggerscript } from './triggers'
 import { isGenerationRequestPhaseOpen, trackConversationPatch } from './generationRequestPhase'
 import { beginGenerationEndRun, subscribeGenerationEnd, type GenerationEndRecord, type GenerationEndStatus } from './generationEnd'
@@ -340,6 +364,9 @@ function streamingSnapshots(...values: string[]) {
 describe('sendChat generation session integration', () => {
     beforeEach(() => {
         mocks.iosDependencies = undefined
+        mocks.ios = false
+        mocks.diagnosticEvents.length = 0
+        mocks.diagnosticMode = 'record'
         vi.spyOn(console, 'log').mockImplementation(() => undefined)
         doingChat.set(false)
         mocks.session = null
@@ -349,6 +376,8 @@ describe('sendChat generation session integration', () => {
         mocks.modelRequestCount = 0
         mocks.realTriggers = false
         mocks.authorityEpoch = 0
+        mocks.diagnosticAuthorityError = null
+        mocks.completionRequest = null
         mocks.modelRequests.length = 0
         mocks.presetActivationCount = 0
         mocks.presetActivation = null
@@ -407,6 +436,153 @@ describe('sendChat generation session integration', () => {
                 },
             }
         })
+    })
+
+    it.each(['buffered', 'streaming', 'multiline', 'continue', 'reroll'] as const)(
+        'records bounded content-free generation phases for %s', async (kind) => {
+            const canary = 'PRIVATE_DIAGNOSTIC_CONTENT_CANARY'
+            const { chat } = installDatabase(makeChat([{ role: 'char', data: canary, chatId: 'PRIVATE_MESSAGE_ID' }]))
+            mocks.outputTriggerReturnsNull = true
+            if (kind === 'reroll') chat.rerollRecovery = { original: [] } as Chat['rerollRecovery']
+            DBState.db.streamingDisplayOptimizationMode = 'balanced'
+            DBState.db.ttsAutoSpeech = true
+            mocks.modelResponse = kind === 'streaming'
+                ? streamingSnapshots(...Array.from({ length: 20 }, (_, index) => `${canary}-${index}`))
+                : kind === 'multiline'
+                    ? { type: 'multiline', result: [['char', canary], ['char', canary + '-alternate']] }
+                    : { type: 'success', result: canary }
+
+            await expect(sendChat({ continue: kind === 'continue' })).resolves.toBe(true)
+
+            const admission = mocks.diagnosticEvents.filter(event => event.kind === 'admission')
+            expect(admission[0]).toMatchObject({ intent: kind === 'continue' || kind === 'reroll' ? kind : 'normal', route: 'unknown', displayMode: 'normal' })
+            expect(admission.at(-1)).toMatchObject({ route: 'complete', admittedMessages: 1, totalMessages: 1 })
+            const exits = mocks.diagnosticEvents.filter(event => event.kind === 'phase' && event.edge === 'exit')
+            const outputPhases = kind === 'multiline' ? ['output-application'] : ['semantic-output', 'inlay', 'tts']
+            for (const phase of ['send-admitted', 'history-materialization', 'prompt-preparation', 'awaiting-provider', 'host-response', ...outputPhases, 'current-chat-parser', 'output-trigger', 'output-listener', 'completion-processing', 'final-acknowledgement', 'settled']) {
+                expect(exits.filter(event => event.phase === phase), phase).toEqual([
+                    expect.objectContaining({ phase, outcome: 'ok' }),
+                ])
+            }
+            expect(mocks.diagnosticEvents.find(event => event.kind === 'persistence')).toMatchObject({ boundary: 'final', savePath: 'complete', acknowledgedRevision: 1 })
+            expect(mocks.diagnosticEvents.length).toBeLessThan(40)
+            const encoded = JSON.stringify(mocks.diagnosticEvents)
+            for (const secret of [canary, 'PRIVATE_MESSAGE_ID', 'character-a', 'chat-a', 'test-model']) expect(encoded).not.toContain(secret)
+            expect(DBState.db.characters[0].chats[0].message.at(-1)?.data).toContain(canary)
+        },
+    )
+
+    it('keeps the multiline aggregate phase active while a later semantic pass is pending', async () => {
+        installDatabase()
+        DBState.db.ttsAutoSpeech = true
+        mocks.modelResponse = { type: 'multiline', result: [['char', 'first'], ['char', 'second']] }
+        const entered = deferred<void>()
+        const finish = deferred<void>()
+        mocks.processScriptFull.mockImplementation(async (_char, data, mode) => {
+            if (mode === 'editoutput' && data === 'second') {
+                entered.resolve()
+                await finish.promise
+            }
+            return { data, emoChanged: false }
+        })
+        const sending = sendChat()
+        await entered.promise
+        expect(mocks.diagnosticEvents.filter(event => event.kind === 'phase').at(-1)).toMatchObject({
+            phase: 'output-application', edge: 'enter',
+        })
+        expect(mocks.diagnosticEvents.some(event => ['semantic-output', 'inlay', 'tts'].includes(String(event.phase)))).toBe(false)
+        finish.resolve()
+        await expect(sending).resolves.toBe(true)
+        expect(DBState.db.characters[0].chats[0].message.at(-1)?.responseVariants?.candidates.map(candidate => candidate.messages[0].data)).toEqual(['first', 'second'])
+    })
+
+    it.each(['throw', 'reject', 'noop'] as const)('does not alter generation when diagnostics %s', async (mode) => {
+        installDatabase()
+        mocks.diagnosticMode = mode
+        await expect(sendChat()).resolves.toBe(true)
+        expect(DBState.db.characters[0].chats[0].message.at(-1)?.data).toBe('answer')
+        expect(mocks.acknowledge).toHaveBeenCalledOnce()
+        expect(mocks.diagnosticEvents).toEqual([])
+    })
+
+    it.each(['save-path', 'authority'] as const)('isolates diagnostic %s state failures from persistence and cleanup', async (failureKind) => {
+        const { session } = installDatabase()
+        mocks.selectedTarget = { characterId: 'character-a', conversationId: 'chat-a' }
+        mocks.outputTriggerReturnsNull = true
+        const failure = new Error('synthetic diagnostic state failure')
+        Object.defineProperty(session, 'residencyFallbackActive', {
+            get() {
+                if (failureKind === 'save-path') throw failure
+                mocks.diagnosticAuthorityError = failure
+                return false
+            },
+        })
+
+        await expect(sendChat()).resolves.toBe(true)
+
+        expect(DBState.db.characters[0].chats[0].message.at(-1)?.data).toBe('answer')
+        expect(mocks.acknowledge).toHaveBeenCalledOnce()
+        expect(session.pinCount('compatibility')).toBe(0)
+        expect(session.pinCount('transaction')).toBe(0)
+        expect(mocks.activeCompleteLeases).toBe(0)
+        expect(mocks.completeLeaseReleases).toBe(1)
+        expect(isGenerationReserved()).toBe(false)
+        expect(get(doingChat)).toBe(false)
+    })
+
+    it.each(['success', 'failure'] as const)('records auxiliary completion work and preserves output and cleanup on %s', async (outcome) => {
+        const { session } = installDatabase()
+        mocks.selectedTarget = { characterId: 'character-a', conversationId: 'chat-a' }
+        mocks.outputTriggerReturnsNull = true
+        DBState.db.igpPrompt = 'synthetic auxiliary prompt'
+        const entered = deferred<void>()
+        const finish = deferred<void>()
+        const failure = new Error('synthetic completion failure')
+        mocks.completionRequest = async () => {
+            entered.resolve()
+            await finish.promise
+            if (outcome === 'failure') throw failure
+            return '|auxiliary'
+        }
+        const sending = sendChat()
+        await entered.promise
+
+        let settled: { value?: boolean; error?: unknown }
+        try {
+            expect(mocks.diagnosticEvents.filter(event => event.kind === 'phase').at(-1)).toMatchObject({
+                phase: 'completion-processing', edge: 'enter',
+            })
+            expect(DBState.db.characters[0].chats[0].message.at(-1)?.data).toBe('answer')
+            expect(mocks.acknowledge).not.toHaveBeenCalled()
+        } finally {
+            finish.resolve()
+            settled = await sending.then(value => ({ value }), error => ({ error }))
+        }
+        expect(settled).toEqual(outcome === 'failure' ? { error: failure } : { value: true })
+
+        expect(mocks.diagnosticEvents).toContainEqual(expect.objectContaining({
+            phase: 'completion-processing', edge: 'exit', outcome: outcome === 'failure' ? 'failed' : 'ok',
+        }))
+        expect(DBState.db.characters[0].chats[0].message.at(-1)?.data).toBe(outcome === 'failure' ? 'answer' : 'answer|auxiliary')
+        expect(mocks.acknowledge).toHaveBeenCalledOnce()
+        expect(session.pinCount('compatibility')).toBe(0)
+        expect(mocks.activeCompleteLeases).toBe(0)
+        expect(isGenerationReserved()).toBe(false)
+    })
+
+    it.each(['provider', 'semantic'] as const)('records a failed %s phase without recording the error', async (failureStage) => {
+        installDatabase()
+        const failure = new Error('PRIVATE_FAILURE_CANARY')
+        if (failureStage === 'provider') mocks.modelResponse = () => { throw failure }
+        else mocks.processScriptFull.mockImplementation(async (_char, data, mode) => {
+            if (mode === 'editoutput') throw failure
+            return { data, emoChanged: false }
+        })
+        await expect(sendChat()).rejects.toBe(failure)
+        const phase = failureStage === 'provider' ? 'awaiting-provider' : 'semantic-output'
+        expect(mocks.diagnosticEvents).toContainEqual(expect.objectContaining({ phase, edge: 'exit', outcome: 'failed' }))
+        expect(mocks.diagnosticEvents).toContainEqual(expect.objectContaining({ phase: 'settled', edge: 'exit', outcome: 'failed' }))
+        expect(JSON.stringify(mocks.diagnosticEvents)).not.toContain('PRIVATE_FAILURE_CANARY')
     })
 
     it('caps the local caption image without changing the stored attachment', async () => {
@@ -991,6 +1167,10 @@ describe('sendChat generation session integration', () => {
         while (!release) await Promise.resolve()
         for (let tick = 0; tick < 20; tick++) await Promise.resolve()
         expect(openDuringRequest).toBe(true)
+        expect(mocks.diagnosticEvents).toContainEqual(expect.objectContaining({ phase: 'awaiting-provider', edge: 'exit', outcome: 'ok' }))
+        expect(mocks.diagnosticEvents.filter(event => event.phase === 'host-response')).toEqual([
+            expect.objectContaining({ phase: 'host-response', edge: 'enter', resultKind: 'streaming' }),
+        ])
         expect(isGenerationRequestPhaseOpen(target)).toBe(false)
         expect(chat.message.map((message) => message.data)).toEqual(['hello'])
         const next = JSON.parse(JSON.stringify(chat))
@@ -1236,6 +1416,12 @@ describe('sendChat generation session integration', () => {
 
         await expect(sending).resolves.toBe(false)
         expect(currentCharacter.chats[0].message[0].data).toBe('replacement')
+        expect(mocks.diagnosticEvents).toContainEqual(expect.objectContaining({
+            phase: 'completion-processing', edge: 'exit', outcome: 'stale',
+        }))
+        expect(mocks.diagnosticEvents).toContainEqual(expect.objectContaining({
+            phase: 'settled', edge: 'exit', outcome: 'stale',
+        }))
     })
 
     it('preserves complete successful non-empty multiline response behavior', async () => {
@@ -1385,6 +1571,8 @@ describe('sendChat generation session integration', () => {
             ['concurrent-message', 'Concurrent mutation'],
         ])
         expect(chat.message.some((message) => message.data === 'Late inlay result')).toBe(false)
+        expect(mocks.diagnosticEvents).toContainEqual(expect.objectContaining({ phase: 'inlay', edge: 'exit', outcome: 'stale' }))
+        expect(mocks.diagnosticEvents).toContainEqual(expect.objectContaining({ phase: 'settled', edge: 'exit', outcome: 'stale' }))
         expect(mocks.sayTTS).not.toHaveBeenCalled()
         expect(mocks.events).not.toContain('output-trigger')
         expect(mocks.acknowledge).toHaveBeenCalledOnce()
@@ -1504,6 +1692,8 @@ describe('sendChat generation session integration', () => {
             expect(chat.message.map((message) => message.data)).toEqual([
                 continuing ? 'existing' : 'hello',
             ])
+            expect(mocks.diagnosticEvents).toContainEqual(expect.objectContaining({ phase: 'semantic-output', edge: 'exit', outcome: 'aborted' }))
+            expect(mocks.diagnosticEvents).toContainEqual(expect.objectContaining({ phase: 'settled', edge: 'exit', outcome: 'aborted' }))
             expect(mocks.events).not.toContain('output-trigger')
             expect(mocks.sayTTS).not.toHaveBeenCalled()
             expect(session.pinCount('transaction')).toBe(0)
@@ -1648,7 +1838,11 @@ describe('sendChat generation session integration', () => {
         const { alertNormal } = await import('../alert')
         const { notifyIOSGenerationComplete } = await import('../iosNative')
         const { language } = await import('../../lang')
+        const { setGenerationBackground } = await import('./generationState')
+        const { beginGenerationBackground } = await import('./generationBackground')
         installDatabase()
+        mocks.ios = true
+        setGenerationBackground(beginGenerationBackground)
         const events = new EventTarget()
         const dispose = vi.fn(async () => undefined)
         mocks.iosDependencies = {
@@ -1670,8 +1864,10 @@ describe('sendChat generation session integration', () => {
         if (end === 'user-stop') expect(alertNormal).not.toHaveBeenCalled()
         else expect(alertNormal).toHaveBeenCalledExactlyOnceWith(language.generationInterruptedInBackground)
         expect(notifyIOSGenerationComplete).not.toHaveBeenCalled()
-        expect(dispose).toHaveBeenCalledWith('generation', false)
+        await vi.waitFor(() => expect(dispose).toHaveBeenCalledWith('generation', false))
         mocks.iosDependencies = undefined
+        mocks.ios = false
+        setGenerationBackground(undefined)
     })
 
     describe('generation end notes', () => {

@@ -1,6 +1,6 @@
 import { expect, it, vi } from 'vitest'
 import { get } from 'svelte/store'
-import { doingChat, generationCancellation, reserveGeneration } from './generationState'
+import { doingChat, generationCancellation, reserveGeneration, setGenerationBackground } from './generationState'
 
 it('keeps ownership until cleanup after an idempotent cancellation request', () => {
     const cancel = vi.fn()
@@ -38,5 +38,22 @@ it('ignores an obsolete Stop callback and release after another send starts', ()
         expect(secondCancel).toHaveBeenCalledOnce()
     } finally {
         second.release()
+    }
+})
+
+it('holds one generation background from the reservation until its release', () => {
+    const end = vi.fn(async () => {})
+    const start = vi.fn(() => ({ signal: new AbortController().signal, progress() {}, settle() {}, takeExpiry: () => false, end }))
+    setGenerationBackground(start)
+    try {
+        const reservation = reserveGeneration()!
+        expect(reserveGeneration()).toBeNull()
+        expect(start).toHaveBeenCalledOnce()
+        expect(end).not.toHaveBeenCalled()
+        reservation.release()
+        reservation.release()
+        expect(end).toHaveBeenCalledOnce()
+    } finally {
+        setGenerationBackground(undefined)
     }
 })

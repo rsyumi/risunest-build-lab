@@ -1,5 +1,5 @@
 import { isBackgroundExpiryReason } from '../iosNative'
-import { measuredTaskPercent, runWithMobileBackgroundTask } from '../mobileBackgroundTask'
+import { measuredTaskPercent, runWithDeferredMobileBackgroundTask, runWithMobileBackgroundTask, runWithMobileBackgroundTaskAfterPicker, type MobileBackgroundTask } from '../mobileBackgroundTask'
 import { Mutex } from '../mutex'
 import { get, writable } from 'svelte/store'
 import { invoke } from '@tauri-apps/api/core'
@@ -88,11 +88,16 @@ export interface SharedNativeFileOperationContext {
     setSource(source: NativeFileOperationSource): void
     setPartialWritesPossible(value: boolean): void
     releaseLibraryAfterPortableAdoption(receipt: NativeFileJobStatus): Promise<void>
+    /** With `protectAfterPicker`, begins the background task once the picker has returned. */
+    protect(): void
 }
 
 export interface SharedNativeFileOperationOptions {
     beforeSettlement?(signal: AbortSignal): Promise<void>
+    onProgress?(percent: number | null): void
     userInitiated?: boolean
+    /** The operation opens a system picker first and calls `protect` once it returns. */
+    protectAfterPicker?: boolean
     presentation?: NativeFileOperationPresentation
     format?: NativeFileOperationFormat
     snapshotBodyOwner?: NativeSnapshotBodiesStarted
@@ -161,7 +166,8 @@ function backgroundTaskPercent({ kind, phase, progress, detail }: NativeFileJobS
         return phase === 'reading-source' ? measuredTaskPercent(progress.completedBytes, progress.totalBytes) : null
     }
     const percent = measuredTaskPercent(progress.completedBytes, progress.totalBytes)
-    return percent === null && detail?.stage === 'copying-source' && detail.stageUnit === 'bytes'
+    return percent === null && (detail?.stage === 'copying-source' && detail.stageUnit === 'bytes'
+        || detail?.stage === 'publishing-destination' && detail.stageUnit === 'items')
         ? measuredTaskPercent(detail.stageCompleted, detail.stageTotal) : percent
 }
 
@@ -367,6 +373,7 @@ function runSharedNativeFileOperationWithAdmission<T>(
             }
             releaseAdmission()
         },
+        protect: () => {},
     }
     let taskSignal = controller.signal
     let finalized = false
@@ -378,7 +385,7 @@ function runSharedNativeFileOperationWithAdmission<T>(
     try {
         const taskKind = options.format === 'library-backup' || options.format === 'risu-save'
             ? (kind === 'export' ? 'backup' : 'restore') : kind
-        runWithMobileBackgroundTask(taskKind, async task => {
+        const protectedOperation = async (task: MobileBackgroundTask & { protect?(): void }) => {
             taskSignal = task.signal ?? context.signal
             try {
                 const waiting = bodyOnly ? null : waitForLibraryFileOperation(task.signal ?? context.signal)
@@ -392,11 +399,21 @@ function runSharedNativeFileOperationWithAdmission<T>(
                     signal: task.signal ?? context.signal,
                     onStatus: status => {
                         context.onStatus(status)
-                        task.progress(backgroundTaskPercent(status))
+                        const percent = backgroundTaskPercent(status)
+                        task.progress(percent)
+                        options.onProgress?.(percent)
                     },
+                    protect: () => task.protect?.(),
                 })
             } finally { await finalize() }
-        }, controller.signal, options.userInitiated ?? true).finally(finalize).then(
+        }
+        // A picker never holds the task, and automatic work is protected only if the app leaves the screen while it runs.
+        void (options.protectAfterPicker
+            ? runWithMobileBackgroundTaskAfterPicker(taskKind, protectedOperation, controller.signal)
+            : options.userInitiated === false
+                ? runWithDeferredMobileBackgroundTask(taskKind, protectedOperation, controller.signal)
+                : runWithMobileBackgroundTask(taskKind, protectedOperation, controller.signal, true)
+        ).finally(finalize).then(
             value => { settle({ value }); resolveOperation(value) },
             error => { settle({ error }); rejectOperation(error) },
         )

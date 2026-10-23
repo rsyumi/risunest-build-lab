@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { imageAliases } from "src/ts/media/imageFormats"
     import { language } from "src/lang";
     import TextInput from "../UI/GUI/TextInput.svelte";
     import TextAreaInput from "../UI/GUI/TextAreaInput.svelte";
@@ -26,7 +27,7 @@
     let fontFamily = $state('Arial');
 
     async function selectFile(){
-        const file = await selectSingleFile(['png', 'jpg', 'jpeg','gif','webp','avif']);
+        const file = await selectSingleFile(imageAliases, { image: true });
         if (!file){
             loading = false;
             return;

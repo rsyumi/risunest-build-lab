@@ -53,7 +53,18 @@ mod tests {
         fixture_with_cc_mime("application/octet-stream")
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Portrait {
+        Present,
+        MissingAlias,
+        MissingPayload,
+    }
+
     fn fixture_with_cc_mime(cc_mime: &str) -> Fixture {
+        fixture_with(cc_mime, Portrait::Present)
+    }
+
+    fn fixture_with(cc_mime: &str, portrait_state: Portrait) -> Fixture {
         let directory = TempDir::new().unwrap();
         let mut store = PersistentStore::open(directory.path()).unwrap();
         let cas = PayloadCas::new(directory.path()).unwrap();
@@ -122,7 +133,18 @@ mod tests {
             .replace_add_characters(&staging, &[character])
             .unwrap();
         store
-            .replace_put_asset_aliases(&staging, &[portrait.clone(), cc.clone(), shared.clone()])
+            .replace_put_asset_aliases(&staging, &match portrait_state {
+                Portrait::Present => vec![portrait.clone(), cc.clone(), shared.clone()],
+                Portrait::MissingAlias => vec![cc.clone(), shared.clone()],
+                Portrait::MissingPayload => vec![
+                    AssetAlias {
+                        object_hash: Some(hex::encode(Sha256::digest(b"never stored"))),
+                        ..portrait.clone()
+                    },
+                    cc.clone(),
+                    shared.clone(),
+                ],
+            })
             .unwrap();
         store
             .replace_put_asset_owner_heads(
@@ -163,7 +185,11 @@ mod tests {
                 cc.object_hash.unwrap(),
                 shared.object_hash.unwrap(),
                 second.content_hash,
-                portrait.object_hash.unwrap(),
+                if portrait_state == Portrait::Present {
+                    portrait.object_hash.unwrap()
+                } else {
+                    hex::encode(Sha256::digest(FALLBACK_PORTRAIT))
+                },
             ],
         }
     }
@@ -230,6 +256,52 @@ mod tests {
                 .pointer("/data/extensions/risuai/customScripts"),
             Some(&json!([{"comment": "regex"}]))
         );
+    }
+
+    #[test]
+    fn native_json_export_embeds_the_fallback_for_an_unreadable_portrait() {
+        for state in [Portrait::MissingAlias, Portrait::MissingPayload] {
+            let mut fixture = fixture_with("application/octet-stream", state);
+            let prepared = fixture
+                .store
+                .prepare_risu_save_export(fixture.revision)
+                .unwrap();
+            let owned = fixture.directory.path().join("owned");
+            fs::create_dir(&owned).unwrap();
+            let destination = fixture.directory.path().join("character.json");
+            let job = JobRegistry::default()
+                .create(JobKind::ExportCharacterCard)
+                .unwrap();
+
+            export_character_json(
+                prepared,
+                "json-character",
+                fixture.metadata,
+                &owned,
+                &fixture.directory.path().join("handoffs"),
+                Some(&destination),
+                &job,
+            )
+            .unwrap_or_else(|error| panic!("{state:?}: {}", error.message));
+
+            let parse_root = fixture.directory.path().join("json-parse");
+            fs::create_dir(&parse_root).unwrap();
+            let parsed = parse_json_card(
+                &mut fs::read(&destination).unwrap().as_slice(),
+                &JobStaging::open(&parse_root).unwrap(),
+                &content_classification_limits(),
+                &|| false,
+            )
+            .unwrap();
+            assert_eq!(
+                parsed
+                    .payloads
+                    .iter()
+                    .map(|payload| payload.payload.sha256.clone())
+                    .collect::<Vec<_>>(),
+                fixture.payload_hashes
+            );
+        }
     }
 
     #[test]
@@ -824,6 +896,31 @@ fn expected_card_assets(character: &Map<String, Value>) -> Result<Vec<Value>, Na
     Ok(assets)
 }
 
+/// The character image key when its payload can be read. An unset image, or one
+/// whose alias or payload is gone, exports the fallback portrait instead.
+pub(super) fn available_portrait_key<'a>(
+    character: &'a Value,
+    reader: &RevisionReadLease,
+    repository: &PayloadCas,
+) -> Result<Option<&'a str>, NativeJobError> {
+    let Some(key) = character
+        .get("image")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let alias = export::pinned_asset_alias_if_present(&reader.connection, &reader.target, key)
+        .map_err(store_error)?;
+    let Some(hash) = alias.and_then(|alias| alias.object_hash) else {
+        return Ok(None);
+    };
+    Ok(repository
+        .stat_available_object(&hash)
+        .map_err(io_error)?
+        .map(|_| key))
+}
+
 pub(super) fn json_asset_sources(
     character: &Value,
     additional_entries: Option<&[OwnerManifestEntry]>,
@@ -867,11 +964,7 @@ pub(super) fn json_asset_sources(
                 return Ok(None);
             }
             if uri == "ccdefault:" {
-                return match character
-                    .get("image")
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.is_empty())
-                {
+                return match available_portrait_key(character, reader, repository)? {
                     Some(key) => cas_source(key, None, reader, repository).map(Some),
                     None => Ok(Some(JsonAssetSource::FallbackPortrait)),
                 };

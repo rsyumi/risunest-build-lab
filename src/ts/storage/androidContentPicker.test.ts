@@ -2,15 +2,22 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
     invoke: vi.fn(), discard: vi.fn(), character: vi.fn(), module: vi.fn(), pick: vi.fn(),
-    controller: new AbortController(),
+    controller: new AbortController(), events: [] as string[],
 }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }))
 vi.mock('./androidSafBridge', () => ({ pickAndroidContentSource: mocks.pick }))
 vi.mock('./nativeFileJobs', () => ({ syntheticNativeFileJobStatus: vi.fn() }))
 vi.mock('./nativeFileJobManager', () => ({
-    runSharedNativeFileOperation: async (_kind: string, _key: string, run: Function) => run({
-        signal: mocks.controller.signal, setSource: vi.fn(), onStatus: vi.fn(),
-    }),
+    // Holds the background task as the manager does: from the start, or once a picker-first operation protects itself.
+    runSharedNativeFileOperation: async (_kind: string, _key: string, run: Function, options?: { protectAfterPicker?: boolean }) => {
+        let held = false
+        const hold = () => { if (!held) { held = true; mocks.events.push('hold') } }
+        if (!options?.protectAfterPicker) hold()
+        return run({
+            signal: mocks.controller.signal, setSource: vi.fn(), onStatus: vi.fn(),
+            protect: () => { if (options?.protectAfterPicker) hold() },
+        })
+    },
 }))
 vi.mock('../characterCards', () => ({ importCharacterProcess: mocks.character }))
 vi.mock('../process/modules', () => ({ importModuleData: mocks.module }))
@@ -22,6 +29,7 @@ const encoded = (text: string) => new TextEncoder().encode(text).buffer
 beforeEach(() => {
     vi.resetAllMocks()
     mocks.controller = new AbortController()
+    mocks.events.length = 0
     mocks.character.mockResolvedValue(0)
     mocks.pick.mockImplementation(async (options) => {
         options.onSource(source)
@@ -115,5 +123,45 @@ describe('Android bounded JSON compatibility replay', () => {
         expect(mocks.character).not.toHaveBeenCalled()
         expect(mocks.module).not.toHaveBeenCalled()
         expect(mocks.discard).toHaveBeenCalledOnce()
+    })
+})
+
+describe('Android content picker background hold', () => {
+    it('holds the background task only once the picker returns, from the first copied bytes', async () => {
+        mocks.invoke.mockResolvedValue(encoded(JSON.stringify({ spec: 'chara_card_v3', data: {} })))
+        mocks.character.mockImplementation(async () => {
+            mocks.events.push('import')
+            return 0
+        })
+        const picked = (copying: boolean) => async (options: {
+            onProgress(progress: { copiedBytes: number; totalBytes: number }): void
+            onSource(file: typeof source): void
+        }) => {
+            mocks.events.push('picker open')
+            if (copying) {
+                options.onProgress({ copiedBytes: 1, totalBytes: source.bytes })
+                mocks.events.push('copying')
+            }
+            options.onSource(source)
+            return { type: 'androidSpool', token: source.token }
+        }
+
+        mocks.pick.mockImplementationOnce(async () => {
+            mocks.events.push('picker open')
+            return null
+        })
+        await expect(importAndroidContentFromPicker('character')).resolves.toBeNull()
+        expect(mocks.events).toEqual(['picker open'])
+
+        mocks.events.length = 0
+        mocks.pick.mockImplementationOnce(picked(true))
+        await importAndroidContentFromPicker('character')
+        expect(mocks.events).toEqual(['picker open', 'hold', 'copying', 'import'])
+
+        // A small file arrives already copied.
+        mocks.events.length = 0
+        mocks.pick.mockImplementationOnce(picked(false))
+        await importAndroidContentFromPicker('character')
+        expect(mocks.events).toEqual(['picker open', 'hold', 'import'])
     })
 })

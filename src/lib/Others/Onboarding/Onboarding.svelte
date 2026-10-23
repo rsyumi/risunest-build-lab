@@ -28,7 +28,7 @@
     import { alertConfirm, alertError, alertNormal, openRisuAccountLogin } from 'src/ts/alert'
     import { restoreNativeOfficialAccountBackup } from 'src/ts/storage/sync/nativeOfficialAccountOperations'
     import { NativeAccountLoginError } from 'src/ts/storage/sync/nativeOfficialAccountFlow'
-    import { presentFileOperationError } from 'src/ts/storage/fileOperationErrorPresentation'
+    import { fileOperationErrorWasPresented, presentFileOperationError } from 'src/ts/storage/fileOperationErrorPresentation'
     import { hubURL } from 'src/ts/characterCards'
     import { getVersionString } from 'src/ts/globalApi.svelte'
     import { updateTextThemeAndCSS } from 'src/ts/gui/colorscheme'
@@ -150,8 +150,11 @@
         && $nativeFileOperationOutcome.status.portableBodyRetry?.pending === true
         && $nativeFileOperationOutcome.status.portableBodyRetry.available === true
         && !$nativeFileOperationOutcome.status.portableBodyRetry.sourceRequired)
+    const stoppedAccountRestore = $derived($nativeFileOperationOutcome?.state === 'cancelled'
+        && $nativeFileOperationOutcome.status?.officialAssets?.state === 'cancelled'
+        && $nativeFileOperationOutcome.status.activationRevision !== undefined)
     // The restored data is in place, so the reader can move on unless the screen still waits for a refresh or the result is unknown.
-    const committedRecovery = $derived(jobRecoveryRequired
+    const committedRecovery = $derived((jobRecoveryRequired || stoppedAccountRestore)
         && $nativeFileOperationOutcome?.error?.code !== 'activation-outcome-unresolved'
         && $persistentWorkingSetRefreshRevision === null)
     const jobTicking = $derived(jobShown && job.terminal === null)
@@ -774,7 +777,12 @@
                             {:else}
                                 {#if accountRetryAvailable}
                                     <button class="btn" type="button" onclick={() => {
-                                        void import('src/ts/storage/sync/nativeOfficialAccountOperations').then(module => module.retryNativeOfficialAccountAssetsFromOutcome()).then(continueAfterImport).catch(() => {})
+                                        const startedAt = Date.now()
+                                        void import('src/ts/storage/sync/nativeOfficialAccountOperations').then(module => module.retryNativeOfficialAccountAssetsFromOutcome()).then(continueAfterImport).catch(async error => {
+                                            if (fileOperationErrorWasPresented('import', startedAt)) return
+                                            const { failureReason } = await import('src/ts/gui/nativeFileJobDialogModel')
+                                            alertError(failureReason(error?.code ?? ''))
+                                        })
                                     }}>{strings.retry}</button>
                                 {/if}
                                 {#if bodyRetryAvailable}
@@ -863,6 +871,7 @@
                                     <Globe />
                                     <span class="sr-only">{t.language}</span>
                                     <select
+                                        class="risu-select"
                                         value={DBState.db.language}
                                         onchange={(event) =>
                                             setLanguage(
@@ -1539,7 +1548,7 @@
     }
     .pill select {
         border: 0;
-        background: none;
+        background-color: transparent;
         font-size: 12.5px;
         outline: none;
     }

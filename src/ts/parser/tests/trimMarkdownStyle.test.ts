@@ -3,9 +3,10 @@
 import { describe, it, expect, vi } from 'vitest'
 import { writable } from 'svelte/store'
 import css from '@adobe/css-tools'
-import { ParseMarkdown, trimMarkdown } from '../parser.svelte'
+import { ParseMarkdown, parseOnboardingHTML, trimMarkdown } from '../parser.svelte'
 import { DBState } from '../../stores.svelte'
 import { DisplayReadRecord } from '../../process/scriptVariableReads'
+import { DeferredInlayMarkerRegistry } from '../../process/files/inlayRenderSource'
 
 vi.mock('../../platform', async () => (await import('../../platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 
@@ -194,5 +195,34 @@ describe('trimMarkdown style handling', () => {
             const body = parse(await ParseMarkdown(input, null, mode))
             expect(body.querySelector('[onmouseover]')).toBeNull()
         }
+    })
+})
+
+describe('onboarding HTML rendering', () => {
+    it('scopes creator styles and keeps the variable bindings that chat messages drop', async () => {
+        const char = { type: 'character', chaId: 'synthetic', name: 'Synthetic', additionalAssets: [], emotionImages: [] } as any
+        const choice = '<button class="selected" risu-change-var-name="route" risu-change-var-value="a" onclick="alert(1)">A</button>'
+        const render = async (html: string) => {
+            const registry = new DeferredInlayMarkerRegistry()
+            try {
+                return parse(await parseOnboardingHTML(html, char, registry))
+            } finally {
+                registry.clear()
+            }
+        }
+        for (const body of [await render(choice), await render(`<style>.selected { color: red; }</style>${choice}<script>bad()</script>`)]) {
+            const button = body.querySelector('button')!
+            expect([button.getAttribute('risu-change-var-name'), button.getAttribute('risu-change-var-value')]).toEqual(['route', 'a'])
+            expect(button.getAttribute('class')).toBe('x-risu-selected')
+            expect(button.hasAttribute('onclick')).toBe(false)
+            expect(body.querySelector('script')).toBeNull()
+        }
+        const styled = await render(`<style>.selected { color: red; }</style>${choice}`)
+        expectScopedStyles(styled, 1)
+        expect(styled.querySelector('style')!.textContent).toBe('.chattext .x-risu-selected{color:red;}')
+
+        const message = parse(await ParseMarkdown(choice, null, 'back'))
+        expect(message.querySelector('button')!.hasAttribute('risu-change-var-name')).toBe(false)
+        expect(message.querySelector('button')!.hasAttribute('risu-change-var-value')).toBe(false)
     })
 })
