@@ -24,7 +24,7 @@ export interface AppLockState {
     saveFailed: boolean
 }
 export interface AppLockStorage {
-    read(): Promise<unknown> | unknown
+    read(refresh?: boolean): Promise<unknown> | unknown
     commit(serialized: string): Promise<void>
 }
 export type NativeSettingResult = 'saved' | 'cancelled' | 'notEnrolled' | 'unavailable' | 'failed' | 'saveFailed'
@@ -127,9 +127,9 @@ export class AppLockController {
         }
     }
 
-    private async readRecord(): Promise<void> {
+    private async readRecord(refresh = false): Promise<void> {
         try {
-            const record = readAppLockRecord(await this.storage.read())
+            const record = readAppLockRecord(await this.storage.read(refresh))
             this.recordRead = true
             this.operation++
             if (record.enabled) this.episode++
@@ -165,7 +165,7 @@ export class AppLockController {
             }
             return
         }
-        await this.readRecord()
+        await this.readRecord(true)
         await this.refreshCapabilities()
         await this.publishPolicy()
     }

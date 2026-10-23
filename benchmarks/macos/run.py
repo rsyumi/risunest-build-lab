@@ -22,6 +22,53 @@ def records(path):
     return [json.loads(line) for line in path.read_text().splitlines(keepends=True) if line.endswith('\n')] if path.exists() else []
 
 
+def activate_owned_process(process, binary):
+    # A directly launched bundle executable does not imply foreground activation.
+    script = r"""
+ObjC.import('AppKit');
+function run(argv) {
+    var pid = Number(argv[0]);
+    var expected = argv[1];
+    var deadline = Date.now() + 10000;
+    var last = { pid: pid, frontmostPid: null, found: false, activationRequested: false };
+    while (Date.now() < deadline) {
+        var applications = $.NSWorkspace.sharedWorkspace.runningApplications;
+        var target = null;
+        last.frontmostPid = null;
+        for (var i = 0; i < applications.count; i++) {
+            var candidate = applications.objectAtIndex(i);
+            if (candidate.isActive) last.frontmostPid = Number(candidate.processIdentifier);
+            if (Number(candidate.processIdentifier) === pid) target = candidate;
+        }
+        if (target !== null) {
+            last.found = true;
+            var executable = ObjC.unwrap(target.executableURL.path.stringByResolvingSymlinksInPath);
+            if (executable !== expected) throw new Error('Owned process executable mismatch');
+            if (last.frontmostPid === pid) return JSON.stringify(last);
+            last.activationRequested = true;
+            target.activateWithOptions($.NSApplicationActivateAllWindows | $.NSApplicationActivateIgnoringOtherApps);
+        } else if (last.found) {
+            throw new Error('Owned application exited before foreground confirmation');
+        }
+        $.NSRunLoop.currentRunLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(0.05));
+    }
+    throw new Error('Owned application did not become foreground: ' + JSON.stringify(last));
+}
+"""
+    result = subprocess.run(['osascript', '-l', 'JavaScript', '-e', script, str(process.pid), str(binary.resolve())],
+                            capture_output=True, text=True, timeout=15)
+    if result.returncode != 0:
+        if process.poll() is not None:
+            # Fast phases may finish before the external observer sees their activation.
+            # Their existing exit and complete-result checks still decide success.
+            return {'pid': process.pid, 'confirmed': False, 'exited': process.returncode}
+        raise RuntimeError(f'Owned app activation failed: {result.stderr.strip()}')
+    observation = json.loads(result.stdout)
+    if observation.get('pid') != process.pid or observation.get('frontmostPid') != process.pid:
+        raise RuntimeError('Foreground confirmation did not identify the owned process')
+    return {**observation, 'confirmed': True}
+
+
 def memory_sample(pid):
     # RSS is a process-residency observation, not physical footprint or private memory.
     output = subprocess.check_output(['ps', '-axo', 'pid=,ppid=,rss=,comm='], text=True)
@@ -175,6 +222,8 @@ def run_phase(app, phase, artifacts, fixtures, expected=None):
     with (artifacts / f'{phase}.log').open('w') as log:
         process = subprocess.Popen([str(binary)], env=environment, stdout=log, stderr=subprocess.STDOUT)
         try:
+            activation = activate_owned_process(process, binary)
+            (artifacts / f'{phase}-activation.json').write_text(json.dumps(activation, indent=2))
             deadline = time.monotonic() + 600
             while process.poll() is None:
                 for record in records(report):

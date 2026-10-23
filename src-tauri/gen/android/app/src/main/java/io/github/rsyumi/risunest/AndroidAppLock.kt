@@ -114,11 +114,13 @@ internal class AndroidAppLock(
   }
 
   private fun capabilities(): JSONObject {
-    val enrolled = activity.getSystemService(KeyguardManager::class.java).isDeviceSecure ||
-      BiometricManager.from(activity).canAuthenticate(authenticatorTypes) == BiometricManager.BIOMETRIC_SUCCESS
+    val enrolled = Build.VERSION.SDK_INT >= 29 &&
+      (activity.getSystemService(KeyguardManager::class.java).isDeviceSecure ||
+        BiometricManager.from(activity).canAuthenticate(authenticatorTypes) == BiometricManager.BIOMETRIC_SUCCESS)
+    val status = appLockAuthStatus(Build.VERSION.SDK_INT, enrolled)
     return JSONObject().put("auth", JSONObject()
-      .put("status", if (enrolled) "available" else "notEnrolled")
-      .apply { if (enrolled) put("method", "device") })
+      .put("status", status)
+      .apply { if (status == "available") put("method", "device") })
       .put("previewSupported", Build.VERSION.SDK_INT >= 33)
   }
 
@@ -178,7 +180,7 @@ internal class AndroidAppLock(
   fun onPause() {
     resumed = false
     conceal()
-    if (ownedResults.isEmpty() && authRequest == null && !activity.isChangingConfigurations) depart()
+    departUnlessTransient(authRequest != null, activity.isChangingConfigurations)
   }
 
   fun onResume() {
@@ -202,11 +204,11 @@ internal class AndroidAppLock(
   }
 
   fun onUserLeaveHint() {
-    if (ownedResults.isEmpty()) depart()
+    departUnlessTransient()
   }
 
   fun onStop() {
-    if (ownedResults.isEmpty() && authRequest == null && !activity.isChangingConfigurations) depart()
+    departUnlessTransient(authRequest != null, activity.isChangingConfigurations)
   }
 
   fun beginOwnedActivity(requestCode: Int) {
@@ -235,6 +237,13 @@ internal class AndroidAppLock(
       activity.getSystemService(KeyguardManager::class.java).isKeyguardLocked) return false
     val tasks = activity.getSystemService(ActivityManager::class.java).appTasks
     return tasks.any { it.taskInfo.taskId == activity.taskId && it.taskInfo.isVisible }
+  }
+
+  private fun departUnlessTransient(authenticating: Boolean = false, changingConfigurations: Boolean = false) {
+    if (lifecycle.departUnlessTransient(ownedResults.isNotEmpty(), authenticating, changingConfigurations)) {
+      conceal()
+      dispatch()
+    }
   }
 
   private fun depart() {

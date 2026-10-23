@@ -26,6 +26,7 @@ const lockDriver = {
         bootFailure.set({ kind: 'unknown', message: 'Synthetic startup failure', stage: 'synthetic' })
     },
     requestExit() { void exitCoordinator.requestExit() },
+    changePin() { appLock.beginChange() },
 }
 Object.assign(window, { lazyImportBoundary, lazyApp: { open: openRoute, ...navigationState, lock: lockDriver } })
 mount(App, { target: document.querySelector<HTMLElement>('#app')! })

@@ -1,4 +1,5 @@
 import "../../src/ts/polyfill";
+import { showNativeHarness } from "../nativeAppLock";
 import { invoke as nativeInvoke } from "@tauri-apps/api/core";
 import { join } from "@tauri-apps/api/path";
 import { nativeDataPath } from "../../src/ts/storage/nativePaths";
@@ -627,6 +628,7 @@ async function verifySyntheticRoot() {
 }
 
 const entryCompletion = verifySyntheticRoot()
+  .then(showNativeHarness)
   .then(() => deviceMaintenanceBeforeBootstrap())
   .then(resume)
   .catch(fail);

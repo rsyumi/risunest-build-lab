@@ -7,6 +7,17 @@ import org.junit.Test
 
 class AppLockLifecycleTest {
   @Test
+  fun `native unlock is unavailable through Android 9 even with an enrolled credential`() {
+    for (apiLevel in 24..28) {
+      assertEquals("unsupported", appLockAuthStatus(apiLevel, enrolled = false))
+      assertEquals("unsupported", appLockAuthStatus(apiLevel, enrolled = true))
+    }
+    assertEquals("notEnrolled", appLockAuthStatus(29, enrolled = false))
+    assertEquals("available", appLockAuthStatus(29, enrolled = true))
+    assertEquals("available", appLockAuthStatus(36, enrolled = true))
+  }
+
+  @Test
   fun `republishing a presented gate does not replace it with a native cover`() {
     val state = AppLockLifecycle { 100L }
     val policy = AppLockPolicy(enabled = true, timing = "immediate", gateRequired = true)
@@ -50,7 +61,9 @@ class AppLockLifecycleTest {
     state.setPolicy(AppLockPolicy(enabled = true, timing = "after-1m"))
     val authEpoch = state.epoch
     state.depart()
+    assertFalse(state.acceptsAuthentication(authEpoch))
     state.resume()
+    assertFalse(state.acceptsAuthentication(authEpoch))
     val returningEpoch = state.epoch
     state.depart()
     assertFalse(state.acceptsAuthentication(authEpoch))
@@ -72,17 +85,30 @@ class AppLockLifecycleTest {
   }
 
   @Test
-  fun `app-owned transient focus changes conceal without starting a departure`() {
-    val state = AppLockLifecycle { 100L }
-    state.setPolicy(AppLockPolicy(enabled = true, timing = "immediate"))
+  fun `owned picker time is excluded but an observed task departure still invalidates results`() {
+    var time = 100L
+    val state = AppLockLifecycle { time }
+    state.setPolicy(AppLockPolicy(enabled = true, timing = "after-1m"))
     val epoch = state.epoch
     assertTrue(state.concealTransition())
+    assertFalse(state.departUnlessTransient(ownedActivity = true))
+    time = 90_000L
+    assertFalse(state.departUnlessTransient(ownedActivity = true))
+    assertFalse(state.resume())
     assertTrue(state.active)
     assertEquals(epoch, state.epoch)
-    assertEquals(null, state.departedAtMs)
+    assertEquals(null, state.snapshot().departedAtMs)
+    assertEquals(time, state.snapshot().atMs)
     assertTrue(state.acceptsAuthentication(epoch))
     assertTrue(state.presented(epoch, locked = false))
     assertFalse(state.blocksBack)
+    assertTrue(state.depart())
+    assertEquals(time, state.departedAtMs)
+    assertFalse(state.acceptsAuthentication(epoch))
+    assertFalse(state.presented(epoch, locked = false))
+    state.resume()
+    assertFalse(state.acceptsAuthentication(epoch))
+    assertFalse(state.presented(epoch, locked = false))
   }
 
   @Test
@@ -90,10 +116,10 @@ class AppLockLifecycleTest {
     var time = 100L
     val state = AppLockLifecycle { time }
     state.setPolicy(AppLockPolicy(enabled = true, timing = "after-5m"))
-    state.depart()
+    assertTrue(state.departUnlessTransient(ownedActivity = false))
     val departedEpoch = state.epoch
     time = 5_000L
-    assertFalse(state.depart())
+    assertFalse(state.departUnlessTransient(ownedActivity = false))
     assertEquals(100L, state.departedAtMs)
     assertEquals(departedEpoch, state.epoch)
   }

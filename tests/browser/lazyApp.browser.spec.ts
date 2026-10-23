@@ -1,7 +1,7 @@
 import { test, expect } from './fixture'
 import { languageKorean as language } from '../../src/lang/ko'
 
-declare global { interface Window { appLockNative: { holdReady(): void; pendingReady(): boolean; finishReady(focusFirst: boolean): void }; lazyApp: { open(route: string): void; layout(mobile: boolean): void; read(): { sidebarClosing: boolean; entries: number }; lock: { initialize(): Promise<void>; bootFailure(loaded: boolean): void; requestExit(): void } }; lazyImportBoundary: { arm(route: string): void; hold(route: string): void; rejectHeld(): void; attempts(): number } } }
+declare global { interface Window { appLockNative: { holdReady(): void; pendingReady(): boolean; finishReady(focusFirst: boolean): void }; lazyApp: { open(route: string): void; layout(mobile: boolean): void; read(): { sidebarClosing: boolean; entries: number }; lock: { initialize(): Promise<void>; bootFailure(loaded: boolean): void; requestExit(): void; changePin(): void } }; lazyImportBoundary: { arm(route: string): void; hold(route: string): void; rejectHeld(): void; attempts(): number } } }
 
 const hosts = ['settings', 'custom', 'grid', 'presets', 'personas', 'mobile'] as const
 for (const back of ['header', 'Escape', 'history'] as const) {
@@ -203,6 +203,27 @@ test.describe('actual App lock integration', () => {
         await page.evaluate(() => window.appLockNative.finishReady(false))
         await painted(page)
         await expect(digit).toBeFocused()
+    })
+
+    test('shakes mismatched confirmation, restarts PIN entry, and respects reduced motion', async ({ page }) => {
+        await page.evaluate(() => window.lazyApp.lock.initialize())
+        await page.keyboard.type('123456')
+        await expect(page.getByRole('dialog', { name: 'RisuNest' })).toHaveCount(0)
+        await page.evaluate(() => window.lazyApp.lock.changePin())
+        const gate = page.getByRole('dialog', { name: language.risuNest.appLock.changeTitle })
+        await page.keyboard.type('123456654321')
+        await expect(gate.getByRole('alert')).toHaveText(language.risuNest.appLock.mismatch)
+        await expect(gate.getByText(language.risuNest.appLock.newPin, { exact: true })).toBeVisible()
+        const dots = gate.getByRole('img', { name: language.risuNest.appLock.progress.replace('{0}', '0') })
+        await expect(dots).toBeVisible()
+        expect(await dots.evaluate(node => getComputedStyle(node).animationName)).not.toBe('none')
+        await expect(dots).toHaveCSS('animation-duration', '0.36s')
+        await page.emulateMedia({ reducedMotion: 'reduce' })
+        await expect(dots).toHaveCSS('animation-name', 'none')
+        await page.emulateMedia({ reducedMotion: 'no-preference' })
+        await page.keyboard.type('4')
+        await expect(gate.getByRole('alert')).toBeEmpty()
+        await expect(gate.getByRole('img', { name: language.risuNest.appLock.progress.replace('{0}', '1') })).toHaveCSS('animation-name', 'none')
     })
 
     test('retains the mounted draft and restores focus after PIN unlock despite a post-load boot failure', async ({ page }) => {

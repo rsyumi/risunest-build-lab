@@ -1,6 +1,7 @@
 <script lang="ts">
     import { onMount } from 'svelte'
     import { language } from 'src/lang'
+    import risuNestLogo from '../../../src-tauri/icon-src/logo.svg?url'
     import SettingButton from '../Setting/RisuNest/SettingButton.svelte'
 
     interface Props {
@@ -38,7 +39,7 @@
 
 <div bind:this={root} class="app-lock-cover fixed inset-0 z-app-lock bg-bgcolor text-textcolor" role="dialog"
     aria-modal="true" aria-label="RisuNest" tabindex="-1" onkeydown={keydown}>
-    <img src="/logo_192.png" alt="" />
+    <img src={risuNestLogo} alt="" />
     {#if readFailed}
         <p role="alert">{language.risuNest.localData.loadFailed}</p>
         <div class="actions">

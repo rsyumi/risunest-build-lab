@@ -4,6 +4,7 @@
     import ScanFace from '@lucide/svelte/icons/scan-face'
     import FingerprintPattern from '@lucide/svelte/icons/fingerprint-pattern'
     import { language } from 'src/lang'
+    import risuNestLogo from '../../../src-tauri/icon-src/logo.svg?url'
     import SettingButton from '../Setting/RisuNest/SettingButton.svelte'
     import SettingNotice from '../Setting/RisuNest/SettingNotice.svelte'
 
@@ -99,13 +100,13 @@
     <div class="column">
         <div class="info">
             {#if mode === 'unlock'}
-                <img class="logo" src="/logo_192.png" alt="" />
+                <img class="logo" src={risuNestLogo} alt="" />
                 <div class="name">RisuNest</div>
             {:else}
                 <h2 class="title">{title}</h2>
             {/if}
             <div class="instruction" aria-live="polite">{instruction}</div>
-            <div class="dots" class:shake={issue === 'wrongPin' && count === 6}
+            <div class="dots" class:shake={issue === 'mismatch' || (issue === 'wrongPin' && count === 6)}
                 role="img" aria-label={text.progress.replace('{0}', String(count))}>
                 {#each [0, 1, 2, 3, 4, 5] as index}
                     <span class="dot" class:filled={index < count}></span>

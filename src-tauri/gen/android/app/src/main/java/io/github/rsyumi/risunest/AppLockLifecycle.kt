@@ -17,6 +17,12 @@ internal data class AppLockSnapshot(
   val departedAtMs: Long?,
 )
 
+internal fun appLockAuthStatus(apiLevel: Int, enrolled: Boolean): String = when {
+  apiLevel < 29 -> "unsupported"
+  enrolled -> "available"
+  else -> "notEnrolled"
+}
+
 internal class AppLockLifecycle(private val now: () -> Long) {
   var policy = AppLockPolicy()
     private set
@@ -39,6 +45,15 @@ internal class AppLockLifecycle(private val now: () -> Long) {
   fun concealTransition(): Boolean {
     if (policy.coversReturn || policy.gateRequired) pendingPresentation = true
     return pendingPresentation
+  }
+
+  fun departUnlessTransient(
+    ownedActivity: Boolean,
+    authenticating: Boolean = false,
+    changingConfigurations: Boolean = false,
+  ): Boolean {
+    if (ownedActivity || authenticating || changingConfigurations) return false
+    return depart()
   }
 
   fun depart(): Boolean {

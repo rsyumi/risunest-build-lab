@@ -1,4 +1,5 @@
 import '../../src/ts/polyfill'
+import { showNativeHarness } from '../nativeAppLock'
 import { invoke } from '@tauri-apps/api/core'
 import { join } from '@tauri-apps/api/path'
 import { nativeDataPath } from '../../src/ts/storage/nativePaths'
@@ -153,6 +154,7 @@ Object.assign(window, { __pluginReview: {
         const root = await nativeDataPath()
         check(new RegExp('/' + identifier.replaceAll('.', '\\.') + '/files/?$').test(root), 'Native root is not the isolated plugin profile')
         check(new TextDecoder().decode(await readFile(await join(root, 'risunest-plugin-review-owner'))).trim() === token, 'Synthetic ownership marker mismatch')
+        await showNativeHarness()
         const directory = await join(root, `plugin-review-${token}`)
         check(!(await exists(directory)), 'Synthetic probe directory already exists')
         await mkdir(directory)

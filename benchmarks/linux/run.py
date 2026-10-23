@@ -17,7 +17,7 @@ import urllib.error
 parser = argparse.ArgumentParser()
 parser.add_argument('--binary', required=True)
 parser.add_argument('--output', required=True)
-parser.add_argument('--phase', choices=['persistence', 'reload', 'regex', 'app', 'app-restart', 'streaming', 'appearance-seed', 'appearance-app'], required=True)
+parser.add_argument('--phase', choices=['persistence', 'reload', 'regex', 'app', 'app-restart', 'streaming', 'appearance-seed', 'appearance-app', 'app-lock-immediate', 'app-lock-timed', 'app-lock-immediate-mutant'], required=True)
 parser.add_argument('--app-theme', choices=['light', 'dark'])
 parser.add_argument('--system-theme', choices=['light', 'dark'])
 parser.add_argument('--capture-size')
@@ -26,6 +26,8 @@ parser.add_argument('--capture-codec-experiment', action='store_true',
                     help='Run diagnostic-only six-second FFV1/NUT and stream-copy/NUT controls')
 parser.add_argument('--capture-codec-control', choices=['ffv1', 'copy'], help=argparse.SUPPRESS)
 args = parser.parse_args()
+if args.phase.startswith('app-lock-') and (not args.capture_size or not args.display_owner_pid):
+    parser.error('App lock frames require capture size and the owned Xvfb PID')
 if args.capture_codec_experiment and args.capture_codec_control:
     parser.error('Select the paired experiment without an individual control')
 if args.capture_codec_experiment or args.capture_codec_control:
@@ -120,6 +122,10 @@ driver = subprocess.Popen(['WebKitWebDriver', '--host=127.0.0.1', f'--port={port
 session = None
 capture = None
 appearance_capture = None
+neutral_window = None
+app_lock_frames = None
+app_lock_ready = None
+app_lock_baseline = None
 stop = threading.Event()
 memory = []
 diagnostic_path = out / f'{args.phase}-diagnostics.jsonl'
@@ -252,7 +258,11 @@ try:
         current_stage = 'capture-start'
         specification = importlib.util.spec_from_file_location('appearance_capture', Path(__file__).resolve().parents[1] / 'macos/run.py')
         appearance_capture = importlib.util.module_from_spec(specification)
-        specification.loader.exec_module(appearance_capture)
+        sys.path.insert(0, str(Path(specification.origin).parent))
+        try:
+            specification.loader.exec_module(appearance_capture)
+        finally:
+            sys.path.pop(0)
         capture = appearance_capture.start_appearance_capture(out,
             f'appearance-{args.system_theme}-{args.app_theme}', 'linux', os.environ.get('DISPLAY'),
             args.capture_size, args.display_owner_pid, experiment_codec=args.capture_codec_control)
@@ -287,11 +297,76 @@ try:
         operation = f"startupAppearance({str(args.phase == 'appearance-seed').lower()},{json.dumps(args.app_theme)})"
     elif args.phase == 'app-restart':
         operation = f"appRestart({json.dumps(app_saved)})"
+    elif args.phase.startswith('app-lock-'):
+        operation = f"appLock({json.dumps(args.phase)})"
     else:
         operation = f"{args.phase}()"
     current_stage = 'operation'
     diagnostic('operation-enter')
     execute(f"window.__linuxResult=null; window.__RISUNEST_LINUX_BENCHMARK__.{operation}.then(result=>window.__linuxResult={{result}},error=>window.__linuxResult={{error:String(error)}})")
+    if args.phase.startswith('app-lock-'):
+        current_stage = 'app-lock-ready'
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            state = execute("return {events:window.__linuxAppLockEvents??[],outcome:window.__linuxResult}")
+            if state['outcome'] and 'error' in state['outcome']:
+                raise RuntimeError(state['outcome']['error'])
+            ready_events = [event['result'] for event in state['events'] if event['stage'] == 'app-lock-ready']
+            if ready_events:
+                if len(ready_events) != 1:
+                    raise RuntimeError('Duplicate app lock readiness report')
+                app_lock_ready = ready_events[0]
+                break
+            time.sleep(.05)
+        else:
+            raise RuntimeError('App lock fixture did not become ready')
+        specification = importlib.util.spec_from_file_location('appearance_capture', Path(__file__).resolve().parents[1] / 'macos/run.py')
+        appearance_capture = importlib.util.module_from_spec(specification)
+        sys.path.insert(0, str(Path(specification.origin).parent))
+        try:
+            specification.loader.exec_module(appearance_capture)
+        finally:
+            sys.path.pop(0)
+        specification = importlib.util.spec_from_file_location('app_lock_frames', Path(__file__).resolve().parents[1] / 'appLock/frames.py')
+        app_lock_frames = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(app_lock_frames)
+        app_window = subprocess.check_output(['xdotool', 'getactivewindow'], text=True).strip()
+        window_pid = int(subprocess.check_output(['xdotool', 'getwindowpid', app_window], text=True))
+        identity = process_identity(window_pid)
+        if window_pid not in descendants(driver.pid) or not identity or not identity['isBenchmarkBinary']:
+            raise RuntimeError('Active window is not the owned synthetic app')
+        current_stage = 'app-lock-baseline'
+        capture = appearance_capture.start_appearance_capture(out, args.phase + '-baseline', 'linux', os.environ.get('DISPLAY'),
+            args.capture_size, args.display_owner_pid)
+        time.sleep(1.1)
+        completed_capture, capture = capture, None
+        appearance_capture.finish_appearance_capture(completed_capture)
+        app_lock_baseline = out / (args.phase + '-baseline.png')
+        subprocess.run(['ffmpeg', '-v', 'error', '-n', '-i', str(completed_capture['video']),
+            '-frames:v', '1', '-update', '1', str(app_lock_baseline)], check=True)
+        current_stage = 'app-lock-departure'
+        title = 'risunest-app-lock-' + profile_id[:12] + '-' + str(time.monotonic_ns())
+        neutral_window = subprocess.Popen(['xmessage', '-title', title, '-geometry', args.capture_size + '+0+0',
+            '-buttons', '', 'Synthetic app lock departure'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if neutral_window.poll() is not None:
+                raise RuntimeError('Owned neutral X11 window exited')
+            windows = subprocess.run(['xdotool', 'search', '--onlyvisible', '--name', '^' + title + '$'],
+                capture_output=True, text=True).stdout.split()
+            if len(windows) == 1:
+                subprocess.run(['xdotool', 'windowactivate', '--sync', windows[0]], check=True, timeout=5)
+                break
+            time.sleep(.05)
+        else:
+            raise RuntimeError('Owned neutral X11 window did not appear')
+        time.sleep(.4)
+        if args.phase == 'app-lock-timed':
+            time.sleep(65)
+        current_stage = 'app-lock-return-capture'
+        capture = appearance_capture.start_appearance_capture(out, args.phase, 'linux', os.environ.get('DISPLAY'),
+            args.capture_size, args.display_owner_pid)
+        subprocess.run(['xdotool', 'windowactivate', '--sync', app_window], check=True, timeout=5)
     deadline = time.monotonic() + 600
     while time.monotonic() < deadline:
         result = execute('return window.__linuxResult')
@@ -304,6 +379,18 @@ try:
         raise RuntimeError(result['error'])
     result = result['result']
     diagnostic('operation-resolved')
+    if args.phase.startswith('app-lock-'):
+        current_stage = 'app-lock-assess'
+        time.sleep(.6)
+        completed_capture, capture = capture, None
+        result['capture'] = appearance_capture.finish_appearance_capture(completed_capture)
+        events = execute('return window.__linuxAppLockEvents')
+        (out / (args.phase + '.jsonl')).write_text(''.join(json.dumps(event) + '\n' for event in events))
+        locked_events = [event['result'] for event in events if event['stage'] == 'app-lock-locked']
+        if len(locked_events) != 1:
+            raise RuntimeError('Current shared PIN gate report is missing')
+        result['frames'] = app_lock_frames.assess(completed_capture['video'], app_lock_baseline,
+            app_lock_ready, locked_events[0], args.phase.endswith('mutant'))
     if args.phase == 'appearance-app':
         if result['systemDark'] != (args.system_theme == 'dark'):
             raise RuntimeError('WebKit observed system appearance differs from the requested theme')
@@ -339,6 +426,13 @@ except Exception as error:
                category='capture' if current_stage == 'capture-finalize' else 'runtime')
     raise
 finally:
+    if neutral_window is not None and neutral_window.poll() is None:
+        neutral_window.terminate()
+        try:
+            neutral_window.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            neutral_window.kill()
+            neutral_window.wait(timeout=5)
     capture_error = None
     if capture is not None:
         try:

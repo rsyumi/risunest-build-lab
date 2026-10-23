@@ -81,6 +81,19 @@ describe('app lock settings', () => {
         await vi.waitFor(() => expect(toggle(language.risuNest.appLock.enable).checked).toBe(false))
     })
 
+    it('keeps app lock on and places a failed enable-row write before the recovery warning', async () => {
+        await render(true)
+        failWrite = true
+        toggle(language.risuNest.appLock.enable).click()
+        await vi.waitFor(() => expect(host.querySelector('[role="alert"]')?.textContent).toBe(language.risuNest.localData.applyFailed))
+        expect(toggle(language.risuNest.appLock.enable).checked).toBe(true)
+        expect([...host.querySelectorAll('[data-notice]')].map(notice => notice.textContent)).toEqual([
+            language.risuNest.localData.applyFailed,
+            language.risuNest.appLock.noRecovery,
+        ])
+        expect(JSON.parse(saved!).enabled).toBe(true)
+    })
+
     it('keeps preview independent and restores its checkbox when a write fails', async () => {
         boundary.capabilities.previewSupported = true
         await appLock.refreshCapabilities()
