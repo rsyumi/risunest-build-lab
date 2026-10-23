@@ -31,6 +31,9 @@ for path in apple.glob('*_iOS/Info.plist'):
     info['BGTaskSchedulerPermittedIdentifiers']=['io.github.rsyumi.risunest.ios.bench.generation']
     info['UIBackgroundModes']=['processing']
     info['NSLocalNetworkUsageDescription']='Connect to the synthetic local verification server.'
+    product_info=plistlib.loads((root/'src-tauri/gen/apple/risunest_iOS/Info.plist').read_bytes())
+    if 'NSFaceIDUsageDescription' in product_info:
+        info['NSFaceIDUsageDescription']=product_info['NSFaceIDUsageDescription']
     info['UIFileSharingEnabled']=True
     info['LSSupportsOpeningDocumentsInPlace']=True
     path.write_bytes(plistlib.dumps(info))
@@ -157,6 +160,9 @@ try:
                '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore600Gzip',
                '-skip-testing:RisuNestUITests/NativeUITests/testDeviceCore',
                'CODE_SIGNING_ALLOWED=NO'],cwd=uitests))
+    frame_runner=root/'benchmarks/appLock/frames.py'
+    if frame_runner.is_file():
+        print(run([sys.executable,str(frame_runner),'--device',device,'--artifacts',str(artifacts/'app-lock-frames')]))
     product=pathlib.Path((artifacts/'app-path.txt').read_text())
     print(run(['codesign','--force','--deep','--sign','-',str(product)]))
     print(run(['xcrun','simctl','install',device,str(product)]))

@@ -14,7 +14,7 @@ on:
       scope:
         type: choice
         default: full
-        options: [full, cleanup, harness, sync, external-storage, external-storage-http, external-sync, backup-file, streaming, termination-probe, termination-dispatch, build-termination-dispatch, appearance-runtime, appearance-light, appearance-dark, appearance-codec-experiment, appearance-bgra-experiment]
+        options: [full, cleanup, harness, app-lock, sync, external-storage, external-storage-http, external-sync, backup-file, streaming, termination-probe, termination-dispatch, build-termination-dispatch, appearance-runtime, appearance-light, appearance-dark, appearance-codec-experiment, appearance-bgra-experiment]
 permissions:
   contents: read
 concurrency:
@@ -44,7 +44,7 @@ jobs:
           test "$GITHUB_REF" = refs/heads/main
           [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
           case "$RUNNER_LABEL" in macos-15|macos-14|macos-15-intel|macos-26) ;; *) exit 1;; esac
-          case "$CHECK_SCOPE" in full|cleanup|harness|sync|external-storage|external-storage-http|external-sync|backup-file|streaming|termination-probe|termination-dispatch|build-termination-dispatch|appearance-runtime|appearance-light|appearance-dark|appearance-codec-experiment|appearance-bgra-experiment) ;; *) exit 1;; esac
+          case "$CHECK_SCOPE" in full|cleanup|harness|app-lock|sync|external-storage|external-storage-http|external-sync|backup-file|streaming|termination-probe|termination-dispatch|build-termination-dispatch|appearance-runtime|appearance-light|appearance-dark|appearance-codec-experiment|appearance-bgra-experiment) ;; *) exit 1;; esac
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
@@ -229,6 +229,13 @@ jobs:
             storage_tmp="$(mktemp -d "$RUNNER_TEMP/risunest-backup-app.XXXXXX")"
             export TMPDIR="$(cd "$storage_tmp" && pwd -P)"
             python3 benchmarks/macos/run.py --app "$app" --artifacts artifacts/wkwebview
+          elif [[ "$CHECK_SCOPE" == app-lock ]]; then
+            if ! command -v ffmpeg >/dev/null; then brew install ffmpeg; fi
+            command -v ffprobe
+            ffmpeg -f avfoundation -list_devices true -i "" > artifacts/capture-devices.txt 2>&1 || true
+            capture_input="$(python3 -c 'import pathlib,re; text=pathlib.Path("artifacts/capture-devices.txt").read_text(); screens=re.findall(r"Capture screen [0-9]+",text); assert screens,"No enumerated screen"; print(screens[0]+":none")')"
+            python3 benchmarks/macos/run.py --app "$app" --artifacts artifacts/app-lock-frames \
+              --app-lock --capture-input "$capture_input" 2>&1 | tee artifacts/app-lock-frames.log
           elif [[ "$CHECK_SCOPE" == appearance-runtime ]]; then
             export RISUNEST_MACOS_PHASES=appearance-seed-light,appearance-app-light,appearance-seed-dark,appearance-app-dark
             python3 benchmarks/macos/run.py --app "$app" --artifacts artifacts/wkwebview 2>&1 | tee artifacts/wkwebview.log

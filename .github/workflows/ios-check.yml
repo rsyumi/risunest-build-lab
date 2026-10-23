@@ -210,6 +210,10 @@ jobs:
           IOS_CHECK_IPAD: ${{ inputs.ipad }}
         run: |
           set -euo pipefail
+          if [ -f benchmarks/appLock/frames.py ]; then
+            if ! command -v ffmpeg >/dev/null; then brew install ffmpeg; fi
+            command -v ffprobe
+          fi
           python3 ../control/scripts/ios-runtime.py 2>&1 | tee artifacts/ios-runtime.log
           node ../control/scripts/verify-unicode-results.mjs ios artifacts
       - uses: actions/upload-artifact@v4
