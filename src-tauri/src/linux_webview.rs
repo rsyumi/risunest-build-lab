@@ -37,6 +37,8 @@ pub(crate) fn init() -> TauriPlugin<Wry> {
                 let view = native.inner();
                 view.connect_web_process_terminated(move |view, reason| {
                     crate::nlog!("error", "WebKitGTK web process ended: reason={}", reason_name(reason));
+                    crate::generation_diagnostics::renderer_exit(crate::generation_diagnostics::RendererExit::Linux { reason: reason_name(reason) });
+                    crate::generation_diagnostics::reload_result("requested");
                     crate::renderer_recovery::renderer_exited(&exit_app);
                     view.reload();
                 });
@@ -44,6 +46,7 @@ pub(crate) fn init() -> TauriPlugin<Wry> {
                 let load_failed = failed.clone();
                 view.connect_load_failed(move |_, _, _, _| {
                     load_failed.set(true);
+                    crate::generation_diagnostics::reload_result("failed");
                     false
                 });
                 view.connect_load_changed(move |_, event| {

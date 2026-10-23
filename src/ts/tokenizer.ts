@@ -8,9 +8,9 @@ import { tokenizeTransformers } from "./process/transformers";
 import { globalFetch } from "./globalApi.svelte";
 import { getModelInfo, LLMTokenizer, type LLMModel } from "./model/modellist";
 import { pluginV2 } from "./plugins/plugins.svelte";
-import type { GemmaTokenizer } from "@huggingface/transformers";
 import { LRUMap } from 'mnemonist';
 import { isTauri } from './platform';
+import { encodeGemma as gemmaTokenize } from './tokenizer/gemmaTokenizer';
 import {
     tryNativeTokenizerCountBatch,
     tryNativeTokenizerIdsBatch,
@@ -122,7 +122,7 @@ export async function encode(data:string):Promise<(number[]|Uint32Array|Int32Arr
             case 'novellist':
                 result = await tokenizeWebTokenizers(data, 'novellist'); break;
             case 'llama3':
-                result = await tokenizeWebTokenizers(data, 'llama'); break;
+                result = await tokenizeWebTokenizers(data, 'llama3'); break;
             case 'gemma':
                 result = await gemmaTokenize(data); break;
             case 'cohere':
@@ -151,7 +151,7 @@ export async function encode(data:string):Promise<(number[]|Uint32Array|Int32Arr
             case 'novellist':
                 result = await tokenizeWebTokenizers(data, 'novellist'); break;
             case 'llama3':
-                result = await tokenizeWebTokenizers(data, 'llama'); break;
+                result = await tokenizeWebTokenizers(data, 'llama3'); break;
             case 'gemma':
                 result = await gemmaTokenize(data); break;
             case 'cohere':
@@ -221,7 +221,7 @@ export async function encode(data:string):Promise<(number[]|Uint32Array|Int32Arr
     return result;
 }
 
-type tokenizerType = 'novellist'|'claude'|'novelai'|'llama'|'mistral'|'llama3'|'gemma'|'cohere'|'googleCloud'|'DeepSeek'|'DeepSeekV4'|'GLM4'|'GLM5'
+type tokenizerType = 'novellist'|'claude'|'novelai'|'llama'|'mistral'|'llama3'|'cohere'|'googleCloud'|'DeepSeek'|'DeepSeekV4'|'GLM4'|'GLM5'
 
 let tikParser:Tiktoken = null
 let tokenizersTokenizer:Tokenizer = null
@@ -255,7 +255,7 @@ async function tokenizeGoogleCloud(text:string) {
     })
 
     if(res.status !== 200){
-        return await tokenizeWebTokenizers(text, 'gemma')
+        return await gemmaTokenize(text)
     }
 
     const json = await res.json()
@@ -263,17 +263,6 @@ async function tokenizeGoogleCloud(text:string) {
     const count = json.totalTokens as number
 
     return new Uint32Array(count)
-}
-
-let gemmaTokenizer:GemmaTokenizer = null
-async function gemmaTokenize(text:string) {
-    if(!gemmaTokenizer){
-        const {GemmaTokenizer} = await import('@huggingface/transformers')
-        gemmaTokenizer = new GemmaTokenizer(
-            await (await fetch("/token/llama/llama3.json")
-        ).json(), {})
-    }
-    return gemmaTokenizer.encode(text)
 }
 
 async function tikJS(text:string, model='cl100k_base') {
@@ -367,11 +356,6 @@ async function tokenizeWebTokenizers(text:string, type:tokenizerType) {
             case 'mistral':
                 tokenizersTokenizer = await webTokenizer.Tokenizer.fromSentencePiece(
                     await (await fetch("/token/mistral/tokenizer.model")
-                ).arrayBuffer())
-                break
-            case 'gemma':
-                tokenizersTokenizer = await webTokenizer.Tokenizer.fromSentencePiece(
-                    await (await fetch("/token/gemma/tokenizer.model")
                 ).arrayBuffer())
                 break
             case 'DeepSeek':

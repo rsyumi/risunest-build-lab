@@ -69,32 +69,36 @@ export function recordAmbientChatVariableReads(recorder: ChatVariableReadRecorde
     }
 }
 
-function recordMatches(record: DisplayReadRecord, request: ScriptDisplayRefreshRequest): boolean {
-    if (record.untracked) return true
-    if ('all' in request) return record.keys.size > 0
-    return request.keys.some((key) => record.keys.has(key))
+function recordMatches(record: DisplayReadRecord, keys: readonly string[]): boolean {
+    return record.untracked || keys.some((key) => record.keys.has(key))
 }
 
 export interface DisplayRowReads {
     /** Replaces the record of one part of the row, such as its message text or body. */
     track(part: string, record: DisplayReadRecord): void
+    /** Raised when a script reloads the row; a render started at a new revision rebuilds its DOM. */
+    readonly rebuildRevision: number
     dispose(): void
 }
 
 interface RegisteredRow {
     index: () => number
     parts: Map<string, DisplayReadRecord>
+    rebuildRevision: number
 }
 
 const rows = new Set<RegisteredRow>()
 
 /** Registers a mounted row; `index` returns the message index its reload pointer uses. */
 export function registerDisplayRow(index: () => number): DisplayRowReads {
-    const row: RegisteredRow = { index, parts: new Map() }
+    const row: RegisteredRow = { index, parts: new Map(), rebuildRevision: 0 }
     rows.add(row)
     return {
         track: (part, record) => {
             row.parts.set(part, record)
+        },
+        get rebuildRevision() {
+            return row.rebuildRevision
         },
         dispose: () => {
             rows.delete(row)
@@ -102,13 +106,28 @@ export function registerDisplayRow(index: () => number): DisplayRowReads {
     }
 }
 
-/** The message indexes of mounted rows a refresh request reaches. A row with no record yet is included. */
-export function displayRowsToRefresh(request: ScriptDisplayRefreshRequest): number[] {
+/** The message indexes of mounted rows that read one of `keys`. A row with no record yet is included. */
+export function displayRowsToRefresh({ keys }: { keys: readonly string[] }): number[] {
     const indexes = new Set<number>()
     for (const row of rows) {
-        if (row.parts.size === 0 || [...row.parts.values()].some((record) => recordMatches(record, request))) {
+        if (row.parts.size === 0 || [...row.parts.values()].some((record) => recordMatches(record, keys))) {
             indexes.add(row.index())
         }
+    }
+    return [...indexes]
+}
+
+/**
+ * Raises the rebuild revision of the mounted rows at `index`, or of every mounted row, and returns
+ * their message indexes. A string index reaches the rows its reload pointer key reaches.
+ */
+export function markDisplayRowsForRebuild(index?: number | string): number[] {
+    const indexes = new Set<number>()
+    for (const row of rows) {
+        const rowIndex = row.index()
+        if (index !== undefined && String(rowIndex) !== String(index)) continue
+        row.rebuildRevision += 1
+        indexes.add(rowIndex)
     }
     return [...indexes]
 }

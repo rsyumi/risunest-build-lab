@@ -6,6 +6,7 @@ const state = vi.hoisted(() => ({
     width: 4,
     queryVector: null as number[] | null,
     distinct: false,
+    positional: false,
     cache: null as unknown,
 }))
 
@@ -23,6 +24,7 @@ import { setDatabaseLite } from 'src/ts/storage/database.svelte'
 import { HypaProcesserEx } from './hypav3'
 import { HypaProcessorV2 } from './hypamemoryv2'
 import { getContextProvider } from './contextualEmbedding'
+import { hypaCacheKey, hypaEmbeddingIdentity } from './hypaCacheKey'
 import * as globalApi from 'src/ts/globalApi.svelte'
 import type {
     HypaCachedEmbedding,
@@ -77,14 +79,17 @@ beforeEach(() => {
         if (options.body.input_type === 'document') state.groups.push(groups.map(group => [...group]))
         return {
             ok: true, status: 200, headers: {},
-            data: { data: groups.map(group => ({ data: group.map(() => ({
+            data: { data: groups.map(group => ({ data: group.map((_, index) => ({
                 embedding: options.body.input_type === 'query' && state.queryVector
                     ? state.queryVector
-                    : new Array(state.width).fill(state.distinct && group.includes('second context') ? 2 : 1),
+                    : new Array(state.width).fill(state.positional
+                        ? index + 1
+                        : state.distinct && group.includes('second context') ? 2 : 1),
             })) })) },
         }
     })
     state.distinct = false
+    state.positional = false
     setDatabaseLite({ ...state.database, voyageApiKey: 'synthetic-voyage-key' } as never)
     expect(DBState.db.hypaModel).toBe('voyageContext3')
 })
@@ -174,6 +179,57 @@ describe('HypaProcesserEx contextual chunks', () => {
     })
 })
 
+
+describe('HypaProcesserEx repeated contextual text', () => {
+    const repeated = ['한', '한'.normalize('NFD'), 'other line']
+    const plain = ['beta one', 'beta two']
+
+    async function previousKeys(texts: string[]) {
+        const contextSuffix = getContextProvider('voyageContext3').getCacheKeySuffix(texts)
+        return Promise.all(texts.map((content) => hypaCacheKey({
+            producer: 'hypa-v3-group', content, identity: hypaEmbeddingIdentity('voyageContext3'), contextSuffix,
+        })))
+    }
+
+    it('keys a group with repeated text by position and keeps the keys of other groups', async () => {
+        state.positional = true
+        const plainKeys = await previousKeys(plain)
+        const recorder = recordingCache(new Map(plainKeys.map((key, index) => [
+            key, { vector: new Float32Array(4).fill(index + 10), dimensions: 4 },
+        ])))
+        state.cache = recorder.cache
+
+        const chunks = chunksOf([repeated, plain])
+        await new HypaProcesserEx('voyageContext3').addSummaryChunks(chunks)
+
+        expect(state.groups).toEqual([[repeated]])
+        const repeatedKeys = recorder.writes.flat().map((entry) => entry.key)
+        expect(new Set(repeatedKeys).size).toBe(3)
+        expect(repeatedKeys).not.toContain((await previousKeys(repeated))[0])
+
+        state.groups = []
+        const warm = new HypaProcesserEx('voyageContext3')
+        await warm.addSummaryChunks(chunks)
+        expect(state.groups).toEqual([])
+        expect(warm.summaryChunkVectors.map(({ vector }) => vector.embedding[0])).toEqual([1, 2, 3, 10, 11])
+    })
+
+    it('rejects a provider response with a missing embedding before caching any vector', async () => {
+        const recorder = recordingCache()
+        state.cache = recorder.cache
+        vi.mocked(globalApi.globalFetch).mockResolvedValueOnce({
+            ok: true, status: 200, headers: {},
+            data: { data: [{ data: [{ embedding: [1, 1, 1, 1] }] }] },
+        })
+
+        const processor = new HypaProcesserEx('voyageContext3')
+        await expect(processor.addSummaryChunks(chunksOf([plain]))).rejects.toThrow(
+            'Contextual embedding count mismatch: expected 2, received 1',
+        )
+        expect(recorder.stored.size).toBe(0)
+        expect(processor.summaryChunkVectors).toEqual([])
+    })
+})
 
 it.each(['cold', 'warm', 'mixed'] as const)('preserves repeated text vector identity with a %s contextual cache', async (mode) => {
     state.distinct = true

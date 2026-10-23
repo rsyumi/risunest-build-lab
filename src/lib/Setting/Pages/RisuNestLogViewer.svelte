@@ -38,7 +38,7 @@
         .slice()
         .reverse()
         .sort((left, right) => right.tsMs - left.tsMs)
-        .map((entry) => `[${new Date(entry.tsMs).toISOString()}] [${entry.level}] ${'source' in entry ? `[${entry.source}] ` : ''}${entry.message}`)
+        .map((entry) => `[${new Date(entry.tsMs).toISOString()}] [${entry.level}] [${'source' in entry ? entry.source : entry.target}] ${entry.message}`)
         .join('\n')
     }
 

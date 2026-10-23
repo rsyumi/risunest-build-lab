@@ -4,7 +4,7 @@ import { get } from 'svelte/store'
 import { selectedCharID } from '../../../stores.svelte'
 import { getDatabase } from '../../database.svelte'
 import { flushDeviceStateBeforeRestore, refreshDeviceStateAfterRestore } from '../../deviceStateRestore'
-import { hasMobileBackgroundTasks, subscribeMobileBackgroundTasks, runWithMobileBackgroundTask, measuredTaskPercent, type MobileBackgroundTask } from '../../../mobileBackgroundTask'
+import { beginMobileBackgroundTask, hasMobileBackgroundTasks, subscribeMobileBackgroundTasks, runWithMobileBackgroundTask, measuredTaskPercent, type MobileBackgroundTask } from '../../../mobileBackgroundTask'
 import {
     acquireDestructiveReplacementFence,
     capturePersistentMutationToken,
@@ -46,6 +46,8 @@ interface ProductionRuntime {
     controller: ExternalStorageController
     scheduler: ExternalStorageScheduler
     session: ExternalExecutionSession
+    /** Native holds the hidden session, which ended the jobs of the previous one. */
+    hidden?: boolean
     lifecycle: Promise<void>
     dispose(): void
 }
@@ -85,9 +87,11 @@ function recoverVerifiedConnections(current: ProductionRuntime, state: ExternalS
 async function refreshForeground(current: ProductionRuntime): Promise<void> {
     if (isLibraryFileOperationReserved()) return
     const bridge = getExternalStorageBridge()
-    if (!hasMobileBackgroundTasks()) {
+    // Routine work that began on return to the screen must not keep the hidden session.
+    if (current.hidden || !hasMobileBackgroundTasks()) {
         current.session = newSession('foreground')
         await bridge.setExecutionSession(current.session)
+        current.hidden = false
     }
     const state = await bridge.getState()
     recoverVerifiedConnections(current, state)
@@ -191,6 +195,7 @@ export function installExternalStorageProduction(): Promise<() => void> {
                     if (hasMobileBackgroundTasks()) return
                     current.session = { kind: 'foreground', id: crypto.randomUUID() }
                     await bridge.setExecutionSession({ kind: 'hidden', id: current.session.id })
+                    current.hidden = true
                     await scheduler.suspend(() => false)
                 } else await refreshForeground(current)
             }).catch(() => {})
@@ -355,6 +360,25 @@ export async function requestExternalStorageDeleteHistory(
         current.controller.replaceState(state)
         return job
     }, undefined, true)
+}
+
+/** Starts a keep or check job and holds background time until it settles. */
+export async function startExternalStorageMaintenanceJob(request: StartExternalJobRequest): Promise<ExternalJobSummary> {
+    const background = await beginMobileBackgroundTask('maintenance', undefined, true)
+    let job: ExternalJobSummary
+    try { job = await getExternalStorageBridge().startJob(request) }
+    catch (error) { await background.dispose(); throw error }
+    if (background.protection?.state === 'refused') { await background.dispose(); return job }
+    void (async () => {
+        try {
+            while (['queued', 'running', 'waiting'].includes(job.state) && !externalJobIsPaused(job)) {
+                await new Promise(resolve => setTimeout(resolve, 500))
+                job = await readBackgroundJob(job.id, background)
+                background.progress(measuredTaskPercent(Number(job.completedBytes), Number(job.totalBytes)))
+            }
+        } catch {} finally { await background.dispose(job.state === 'succeeded') }
+    })()
+    return job
 }
 
 async function retryPausedJob(

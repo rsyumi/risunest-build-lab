@@ -7,6 +7,8 @@ import { syncStatusPanel } from 'src/ts/gui/syncStatusPanel'
 import { DBState } from 'src/ts/stores.svelte'
 import { syncStatus, type SyncStatusSource } from 'src/ts/storage/sync/syncStatus'
 import type { ServerSyncView } from 'src/ts/storage/sync/syncStatusView'
+import type { ExternalConnectionSummary } from 'src/ts/storage/sync/external/types'
+import { externalStorageStrings } from 'src/lib/Setting/ExternalStorage/strings'
 import SyncStatusButton from './SyncStatusButton.svelte'
 
 let component: ReturnType<typeof mount> | undefined
@@ -47,4 +49,16 @@ it('labels the sidebar column as sync and names a failing attempt without a stop
     expect(button.getAttribute('data-sync-status')).toBe('failed')
     expect(button.getAttribute('aria-label')).toBe(`${language.risuNest.tabs.sync}: ${language.risuNest.serverSync.failed}`)
     expect(button.textContent?.trim()).toBe(language.risuNest.syncStatus.menuLabel)
+})
+
+it('keeps external storage working between receive turns while changes remain', async () => {
+    component = mount(SyncStatusButton, { target: document.body, props: { variant: 'slot' } })
+    const connection = { id: 'webdav-1', purpose: 'sync', status: 'ready' } as Partial<ExternalConnectionSummary> as ExternalConnectionSummary
+    const source: SyncStatusSource = { target: 'external', connection, syncStopped: false, catchingUp: true, refresh: () => {}, syncNow: async () => {} }
+    syncStatus.set(source); await tick()
+    const button = () => document.querySelector<HTMLButtonElement>('button[data-sync-status]')!
+    expect(button().getAttribute('data-sync-status')).toBe('working')
+    expect(button().getAttribute('aria-label')).toBe(`${language.risuNest.tabs.sync}: ${externalStorageStrings('en').transfer.syncing}`)
+    syncStatus.set({ ...source, catchingUp: false }); await tick()
+    expect(button().getAttribute('data-sync-status')).toBe('connected')
 })

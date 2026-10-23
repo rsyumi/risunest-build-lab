@@ -6,6 +6,11 @@ import { appVer } from './appVersion'
 import versionData from '../../version.json'
 
 export type DiagnosticInfo = { os: string; device: string; userAgent: string }
+type NativeDeviceInfo = {
+    model: string | null
+    arch: string
+    os?: { platform?: 'windows' | 'linux'; name: string; version: string | null } | null
+}
 
 function fallbackInfo(): DiagnosticInfo {
     let device = 'Unknown'
@@ -21,11 +26,18 @@ let infoPromise: Promise<DiagnosticInfo> | undefined
 export function loadDiagnosticInfo(): Promise<DiagnosticInfo> {
     return infoPromise ??= (async () => {
         const info = fallbackInfo()
-        await Promise.all([
-            Promise.resolve().then(getDetailedOSLabel).then(os => { info.os = os }, () => {}),
-            isTauri ? Promise.resolve().then(() => invoke<{ model: string | null; arch: string }>('diagnostic_device_info'))
-                .then(device => { info.device = device.model ? `${device.model} (${device.arch})` : device.arch }, () => {}) : undefined,
+        const [os, device] = await Promise.all([
+            Promise.resolve().then(getDetailedOSLabel).catch(() => undefined),
+            isTauri ? Promise.resolve().then(() => invoke<NativeDeviceInfo>('diagnostic_device_info')).catch(() => undefined) : undefined,
         ])
+        if (os) info.os = os
+        if (device) {
+            info.device = device.model ? `${device.model} (${device.arch})` : device.arch
+            if (device.os) {
+                const { platform, name, version } = device.os
+                info.os = !version ? name : platform === 'linux' ? `${name} ${version}` : `${name} (NT ${version})`
+            }
+        }
         return info
     })()
 }

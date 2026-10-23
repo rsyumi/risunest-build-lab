@@ -46,6 +46,9 @@ pub(crate) struct SyncError {
     /// False for a rejection the same request would receive again. The scheduler
     /// stops automatic retries on it instead of backing off forever.
     pub retryable: bool,
+    /// An activation failed before changing an already usable local library.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub startup_local_ready: Option<bool>,
     /// Where the error was raised. Kept for the device log, never sent.
     #[serde(skip)]
     pub at: &'static std::panic::Location<'static>,
@@ -62,6 +65,7 @@ impl SyncError {
             code,
             status,
             retryable,
+            startup_local_ready: None,
             at: std::panic::Location::caller(),
             cause: None,
         }
@@ -151,6 +155,9 @@ impl From<crate::persistent_store::StoreError> for SyncError {
             crate::persistent_store::StoreError::Validation { message } if matches!(message.as_str(), "accepted-clock-correction-required" | "incoming-clock-skew" | "clock-skew" | "equal-stamp-integrity" | "writer-collision" | "binding-authority-changed") => Self::new(message,409),
             crate::persistent_store::StoreError::Store { message } => Self::caused("local-storage", 503, message),
             crate::persistent_store::StoreError::CommitBusy => Self::new("library-operation-busy", 409),
+            crate::persistent_store::StoreError::Validation { message }
+                if message == "Asset inventory is being pinned by a local capture" =>
+                Self::new("library-operation-busy", 409),
             other => Self::caused("local-validation", 409, other.to_string()),
         }
     }

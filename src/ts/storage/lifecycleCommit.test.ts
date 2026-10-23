@@ -14,6 +14,8 @@ vi.mock('../platform', async () => (await import('../platform.testSupport')).pla
 
 import { registerLifecycleCommitListeners } from './lifecycleCommit'
 import { createLifecycleFlush } from './lifecycleFlush'
+import { beginDisplayWork, installDisplayRecovery, suspendDisplayWork } from '../displayRecovery.svelte'
+import { recoveryStore } from '../displayRecovery.testSupport'
 import {
     captureRoot,
     deferred,
@@ -34,6 +36,7 @@ function platformLifecycleFlush(
         nativePlatform: () => platform,
         forgetInlayProviderImages: vi.fn(),
         releaseIdleTransformerModels: vi.fn(async () => undefined),
+        suspendDisplayWork,
     }).flushForLifecycle
 }
 
@@ -293,6 +296,43 @@ describe('registerLifecycleCommitListeners', () => {
         delete (window as any).RisuLifecycleBridge
     })
 
+    it('acknowledges a native stop after the record of running display work is removed', async () => {
+        const device = recoveryStore()
+        await installDisplayRecovery(device.store)
+        const work = beginDisplayWork({ characterId: 'synthetic-character', conversationId: 'synthetic-chat' })
+        device.commitAll()
+        await work.ready
+        const onFlushComplete = vi.fn()
+        ;(window as any).RisuLifecycleBridge = { onFlushComplete }
+        const runtime = {
+            flushPendingData: vi.fn(async () => undefined),
+            flushPendingDataLocally: vi.fn(async () => undefined),
+        }
+        const dispose = registerLifecycleCommitListeners(
+            platformLifecycleFlush(runtime, false, 'android'),
+            undefined,
+            vi.fn(async () => undefined),
+        )
+        try {
+            window.dispatchEvent(new CustomEvent('risu-native-lifecycle', {
+                detail: { reason: 'stop', ackToken: 'stop-display' },
+            }))
+            await vi.waitFor(() => expect(device.pendingWrites).toBe(1))
+            expect(device.record).toBeNull()
+            // A turn of the event loop in which an acknowledgement that did not wait would arrive.
+            await new Promise((resolve) => setTimeout(resolve, 0))
+            expect(onFlushComplete).not.toHaveBeenCalled()
+
+            device.commitAll()
+            await vi.waitFor(() => expect(onFlushComplete).toHaveBeenCalledExactlyOnceWith('stop-display'))
+        } finally {
+            dispose()
+            work.release()
+            await installDisplayRecovery(null)
+            delete (window as any).RisuLifecycleBridge
+        }
+    })
+
     it('flushes, checkpoints with truncate, then acknowledges a native event', async () => {
         const order: string[] = []
         const onFlushComplete = vi.fn(() => order.push('ack'))
@@ -374,25 +414,44 @@ describe('registerLifecycleCommitListeners', () => {
         delete (window as any).RisuLifecycleBridge
     })
 
-    it('checkpoints through the native store on the Tauri production path', async () => {
+    it.each(['stop', 'trim-memory', 'exit'] as const)('records the native %s reason and checkpoints on the Tauri production path', async (reason) => {
         checkpointNativePersistentStore.mockClear()
         vi.resetModules()
         vi.doMock('../platform', async () => (await import('../platform.testSupport')).platformModule({ runtime: 'tauri', os: 'windows' }))
+        const diagnosticEvents: Record<string, unknown>[] = []
+        vi.doMock('@tauri-apps/api/core', async (importOriginal) => ({
+            ...await importOriginal<typeof import('@tauri-apps/api/core')>(),
+            invoke: async (command: string, args?: { event?: Record<string, unknown> }) => {
+                if (command === 'native_generation_diagnostic' && args?.event) diagnosticEvents.push(args.event)
+                return 7
+            },
+        }))
         const { registerLifecycleCommitListeners: registerTauri } = await import('./lifecycleCommit')
+        const { generationDiagnostics } = await import('../generationDiagnostics')
+        generationDiagnostics.startDocument()
+        await Promise.resolve()
         const onFlushComplete = vi.fn()
         ;(window as any).RisuLifecycleBridge = { onFlushComplete }
         const dispose = registerTauri(vi.fn(async () => undefined))
 
-        window.dispatchEvent(new CustomEvent('risu-native-lifecycle', {
-            detail: { reason: 'stop', ackToken: 'tauri-stop' },
-        }))
+        try {
+            window.dispatchEvent(new CustomEvent('risu-native-lifecycle', {
+                detail: { reason, ackToken: 'tauri-lifecycle' },
+            }))
 
-        await vi.waitFor(() => expect(onFlushComplete).toHaveBeenCalledWith('tauri-stop'))
-        expect(checkpointNativePersistentStore).toHaveBeenCalledWith('truncate')
-        dispose()
-        delete (window as any).RisuLifecycleBridge
-        vi.doUnmock('../platform')
-        vi.resetModules()
+            await vi.waitFor(() => expect(onFlushComplete).toHaveBeenCalledWith('tauri-lifecycle'))
+            expect(checkpointNativePersistentStore).toHaveBeenCalledWith('truncate')
+            expect(diagnosticEvents).toEqual([
+                { kind: 'document-start' },
+                { kind: 'lifecycle', documentSequence: 7, eventSequence: 1, event: reason },
+            ])
+        } finally {
+            dispose()
+            delete (window as any).RisuLifecycleBridge
+            vi.doUnmock('../platform')
+            vi.doUnmock('@tauri-apps/api/core')
+            vi.resetModules()
+        }
     })
 
     it('acknowledges the native ack token when the flush fails', async () => {

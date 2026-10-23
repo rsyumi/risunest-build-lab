@@ -3,6 +3,7 @@ import { getPersistentDataStore } from '../../storage/persistentDataStoreFactory
 import { resolveBlobStore } from '../../storage/platformBlobStore'
 import { clearNativeAssetSourceCache } from '../../globalApi.svelte'
 import { calculateMissingImageGeometry, emptyImageGeometryProgress, type ImageGeometryProgress } from './imageGeometryJob'
+import { runWithMobileBackgroundTask } from '../../mobileBackgroundTask'
 
 export class ImageGeometryController {
     running = $state(false)
@@ -25,12 +26,12 @@ export class ImageGeometryController {
             const epoch = runtime.getStorageAuthorityEpoch()
             const geometry = (await resolveBlobStore()).imageGeometry
             if (!geometry) throw new Error('Image geometry is unavailable')
-            this.result = await calculateMissingImageGeometry({
+            this.result = await runWithMobileBackgroundTask('maintenance', task => calculateMissingImageGeometry({
                 geometry,
                 list: query => getPersistentDataStore().listAssetAliases(query),
-                isCancelled: () => this.cancelRequested || runtime.getStorageAuthorityEpoch() !== epoch,
+                isCancelled: () => this.cancelRequested || runtime.getStorageAuthorityEpoch() !== epoch || !!task.signal?.aborted,
                 onProgress: value => { this.progress = value },
-            })
+            }), undefined, true)
         } catch {
             this.failed = true
         } finally {

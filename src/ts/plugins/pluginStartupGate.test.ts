@@ -39,6 +39,29 @@ function harness() {
 }
 
 describe('plugin initial receive gate', () => {
+    it('uses the transport startup policy to release plugins during an outage', async () => {
+        native.state.target = {kind: 'server', connectionId: 'offline-startup'}
+        const offline = {code: 'server-unreachable', status: 503, retryable: true}
+        const unsupported = async (): Promise<never> => { throw new Error('Unexpected binding switch') }
+        const transport = {
+            inspectTarget: unsupported, pullAvailableState: unsupported, replaceFromTarget: unsupported,
+            publishInitialSharedState: unsupported, fenceOldJobs: unsupported, resumeBinding: unsupported,
+            receiveAvailableChanges: async () => { throw offline },
+            preparePluginStartup: async () => {},
+        }
+        const unregister = registerSyncBindingTransport(native.state.target, transport)
+        let starts = 0
+        configurePluginStartup(() => true, async () => { if (await pluginStartupGate.ensure()) starts++ })
+        try {
+            expect(await pluginStartupGate.ensure()).toBe(false)
+            await vi.waitFor(() => expect(starts).toBe(1))
+            expect(get(pluginStartupGate.state).phase).toBe('released')
+        } finally {
+            unregister(); native.state.target = {kind: 'none'}
+            configurePluginStartup(() => false, async () => {})
+            pluginStartupGate.invalidate(); pluginStartupGate.state.set({phase: 'released', since: 0})
+        }
+    })
     it.each([false,true])('uses the real replacement resume notification to release the production gate after a server hold (delay disabled=%s)', async disabled => {
         native.state.target = {kind:'server',connectionId:'synthetic-startup'}
         let active = true, held = false, starts = 0

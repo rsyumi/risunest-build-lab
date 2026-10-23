@@ -1,3 +1,4 @@
+import { userScriptConsole } from '../../userScriptConsole'
 import { pluginStartupGate } from '../pluginStartupGate'
 import { parseRisuChat } from '../parseRisuChat'
 import { createPluginDeviceKeyspace } from '../pluginDeviceKeyspace'
@@ -32,6 +33,7 @@ import { beginGenerationEndRun, type GenerationEndRun } from "src/ts/process/gen
 import { getModelInfo } from "src/ts/model/modellist";
 import type { ModelModeExtended } from "src/ts/process/request/shared";
 import { requestChatDataMain } from "src/ts/process/request/request";
+import { holdModelCall } from "src/ts/process/generationBackground";
 import { getModuleLorebooks } from "src/ts/process/modules";
 import {
     registerTTSPreprocessor,
@@ -63,6 +65,7 @@ import {
     registerChatOutputListener,
     removeChatOutputListener,
     type ChatOutputListener,
+    type ChatOutputListenerOptions,
 } from '../pluginChatOutputListeners'
 import {
     createProductionPluginDatabaseAccess,
@@ -105,12 +108,13 @@ const pluginChannel = new Map<string, Map<string, Function>>();
 function allowsIPC(allowedIPC: readonly string[] | undefined, pluginName: string): boolean {
     return !!allowedIPC && (allowedIPC.includes(pluginName) || allowedIPC.includes('*'));
 }
-const documentEventListeners: Array<{
+type TrackedEventListener = {
     target: EventTarget
     type: string
     listener: EventListenerOrEventListenerObject
     options: boolean | AddEventListenerOptions
-}> = [];
+}
+const documentEventListeners: TrackedEventListener[] = [];
 // One access object per plugin. The owner is fixed here, so no call a plugin
 // makes can widen past its own rows.
 const pluginDatabaseAccessByOwner = new Map<string, PluginDatabaseAccess>()
@@ -337,7 +341,14 @@ class SafeElement {
     public scrollIntoView(options?: boolean | ScrollIntoViewOptions) {
         this.#element.scrollIntoView(options);
     }
-    #eventIdMap = new Map<string, Function>()
+    #eventIdMap = new Map<string, TrackedEventListener>()
+
+    #trackEventListener(id: string, type: string, listener: EventListenerOrEventListenerObject, options: AddEventListenerOptions): void {
+        const tracked: TrackedEventListener = { target: this.#eventTarget, type, listener, options }
+        this.#eventIdMap.set(id, tracked)
+        documentEventListeners.push(tracked)
+        tracked.target.addEventListener(tracked.type, tracked.listener, tracked.options)
+    }
 
     public async addEventListener(type:string, listener: (event: any) => void, options?: boolean | AddEventListenerOptions):Promise<string> {
         const realOptions = typeof options === 'boolean' ? { capture: options } : options || {};
@@ -412,9 +423,7 @@ class SafeElement {
             const modifiedListener = (event: any) => {
                 listener(trimEvent(event))
             }
-            this.#eventIdMap.set(id, modifiedListener)
-            documentEventListeners.push({target: this.#eventTarget, type, listener: modifiedListener as EventListenerOrEventListenerObject, options: realOptions})
-            this.#eventTarget.addEventListener(type, modifiedListener, realOptions)
+            this.#trackEventListener(id, type, modifiedListener, realOptions)
             return id;
         }
         else if(allowedDelayedEventListeners.includes(type)){
@@ -427,9 +436,7 @@ class SafeElement {
                     listener(trimEvent(event));
                 }, delay);
             }
-            this.#eventIdMap.set(id, modifiedListener)
-            documentEventListeners.push({target: this.#eventTarget, type, listener: modifiedListener as EventListenerOrEventListenerObject, options: realOptions})
-            this.#eventTarget.addEventListener(type, modifiedListener, realOptions);
+            this.#trackEventListener(id, type, modifiedListener, realOptions)
             return id;
         }
         else{
@@ -437,14 +444,13 @@ class SafeElement {
         }        
     }
 
+    // type and options stay in the signature for compatibility. The DOM ignores a removal
+    // whose type or capture differs from the registration, so the recorded one is replayed.
     public removeEventListener(type:string, id:string, options?: boolean | EventListenerOptions) {
-        const listener = this.#eventIdMap.get(id);
-        if(listener){
-            const realOptions = typeof options === 'boolean' ? { capture: options } : options || {};
-            this.#eventTarget.removeEventListener(type, listener as EventListenerOrEventListenerObject, realOptions);
-            const idx = documentEventListeners.findIndex(e =>
-                e.target === this.#eventTarget && e.listener === listener
-            );
+        const tracked = this.#eventIdMap.get(id);
+        if(tracked){
+            tracked.target.removeEventListener(tracked.type, tracked.listener, tracked.options);
+            const idx = documentEventListeners.indexOf(tracked);
             if(idx !== -1) documentEventListeners.splice(idx, 1);
             this.#eventIdMap.delete(id);
         }
@@ -896,7 +902,7 @@ const makeRisuaiAPIV3 = (
             addPluginUnloadCallback(plugin.name, () => oldApis.removeRisuReplacer(name, func as any));
         },
         removeRisuReplacer: oldApis.removeRisuReplacer,
-        addRisuChatListener: async (mode:'output', func:Function) => {
+        addRisuChatListener: async (mode:'output', func:Function, options?: ChatOutputListenerOptions) => {
             if (mode !== 'output') throw (`chat listener mode ${mode} not found`)
             //permission check, lets use same as replacer
             const conf = await getPluginPermission(permissionContext, 'replacer', 'periodically');
@@ -905,7 +911,7 @@ const makeRisuaiAPIV3 = (
             }
             if (pluginLifetime.signal.aborted) return
             const listener = func as ChatOutputListener
-            registerChatOutputListener(pluginV2.chatOutput, listener)
+            registerChatOutputListener(pluginV2.chatOutput, listener, options)
             addPluginUnloadCallback(plugin.name, () => removeChatOutputListener(
                 pluginV2.chatOutput,
                 listener,
@@ -1399,7 +1405,7 @@ const makeRisuaiAPIV3 = (
             risunest.unregisterUIPart(id);
         },
         log: (message:string) => {
-            console.log(`[RisuAI Plugin: ${plugin.name}] ${message}`);
+            userScriptConsole.log(`[RisuAI Plugin: ${plugin.name}] ${message}`);
         },
         createMutationObserver(callback: SafeMutationCallback): SafeMutationObserver {
             const observer = new SafeMutationObserver(callback)
@@ -1556,7 +1562,7 @@ const makeRisuaiAPIV3 = (
             staticModel?: string
             allowPlugins?: boolean
         }) => {
-            return requestChatDataMain({
+            return holdModelCall(signal => requestChatDataMain({
                 formated: options.messages,
                 bias: {},
                 staticModel: options.staticModel,
@@ -1569,7 +1575,7 @@ const makeRisuaiAPIV3 = (
                 // explicitly with `allowPlugins: true`, accepting responsibility
                 // for avoiding provider-to-provider call loops.
                 blockPlugins: !options.allowPlugins,
-            }, options.mode, pluginLifetime.signal)
+            }, options.mode, signal), pluginLifetime.signal)
         },
         sendChat: async (message: string) => {
             const authorityEpoch = getPersistentStorageAuthorityEpoch();

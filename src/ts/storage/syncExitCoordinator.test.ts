@@ -35,6 +35,7 @@ function harness(adapter: SyncExitDrainAdapter | null = null) {
             return target
         }),
         selectedDrain: vi.fn(() => adapter),
+        prepareExit: vi.fn(async () => { order.push('prepare') }),
         softWaitMillis: 5_000,
         reportError: vi.fn(),
     }
@@ -120,12 +121,14 @@ describe('sync exit coordinator', () => {
         h.coordinator.requestExitWithoutSync()
         cancelled.resolve()
         await expect(exit).resolves.toBe('cancelled')
+        expect(h.dependencies.prepareExit).not.toHaveBeenCalled()
         adapter.drain.mockResolvedValueOnce({ kind: 'blocked', reason: 'offline' })
         const retry = h.coordinator.requestExit()
         await vi.waitFor(() => expect(adapter.drain).toHaveBeenCalledTimes(2))
         expect(h.coordinator.snapshot().phase).toBe('remote-blocked')
         h.coordinator.decide('exit-unsynced')
         await expect(retry).resolves.toBe('exit')
+        expect(h.dependencies.prepareExit).toHaveBeenCalledOnce()
     })
 
     it('does not bypass a replacement fence on repeated close', async () => {
@@ -179,7 +182,7 @@ describe('sync exit coordinator', () => {
 
         await expect(h.coordinator.requestExit()).resolves.toBe('exit')
 
-        expect(h.order).toEqual(['flush', 'checkpoint', 'fence', 'capture', 'release'])
+        expect(h.order).toEqual(['flush', 'checkpoint', 'fence', 'capture', 'release', 'prepare'])
         expect(h.coordinator.snapshot()).toEqual({ phase: 'complete', target })
     })
 

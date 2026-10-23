@@ -221,7 +221,7 @@ window.acceptance = (async () => {
         )
         latest.note = 'listener persisted'
         await risuai.setChatToIndex(event.characterIndex, event.chatIndex, latest)
-    })
+    }, { history: 'current' })
     return {
         characterId: character.chaId,
         chatId: chat.id,
@@ -278,6 +278,7 @@ window.acceptance = (async () => {
         )
         expect((frame.contentWindow as any).listenerEvent.chat.note).toBe('final live output')
         expect(fixture.projectScalable).toHaveBeenCalledOnce()
+        expect(fixture.projectScalable).toHaveBeenCalledWith(expect.objectContaining({ history: 'current' }))
         expect(fixture.requestedPermissions).toEqual(['replacer'])
     })
 

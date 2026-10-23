@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 import { setRuntimePerformanceProfile } from './runtimePerformanceProfile'
 import type { PlatformShape } from './platform.testSupport'
 
@@ -75,6 +75,8 @@ import { doingChat } from './process/generationState'
 import { save } from '@tauri-apps/plugin-dialog'
 import { navigationActivity } from './ui/navigationActivity'
 import { get } from 'svelte/store'
+import { imageFixture } from '../../tests/support/imageFixtures'
+import { createKeyValueBlobStore, type BlobKeyValueBackend } from './storage/blobStore'
 
 function createFakeBlobStore(entries: { [key: string]: { data: Uint8Array, mime: string } }) {
     return {
@@ -112,6 +114,34 @@ beforeEach(() => {
     setRuntimePerformanceProfile('normal')
     ;(forageStorage as any).isAccount = false
     vi.spyOn(console, 'error').mockImplementation(() => undefined)
+})
+
+describe('picture storage', () => {
+    let saveImage: typeof import('./storage/database.svelte').saveImage
+    beforeAll(async () => {
+        saveImage = (await vi.importActual<typeof import('./storage/database.svelte')>('./storage/database.svelte')).saveImage
+    }, 30_000)
+    test.each(['png', 'jpg', 'gif', 'webp', 'avif'] as const)('stores %s bytes with canonical metadata through saveImage and survives reopening', async ext => {
+        const values = new Map<string, Uint8Array>()
+        const backend: BlobKeyValueBackend = {
+            read: async key => values.get(key)?.slice() ?? null,
+            write: async (key, bytes) => { values.set(key, bytes.slice()) },
+            remove: async key => { values.delete(key) },
+            keys: async () => [...values.keys()],
+        }
+        state.blobStore = createKeyValueBlobStore(backend, { kind: 'legacy' })
+        const bytes = imageFixture(ext)
+        const key = await saveImage(bytes, 'picture', 'wrong.PNG')
+        expect(key).toBe(`assets/picture.${ext}`)
+        const reopened = createKeyValueBlobStore(backend, { kind: 'legacy' })
+        expect(await reopened.read(key)).toEqual(bytes)
+        expect(await reopened.stat(key)).toMatchObject({ ext, mime: ext === 'jpg' ? 'image/jpeg' : `image/${ext}` })
+        const before = new Map(values)
+        await expect(saveImage(new Uint8Array([1]), 'picture')).rejects.toThrow()
+        expect(values).toEqual(before)
+        expect(await saveAsset(bytes, 'plugin-raw')).toBe('assets/plugin-raw.png')
+        expect(await reopened.read('assets/plugin-raw.png')).toEqual(bytes)
+    })
 })
 
 describe('conversation navigation', () => {

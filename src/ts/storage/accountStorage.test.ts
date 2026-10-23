@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { language } from 'src/lang'
-import type { AccountNativeOfficialWriteAttemptContext } from './accountStorage'
+import type { AccountNativeAssetReadAttempt, AccountNativeOfficialWriteAttemptContext } from './accountStorage'
 import {
     createNativeOfficialAccountFlowService,
     type NativeOfficialAccountFlow,
@@ -168,7 +168,7 @@ beforeEach(() => {
     })
     mocks.getUncleanablesSync.mockReset().mockReturnValue([])
     mocks.getColdStorageItem.mockReset().mockResolvedValue(null)
-    mocks.getAccountColdStorageItem.mockReset().mockResolvedValue(null)
+    mocks.getAccountColdStorageItem.mockReset().mockResolvedValue({ kind: 'missing' })
     mocks.setLocalColdStorageItem.mockReset().mockResolvedValue(true)
     mocks.materializePersistentDatabaseSnapshotWithRevision.mockReset().mockResolvedValue({
         database: mocks.database,
@@ -222,7 +222,7 @@ describe('AccountStorage structured wire contract', () => {
         mocks.replacePersistentDatabase.mockImplementation((candidate, reason, options) =>
             coordinator.replacePersistentDatabase(candidate, reason, options),
         )
-        mocks.getAccountColdStorageItem.mockResolvedValue({ character: database.characters[0] })
+        mocks.getAccountColdStorageItem.mockResolvedValue({ kind: 'present', value: { character: database.characters[0] } })
         mocks.getUncleanablesSync.mockReturnValue(['assets/remote.png'])
         let finishDownload!: (value: Response) => void
         mocks.fetchProtectedResource.mockImplementation(
@@ -254,7 +254,7 @@ describe('AccountStorage structured wire contract', () => {
         const actual =
             await vi.importActual<typeof import('./databaseRestore')>('./databaseRestore')
         mocks.completeAccountUnmigration.mockImplementation(actual.completeAccountUnmigration)
-        mocks.getAccountColdStorageItem.mockResolvedValue({ character: {} })
+        mocks.getAccountColdStorageItem.mockResolvedValue({ kind: 'present', value: { character: {} } })
         mocks.getUncleanablesSync.mockReturnValue(['assets/retry.png'])
         mocks.fetchProtectedResource
             .mockRejectedValueOnce(new Error('offline'))
@@ -566,6 +566,61 @@ describe('AccountStorage structured wire contract', () => {
         expect(attempt).toHaveBeenCalledTimes(3)
         expect(mocks.alertLogin).toHaveBeenCalledTimes(2)
         expect(credentialRouting.reauthenticate).toHaveBeenCalledTimes(2)
+    })
+
+    it('reauthenticates rejected native asset reads once and retries them with the fresh token', async () => {
+        let token = 'old-token'
+        const credentialRouting = {
+            getAccountId: () => 'account-a',
+            getToken: vi.fn(() => token),
+            reauthenticate: vi.fn(async () => { token = 'new-token' }),
+        }
+        const attempt = vi.fn<AccountNativeAssetReadAttempt>()
+            .mockResolvedValueOnce('reauthentication-needed')
+            .mockResolvedValueOnce('done')
+        const { AccountStorage } = await loadStorage()
+
+        await expect(new AccountStorage({ credentialRouting }).readAssetsFromNative(attempt)).resolves.toBe('done')
+
+        expect(mocks.alertLogin).toHaveBeenCalledOnce()
+        expect(attempt.mock.calls).toEqual([
+            [{ credential: { kind: 'risu-auth', token: 'old-token' }, reauthenticated: false }],
+            [{ credential: { kind: 'risu-auth', token: 'new-token' }, reauthenticated: true }],
+        ])
+    })
+
+    it.each(['missing', 'rejected again', 'not renewed'] as const)('ends native asset reads unauthenticated when the credential is %s', async ending => {
+        const credentialRouting = {
+            getAccountId: () => 'account-a',
+            getToken: vi.fn(() => ending === 'missing' ? '' : 'native-token'),
+            reauthenticate: vi.fn(async () => { if (ending === 'not renewed') throw new Error('Synthetic login failure') }),
+        }
+        const attempt = vi.fn<AccountNativeAssetReadAttempt>(async () => 'reauthentication-needed')
+        const { AccountStorage } = await loadStorage()
+
+        await expect(new AccountStorage({ credentialRouting }).readAssetsFromNative(attempt)).resolves.toBe('unauthenticated')
+
+        expect(attempt).toHaveBeenCalledTimes({ missing: 0, 'rejected again': 2, 'not renewed': 1 }[ending])
+        expect(mocks.alertLogin).toHaveBeenCalledTimes(ending === 'missing' ? 0 : 1)
+    })
+
+    it('aborts native asset reads while waiting for reauthentication', async () => {
+        mocks.alertLogin.mockReturnValueOnce(new Promise<string>(() => {}))
+        const credentialRouting = {
+            getAccountId: () => 'account-a',
+            getToken: vi.fn(() => 'native-token'),
+            reauthenticate: vi.fn(async () => undefined),
+        }
+        const attempt = vi.fn<AccountNativeAssetReadAttempt>(async () => 'reauthentication-needed')
+        const { AccountStorage } = await loadStorage()
+        const controller = new AbortController()
+
+        const reading = new AccountStorage({ credentialRouting }).readAssetsFromNative(attempt, { signal: controller.signal })
+        await vi.waitFor(() => expect(mocks.alertLogin).toHaveBeenCalledOnce())
+        controller.abort(new DOMException('Restore cancelled', 'AbortError'))
+
+        await expect(reading).rejects.toMatchObject({ name: 'AbortError' })
+        expect(attempt).toHaveBeenCalledOnce()
     })
 
     it('aborts while waiting for native reauthentication without retrying after login resolves', async () => {
@@ -1495,9 +1550,7 @@ describe('AccountStorage structured wire contract', () => {
 
         await expect(restore).resolves.toEqual({ kind: 'missing' })
         await expect(logout).resolves.toBeUndefined()
-        await expect(liveRead).rejects.toThrow(
-            'Native official account session changed during reauthentication',
-        )
+        await expect(liveRead).rejects.toMatchObject({ kind: 'account-changed' })
         expect(flow.getToken()).toBeNull()
         expect(vault.stored).toBeNull()
         expect(setRouting).toHaveBeenCalledTimes(1)
@@ -1801,6 +1854,68 @@ describe('AccountStorage structured wire contract', () => {
         expect(forbidden.cancel).toHaveBeenCalledOnce()
     })
 
+    it.each([401, 403])('stops a native asset read when HTTP %s persists after one authentication', async status => {
+        const { options } = nativeReauthenticationFixture()
+        mocks.alertLogin.mockResolvedValue(JSON.stringify({ id: 'account-a', token: 'fresh-token', data: {} }))
+        mocks.fetchProtectedResource
+            .mockResolvedValueOnce(response(null, status))
+            .mockResolvedValueOnce(response(null, status))
+            .mockRejectedValue(new Error('Unexpected third request'))
+        const { AccountStorage, AccountReadError } = await loadStorage()
+        const result = new AccountStorage(options).readItem('assets/blocked')
+        await expect(result).rejects.toBeInstanceOf(AccountReadError)
+        await expect(result).rejects.toMatchObject({ kind: 'http', status })
+        expect(mocks.alertLogin).toHaveBeenCalledOnce()
+    })
+
+    it('classifies an account change during native asset reauthentication as an ownership change', async () => {
+        const { service, options } = nativeReauthenticationFixture()
+        mocks.fetchProtectedResource.mockResolvedValueOnce(response(null, 403))
+        mocks.alertLogin.mockImplementationOnce(async () => {
+            await service.flow.login({ id: 'account-b', token: 'other-token', data: {} })
+            return JSON.stringify({ id: 'account-a', token: 'fresh-token', data: {} })
+        })
+        const { AccountStorage } = await loadStorage()
+        await expect(new AccountStorage(options).readItem('assets/failure')).rejects.toMatchObject({ kind: 'account-changed' })
+    })
+
+    it.each([429, 503, 404].flatMap(status => ['assets/failure', 'assets\\failure'].map(key => ({ status, key }))))('preserves HTTP $status and Retry-After for $key', async ({ status, key }) => {
+        const { options } = nativeReauthenticationFixture()
+        mocks.fetchProtectedResource.mockResolvedValueOnce(response('synthetic error', status, { 'Retry-After': '120' }))
+        const { AccountStorage } = await loadStorage()
+        await expect(new AccountStorage(options).readItem(key)).rejects.toMatchObject({ kind: 'http', status, retryAfter: '120' })
+    })
+    it('caches and measures a legacy asset read without changing its server key', async () => {
+        const { options } = nativeReauthenticationFixture()
+        const key = 'assets\\legacy.gif'
+        const bytes = Uint8Array.of(1, 2, 3)
+        const cached = new Map<string, ArrayBuffer>()
+        const assetCache = {
+            getItem: async (key: string) => cached.get(key) ?? null,
+            setItem: async (key: string, value: ArrayBuffer) => { cached.set(key, value) },
+        }
+        mocks.fetchProtectedResource.mockResolvedValueOnce(response(bytes))
+        const { AccountStorage } = await loadStorage()
+        const onBytes = vi.fn()
+        const storage = new AccountStorage({ ...options, assetCache })
+        expect(await storage.readItem(key, { onBytes })).toEqual({ kind: 'value', bytes })
+        expect(new Uint8Array(cached.get(key)!)).toEqual(bytes)
+        expect(onBytes.mock.calls.flat()).toEqual([3])
+        expect(mocks.fetchProtectedResource.mock.calls[0]?.[1]?.headers).toMatchObject({ 'x-risu-key': key })
+        expect(await storage.readItem(key)).toEqual({ kind: 'value', bytes })
+    })
+    it.each(['get', 'set'])('classifies a native asset cache %s failure as local storage failure', async action => {
+        const { options } = nativeReauthenticationFixture()
+        const assetCache = {
+            getItem: async () => { if (action === 'get') throw new Error('synthetic storage failure'); return null },
+            setItem: async () => { throw new Error('synthetic quota failure') },
+        }
+        mocks.fetchProtectedResource.mockResolvedValueOnce(response(Uint8Array.of(1)))
+        const { AccountStorage } = await loadStorage()
+        await expect(new AccountStorage({ ...options, assetCache }).readItem('assets/failure')).rejects.toMatchObject({ kind: 'local' })
+        expect(mocks.alertLogin).not.toHaveBeenCalled()
+    })
+
     it('unmigrates assets referenced by the account cold character before disabling account', async () => {
         const officialCold = {
             character: {
@@ -1828,7 +1943,7 @@ describe('AccountStorage structured wire contract', () => {
             revision: 11,
             mutationGeneration: 17,
         })
-        mocks.getAccountColdStorageItem.mockResolvedValue(officialCold)
+        mocks.getAccountColdStorageItem.mockResolvedValue({ kind: 'present', value: officialCold })
         mocks.getUncleanablesSync.mockImplementation((_database, _mode, options) => (
             options.chars.flatMap((character: any) => (
                 character.additionalAssets?.map((asset: string[]) => asset[1]) ?? []

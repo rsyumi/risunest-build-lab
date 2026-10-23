@@ -1673,6 +1673,46 @@ fn local_and_opaque_fields_persist_without_publication() {
 }
 
 #[test]
+fn realm_block_loadout_and_onboarding_fields_publish_and_apply_on_a_peer() {
+    let (_source_dir, mut source) = store();
+    let (peer_dir, mut peer) = store();
+    create_conversation(&mut source, "char", "conv");
+    let blocked = serde_json::json!([{"id":"synthetic-creator","name":"Synthetic creator"}]);
+    let options = serde_json::json!({"modules":false,"globalVariables":true,"preset":false,"persona":true});
+    let onboarding = serde_json::json!({"enabled":true,"mode":"form","questions":[]});
+    save(
+        &mut source,
+        vec![
+            mutation(&["root", "blockedRealmCreators"], blocked.clone()),
+            mutation(&["root", "loadoutApplyOptions"], options.clone()),
+            mutation(&["character", "char", "onboarding"], onboarding.clone()),
+            mutation(&["conversation", "char", "conv", "onboardingDone"], serde_json::json!(true)),
+        ],
+    );
+    let outbox = source.lww_read_outbox(0.into(), 100).unwrap().entries;
+    copy_objects(&source, &peer);
+    receive(
+        &mut peer,
+        "shared-fields",
+        outbox
+            .into_iter()
+            .map(|entry| Change { key: entry.key, stamp: entry.stamp, value: entry.value })
+            .collect(),
+        vec![],
+    );
+    drop(peer);
+    let peer = PersistentStore::open(peer_dir.path()).unwrap();
+    let root = peer.read_root(None).unwrap().value;
+    assert_eq!(root["blockedRealmCreators"], blocked);
+    assert_eq!(root["loadoutApplyOptions"], options);
+    assert_eq!(peer.read_character("char", None).unwrap().unwrap().value["onboarding"], onboarding);
+    assert_eq!(
+        peer.read_conversation("char", "conv", None).unwrap().unwrap().value["onboardingDone"],
+        true
+    );
+}
+
+#[test]
 fn plugin_record_deletion_is_reusable_and_generic_record_deletion_is_permanent() {
     let (_, mut store) = store();
     receive(
@@ -2004,6 +2044,14 @@ fn archive_publishes_one_state_unit_and_shared_payload_excludes_local_fields() {
                 &["conversation", "char", "chat", "localFuture"],
                 serde_json::json!("private-chat"),
             ),
+            mutation(
+                &["character", "char", "onboarding"],
+                serde_json::json!({"enabled":true,"mode":"html","questions":[],"html":"<form></form>"}),
+            ),
+            mutation(
+                &["conversation", "char", "chat", "onboardingDone"],
+                serde_json::json!(true),
+            ),
         ],
     );
     clear_outbox(&mut store);
@@ -2037,6 +2085,8 @@ fn archive_publishes_one_state_unit_and_shared_payload_excludes_local_fields() {
     assert!(shared["conversations"][0]["detail"]
         .get("localFuture")
         .is_none());
+    assert_eq!(shared["detail"]["onboarding"]["html"], "<form></form>");
+    assert_eq!(shared["conversations"][0]["detail"]["onboardingDone"], true);
     clear_outbox(&mut store);
     let revision = store.revision().unwrap();
     store.restore_character("char", revision).unwrap();
@@ -3309,4 +3359,186 @@ fn an_unreadable_reference_node_stops_the_message_object_sweep() {
     store.sweep_message_page_objects(super::super::MessageObjectStore::Library, now + 2 * grace, limit).unwrap();
     store.sweep_message_page_objects(super::super::MessageObjectStore::Library, now + 3 * grace, limit).unwrap();
     assert!([&node, &body, &orphan].iter().all(|hash| !present(&store, hash)));
+}
+
+#[test]
+fn gallery_pending_guard_survives_intent_recovery_and_acknowledges_committed_deletes() {
+    for committed in [false, true] {
+        let (dir, mut store) = store();
+        let attachment: crate::persistent_store::AssetAlias = serde_json::from_value(serde_json::json!({
+            "key":"guarded", "objectHash":null, "kind":"inlay", "size":0, "mime":"image/png",
+            "name":"guarded", "ext":"png", "inlayType":"image", "metadata":{}
+        })).unwrap();
+        store.commit_asset_alias(&attachment, store.revision().unwrap()).unwrap();
+        let revision = store.revision().unwrap();
+        let header = Header { binding_authority: store.lww_binding_authority().unwrap(), request_id: "guarded-gallery-delete".into() };
+        let input = WorkingSetCommit {
+            expected_revision: revision,
+            gallery_pending_fence: Some(crate::persistent_store::gallery::pending_fence(&store.connection).unwrap()),
+            unit_mutations: Some(vec![UnitMutation::Delete { key: unit_key(&["inlay", "guarded"]).unwrap() }]),
+            ..Default::default()
+        };
+        let (issued, digest) = store.reserve_intent(&header, &Intent::for_commit(&input, &[])).unwrap();
+        if committed { commit::commit_lww(&mut store.connection, &input, &[], &header, &issued, &digest).unwrap(); }
+        let mut peer = store.open_native_job_store().unwrap();
+        receive(&mut peer, "guarded-pending", vec![change(&["character", "missing", "desc"], 1, serde_json::json!("{{inlay::guarded}}"))], vec![]);
+        assert_eq!(peer.revision().unwrap(), revision + i64::from(committed));
+        if !committed {
+            assert!(matches!(commit::commit_lww(&mut store.connection, &input, &[], &header, &issued, &digest), Err(StoreError::RevisionConflict {..})));
+            assert!(store.read_asset_alias("inlay", "guarded", None).unwrap().is_some());
+        }
+        drop(peer);
+        drop(store);
+        let mut reopened = PersistentStore::open(dir.path()).unwrap();
+        reopened.lww_recover_intents().unwrap();
+        assert_eq!(reopened.revision().unwrap(), revision + i64::from(committed));
+        assert_eq!(reopened.read_asset_alias("inlay", "guarded", None).unwrap().is_none(), committed);
+        assert_eq!(reopened.lww_request_recorded(&header.request_id).unwrap(), committed);
+        let pending: bool = reopened.device_store().unwrap().connection().query_row(
+            "SELECT EXISTS(SELECT 1 FROM lww_intents WHERE request_id=?1)", [&header.request_id], |row| row.get(0),
+        ).unwrap();
+        assert!(!pending);
+    }
+}
+
+// Frozen serde declarations from app-v1.0.6. The downgrade contract depends on
+// that reader rejecting the new intent kind before it can replay a deletion.
+#[allow(dead_code)]
+mod released_app_v1_0_6_intents {
+    use super::*;
+    use crate::persistent_store::{AssetOwnerHead, ConversationMutation, PluginStorageMutation, RootMutation};
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "camelCase")]
+    pub(super) enum Intent<'a> {
+        Commit {
+            commit: WorkingSetCommit,
+            aliases: Vec<crate::persistent_store::AssetAlias>,
+        },
+        PluginClaim {
+            owner: String,
+            key: String,
+            import_batch_id: String,
+            assigned_at: i64,
+            expected_revision: i64,
+        },
+        PluginAssign {
+            sources: Vec<(String, String)>,
+            to_owner: String,
+            collision: commit::AssignCollision,
+            assigned_at: i64,
+            expected_revision: i64,
+        },
+        Replacement {
+            device_revision: i64,
+            staging_id: String,
+            base_revision: i64,
+            staging_digest: String,
+            /// Rows of the changes, each marked when a source unit replaced the
+            /// value captured from the stage.
+            changes: intent_rows::IntentRows,
+            /// Recognizes a retry with the same source units; nothing replays them.
+            source_units: Option<intent_rows::IntentRows>,
+            device_sections: Option<Cow<'a, device_store::sections::FrozenBackupSections>>,
+            /// Fixed settings and permissions do not advance device_revision.
+            device_settings_digest: Option<String>,
+            device_changes: Cow<'a, [(UnitKey, UnitValue)]>,
+        },
+        Target {
+            device_revision: i64,
+            staging_id: String,
+            changes: intent_rows::IntentRows,
+        },
+        NewDevice {
+            device_revision: i64,
+            authorization_id: String,
+            staging_id: String,
+            changes: Vec<Change>,
+            old_writer_id: String,
+            writer_id: String,
+            new_authority: DecimalU64,
+            selection_change: crate::persistent_store::sync_selection::BindingSelectionChange,
+        },
+        Repair {
+            entries: Vec<OutboxEntry>,
+        },
+        Archive {
+            character_id: String,
+            expected_revision: i64,
+            at_ms: i64,
+            restore: bool,
+            incoming: Option<Change>,
+        },
+        Switch {
+            device_revision: i64,
+            change: crate::persistent_store::sync_selection::BindingSelectionChange,
+            new_authority: DecimalU64,
+        },
+    }
+
+    #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+    #[serde(rename_all = "camelCase")]
+    pub(crate) struct WorkingSetCommit {
+        pub(crate) expected_revision: i64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(crate) root: Option<Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(crate) root_mutations: Option<Vec<RootMutation>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(crate) replace_presets: Option<Vec<Value>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(crate) character: Option<Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(crate) character_details: Option<Vec<Value>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(crate) replace_character: Option<Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(crate) add_character: Option<Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(crate) conversations: Option<Vec<ConversationMutation>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(crate) delete_character_ids: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(crate) plugin_storage: Option<Vec<PluginStorageMutation>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(crate) asset_owner_heads: Option<Vec<AssetOwnerHead>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(crate) unit_mutations: Option<Vec<crate::persistent_store::lww::UnitMutation>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(crate) messages_changed: Option<Vec<crate::persistent_store::lww::MessageLocator>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(crate) binding_authority: Option<risunest_sync_wire::stamp::DecimalU64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(crate) request_id: Option<String>,
+    }
+}
+
+#[test]
+fn released_reader_rejects_guarded_gallery_intents_without_changing_ordinary_commits() {
+    use crate::persistent_store::hash_work::{reset_commit_intent_inputs, take_commit_intent_inputs};
+    let (_dir, mut store) = store();
+    for guarded in [false, true] {
+        let input = WorkingSetCommit {
+            expected_revision: store.revision().unwrap(),
+            gallery_pending_fence: guarded.then(|| crate::persistent_store::gallery::pending_fence(&store.connection).unwrap()),
+            unit_mutations: Some(vec![UnitMutation::Delete { key: unit_key(&["inlay", "synthetic"]).unwrap() }]),
+            ..Default::default()
+        };
+        reset_commit_intent_inputs();
+        store.commit(&input).unwrap();
+        let bodies = take_commit_intent_inputs();
+        assert_eq!(bodies.len(), 1);
+        let body = String::from_utf8(bodies.into_iter().next().unwrap()).unwrap();
+        let released = serde_json::from_str::<released_app_v1_0_6_intents::Intent>(&body);
+        if guarded {
+            assert!(released.unwrap_err().to_string().contains("unknown variant"));
+            // The old reader accepts the guard as an unknown field on ordinary Commit.
+            let unsafe_body = serde_json::to_string(&Intent::Commit { commit: input, aliases: vec![] }).unwrap();
+            assert!(serde_json::from_str::<released_app_v1_0_6_intents::Intent>(&unsafe_body).is_ok());
+        } else {
+            let old_body = serde_json::to_string(&released.unwrap()).unwrap();
+            assert_eq!(old_body, body);
+            assert!(serde_json::from_str::<Intent>(&old_body).is_ok());
+        }
+    }
 }

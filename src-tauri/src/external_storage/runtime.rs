@@ -1316,8 +1316,8 @@ pub(crate) async fn run_connected_cleanup(
         }
         let fresh_after=std::time::Instant::now();
         connected.provider.list_objects(&connected.handle,super::contract::Collection::Segments,None,1,cancel).await?;
-        let sample=connected.dependencies.requests.clock_sample_after(&connected.handle.account,fresh_after)?
-            .ok_or_else(||ProviderError::new(ErrorKind::ClockSkew))?;
+        let sample=connected.dependencies.requests.require_clock_sample_after(&connected.handle.account,fresh_after)
+            .map_err(super::clock::after_refresh)?;
         let mut selected=super::lww_engine::ExternalLwwEngine {
             provider:selected_connection.provider,repository:selected_connection.handle,
             library:connected.stored.descriptor.repository_id.clone(),root_key:connected.root_key.clone(),

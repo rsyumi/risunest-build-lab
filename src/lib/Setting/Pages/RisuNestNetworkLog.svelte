@@ -192,10 +192,10 @@
                     <SettingRow label={t.captureBinary} help={t.captureBinaryHelp} inline>
                         <SettingToggle label={t.captureBinary} checked={settings.captureBinary} disabled={busy} onchange={captureBinary => configure({ captureBinary })}/>
                     </SettingRow>
-                    <SettingRow label={t.recentCount} labelFor="network-recent-count"><select id="network-recent-count" value={settings.recentCount} disabled={busy} onchange={event => configure({ recentCount: Number(event.currentTarget.value) })}>{#each [100, 200, 500, 1000] as count}<option value={count}>{count.toLocaleString()}</option>{/each}</select></SettingRow>
+                    <SettingRow label={t.recentCount} labelFor="network-recent-count"><select id="network-recent-count" class="risu-select" value={settings.recentCount} disabled={busy} onchange={event => configure({ recentCount: Number(event.currentTarget.value) })}>{#each [100, 200, 500, 1000] as count}<option value={count}>{count.toLocaleString()}</option>{/each}</select></SettingRow>
                     {#each [{ key: 'recentMib', label: t.recentBudget }, { key: 'retainedMib', label: t.retainedBudget }, { key: 'bufferMib', label: t.bufferBudget }] as option}
                         <SettingRow label={option.label} labelFor={'network-' + option.key}>
-                            <select id={'network-' + option.key} value={settings[option.key as 'recentMib' | 'retainedMib' | 'bufferMib']} disabled={busy} onchange={event => configure({ [option.key]: Number(event.currentTarget.value) })}>{#each option.key === 'bufferMib' ? [4, 8, 16, 32, 64, 128] : budgets as budget}<option value={budget}>{logSize(budget * 1024 * 1024)}</option>{/each}</select>
+                            <select id={'network-' + option.key} class="risu-select" value={settings[option.key as 'recentMib' | 'retainedMib' | 'bufferMib']} disabled={busy} onchange={event => configure({ [option.key]: Number(event.currentTarget.value) })}>{#each option.key === 'bufferMib' ? [4, 8, 16, 32, 64, 128] : budgets as budget}<option value={budget}>{logSize(budget * 1024 * 1024)}</option>{/each}</select>
                         </SettingRow>
                     {/each}
                 </div>
@@ -214,7 +214,7 @@
     </div>
     <div class="mt-3 flex flex-wrap gap-2">
         <label class="search-box flex min-w-0 flex-1 items-center gap-2 rounded-md border border-darkborderc bg-darkbg px-3"><Search size={15} class="shrink-0 text-textcolor2"/><input class="min-w-0 flex-1 border-0 bg-transparent py-2 text-sm outline-none" aria-label={t.search} placeholder={t.search} bind:value={search} oninput={searchChanged}/></label>
-        <select aria-label={t.status} bind:value={status} onchange={filter}><option value="all">{t.all}</option><option value="error">{t.errors}</option><option value="active">{t.active}</option></select>
+        <select class="risu-select" aria-label={t.status} bind:value={status} onchange={filter}><option value="all">{t.all}</option><option value="error">{t.errors}</option><option value="active">{t.active}</option></select>
     </div>
     <div class="mt-3 overflow-hidden rounded-lg border border-darkborderc bg-darkbg">
         {#each groupNetworkLogItems(listing?.items ?? []) as group (group[0].operationId ?? group[0].id)}
@@ -283,7 +283,7 @@
     .network-log button { display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem; padding: 0.4rem 0.65rem; border-radius: 0.375rem; font-size: 0.75rem; }
     .network-log button:hover:not(:disabled) { background: var(--risu-theme-darkbutton); }
     .network-log button:disabled { opacity: 0.4; cursor: not-allowed; }
-    .network-log select { max-width: 100%; min-width: 6.5rem; padding: 0.4rem 0.6rem; border: 1px solid var(--risu-theme-darkborderc); border-radius: 0.375rem; background: var(--risu-theme-darkbg); color: var(--risu-theme-textcolor); font-size: 0.8125rem; }
+    .network-log select { max-width: 100%; min-width: 6.5rem; padding: 0.4rem 2.25rem 0.4rem 0.6rem; border: 1px solid var(--risu-theme-darkborderc); border-radius: 0.375rem; background-color: var(--risu-theme-darkbg); color: var(--risu-theme-textcolor); font-size: 0.8125rem; }
     .network-log .scope-active { background: var(--risu-theme-darkbutton); color: var(--risu-theme-textcolor); }
     .network-log .request-row { display: block; border-radius: 0; padding: 0.75rem; }
     /* A shadow, not a border, so grouped rows keep their alignment and a selected row draws one marker. */

@@ -31,6 +31,7 @@ vi.mock('./RisuNestAndroidPlatform.svelte', child('android-platform'))
 vi.mock('./RisuNestLogViewer.svelte', child('log-viewer'))
 vi.mock('./RisuNestStorageDashboard.svelte', child('storage-dashboard'))
 vi.mock('./RisuNestInlayInventory.svelte', child('inlay-inventory'))
+vi.mock('./RisuNestAttachmentGallery.svelte', child('attachment-gallery'))
 vi.mock('./RisuNestImageGeometry.svelte', child('image-geometry'))
 vi.mock('./RisuNestDataHealth.svelte', child('data-health'))
 vi.mock('./RisuNestBackupRestore.svelte', child('backup-restore'))
@@ -85,15 +86,15 @@ afterEach(async () => {
 describe('RisuNest settings tabs', () => {
     it('offers the network log tab only in the native app', () => {
         render(desktop)
-        expect(tabs().map((tab) => tab.dataset.risunestTab)).toEqual(['settings', 'storage', 'sync', 'plugin-data', 'network-logs'])
+        expect(tabs().map((tab) => tab.dataset.risunestTab)).toEqual(['settings', 'storage', 'attachments', 'sync', 'plugin-data', 'network-logs'])
         expect(tabs().map((tab) => tab.textContent)).toEqual([
-            language.risuNest.tabs.settings, language.risuNest.tabs.storage, language.risuNest.tabs.sync,
+            language.risuNest.tabs.settings, language.risuNest.tabs.storage, language.risuNest.gallery.tab, language.risuNest.tabs.sync,
             language.risuNest.tabs.pluginData, language.risuNest.tabs.networkLogs,
         ])
         void unmount(component!)
         target.remove()
         render(web)
-        expect(tabs().map((tab) => tab.dataset.risunestTab)).toEqual(['settings', 'storage', 'sync', 'plugin-data'])
+        expect(tabs().map((tab) => tab.dataset.risunestTab)).toEqual(['settings', 'storage', 'attachments', 'sync', 'plugin-data'])
     })
 
     it.each([
@@ -115,6 +116,8 @@ describe('RisuNest settings tabs', () => {
         expect(panelChildren()).toEqual([
             'storage-dashboard', 'inlay-inventory', 'image-geometry', 'data-health', 'backup-restore', 'local-data-reset',
         ])
+        open('attachments')
+        expect(panelChildren()).toEqual(['attachment-gallery'])
         open('sync')
         expect(panelChildren()).toEqual(['server-sync', 'external-storage', 'plugin-startup', 'local-data'])
         open('plugin-data')
@@ -176,6 +179,6 @@ describe('RisuNest settings tabs', () => {
         expect(press('End')).toBe('network-logs')
         expect(press('Home')).toBe('settings')
         expect(press('ArrowRight')).toBe('storage')
-        expect(tabs().map((tab) => tab.tabIndex)).toEqual([-1, 0, -1, -1, -1])
+        expect(tabs().map((tab) => tab.tabIndex)).toEqual([-1, 0, -1, -1, -1, -1])
     })
 })

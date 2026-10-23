@@ -1,5 +1,7 @@
 import { describe, expect, test, vi } from 'vitest'
+vi.mock('../../../mobileBackgroundTask', async () => (await import('../../../mobileBackgroundTask.testSupport')).mobileBackgroundTaskModule())
 import { InlayOptimizationController } from '../inlayOptimizationController.svelte'
+import { runWithMobileBackgroundTask } from '../../../mobileBackgroundTask'
 import { defaultInlayEncodeOptions, type InlayBlobMetadata } from '../../../storage/blobStore'
 
 describe('shared optimization ownership', () => {
@@ -36,6 +38,24 @@ describe('shared optimization ownership', () => {
         await controller.start([target], defaultInlayEncodeOptions, deps)
         expect(encodeNewInlayImage).toHaveBeenCalledTimes(2)
         expect(deps.write).not.toHaveBeenCalled()
+    })
+    test('runs under a maintenance hold that reports progress and stops when its time expires', async () => {
+        const controller = new InlayOptimizationController()
+        const expiry = new AbortController()
+        const progress = vi.fn()
+        vi.mocked(runWithMobileBackgroundTask).mockImplementationOnce(async (_kind, operation) => operation({ signal: expiry.signal, progress, async dispose() {} }))
+        const targets: InlayBlobMetadata[] = ['first', 'second'].map(key => ({ key, kind: 'inlay', inlayType: 'image', mime: 'image/png', ext: 'png', name: key, size: 10 }))
+        const encodeNewInlayImage = vi.fn(async (_key: string, _data: Uint8Array) => {
+            expiry.abort()
+            return { data: new Uint8Array(1), metadata: { ...targets[0], mime: 'image/webp', ext: 'webp' } }
+        })
+        const deps = { read: async () => new Uint8Array(10), write: vi.fn(), encoder: { encodeNewInlayImage } }
+        await controller.start(targets, defaultInlayEncodeOptions, deps)
+        expect(runWithMobileBackgroundTask).toHaveBeenLastCalledWith('maintenance', expect.any(Function), undefined, true)
+        expect(encodeNewInlayImage).toHaveBeenCalledOnce()
+        expect(deps.write).not.toHaveBeenCalled()
+        // The hold shows the share of the two images scanned so far.
+        expect(progress).toHaveBeenLastCalledWith(50)
     })
 
 })

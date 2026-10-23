@@ -493,7 +493,7 @@ export async function hypaMemoryV2(
         const summaryData = await summary(stringlizedChat);
 
         if (!summaryData.success) {
-            console.log("Summarization failed:", summaryData.data);
+            console.warn("Summarization failed:", summaryData.data);
             summarizationFailures++;
             if (summarizationFailures >= maxSummarizationFailures) {
                 console.error("[HypaV2] Summarization failed multiple times. Aborting...");

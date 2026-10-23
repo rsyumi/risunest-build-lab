@@ -291,9 +291,13 @@ type ReplacerType = 'beforeRequest' | 'afterRequest';
  * Argument passed to chat lifecycle listeners
  */
 type ChatOutputListenerArg = {
-    /** Current character */
+    /**
+     * Current character. Every conversation in `char.chats` carries its
+     * messages only when the full history is delivered; otherwise the
+     * `message` property is absent from every entry.
+     */
     char: any;
-    /** Current chat */
+    /** Current chat, with every message */
     chat: any;
     /** Index of the character in the database. Use with `setCharacterToIndex`. */
     characterIndex: number;
@@ -301,6 +305,19 @@ type ChatOutputListenerArg = {
     chatIndex: number;
     /** Current index of the generated message in `chat.message`, or -1 if it is no longer present */
     messageIndex: number;
+};
+
+/**
+ * Options for `addRisuChatListener`
+ */
+type ChatOutputListenerOptions = {
+    /**
+     * `'current'` asks for an event whose `char.chats` entries omit `message`.
+     * The event also has that shape when the user turns on sending only the
+     * current chat to plugins; `'full'` and omitting this field follow that
+     * setting.
+     */
+    history?: 'full' | 'current';
 };
 
 /**
@@ -841,7 +858,8 @@ interface SafeElement extends SafeRemoteRef {
      * - Keyboard: keydown, keyup, keypress
      *
      * listener function receives trimmed event object with common properties only.
-     * 
+     * listeners receive events that reach the element via normal DOM propagation; for document-wide listening, use the SafeDocument from getRootDocument().
+     *
      * @example
      * ```typescript
      * const id = await element.addEventListener('click', async (event) => {
@@ -860,9 +878,9 @@ interface SafeElement extends SafeRemoteRef {
 
     /**
      * Removes an event listener using its ID
-     * @param type - Event type
+     * @param type - Event type (for compatibility; removal is resolved by ID)
      * @param id - Listener ID returned by addEventListener
-     * @param options - Event listener options
+     * @param options - Event listener options (for compatibility)
      */
     removeEventListener(
         type: string,
@@ -1653,9 +1671,10 @@ interface RisuaiPluginAPI {
 
     /**
      * Sets the database (lightweight save)
-     * @param db - DatabaseSubset object to save
+     * The `plugins` property is ignored. Use setDatabase() to update plugins.
+     * @param db - DatabaseSubset object to save, excluding `plugins`
      */
-    setDatabaseLite(db: DatabaseSubset): Promise<void>;
+    setDatabaseLite(db: Omit<DatabaseSubset, 'plugins'>): Promise<void>;
 
     /**
      * Sets the database (full save with sync)
@@ -2078,8 +2097,16 @@ interface RisuaiPluginAPI {
      * still resolves normally but the listener is never registered and will
      * not fire.
      *
+     * By default `char.chats` holds every conversation with its messages. When
+     * the user turns on sending only the current chat to plugins, or the listener passes
+     * `{ history: 'current' }`, every `char.chats` entry omits `message` and only
+     * `chat` carries messages. Such a `char` cannot be saved with
+     * `setCharacterToIndex` or `setDatabase`. Pass `{ history: 'current' }` when
+     * the listener does not read other conversations.
+     *
      * @param mode - Listener mode
      * @param func - Listener function. Receives the current character, chat, and generated message index.
+     * @param options - Listener options
      *
      * @example
      * ```typescript
@@ -2092,7 +2119,8 @@ interface RisuaiPluginAPI {
      */
     addRisuChatListener(
         mode: 'output',
-        func: (arg: ChatOutputListenerArg) => void | Promise<void>
+        func: (arg: ChatOutputListenerArg) => void | Promise<void>,
+        options?: ChatOutputListenerOptions
     ): Promise<void>;
 
     /**

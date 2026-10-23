@@ -24,6 +24,12 @@ internal class AndroidFrontendReady {
   @Volatile private var cancelled = false
   val isReady: Boolean get() = !cancelled && ready.isCompleted && !ready.isCancelled
 
+  /** Called once for each document admitted by the control bridge. */
+  fun onDocumentReady(clearPreviousHolds: () -> Unit): Boolean {
+    clearPreviousHolds()
+    return markReady()
+  }
+
   fun markReady(): Boolean = !cancelled && ready.complete(Unit)
   fun cancel() {
     cancelled = true

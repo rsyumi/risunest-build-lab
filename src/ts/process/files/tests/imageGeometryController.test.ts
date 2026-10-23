@@ -6,7 +6,9 @@ vi.mock('../../../storage/persistentDataRuntime.svelte', () => ({ getPersistentD
 vi.mock('../../../storage/persistentDataStoreFactory', () => ({ getPersistentDataStore: () => ({ listAssetAliases: state.list }) }))
 vi.mock('../../../storage/platformBlobStore', () => ({ resolveBlobStore: async () => ({ imageGeometry: { read: state.read, write: state.write, compute: state.compute } }) }))
 vi.mock('../../../globalApi.svelte', () => ({ clearNativeAssetSourceCache: state.invalidate }))
+vi.mock('../../../mobileBackgroundTask', async () => (await import('../../../mobileBackgroundTask.testSupport')).mobileBackgroundTaskModule())
 import { ImageGeometryController } from '../imageGeometryController.svelte'
+import { runWithMobileBackgroundTask } from '../../../mobileBackgroundTask'
 
 const contentHash = 'a'.repeat(64)
 beforeEach(() => {
@@ -24,16 +26,20 @@ it('exposes committed results and refreshes cached size hints', async () => {
     expect(job.result).toMatchObject({ saved: 1, failed: 0, cancelled: false })
     expect(job.running).toBe(false)
     expect(state.invalidate).toHaveBeenCalledOnce()
+    expect(runWithMobileBackgroundTask).toHaveBeenCalledExactlyOnceWith('maintenance', expect.any(Function), undefined, true)
 })
 
-it('prevents duplicate starts and discards computation after profile activation', async () => {
+it.each(['profile activation', 'background expiry'] as const)('prevents duplicate starts and discards computation after %s', async reason => {
+    const expiry = new AbortController()
+    vi.mocked(runWithMobileBackgroundTask).mockImplementationOnce(async (_kind, operation) => operation({ signal: expiry.signal, progress() {}, async dispose() {} }))
     let complete!: (value: unknown) => void
     state.compute.mockImplementation(() => new Promise(resolve => { complete = resolve }))
     const job = new ImageGeometryController()
     const running = job.start()
     await vi.waitFor(() => expect(state.compute).toHaveBeenCalledOnce())
     await job.start()
-    state.epoch++
+    if (reason === 'profile activation') state.epoch++
+    else expiry.abort()
     complete({ contentHash, width: 10, height: 20 })
     await running
     expect(job.result).toMatchObject({ saved: 0, cancelled: true })

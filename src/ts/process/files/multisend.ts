@@ -1,3 +1,4 @@
+import { imageAliases, selectedImageFormat, ImageFormatError } from '../../media/imageFormats';
 import { DBState, selectedCharID } from 'src/ts/stores.svelte';
 import { get } from 'svelte/store';
 import { sendChat } from '../index.svelte';
@@ -250,14 +251,10 @@ export async function postChatFile(query:string|{
     name:string,
     data:Uint8Array
 }):Promise<postFileResult[]>{
+    const failures: string[] = []
     const files = typeof(query) === 'string' ? (await selectMultipleFile([
         //image format
-        'jpg',
-        'jpeg',
-        'png',
-        'webp',
-        'gif',
-        'avif',
+        ...imageAliases,
 
         //audio format
         'wav',
@@ -275,7 +272,7 @@ export async function postChatFile(query:string|{
         'po',
         // 'pdf',
         'txt'
-    ])) : [query]
+    ], { failures })) : [query]
 
     if(!files){
         return null
@@ -283,96 +280,106 @@ export async function postChatFile(query:string|{
 
     const xquery = typeof(query) === 'string' ? query : ''
     const results: postFileResult[] = []
+    const reportFrom = failures.length
 
     for(const file of files){
-        const extention = file.name.split('.').at(-1)
-        console.log(extention)
+        let extention = file.name.split('.').at(-1)?.toLowerCase()
+        try {
+            const image = selectedImageFormat(file.data, file.name)
+            extention = image?.ext ?? extention
 
-        switch(extention){
-            case 'po':{
-                await sendPofile({
-                    file: BufferToText(file.data),
-                    query: xquery
-                })
-                results.push({
-                    type: 'void'
-                })
-                break
-            }
-            case 'pdf':{
-                results.push({
-                    type: 'text',
-                    data: await sendPDFFile({
+            switch(extention){
+                case 'po':{
+                    await sendPofile({
                         file: BufferToText(file.data),
                         query: xquery
-                    }),
-                    name: file.name
-                })
-                break
-            }
-            case 'xml':{
-                results.push({
-                    type: 'text',
-                    data: await sendXMLFile({
-                        file: BufferToText(file.data),
-                        query: xquery
-                    }),
-                    name: file.name
-                })
-                break
-            }
+                    })
+                    results.push({
+                        type: 'void'
+                    })
+                    break
+                }
+                case 'pdf':{
+                    results.push({
+                        type: 'text',
+                        data: await sendPDFFile({
+                            file: BufferToText(file.data),
+                            query: xquery
+                        }),
+                        name: file.name
+                    })
+                    break
+                }
+                case 'xml':{
+                    results.push({
+                        type: 'text',
+                        data: await sendXMLFile({
+                            file: BufferToText(file.data),
+                            query: xquery
+                        }),
+                        name: file.name
+                    })
+                    break
+                }
 
-            //image format
-            case 'jpg':
-            case 'jpeg':
-            case 'png':
-            case 'webp':
-            case 'gif':
-            case 'avif':
+                //image format
+                case 'jpg':
+                case 'jpeg':
+                case 'png':
+                case 'webp':
+                case 'gif':
+                case 'avif':
 
-            //audio format
-            case 'wav':
-            case 'mp3':
-            case 'ogg':
-            case 'flac':
+                //audio format
+                case 'wav':
+                case 'mp3':
+                case 'ogg':
+                case 'flac':
 
-            //video format
-            case 'mp4':
-            case 'webm':
-            case 'mpeg':
-            case 'avi':{
-                let postData: Awaited<ReturnType<typeof postInlayAsset>>
-                try {
-                    postData = await postInlayAsset(file)
-                } catch (error) {
-                    if (error instanceof InlayInputTooLargeError) {
-                        alertError(language.risuNest.inlay.tooLarge)
-                        continue
+                //video format
+                case 'mp4':
+                case 'webm':
+                case 'mpeg':
+                case 'avi':{
+                    let postData: Awaited<ReturnType<typeof postInlayAsset>>
+                    try {
+                        postData = await postInlayAsset(file)
+                    } catch (error) {
+                        if (error instanceof InlayInputTooLargeError) {
+                            failures.push(`${file.name}: ${language.risuNest.inlay.tooLarge}`)
+                            continue
+                        }
+                        throw error
                     }
-                    throw error
+                    if(!postData){
+                        throw new Error(language.risuNest.importDialog.reasonUnsupportedFormat)
+                    }
+                    results.push({
+                        data: postData,
+                        type: 'asset'
+                    })
+                    break
                 }
-                if(!postData){
-                    continue
+                case 'txt':{
+                    results.push({
+                        type: 'text',
+                        data: await sendTxtFile({
+                            file: BufferToText(file.data),
+                            query: xquery
+                        }),
+                        name: file.name
+                    })
+                    break
                 }
-                results.push({
-                    data: postData,
-                    type: 'asset'
-                })
-                break
+                default:
+                    throw new Error(language.risuNest.importDialog.reasonUnsupportedFormat)
             }
-            case 'txt':{
-                results.push({
-                    type: 'text',
-                    data: await sendTxtFile({
-                        file: BufferToText(file.data),
-                        query: xquery
-                    }),
-                    name: file.name
-                })
-                break
-            }
+        } catch (error) {
+            if (!(error instanceof ImageFormatError) && ['po', 'pdf', 'xml', 'txt'].includes(extention)) throw error
+            failures.push(`${file.name}: ${error instanceof Error ? error.message : String(error)}`)
         }
     }
+    if (failures.length > reportFrom) void alertError(failures.slice(reportFrom).join('\n'))
 
     return results
 }

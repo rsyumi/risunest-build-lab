@@ -87,7 +87,7 @@ def main():
     run(["xcodegen", "generate", "--spec", "project.yml"], cwd=apple)
     for path in apple.glob("*_iOS/Info.plist"):
         info = plistlib.loads(path.read_bytes())
-        for key in ["NSCameraUsageDescription", "NSLocalNetworkUsageDescription", "UIBackgroundModes"]:
+        for key in ["NSCameraUsageDescription", "NSFaceIDUsageDescription", "NSLocalNetworkUsageDescription", "UIBackgroundModes"]:
             if key in product_info:
                 info[key] = product_info[key]
         info["BGTaskSchedulerPermittedIdentifiers"] = [BENCH_ID + ".generation"]

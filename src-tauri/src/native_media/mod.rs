@@ -27,6 +27,7 @@ use tauri::{AppHandle, Manager};
 
 pub(crate) mod ipc;
 mod animation_policy;
+mod thumbnail;
 
 const MAX_BODY_BYTES: u64 = 1024 * 1024;
 const EXPOSED_HEADERS: &str = "Accept-Ranges, Content-Length, Content-Range, Content-Type, ETag";
@@ -800,9 +801,14 @@ fn prepare_response(root: &Path, request: Request<()>) -> Response<Option<std::i
     let Some(blob) = resolve_blob(root, &uri, physical_key) else {
         return not_found();
     };
-    let Ok(mut file) = crate::trust_boundary::open_regular_source(&blob.payload_path) else {
+    let Ok(file) = crate::trust_boundary::open_regular_source(&blob.payload_path) else {
         return not_found();
     };
+    drop(_guard);
+    prepare_file_response(request, blob, file)
+}
+
+fn prepare_file_response(request: Request<()>, blob: ResolvedBlob, mut file: File) -> Response<Option<std::io::Take<File>>> {
     if file.metadata().ok().map(|metadata| metadata.len()) != Some(blob.size) {
         return not_found();
     }

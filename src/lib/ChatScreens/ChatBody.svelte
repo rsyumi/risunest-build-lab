@@ -12,7 +12,7 @@
     import { getCurrentCharacter } from "src/ts/storage/database.svelte";
     import { getFileSrc } from "src/ts/globalApi.svelte";
     import { DeferredInlayMarkerRegistry, mountDeferredInlaySources, resolveDeferredInlaySources } from "src/ts/process/files/inlayRenderSource";
-    import { onDestroy, tick } from 'svelte'
+    import { onDestroy, tick, untrack } from 'svelte'
     import type { FrozenChatScreenshotRenderContext } from 'src/ts/chatScreenshotRange'
     import type { ProcessScriptCaptureContext } from 'src/ts/process/scripts'
     import type { BoundedLiveChatParserProjection } from 'src/ts/selectedConversationLiveParserProjection'
@@ -23,6 +23,7 @@
     import type { StreamingThoughtMode } from '../../ts/storage/database.svelte'
     import { mountBoundedThoughtExpansion, type BoundedThoughtExpansion } from './boundedThoughtExpansion'
     import { DisplayReadRecord, recordChatVariableReads, type DisplayRowReads } from 'src/ts/process/scriptVariableReads'
+    import { nextDisplayListenerOrder } from 'src/ts/process/luaDisplayTimeouts'
 
     interface Props {
         character?: simpleCharacterArgument|string|null
@@ -51,6 +52,8 @@
         parserAbortSignal?: AbortSignal
         onDisplaySettled?: () => void
         displayRow?: DisplayRowReads
+        /** When the view asked for this row, from `nextDisplayListenerOrder`. */
+        displayRequestOrder?: number
     }
 
     let {
@@ -80,6 +83,7 @@
         parserAbortSignal,
         onDisplaySettled,
         displayRow,
+        displayRequestOrder,
     }: Props =  $props()
 
     // svelte-ignore non_reactive_update
@@ -109,7 +113,9 @@
         releaseObjectUrls: () => void
         thoughtExpansion: BoundedThoughtExpansion | null
         reads?: DisplayReadRecord
+        rebuildRevision: number
         translatedDuringGeneration: boolean
+        displayRequestOrder: number
     }
 
     let activeParseJob: ChatBodyParseJob|null = null
@@ -308,6 +314,14 @@
         }
     }
 
+    function alertParseError(error: any) {
+        const wrapped = new Error(`Error while parsing chat message: ${error?.message ?? error}`)
+        if(error instanceof Error){
+            wrapped.stack = error.stack
+        }
+        alertError(wrapped)
+    }
+
     const markParsing = async (data: string, charArg: string | simpleCharacterArgument, chatID: number, job:ChatBodyParseJob, tries?:number):Promise<string> => {
         const thoughtMode = captureContext ? 'off' : streamingThoughtMode
         job.controller.signal.throwIfAborted()
@@ -340,6 +354,7 @@
                     ? captureParserIndex
                     : parserProjection?.projectedChatID,
                 variableReads: job.reads,
+                displayRequestOrder: job.displayRequestOrder,
             })
         )
         // track 'translated' and 'retranslate' state
@@ -347,6 +362,7 @@
         retranslate;
         let lastParsedQueue = ''
         let mode = 'notrim' as const
+        let translationAttempted = false
         try {
             if((!isEqual(lastCharArg, charArg)) || (chatID !== lastChatId)){
                 lastParsedQueue = ''
@@ -387,6 +403,7 @@
                 }
             }
             if(retranslate || translated){
+                translationAttempted = true
                 // Translation runs its own script pass, which this record does not follow.
                 job.reads?.markUntracked()
                 const settings = captureContext?.settings ?? DBState.db
@@ -472,10 +489,23 @@
             }   
         } catch (error) {
             if (job.controller.signal.aborted) throw error
+            if (translationAttempted && !captureContext) {
+                translating = false
+                // A failed translation leaves the message as it renders untranslated.
+                job.deferredInlays.clear()
+                job.deferredInlays = new DeferredInlayMarkerRegistry()
+                const marked = await parseForRender(data, mode).catch(() => null)
+                if (marked !== null) {
+                    alertParseError(error)
+                    lastParsedQueue = marked
+                    lastCharArg = charArg
+                    return marked
+                }
+            }
             //retry
             if(tries > 2){
                 if(captureContext) throw error
-                alertError(`Error while parsing chat message: ${translated}, ${error.message}, ${error.stack}`)
+                alertParseError(error)
                 return data
             }
             if(job.disposed) return data
@@ -581,6 +611,15 @@
         }
     }
 
+    // The parse the view asked for keeps the view's request order. A later parse is a new request.
+    let consumedDisplayRequestOrder: number | undefined
+    function takeDisplayRequestOrder(): number {
+        const requested = untrack(() => displayRequestOrder)
+        if (requested === undefined || requested === consumedDisplayRequestOrder) return nextDisplayListenerOrder()
+        consumedDisplayRequestOrder = requested
+        return requested
+    }
+
     function startParsing(requestedRevision: number):ChatBodyParseJob {
         const controller = new AbortController()
         const externalSignal = parserAbortSignal
@@ -607,7 +646,9 @@
             releaseObjectUrls: () => {},
             thoughtExpansion: null,
             reads,
+            rebuildRevision: displayRow?.rebuildRevision ?? 0,
             translatedDuringGeneration: false,
+            displayRequestOrder: takeDisplayRequestOrder(),
         }
         job.promise = markParsing(msgDisplay, character, idx, job)
         return job
@@ -666,8 +707,10 @@
             ).map((element) => element.open)
             if (openThoughts.length) thoughtOpenStates = openThoughts
 
+            // Identical markup keeps its DOM unless a script reloaded the row.
             const retainMarkup =
-                html === displayedHtml && previousDisplay?.settledNotified
+                html === displayedHtml && previousDisplay?.settledNotified &&
+                job.rebuildRevision === previousDisplay.rebuildRevision
             if (retainMarkup) {
                 job.releaseObjectUrls = previousDisplay.releaseObjectUrls
                 previousDisplay.releaseObjectUrls = () => {}

@@ -80,6 +80,8 @@ const { pluginV2 } = await import('../../../plugins/plugins.svelte')
 const { createMetadataOnlySelectedConversation } = await import('../../../storage/selectedConversationLifecycle')
 const { acquireLiveDisplayParserLease, subscribeLiveDisplayParserSelection, captureLiveDisplayParserInputs } = await import('../../../liveDisplayParserLease')
 const { PersistentConversationViewportSource } = await import('../../../conversationViewportSource')
+const { installDisplayRecovery } = await import('../../../displayRecovery.svelte')
+const { manualTimers, recoveryStore } = await import('../../../displayRecovery.testSupport')
 
 function makeCharacter(name: string, messages = [
     { role: 'user' as const, data: `${name} previous` },
@@ -601,6 +603,39 @@ test('does not rerun live display Lua after an obsolete translation finishes', a
     controller.abort()
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
     expect(runLuaEditTrigger).not.toHaveBeenCalled()
+})
+
+test('stores the display recovery record of the selected chat before a translation runs its display step again', async () => {
+    const owner = makeCharacter('Translation owner')
+    owner.chats[0].id = 'translated-chat'
+    live.database = {
+        ...makeDatabase(owner, 'Translation owner'),
+        translatorType: 'bergamot',
+        translator: 'ko',
+        aiModel: 'gpt',
+        htmlTranslation: false,
+        combineTranslation: true,
+    } as Database
+    bergamotTranslate.mockImplementationOnce(async () => 'synthetic translated fixture')
+    vi.mocked(runLuaEditTrigger).mockClear()
+    const device = recoveryStore()
+    await installDisplayRecovery(device.store, { timers: manualTimers().timers })
+    try {
+        const pending = translateHTML('<p>synthetic translation fixture</p>', false, owner, 0, false)
+        await vi.waitFor(() => expect(device.records).toEqual([{
+            working: [{ characterId: owner.chaId, conversationId: 'translated-chat' }],
+            marked: [],
+        }]))
+        // A turn of the event loop in which a display step that did not wait would start.
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(runLuaEditTrigger).not.toHaveBeenCalled()
+
+        device.commitAll()
+        await pending
+        expect(runLuaEditTrigger).toHaveBeenCalledOnce()
+    } finally {
+        await installDisplayRecovery(null)
+    }
 })
 
 test('uses frozen CBS values after the live database, persona, variables, and modules change', () => {

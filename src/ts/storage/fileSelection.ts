@@ -8,7 +8,7 @@ export const open = <T extends OpenDialogOptions>(options?: T) =>
 export const save = (options?: SaveDialogOptions) =>
     withLibraryFileSelection(() => nativeSave(options))
 
-export function selectDomFiles(options: { accept?: string; multiple?: boolean; signal?: AbortSignal }): Promise<File[]> {
+export function selectDomFiles(options: { accept?: string; multiple?: boolean; signal?: AbortSignal; image?: boolean }): Promise<File[]> {
     if (isTauriMobile) return import('./nativeFileSelection').then(({ selectNativeFiles }) => selectNativeFiles(options))
     return withLibraryFileSelection(() => new Promise((resolve, reject) => {
         if (options.signal?.aborted) { resolve([]); return }

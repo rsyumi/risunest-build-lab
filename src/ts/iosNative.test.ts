@@ -71,6 +71,82 @@ describe("iOS generation lifecycle", () => {
       remove();
     }
   });
+  it.each(["settled", "active", "expired"] as const)(
+    "keeps the background save assertion while deferred work runs until it ends: %s",
+    async (ending) => {
+      let settle!: () => void;
+      const holds = {
+        settled: vi.fn(() => new Promise<void>((resolve) => { settle = resolve; })),
+        expire: vi.fn(),
+      };
+      const lifecycle = (detail: { event: string; id?: string }) =>
+        window.dispatchEvent(new CustomEvent("risunest-ios-lifecycle", { detail }));
+      const remove = installIOSPersistenceLifecycle(vi.fn(async () => {}), holds);
+      try {
+        lifecycle({ event: "background", id: "save-lease" });
+        await vi.waitFor(() => expect(holds.settled).toHaveBeenCalledOnce());
+        lifecycle({ event: "expired", id: "other-lease" });
+        await new Promise((resolve) => setTimeout(resolve));
+        expect(invoke).not.toHaveBeenCalled();
+        expect(holds.expire).not.toHaveBeenCalled();
+        if (ending === "settled") settle();
+        else lifecycle({ event: ending, ...(ending === "expired" ? { id: "save-lease" } : {}) });
+        await vi.waitFor(() =>
+          expect(invoke).toHaveBeenCalledWith("plugin:ios-native|end", { id: "save-lease" }),
+        );
+        expect(holds.expire).toHaveBeenCalledTimes(ending === "expired" ? 1 : 0);
+        // Returning to the screen also checks the media endpoint; let that call land inside this test.
+        if (ending === "active") await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("native_media_ensure"));
+      } finally {
+        remove();
+      }
+    },
+  );
+  it("saves again at once while a background entry waits for deferred work", async () => {
+    let settle!: () => void;
+    const holds = {
+      settled: vi.fn(() => new Promise<void>((resolve) => { settle = resolve; })),
+      expire: vi.fn(),
+    };
+    const flush = vi.fn(async () => {});
+    const lifecycle = (detail: { event: string; id?: string }) =>
+      window.dispatchEvent(new CustomEvent("risunest-ios-lifecycle", { detail }));
+    const remove = installIOSPersistenceLifecycle(flush, holds);
+    try {
+      lifecycle({ event: "background", id: "save-lease" });
+      await vi.waitFor(() => expect(holds.settled).toHaveBeenCalledOnce());
+      lifecycle({ event: "memory-warning" });
+      await vi.waitFor(() => expect(flush).toHaveBeenCalledTimes(2));
+      expect(invoke).not.toHaveBeenCalled();
+      settle();
+      await vi.waitFor(() =>
+        expect(invoke).toHaveBeenCalledWith("plugin:ios-native|end", { id: "save-lease" }),
+      );
+    } finally {
+      remove();
+    }
+  });
+  it("ends the background save assertion without waiting when the app returned during the save", async () => {
+    const holds = { settled: vi.fn(() => new Promise<void>(() => {})), expire: vi.fn() };
+    let finish!: () => void;
+    const flush = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const lifecycle = (detail: { event: string; id?: string }) =>
+      window.dispatchEvent(new CustomEvent("risunest-ios-lifecycle", { detail }));
+    const remove = installIOSPersistenceLifecycle(flush, holds);
+    try {
+      lifecycle({ event: "background", id: "save-lease" });
+      await vi.waitFor(() => expect(flush).toHaveBeenCalledOnce());
+      lifecycle({ event: "active" });
+      finish();
+      await vi.waitFor(() =>
+        expect(invoke).toHaveBeenCalledWith("plugin:ios-native|end", { id: "save-lease" }),
+      );
+      expect(holds.settled).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("native_media_ensure"));
+    } finally {
+      remove();
+    }
+  });
   it("reports actual progress in order and releases only after pending progress", async () => {
     const calls: string[] = [];
     const deps = {

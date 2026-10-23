@@ -63,6 +63,8 @@ export interface SyncBindingTransport {
     observeBinding?(operation: () => Promise<BindingOutcome>): Promise<BindingOutcome>
     setConfirmationPending?(waiting: boolean): void
     receiveAvailableChanges?(context: BindingContext): Promise<void>
+    // May allow plugins to use local data without reporting a completed receive.
+    preparePluginStartup?(context: BindingContext): Promise<void>
     inspectTarget(context: BindingContext): Promise<InspectedSyncTarget>
     pullAvailableState(target: InspectedSyncTarget, context: BindingContext): Promise<StagedSyncTarget>
     // Native activation only, called under the exclusive gate. It must not acquire a renderer gate.

@@ -1,3 +1,4 @@
+import { userScriptConsole } from '../userScriptConsole'
 import { asBuffer } from 'src/ts/util';
 import {
     getChatVar,
@@ -10,10 +11,10 @@ import { hasher, type simpleCharacterArgument, risuChatParser } from "../parser/
 import type { LuaEngine, LuaFactory } from "wasmoon";
 import { getCurrentCharacter, getCurrentChat, getDatabase, setDatabase, type Chat, type Database, type Message, type character, type triggerscript } from "../storage/database.svelte";
 import { get } from "svelte/store";
-import { DBState, ReloadChatPointer, ReloadGUIPointer, selectedCharID } from "../stores.svelte";
+import { DBState, ReloadGUIPointer, selectedCharID } from "../stores.svelte";
 import { alertSelect, alertError, alertInput, alertNormal, alertConfirm } from "../alert";
 import { HypaProcesser } from "./memory/hypamemory";
-import { generateAIImage } from "./stableDiff";
+import { generateAIImage, type ImageGenerationOptions } from "./stableDiff";
 import { writeInlayImage, getInlayAsset } from "./files/inlays";
 import type { OpenAIChat, MultiModal } from "./index.svelte";
 import { requestChatData, type StreamResponseChunk } from "./request/request";
@@ -27,16 +28,24 @@ import { getPersonaPrompt, getUserName, getUserIcon } from '../util';
 import { isTauriMobile } from '../platform';
 import { getRuntimePerformanceBudgets, subscribeRuntimePerformanceProfile } from '../runtimePerformanceProfile';
 import { createLuaFactory, runLuaSource } from './luaRuntime';
+import { LuaWorkerExecutor, LuaWorkerUnavailableError } from './luaWorkerExecutor';
+import { createLuaHistoryJSON } from './luaHistoryJSON';
+import { luaCodeWrapper } from './luaCodeWrapper';
 import { withObjectUrl } from '../objectUrl';
 import {
     type ConversationOperationContext,
     type ConversationCommitObserver,
 } from './conversationOperationContext';
-import { peekActiveConversationSession } from '../storage/persistentDataRuntime.svelte';
+import {
+    captureSelectedConversationAuthority,
+    getActiveConversationViewportSource,
+    peekActiveConversationSession,
+} from '../storage/persistentDataRuntime.svelte';
 import type { ActiveConversationSession } from '../storage/activeConversationSession';
 import { runSerializedUserTrigger } from './conversationUserTrigger';
 import {
     findActiveHistoryWindow,
+    getHistoryMessage,
     getHistoryMessageAt,
     historyLength,
     sliceHistory,
@@ -48,16 +57,39 @@ import {
     createScriptConversationAccess,
     type ScriptConversationAccess,
 } from './scriptConversationAccess';
-import { requestScriptDisplayRefresh } from './scriptDisplayRefresh';
+import { createScriptDisplayRefreshBatch, rebuildScriptDisplayRow, requestScriptDisplayRefresh } from './scriptDisplayRefresh';
 import { beginDisplayScriptRun, noticeScriptTimeout } from './scriptTimeoutNotice';
+import {
+    displayListenerEngine,
+    nextDisplayListenerOrder,
+    noteDisplayListenerTimeout,
+    skipsDisplayListener,
+    type DisplayListenerRequest,
+} from './luaDisplayTimeouts';
 import { findCharacterById, findCharacterIndexById } from './scriptCharacterLookup';
+import { isMetadataOnlySelectedConversation } from '../storage/selectedConversationLifecycle';
 
 /** Deadline for each synchronous Lua segment of a listener. */
-const LUA_LISTENER_TIMEOUT_MS = 2_000
+const LUA_LISTENER_TIMEOUT_MS = 5_000
 /** Deadline for each synchronous Lua segment of a handler the user started. */
 const LUA_USER_HANDLER_TIMEOUT_MS = 60_000
 let luaFactory:LuaFactory
-let luaTimeoutErrorConstructor: typeof import('wasmoon').LuaTimeoutError | undefined
+let luaJSONSource = ''
+let luaWorkerUnavailable = false
+let luaLocalFactoryPromise: Promise<LuaFactory> | undefined
+
+function canUseLuaWorker() { return typeof Worker !== 'undefined' && !luaWorkerUnavailable }
+
+async function ensureLocalLuaFactory() {
+    if (luaFactory) return luaFactory
+    const pending = luaLocalFactoryPromise ??= createLuaFactory().then(async factory => {
+        await factory.mountFile('json.lua', luaJSONSource)
+        luaFactory = factory
+        return factory
+    })
+    try { return await pending }
+    finally { if (luaLocalFactoryPromise === pending) luaLocalFactoryPromise = undefined }
+}
 let ScriptingSafeIds = new Set<string>()
 let ScriptingEditDisplayIds = new Set<string>()
 let ScriptingLowLevelIds = new Set<string>()
@@ -91,11 +123,14 @@ interface BasicScriptingEngineState {
     writeChat?: () => Chat
     readDatabase?: () => Database
     flushVariables?: () => void
+    historyJSON?: ReturnType<typeof createLuaHistoryJSON>
     stopSending?: boolean
+    displayListenerEngine?: string
 }
 
 interface LuaScriptingEngineState extends BasicScriptingEngineState {
     engine?: LuaEngine;
+    worker?: LuaWorkerExecutor;
     type: 'lua';
 }
 
@@ -120,6 +155,7 @@ function clearScriptingEngineInvocationState(state: ScriptingEngineState) {
     state.writeChat = undefined
     state.readDatabase = undefined
     state.flushVariables = undefined
+    state.historyJSON = undefined
     state.stopSending = undefined
 }
 
@@ -147,7 +183,10 @@ export async function runScripted(code:string, arg:{
     access?: ScriptConversationAccess
     /** A button or manual trigger the user started, which gets the longer deadline. */
     userStarted?: boolean
+    signal?: AbortSignal
     createConversationChat?: () => Chat
+    /** An editDisplay request, which skips a listener that timed out for it. */
+    displayListener?: DisplayListenerRequest
 }){
     const type: 'lua'|'py' = arg.type ?? 'lua'
     if (type === 'py' && isTauriMobile) {
@@ -207,11 +246,20 @@ export async function runScripted(code:string, arg:{
     const ScriptingEngineState = getOrCreateEngineState(mode, type, ownerChaId, code, functionTimeout);
     ScriptingEngineState.activeUses++
     let invocationFinished = false
+    const displayListener = mode === 'editDisplay' && type === 'lua' ? arg.displayListener : undefined
+    const displayEngine = displayListener
+        ? ScriptingEngineState.displayListenerEngine ??= displayListenerEngine(ownerChaId, code)
+        : undefined
     
     try {
     return await ScriptingEngineState.mutex.runExclusive(async () => {
+        arg.signal?.throwIfAborted()
+        if (displayEngine && skipsDisplayListener(displayEngine, displayListener!, data as string)) {
+            return { stopSending: false, chat, res: undefined }
+        }
         try {
         ScriptingEngineState.chat = chat
+        ScriptingEngineState.historyJSON = createLuaHistoryJSON()
         ScriptingEngineState.setVar = setVar
         ScriptingEngineState.getVar = getVar
         ScriptingEngineState.operationCharacter = char
@@ -247,20 +295,34 @@ export async function runScripted(code:string, arg:{
             }
         ScriptingEngineState.flushVariables = access ? () => { access.flushVariables() } : undefined
         ScriptingEngineState.stopSending = false
-        if (code !== ScriptingEngineState.code) {
+        if (code !== ScriptingEngineState.code || (ScriptingEngineState.type === 'lua' && ScriptingEngineState.worker?.isClosed())) {
             try {
             let declareAPI:(name: string, func:Function) => void
+            const luaCallbacks = new Map<string, Function>()
 
             if(ScriptingEngineState.type === 'lua'){
                 console.log('Creating new Lua engine for mode:', mode)
                 ScriptingEngineState.engine?.global.close()
-                ScriptingEngineState.engine = await luaFactory.createEngine({
-                    injectObjects: true,
-                    functionTimeout,
-                })
-                const luaEngine = ScriptingEngineState.engine
-                declareAPI = (name:string, func:Function) => {
-                    luaEngine.global.set(name, func)
+                ScriptingEngineState.worker?.close()
+                ScriptingEngineState.worker = undefined
+                if (canUseLuaWorker()) {
+                    try { ScriptingEngineState.worker = new LuaWorkerExecutor(functionTimeout, createScriptDisplayRefreshBatch()) }
+                    catch (error) {
+                        if (!(error instanceof LuaWorkerUnavailableError)) throw error
+                        luaWorkerUnavailable = true
+                    }
+                }
+                if (!ScriptingEngineState.worker) {
+                    ScriptingEngineState.engine = await (await ensureLocalLuaFactory()).createEngine({
+                        injectObjects: true,
+                        enableProxy: false,
+                        functionTimeout,
+                    })
+                }
+                declareAPI = (name: string, func: Function) => {
+                    luaCallbacks.set(name, func)
+                    if (ScriptingEngineState.worker) ScriptingEngineState.worker.register(name, func)
+                    else ScriptingEngineState.engine.global.set(name, func)
                 }
             }
             if(ScriptingEngineState.type === 'py'){
@@ -289,6 +351,7 @@ export async function runScripted(code:string, arg:{
                     : undefined
                 if (message) edit(message)
             }
+            // Commits buffered variables before a call that waits, so triggers and displays running meanwhile read them.
             const flushScriptingVariables = () => ScriptingEngineState.flushVariables?.()
             const getScriptingDatabase = () => ScriptingEngineState.readDatabase?.() ?? getDatabase()
             const getScriptingCharacterIndex = (db: Database) => {
@@ -504,21 +567,14 @@ export async function runScripted(code:string, arg:{
             })
 
             declareAPI('getFullChatMain', (id:string) => {
-                const data = JSON.stringify(readScriptingChat().message.map((v) => {
-                    return {
-                        role: v.role,
-                        data: v.data,
-                        chatId: v.chatId,
-                        time: v.time ?? 0,
-                    }
-                }))
-                return data
+                return ScriptingEngineState.historyJSON(readScriptingChat().message)
             })
 
             declareAPI('sleep', (id:string, time:number) => {
                 if(!ScriptingSafeIds.has(id)){
                     return
                 }
+                flushScriptingVariables()
                 return new Promise((resolve) => {
                     setTimeout(() => {
                         resolve(true)
@@ -581,7 +637,7 @@ export async function runScripted(code:string, arg:{
             })
 
             declareAPI('logMain', (value:string) => {
-                console.log(JSON.parse(value))
+                userScriptConsole.log(JSON.parse(value))
             })
 
             declareAPI('reloadDisplay', (id:string) => {
@@ -597,10 +653,7 @@ export async function runScripted(code:string, arg:{
                     return
                 }
                 flushScriptingVariables()
-                ReloadChatPointer.update((v) => {
-                    v[index] = (v[index] ?? 0) + 1
-                    return v
-                })
+                rebuildScriptDisplayRow(index)
             })
 
             //Low Level Access
@@ -608,6 +661,7 @@ export async function runScripted(code:string, arg:{
                 if(!ScriptingLowLevelIds.has(id)){
                     return
                 }
+                flushScriptingVariables()
                 const processer = new HypaProcesser()
                 await processer.addText(value)
                 return await processer.similaritySearch(source)
@@ -617,6 +671,7 @@ export async function runScripted(code:string, arg:{
                 if(!ScriptingLowLevelIds.has(id)){
                     return
                 }
+                flushScriptingVariables()
 
                 if(lastRequestResetTime + 60000 < Date.now()){
                     lastRequestsCount = 0
@@ -682,15 +737,22 @@ export async function runScripted(code:string, arg:{
                 }
             })
 
-            declareAPI('generateImage', async (id:string, value:string, negValue:string = '') => {
+            declareAPI('generateImage', async (id:string, value:string, negValue:string = '', options?:ImageGenerationOptions) => {
                 if(!ScriptingLowLevelIds.has(id)){
                     return
                 }
+                flushScriptingVariables()
+                const orientation = options?.orientation
+                if(orientation !== undefined && orientation !== 'landscape' && orientation !== 'portrait'){
+                    return 'Error: Image orientation must be landscape or portrait, received ' + orientation
+                }
+
                 const gen = await generateAIImage(
                     value,
                     ScriptingEngineState.operationCharacter as character,
                     negValue,
                     'inlay',
+                    options,
                 )
                 if(!gen){
                     return 'Error: Image generation failed'
@@ -815,6 +877,7 @@ export async function runScripted(code:string, arg:{
                 if(!ScriptingLowLevelIds.has(id)){
                     return
                 }
+                flushScriptingVariables()
                 let promptbody:OpenAIChat[] = prompt.map((dict) => {
                     let role:'system'|'user'|'assistant' = 'assistant'
                     switch(dict['role']){
@@ -922,6 +985,7 @@ export async function runScripted(code:string, arg:{
                 if(!ScriptingLowLevelIds.has(id)){
                     return
                 }
+                flushScriptingVariables()
                 const result = await requestChatData({
                     formated: [{
                         role: 'user',
@@ -1162,6 +1226,7 @@ export async function runScripted(code:string, arg:{
                 if(!ScriptingLowLevelIds.has(id)){
                     return
                 }
+                flushScriptingVariables()
                 let promptbody:OpenAIChat[] = prompt.map((dict) => {
                     let role:'system'|'user'|'assistant' = 'assistant'
                     switch(dict['role']){
@@ -1222,14 +1287,22 @@ export async function runScripted(code:string, arg:{
                     }
                 }
 
-                const options = parseLuaOptions(optionsStr) as { streaming?: boolean }
+                const options = parseLuaOptions(optionsStr) as { mode?: string, streaming?: boolean }
+                const modes = new Set(['emotion', 'memory', 'otherAx', 'submodel', 'translate'])
+                const mode = options.mode ?? 'otherAx'
+                if (!modes.has(mode)) {
+                    return JSON.stringify({
+                        result: 'Error: Invalid axLLM mode: ' + mode,
+                        success: false
+                    })
+                }
                 const result = await requestChatData({
                     formated: promptbody,
                     bias: {},
                     useStreaming: options.streaming === true,
                     forceStreaming: options.streaming === true,
                     noMultiGen: true,
-                }, 'otherAx')
+                }, mode as 'emotion' | 'memory' | 'otherAx' | 'submodel' | 'translate')
 
                 if(result.type === 'fail'){
                     return JSON.stringify({
@@ -1342,7 +1415,22 @@ export async function runScripted(code:string, arg:{
 
             console.log('Running Lua code:', code)
             if(ScriptingEngineState.type === 'lua'){
-                await runLuaSource(ScriptingEngineState.engine, luaCodeWrapper(code))
+                if (ScriptingEngineState.worker) {
+                    try { await ScriptingEngineState.worker.initialize(luaCodeWrapper(code), luaJSONSource, arg.signal) }
+                    catch (error) {
+                        if (!(error instanceof LuaWorkerUnavailableError)) throw error
+                        luaWorkerUnavailable = true
+                        ScriptingEngineState.worker.close()
+                        ScriptingEngineState.worker = undefined
+                        arg.signal?.throwIfAborted()
+                        const engine = await (await ensureLocalLuaFactory()).createEngine({
+                            injectObjects: true, enableProxy: false, functionTimeout,
+                        })
+                        ScriptingEngineState.engine = engine
+                        for (const [name, func] of luaCallbacks) engine.global.set(name, func)
+                        await runLuaSource(engine, luaCodeWrapper(code))
+                    }
+                } else await runLuaSource(ScriptingEngineState.engine, luaCodeWrapper(code))
             }
             if(ScriptingEngineState.type === 'py'){
                 await ScriptingEngineState.pyodide?.init(code)
@@ -1350,6 +1438,8 @@ export async function runScripted(code:string, arg:{
             ScriptingEngineState.code = code
             } catch (error) {
                 discardFailedScriptingEngineState(ScriptingEngineState)
+                // Top-level code that times out would spend the same budget again for every queued row.
+                if (displayEngine && isLuaTimeoutError(error)) noteDisplayListenerTimeout(displayEngine, displayListener!, data as string)
                 throw error
             }
         }
@@ -1367,34 +1457,45 @@ export async function runScripted(code:string, arg:{
         let res:any
         if(ScriptingEngineState.type === 'lua'){
             const luaEngine = ScriptingEngineState.engine
+            const worker = ScriptingEngineState.worker
+            const getFunction = (name: string) => worker
+                ? (...args: unknown[]) => worker.invoke(name, args, arg.signal)
+                : luaEngine.global.get(name)
             const listenerStartedAt = performance.now()
             try {
                 switch(mode){
                     case 'input':{
-                        const func = luaEngine.global.get('onInput')
+                        const func = getFunction('onInput')
                         if(func){
                             res = await func(accessKey)
                         }
                         break
                     }
                     case 'output':{
-                        const func = luaEngine.global.get('onOutput')
+                        const func = getFunction('onOutput')
                         if(func){
                             res = await func(accessKey)
                         }
                         break
                     }
                     case 'start':{
-                        const func = luaEngine.global.get('onStart')
+                        const func = getFunction('onStart')
                         if(func){
                             res = await func(accessKey)
                         }
                         break
                     }
                     case 'onButtonClick':{
-                        const func = luaEngine.global.get('onButtonClick')
+                        const func = getFunction('onButtonClick')
                         if(func){
                             res = await func(accessKey, data)
+                        }
+                        break
+                    }
+                    case 'onFormSubmit':{
+                        const func = getFunction('onFormSubmit')
+                        if(func){
+                            res = await func(accessKey, data, JSON.stringify(meta))
                         }
                         break
                     }
@@ -1402,15 +1503,20 @@ export async function runScripted(code:string, arg:{
                     case 'editDisplay':
                     case 'editInput':
                     case 'editOutput':{
-                        const func = luaEngine.global.get('callListenMain')
+                        const func = getFunction('callListenMain')
                         if(func){
-                            res = await func(mode, accessKey, JSON.stringify(data), JSON.stringify(meta))
-                            res = JSON.parse(res)
+                            // editDisplay takes a raw string, and must output a raw string
+                            const directString = mode === 'editDisplay'
+                            const value = directString ? data : JSON.stringify(data)
+                            res = await func(mode, accessKey, value, JSON.stringify(meta))
+                            if (!directString) {
+                                res = JSON.parse(res)
+                            }
                         }
                         break
                     }
                     default:{
-                        const func = luaEngine.global.get(mode)
+                        const func = getFunction(mode)
                         if(func){
                             res = await func(accessKey)
                         }
@@ -1421,13 +1527,14 @@ export async function runScripted(code:string, arg:{
                     ScriptingEngineState.stopSending = true
                 }
             } catch (error) {
-                // Wasmoon wraps synchronous hook timeouts in a plain Error with this first line.
-                if ((luaTimeoutErrorConstructor && error instanceof luaTimeoutErrorConstructor) ||
-                    (error instanceof Error && error.message.split('\n', 1)[0] === 'Error: thread timeout exceeded')) {
-                    const diagnosticMode = ['input', 'output', 'start', 'onButtonClick', 'editRequest',
+                if (worker?.isClosed()) discardFailedScriptingEngineState(ScriptingEngineState)
+                arg.signal?.throwIfAborted()
+                if (isLuaTimeoutError(error)) {
+                    const diagnosticMode = ['input', 'output', 'start', 'onButtonClick', 'onFormSubmit', 'editRequest',
                         'editDisplay', 'editInput', 'editOutput', 'manual'].includes(mode) ? mode : 'custom'
                     console.error({ code: 'lua-listener-timeout', mode: diagnosticMode,
                         elapsedMs: performance.now() - listenerStartedAt })
+                    if (displayEngine) noteDisplayListenerTimeout(displayEngine, displayListener!, data as string)
                     noticeScriptTimeout(mode === 'editDisplay')
                 } else {
                     console.error(error)
@@ -1490,9 +1597,7 @@ export async function runScripted(code:string, arg:{
 }
 
 async function makeLuaFactory(){
-    const wasmoon = await import('wasmoon')
-    luaTimeoutErrorConstructor = wasmoon.LuaTimeoutError
-    const _luaFactory = await createLuaFactory()
+    const _luaFactory = canUseLuaWorker() ? undefined : await createLuaFactory()
     async function mountFile(name:string){
         let code = ''
         for(let i = 0; i < 3; i++){
@@ -1504,7 +1609,8 @@ async function makeLuaFactory(){
                 }
             } catch (error) {}
         }
-        await _luaFactory.mountFile(name,code)
+        luaJSONSource = code
+        await _luaFactory?.mountFile(name,code)
     }
 
     await mountFile('json.lua')
@@ -1512,7 +1618,7 @@ async function makeLuaFactory(){
 }
 
 async function ensureLuaFactory() {
-    if (luaFactory) return;
+    if (luaFactory || (canUseLuaWorker() && luaJSONSource)) return;
 
     const pendingFactory = (luaFactoryPromise ??= makeLuaFactory())
     try {
@@ -1566,6 +1672,8 @@ function evictIdleScriptingEngines() {
         if (oldest.type === 'lua') {
             oldest.engine?.global.close()
             oldest.engine = undefined
+            oldest.worker?.close()
+            oldest.worker = undefined
         } else {
             oldest.pyodide?.close()
             oldest.pyodide = undefined
@@ -1582,11 +1690,20 @@ function finishScriptingEngineUse(state: ScriptingEngineState) {
     evictIdleScriptingEngines()
 }
 
+function isLuaTimeoutError(error: unknown): boolean {
+    // Async coroutine rejection preserves the Lua string; synchronous calls wrap it in Error.
+    const firstLine = (typeof error === 'string' ? error : error instanceof Error ? error.message : '').split('\n', 1)[0]
+    // Lua wrap/error can prepend one or more source locations to the timeout string.
+    return /(?:^|:\d+: )thread timeout exceeded$/.test(firstLine)
+}
+
 function discardFailedScriptingEngineState(state: ScriptingEngineState) {
     state.code = undefined
     if (state.type === 'lua') {
         state.engine?.global.close()
         state.engine = undefined
+        state.worker?.close()
+        state.worker = undefined
     } else {
         state.pyodide?.close()
         state.pyodide = undefined
@@ -1600,168 +1717,6 @@ function removeScriptingEngineStateIfUnused(state: ScriptingEngineState) {
     }
 }
 
-function luaCodeWrapper(code:string){
-    return `
-json = require 'json'
-
-function getChat(id, index)
-    return json.decode(getChatMain(id, index))
-end
-
-function getFullChat(id)
-    return json.decode(getFullChatMain(id))
-end
-
-function getRecentChats(id, count)
-    return json.decode(getRecentChatsMain(id, count))
-end
-
-function setFullChat(id, value)
-    setFullChatMain(id, json.encode(value))
-end
-
-function log(value)
-    logMain(json.encode(value))
-end
-
-function getLoreBooks(id, search)
-    return json.decode(getLoreBooksMain(id, search))
-end
-
-
-function loadLoreBooks(id)
-    return json.decode(loadLoreBooksMain(id):await())
-end
-
-function LLM(id, prompt, useMultimodal, options)
-    useMultimodal = useMultimodal or false
-    options = options or {}
-    return json.decode(LLMMain(id, json.encode(prompt), useMultimodal, json.encode(options)):await())
-end
-
-function axLLM(id, prompt, useMultimodal, options)
-    useMultimodal = useMultimodal or false
-    options = options or {}
-    return json.decode(axLLMMain(id, json.encode(prompt), useMultimodal, json.encode(options)):await())
-end
-
-function getCharacterImage(id)
-    return getCharacterImageMain(id):await()
-end
-
-function getPersonaImage(id)
-    return getPersonaImageMain(id):await()
-end
-
-local editRequestFuncs = {}
-local editDisplayFuncs = {}
-local editInputFuncs = {}
-local editOutputFuncs = {}
-
-function listenEdit(type, func)
-    if type == 'editRequest' then
-        editRequestFuncs[#editRequestFuncs + 1] = func
-        return
-    end
-
-    if type == 'editDisplay' then
-        editDisplayFuncs[#editDisplayFuncs + 1] = func
-        return
-    end
-
-    if type == 'editInput' then
-        editInputFuncs[#editInputFuncs + 1] = func
-        return
-    end
-
-    if type == 'editOutput' then
-        editOutputFuncs[#editOutputFuncs + 1] = func
-        return
-    end
-
-    throw('Invalid type')
-end
-
-function getState(id, name)
-    local escapedName = "__"..name
-    return json.decode(getChatVar(id, escapedName))
-end
-
-function setState(id, name, value)
-    local escapedName = "__"..name
-    setChatVar(id, escapedName, json.encode(value))
-end
-
-function setStateChanged(id, name, value)
-    local escapedName = "__"..name
-    return setChatVarChanged(id, escapedName, json.encode(value))
-end
-
-function async(callback)
-    return function(...)
-        local co = coroutine.create(callback)
-        local safe, result = coroutine.resume(co, ...)
-
-        return Promise.create(function(resolve, reject)
-            local checkresult
-            local step = function()
-                if coroutine.status(co) == "dead" then
-                    local send = safe and resolve or reject
-                    return send(result)
-                end
-
-                safe, result = coroutine.resume(co)
-                checkresult()
-            end
-
-            checkresult = function()
-                if safe and result == Promise.resolve(result) then
-                    result:finally(step):catch(reject)
-                else
-                    step()
-                end
-            end
-
-            checkresult()
-        end)
-    end
-end
-
-callListenMain = async(function(type, id, value, meta)
-    local realValue = json.decode(value)
-    local realMeta = json.decode(meta)
-
-    if type == 'editRequest' then
-        for _, func in ipairs(editRequestFuncs) do
-            realValue = func(id, realValue, realMeta)
-        end
-    end
-
-    if type == 'editDisplay' then
-        for _, func in ipairs(editDisplayFuncs) do
-            realValue = func(id, realValue, realMeta)
-        end
-    end
-
-    if type == 'editInput' then
-        for _, func in ipairs(editInputFuncs) do
-            realValue = func(id, realValue, realMeta)
-        end
-    end
-
-    if type == 'editOutput' then
-        for _, func in ipairs(editOutputFuncs) do
-            realValue = func(id, realValue, realMeta)
-        end
-    end
-
-    return json.encode(realValue)
-end)
-
-${code}
-`
-}
-
 export async function runLuaEditTrigger<T extends string | OpenAIChat[]>(
     char: character | simpleCharacterArgument,
     mode: string,
@@ -1770,11 +1725,16 @@ export async function runLuaEditTrigger<T extends string | OpenAIChat[]>(
     conversationOperation?: ConversationOperationContext,
     onConversationCommit?: ConversationCommitObserver,
     signal?: AbortSignal,
+    /** When the view asked for this display, from `nextDisplayListenerOrder`. */
+    displayRequestOrder?: number,
 ): Promise<T> {
+    if (mode !== 'editdisplay' && mode !== 'editDisplay') {
+        return runLuaEditTriggerForMode(char, mode, content, meta, conversationOperation, onConversationCommit, signal)
+    }
+    const order = displayRequestOrder ?? nextDisplayListenerOrder()
     const run = () => runLuaEditTriggerForMode(
-        char, mode, content, meta, conversationOperation, onConversationCommit, signal,
+        char, mode, content, meta, conversationOperation, onConversationCommit, signal, order,
     )
-    if (mode !== 'editdisplay' && mode !== 'editDisplay') return run()
     const endDisplayRun = beginDisplayScriptRun()
     try {
         return await run()
@@ -1791,6 +1751,7 @@ async function runLuaEditTriggerForMode<T extends string | OpenAIChat[]>(
     conversationOperation?: ConversationOperationContext,
     onConversationCommit?: ConversationCommitObserver,
     signal?: AbortSignal,
+    displayRequestOrder?: number,
 ): Promise<T> {
     switch (mode) {
         case 'editinput':
@@ -1805,6 +1766,9 @@ async function runLuaEditTriggerForMode<T extends string | OpenAIChat[]>(
         case 'editprocess':
             return content
     }
+    const displayRequest = (chat: Chat | null | undefined) => mode === 'editDisplay' && displayRequestOrder !== undefined
+        ? createDisplayListenerRequest(displayRequestOrder, chat, meta)
+        : undefined
 
     if (mode === 'editDisplay' && !conversationOperation) {
         const hasLuaTrigger = (trigger: triggerscript) =>
@@ -1846,6 +1810,7 @@ async function runLuaEditTriggerForMode<T extends string | OpenAIChat[]>(
                     undefined,
                     onConversationCommit,
                     signal,
+                    displayRequest(sourceChat),
                 )
             })
         }
@@ -1858,7 +1823,29 @@ async function runLuaEditTriggerForMode<T extends string | OpenAIChat[]>(
         conversationOperation,
         onConversationCommit,
         signal,
+        displayRequest(conversationOperation ? null : getCurrentChat()),
     )
+}
+
+function createDisplayListenerRequest(order: number, chat: Chat | null | undefined, meta?: object): DisplayListenerRequest {
+    const index = (meta as { index?: unknown } | undefined)?.index
+    if (!chat?.id || typeof index !== 'number') return { order }
+    const messageId = isMetadataOnlySelectedConversation(chat)
+        ? displayedWindowMessageId(chat.id, index)
+        : getHistoryMessage(chat, index)?.chatId ?? ''
+    if (messageId === undefined) return { order }
+    return { order, row: { conversationId: chat.id, index, messageId } }
+}
+
+/** A conversation that keeps only part of its history loaded shows its rows from the viewport source. */
+function displayedWindowMessageId(conversationId: string, index: number): string | undefined {
+    try {
+        if (captureSelectedConversationAuthority()?.conversationId !== conversationId) return undefined
+        const row = getActiveConversationViewportSource()?.snapshot().rowAt(index)
+        return row ? row.message.chatId ?? '' : undefined
+    } catch {
+        return undefined
+    }
 }
 
 async function runLuaEditTriggerBatch<T extends string | OpenAIChat[]>(
@@ -1869,6 +1856,7 @@ async function runLuaEditTriggerBatch<T extends string | OpenAIChat[]>(
     conversationOperation?: ConversationOperationContext,
     onConversationCommit?: ConversationCommitObserver,
     signal?: AbortSignal,
+    displayRequest?: DisplayListenerRequest,
 ): Promise<T> {
     let operationContext = conversationOperation
     let historyWindowCopy: HistoryWindowCopy | null = null
@@ -1924,6 +1912,8 @@ async function runLuaEditTriggerBatch<T extends string | OpenAIChat[]>(
                     access: access ?? undefined,
                     chat: historyWindow?.chat,
                     createConversationChat: createWindowChat,
+                    displayListener: displayRequest,
+                    signal,
                 })
                 data = runResult.res ?? data
             }
@@ -1941,22 +1931,27 @@ async function runLuaEditTriggerBatch<T extends string | OpenAIChat[]>(
     }
 }
 
-export async function runLuaButtonTrigger(
+export async function runLuaInteractionTrigger(
+    type: 'button' | 'form',
     char: character | simpleCharacterArgument,
-    data: string,
+    triggerKey: string,
+    meta?: object,
     conversationOperation?: ConversationOperationContext,
 ): Promise<any> {
+    const mode = type === 'button' ? 'onButtonClick' : 'onFormSubmit'
     if (conversationOperation) {
-        return runLuaButtonTriggerBatch(char, data, conversationOperation)
+        return runLuaInteractionTriggerBatch(mode, char, triggerKey, meta, conversationOperation)
     }
     return runSerializedUserTrigger(char.chaId, getCurrentChat(), () =>
-        runLuaButtonTriggerBatch(char, data),
+        runLuaInteractionTriggerBatch(mode, char, triggerKey, meta),
     )
 }
 
-async function runLuaButtonTriggerBatch(
+async function runLuaInteractionTriggerBatch(
+    mode: 'onButtonClick' | 'onFormSubmit',
     char: character|simpleCharacterArgument,
-    data: string,
+    triggerKey: string,
+    meta?: object,
     conversationOperation?: ConversationOperationContext,
 ): Promise<any>{
     let runResult
@@ -1980,8 +1975,9 @@ async function runLuaButtonTriggerBatch(
                 runResult = await runScripted(trigger.effect[0].code, {
                     char: char,
                     lowLevelAccess: trigger.lowLevelAccess,
-                    mode: 'onButtonClick',
-                    data: data,
+                    mode,
+                    data: triggerKey,
+                    meta,
                     operationContext: conversationOperation,
                     access: access ?? undefined,
                     userStarted: true,

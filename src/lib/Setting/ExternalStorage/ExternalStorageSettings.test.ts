@@ -46,7 +46,7 @@ vi.mock('qrcode', async importOriginal => {
     return { default: { ...actual.default, toDataURL: state.qrDataUrl } }
 })
 vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn(), alertNormal: vi.fn(), alertCheckboxConfirm: vi.fn(), alertActionConfirm: state.actionConfirm }))
-vi.mock('src/ts/storage/sync/external/lwwProduction', () => ({ requestExternalLwwNow: state.syncNow, isExternalLwwRunning: (id: string) => !state.stopped.has(id), supportsExternalLwwNewDevice: () => state.remedy, subscribeExternalLwwFailures(callback: (value: ReadonlyMap<string, unknown>) => void) { callback(new Map(state.failures)); return () => {} } }))
+vi.mock('src/ts/storage/sync/external/lwwProduction', () => ({ requestExternalLwwNow: state.syncNow, isExternalLwwRunning: (id: string) => !state.stopped.has(id), supportsExternalLwwNewDevice: () => state.remedy, subscribeExternalLwwFailures(callback: (value: ReadonlyMap<string, unknown>) => void) { callback(new Map(state.failures)); return () => {} }, subscribeExternalLwwCatchUp(callback: (value: ReadonlySet<string>) => void) { callback(new Set()); return () => {} } }))
 vi.mock('src/ts/storage/sync/bindingRegistry', () => ({ bindSyncTarget: state.bind, unbindSyncTarget: state.unbind, resumeCurrentSyncBinding: state.resume, prepareBoundLibraryReplacement: state.prepareReplacement }))
 vi.mock('src/ts/storage/libraryCharacters', () => ({ hasLibraryCharacters: state.characters }))
 // The form's own steps are covered by its tests; here it only reports a finished connection.
@@ -63,6 +63,7 @@ vi.mock('src/ts/storage/sync/external/production', () => ({
     requestExternalStorageResolveConflict: vi.fn(),
     requestExternalStorageRestore: vi.fn(),
     requestExternalStorageDeleteHistory: vi.fn(async () => {}),
+    startExternalStorageMaintenanceJob: vi.fn((request: unknown) => state.startJob(request)),
     stopExternalStorageRestore: vi.fn(async () => {}),
 }))
 vi.mock('src/ts/storage/sync/external/bridge', () => ({

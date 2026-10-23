@@ -2,3 +2,5 @@
     let { openGrid }: { openGrid(): void } = $props()
 </script>
 <button onclick={openGrid}>Synthetic grid opener</button>
+
+<textarea aria-label="Synthetic retained draft"></textarea>

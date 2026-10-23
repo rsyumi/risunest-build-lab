@@ -4,6 +4,8 @@ import {
     ConversationSessionInactiveError,
     ConversationSessionStaleError,
     type ActiveConversationBackwardScan,
+    type ActiveConversationMetadataBackwardScan,
+    type ActiveConversationMetadataWindow,
     type ActiveConversationPin,
     type ActiveConversationWindow,
     type MessageLocator,
@@ -22,7 +24,9 @@ export interface ConversationHistoryOperation {
     readonly totalMessages: number
     readLatest(limit: number): ActiveConversationWindow
     readRange(startIndex: number, limit: number): ActiveConversationWindow
+    readMetadataRange(startIndex: number, limit: number): ActiveConversationMetadataWindow
     scanBackward(startIndexExclusive?: number, limit?: number): ActiveConversationBackwardScan
+    scanMetadataBackward(startIndexExclusive?: number, limit?: number): ActiveConversationMetadataBackwardScan
     resolveMessage(locator: MessageLocator): Message
     ensureMessageId(locator: MessageLocator, createId: () => string): Message
     assertCurrent(): void
@@ -67,6 +71,20 @@ class SessionConversationHistoryOperation implements ConversationHistoryOperatio
 
     readRange(startIndex: number, limit: number): ActiveConversationWindow {
         return this.requireCurrentSession().readRange(startIndex, limit)
+    }
+
+    readMetadataRange(startIndex: number, limit: number): ActiveConversationMetadataWindow {
+        return this.requireCurrentSession().readMetadataRange(startIndex, limit)
+    }
+
+    scanMetadataBackward(
+        startIndexExclusive = this.totalMessages,
+        limit?: number,
+    ): ActiveConversationMetadataBackwardScan {
+        const session = this.requireCurrentSession()
+        return limit === undefined
+            ? session.scanMetadataBackward(startIndexExclusive)
+            : session.scanMetadataBackward(startIndexExclusive, limit)
     }
 
     scanBackward(

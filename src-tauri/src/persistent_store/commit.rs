@@ -151,6 +151,11 @@ fn commit_inner(
         connection,
         input.expected_revision,
         |transaction, active| {
+            if let Some(fence) = input.gallery_pending_fence {
+                if super::gallery::pending_fence(transaction)? != fence {
+                    return Err(StoreError::RevisionConflict { expected: input.expected_revision, actual: current_revision(transaction)? });
+                }
+            }
             if input.root.as_ref().is_some_and(|root| root.get("account").is_some()) {
                 return Err(validation("Account credentials are device-local"));
             }
@@ -2328,6 +2333,7 @@ pub(super) fn apply_conversation_mutation(
                 "DELETE FROM conversations WHERE generation = ?1 AND character_id = ?2 AND conversation_id = ?3",
                 params![generation, character_id, conversation_id],
             )?;
+            super::message_pages::forget_pages(transaction, generation, character_id, conversation_id)?;
             refresh_character_summary(transaction, generation, character_id)?;
             Ok(())
         }
@@ -2612,19 +2618,17 @@ pub(super) fn delete_character(
     Ok(())
 }
 
-fn delete_character_contents(
+pub(super) fn delete_character_contents(
     transaction: &Transaction<'_>,
     generation: &str,
     character_id: &str,
 ) -> StoreResult<()> {
-    transaction.execute(
-        "DELETE FROM messages WHERE generation = ?1 AND character_id = ?2",
-        params![generation, character_id],
-    )?;
-    transaction.execute(
-        "DELETE FROM conversations WHERE generation = ?1 AND character_id = ?2",
-        params![generation, character_id],
-    )?;
+    for table in ["messages", "conversations", "message_page_indexes", "message_page_manifests"] {
+        transaction.execute(
+            &format!("DELETE FROM {table} WHERE generation = ?1 AND character_id = ?2"),
+            params![generation, character_id],
+        )?;
+    }
     Ok(())
 }
 

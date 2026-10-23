@@ -1,7 +1,7 @@
 import { prepareExternalDatabaseImport } from '../storage/upstreamImport'
 import { hubURL } from "../characterCards"
 import { getDatabase } from "../storage/database.svelte"
-import { alertCheckboxConfirm, alertConfirm, alertError, alertMd, alertNormal, alertSelect, alertWait } from "../alert"
+import { alertActionConfirm, alertCheckboxConfirm, alertConfirm, alertError, alertMd, alertNormal, alertSelect, alertWait } from "../alert"
 import { AppendableBuffer } from "../globalApi.svelte"
 import { decodeRisuSave } from "../storage/risuSave"
 import { language } from "src/lang"
@@ -11,7 +11,7 @@ import { installAccountBackup } from "../storage/databaseRestore"
 import { isTauri } from "../platform"
 import { hasLibraryCharacters } from "../storage/libraryCharacters"
 import { getAccountColdStorageItem } from "../process/coldstorage.svelte"
-import { expandColdPayloads } from "../process/coldPayloadExpansion"
+import { expandColdPayloads, importColdPluginStorage } from "../process/coldPayloadExpansion"
 
 export function risuLogin() {
     const win = window.open(hubURL + '/hub/login')
@@ -146,9 +146,23 @@ export async function loadRisuAccountBackup() {
             alertError(language.accountBackupUnavailable)
             return
         }
+        const plugins = await importColdPluginStorage(candidate, getAccountColdStorageItem)
+        const warnings = [
+            ...(plugins.omitted > 0 ? [language.portableBackup.omittedRestoreData.pluginStorage(plugins.omitted)] : []),
+            ...(plugins.tooLarge > 0 ? [language.portableBackup.omittedRestoreData.oversizedPluginStorage(plugins.tooLarge)] : []),
+        ]
+        if (!isTauri && warnings.length > 0 && !(await alertActionConfirm({
+            title: language.backupLoadConfirm,
+            description: warnings.join('\n\n'),
+            actionLabel: language.confirm,
+            cancelLabel: language.cancel,
+        }))) return
         let followupFailed = false
         const outcome = await installAccountBackup(prepareExternalDatabaseImport(candidate), {
-            replaceDatabase: replacePersistentDatabase,
+            replaceDatabase: (database, reason, options) => replacePersistentDatabase(database, reason, {
+                ...options,
+                ...(warnings.length > 0 ? { upstreamImportWarnings: warnings } : {}),
+            }),
             loadPlugins: async () => (await import('../plugins/plugins.svelte')).loadPlugins(),
             onPostCommitError: (error) => {
                 followupFailed = true

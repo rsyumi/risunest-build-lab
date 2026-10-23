@@ -4,10 +4,12 @@ import { resolve, join, dirname, basename, isAbsolute } from 'node:path'
 import { randomUUID, createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { verifyReport } from './report.mjs'
+import { startOfficialAccountFixtureServer } from '../../benchmarks/official-account/server.mjs'
 
 const root = resolve(import.meta.dirname, '../..')
 const smallAssets = process.argv.includes('--asset-benchmark-small')
-const assetBenchmark = smallAssets || process.argv.includes('--asset-benchmark')
+const officialAccount = process.argv.includes('--official-account-benchmark')
+const assetBenchmark = officialAccount || smallAssets || process.argv.includes('--asset-benchmark')
 const debug = process.argv.includes('--debug')
 const reuseBuild = process.argv.includes('--reuse-build')
 const binaryInput = process.argv.find(arg => arg.startsWith('--binary='))?.slice(9)
@@ -43,10 +45,12 @@ if (assetBenchmark && !binaryInput) {
     if (!reuseBuild) writeFileSync(measuredBuild, binaryHash)
     else if (!existsSync(measuredBuild) || readFileSync(measuredBuild, 'utf8') !== binaryHash) throw new Error('Rebuild the asset benchmark; this binary was not built for it')
 }
-const phaseGroups = assetBenchmark ? [[smallAssets ? 'asset-benchmark-small' : 'asset-benchmark']] : [['write', 'read'], ['abort', 'read-abort'], ['contract', 'read-contract']]
+const phaseGroups = assetBenchmark ? [[officialAccount ? 'official-account-benchmark' : smallAssets ? 'asset-benchmark-small' : 'asset-benchmark']] : [['write', 'read'], ['abort', 'read-abort'], ['contract', 'read-contract']]
 // The repeated-close escape exists where closing the window quits; SIGTERM asks only Linux to save.
 if (!assetBenchmark && (process.platform === 'win32' || process.platform === 'linux')) phaseGroups.push(['close-escape'])
 if (!assetBenchmark && process.platform === 'linux') phaseGroups.push(['session-end', 'read-session-end'], ['session-end-unanswered'])
+const accountServer = officialAccount ? await startOfficialAccountFixtureServer() : null
+try {
 for (const phases of Array.from({ length: repetitions }, () => phaseGroups).flat()) {
     // Linux registers the identifier as a D-Bus name, whose elements cannot start with a digit.
     const runId = `a${randomUUID().replaceAll('-', '').slice(1)}`
@@ -70,11 +74,22 @@ for (const phases of Array.from({ length: repetitions }, () => phaseGroups).flat
     try {
         for (const phase of phases) {
             const reportPath = join(output, `${phase}.json`)
+            const memoryPath = join(output, `${phase}.memory.jsonl`)
+            let memoryDone = Promise.resolve(null)
             const status = await new Promise((accept, reject) => {
                 const child = spawn(executable, [], { cwd: root, windowsHide: true, stdio: 'inherit', detached: process.platform !== 'win32', env: {
                     ...env, RISUNEST_BOUNDARY_ID: runId, RISUNEST_BOUNDARY_ROOT: ownedRoot,
+                    ...(accountServer ? { RISUNEST_BOUNDARY_ACCOUNT_ORIGIN: accountServer.origin } : {}),
                     RISUNEST_BOUNDARY_PHASE: phase, RISUNEST_BOUNDARY_REPORT: reportPath,
                 } })
+                if (officialAccount && process.platform === 'win32' && child.pid) {
+                    const monitor = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(root, 'tests/native/windowsMemory.ps1'),
+                        '-RootProcessId', String(child.pid), '-OutputPath', memoryPath], { windowsHide: true, stdio: 'ignore' })
+                    memoryDone = new Promise(resolve => {
+                        monitor.on('error', () => resolve('unavailable'))
+                        monitor.on('exit', code => resolve(code === 0 ? null : `exit-${code}`))
+                    })
+                }
                 let timedOut = false
                 const terminate = phase.startsWith('session-end') ? setInterval(() => {
                     if (!existsSync(`${reportPath}.ready`)) return
@@ -85,7 +100,7 @@ for (const phases of Array.from({ length: repetitions }, () => phaseGroups).flat
                     timedOut = true
                     if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true })
                     else process.kill(-child.pid, 'SIGKILL')
-                }, assetBenchmark ? 300_000 : 90_000)
+                }, officialAccount ? 600_000 : assetBenchmark ? 300_000 : 90_000)
                 child.on('error', error => { clearTimeout(timeout); clearInterval(terminate); reject(error) })
                 child.on('close', code => {
                     clearTimeout(timeout)
@@ -95,6 +110,19 @@ for (const phases of Array.from({ length: repetitions }, () => phaseGroups).flat
             })
             const report = JSON.parse(readFileSync(reportPath, 'utf8'))
             verifyReport(report, runId, phase, status)
+            const memoryError = await memoryDone
+            if (officialAccount && process.platform === 'win32') {
+                const memory = existsSync(memoryPath) ? readFileSync(memoryPath, 'utf8').replace(/^\uFEFF/, '').trim().split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line)) : []
+                report.processMemory = { sampleCount: memory.length, error: memoryError,
+                    maximumSampledPrivateBytes: memory.length ? Math.max(...memory.map(sample => sample.privateBytes)) : null,
+                    note: 'Windows native process plus its WebView descendants, sampled about every 500 ms. Private bytes are committed memory; working sets can double-count shared pages. Short-lived peaks may be missed.' }
+                for (const group of ['samples', 'nativeLedgerSamples', 'presenceSamples', 'manifestSamples']) for (const sample of report.measurements?.[group] ?? []) {
+                    const window = memory.filter(value => value.timestampMs >= sample.startedAt && value.timestampMs <= sample.finishedAt)
+                    const before = memory.filter(value => value.timestampMs <= sample.startedAt).at(-1)
+                    sample.processMemory = { samples: window.length, beforePrivateBytes: before?.privateBytes ?? null,
+                        maximumSampledPrivateBytes: window.length ? Math.max(...window.map(value => value.privateBytes)) : null }
+                }
+            }
             if (assetBenchmark) writeFileSync(reportPath, JSON.stringify({ ...report, binaryHash, buildMode: debug ? 'debug' : 'release', reusedBuild: reuseBuild }, null, 2))
             console.log(`Native persistence ${phase}: passed (${process.platform})`)
             if (assetBenchmark) console.log(`Asset measurement report: ${reportPath}`)
@@ -114,4 +142,7 @@ for (const phases of Array.from({ length: repetitions }, () => phaseGroups).flat
             rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
         }
     }
+}
+} finally {
+    await accountServer?.close()
 }

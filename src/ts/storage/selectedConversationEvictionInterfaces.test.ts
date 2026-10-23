@@ -313,6 +313,8 @@ describe('independent windowed conversation interfaces', () => {
 
     }, 30_000)
     it('runs public generation from a fresh windowed owner', async () => {
+        vi.resetModules()
+        const { createEvictionFixture, makeConversation } = await import('./tests/selectedConversationEvictionFixture')
         const fixture = await createEvictionFixture(makeConversation(INITIAL_MESSAGE_COUNT, DUPLICATE_POSITIONS))
         const { store, initial, runtime, selectedConversation } = fixture
         const oracle = makeConversation(INITIAL_MESSAGE_COUNT, DUPLICATE_POSITIONS)

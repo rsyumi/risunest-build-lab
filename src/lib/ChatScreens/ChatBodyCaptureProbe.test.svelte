@@ -1,5 +1,12 @@
+<script module lang="ts">
+    import type { DisplayRowReads } from 'src/ts/process/scriptVariableReads'
+
+    /** The row registrations the probed bodies received, newest last. */
+    export const probedDisplayRows: DisplayRowReads[] = []
+</script>
+
 <script lang="ts">
-    import { onMount, tick } from 'svelte'
+    import { onMount, tick, untrack } from 'svelte'
     import type { BoundedLiveChatParserProjection } from 'src/ts/selectedConversationLiveParserProjection'
     import type { StreamingThoughtPreview } from '../../ts/parser/streamingThoughtPreview'
 
@@ -11,6 +18,7 @@
         thoughtPreview = null,
         streamingThoughtMode = 'off',
         renderRawStreaming = false,
+        displayRow,
     }: {
         msgDisplay?: string
         onCaptureSettled?: (generation: number) => void
@@ -19,7 +27,9 @@
         thoughtPreview?: StreamingThoughtPreview | null
         streamingThoughtMode?: string
         renderRawStreaming?: boolean
+        displayRow?: DisplayRowReads
     } = $props()
+    untrack(() => displayRow && probedDisplayRows.push(displayRow))
 
     onMount(() => onCaptureSettled?.(1))
     $effect(() => {

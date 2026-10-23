@@ -131,6 +131,16 @@ impl RevisionReadLease {
             .publish_detached_asset_roots(&self.lease, roots)
     }
 
+    pub(crate) fn publish_detached_gallery_file_root(&self, kind: &str, key: &str) -> StoreResult<()> {
+        let mut roots = AssetRootSet::default();
+        if let Some(alias) = super::query::read_asset_alias(&self.connection, kind, key, &self.target)? {
+            if let Some(hash) = alias.value.object_hash {
+                roots.object_hashes.insert(hash);
+            }
+        }
+        self.active_readers.publish_detached_asset_roots(&self.lease, roots)
+    }
+
     #[cfg(feature = "native-official-publication")]
     pub(crate) fn asset_roots(&self) -> StoreResult<AssetRootSet> {
         collect_asset_roots_for_generation(&self.connection, &self.target.generation)
@@ -587,7 +597,18 @@ pub(super) fn collect_asset_roots(
 ) -> StoreResult<AssetRootSet> {
     #[cfg(test)]
     ASSET_ROOT_SCANS.with(|count| count.set(count.get() + 1));
-    collect_library_asset_roots(connection, None)
+    collect_library_asset_roots(connection, None, None)
+}
+
+/// The library's roots without the active generation's `asset` aliases named in `excluded` and
+/// their units, so what else holds their objects can be told apart from the aliases themselves.
+pub(super) fn collect_asset_roots_without_aliases(
+    connection: &Connection,
+    excluded: &BTreeSet<String>,
+) -> StoreResult<AssetRootSet> {
+    #[cfg(test)]
+    ASSET_ROOT_SCANS.with(|count| count.set(count.get() + 1));
+    collect_library_asset_roots(connection, None, Some(excluded))
 }
 
 pub(super) fn collect_plugin_asset_roots(connection: &Connection) -> StoreResult<AssetRootSet> {
@@ -659,7 +680,7 @@ pub(super) fn merge_asset_roots(target: &mut AssetRootSet, source: AssetRootSet)
 }
 
 pub(super) fn collect_asset_roots_with_plugin_cache(connection: &Connection, plugins: &AssetRootSet) -> StoreResult<AssetRootSet> {
-    collect_library_asset_roots(connection, Some(plugins))
+    collect_library_asset_roots(connection, Some(plugins), None)
 }
 
 pub(super) fn collect_preserved_source_roots(repository:&Path)->AssetRootSet {
@@ -696,7 +717,7 @@ fn collect_asset_roots_for_generation(
     connection: &Connection,
     generation: &str,
 ) -> StoreResult<AssetRootSet> {
-    collect_generation_asset_roots(connection, generation, None)
+    collect_generation_asset_roots(connection, generation, None, None)
 }
 
 /// Generation tables whose rows can reference a CAS object. The other
@@ -718,6 +739,7 @@ pub(super) const ROOT_GENERATION_TABLES: [&str; 8] = [
 fn collect_library_asset_roots(
     connection: &Connection,
     plugins: Option<&AssetRootSet>,
+    excluded: Option<&BTreeSet<String>>,
 ) -> StoreResult<AssetRootSet> {
     let mut roots = AssetRootSet::default();
     let query = ROOT_GENERATION_TABLES
@@ -726,14 +748,16 @@ fn collect_library_asset_roots(
     let mut statement = connection.prepare(&query)?;
     let generations = statement.query_map([], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
+    let active = excluded.map(|_| active_generation(connection)).transpose()?;
     for generation in generations {
-        merge_asset_roots(&mut roots, collect_generation_asset_roots(connection, &generation, plugins)?);
+        let excluded = excluded.filter(|_| active.as_deref() == Some(generation.as_str()));
+        merge_asset_roots(&mut roots, collect_generation_asset_roots(connection, &generation, plugins, excluded)?);
     }
     if table_exists(connection, "server_sync_objects")? {
         scan_optional_hash_column(connection, "SELECT hash FROM server_sync_objects", [],
             HashTarget::Object, &mut roots)?;
     }
-    merge_asset_roots(&mut roots, collect_lww_asset_roots(connection)?);
+    merge_asset_roots(&mut roots, collect_lww_asset_roots(connection, excluded)?);
     Ok(roots)
 }
 
@@ -743,6 +767,7 @@ fn collect_generation_asset_roots(
     connection: &Connection,
     generation: &str,
     plugins: Option<&AssetRootSet>,
+    excluded: Option<&BTreeSet<String>>,
 ) -> StoreResult<AssetRootSet> {
     let mut roots = AssetRootSet::default();
     let scope_params: &[&dyn rusqlite::ToSql] = &[&generation];
@@ -757,8 +782,9 @@ fn collect_generation_asset_roots(
     )?;
     scan_asset_alias_roots(
         connection,
-        "SELECT logical_key, object_hash FROM asset_aliases WHERE generation = ?1",
+        "SELECT logical_key, object_hash, kind FROM asset_aliases WHERE generation = ?1",
         scope_params,
+        excluded,
         &mut roots,
     )?;
     // An archived character keeps no scannable detail, so its payload object and
@@ -815,7 +841,7 @@ fn collect_generation_asset_roots(
     Ok(roots)
 }
 
-fn collect_lww_asset_roots(connection: &Connection) -> StoreResult<AssetRootSet> {
+fn collect_lww_asset_roots(connection: &Connection, excluded: Option<&BTreeSet<String>>) -> StoreResult<AssetRootSet> {
     use risunest_sync_wire::unit::{UnitKey, UnitValue};
     let mut roots = AssetRootSet::default();
     let mut object_units = Vec::new();
@@ -826,6 +852,10 @@ fn collect_lww_asset_roots(connection: &Connection) -> StoreResult<AssetRootSet>
         while let Some(row) = rows.next()? {
             let result = (|| -> StoreResult<()> {
                 let key:UnitKey=row.get::<_,String>(0)?.try_into().map_err(|error:risunest_sync_wire::WireError|validation(error.to_string()))?;
+                if table == "lww_units" && excluded.is_some_and(|excluded| key.as_str().starts_with("[\"asset\",")
+                    && matches!(key.components().as_slice(), [_, logical_key] if excluded.contains(logical_key))) {
+                    return Ok(());
+                }
                 let value:UnitValue=serde_json::from_str(&row.get::<_,String>(1)?)?;
                 if let Some((decoded,json))=value.validated_inline().map_err(|error|validation(error.to_string()))? {
                     observe_json_value(&inline_root_json(&decoded,json)?,None,&mut roots);
@@ -1091,11 +1121,17 @@ fn scan_asset_alias_roots<P: rusqlite::Params>(
     connection: &Connection,
     query: &str,
     params: P,
+    excluded: Option<&BTreeSet<String>>,
     roots: &mut AssetRootSet,
 ) -> StoreResult<()> {
     let mut statement = connection.prepare(query)?;
     let mut rows = statement.query(params)?;
     while let Some(row) = rows.next()? {
+        if let (Some(excluded), ScannedText::Text(key), ScannedText::Text(kind)) = (excluded, scanned_text(row, 0)?, scanned_text(row, 2)?) {
+            if kind == "asset" && excluded.contains(&key) {
+                continue;
+            }
+        }
         match scanned_text(row, 1)? {
             ScannedText::Text(object_hash) => {
                 roots.object_hashes.insert(object_hash);
@@ -1489,8 +1525,7 @@ impl super::PersistentStore {
                     Ok((key,value))
                 });
                 let inventory=super::external_capture::streamed_unit_dependency_inventory(original_units,&|hash| {
-                    let length:Option<i64>=source.query_row("SELECT length(body) FROM message_page_objects WHERE hash=?1",[hash],|row|row.get(0)).optional()?;
-                    if length.is_some_and(|length|length<0 || length as u64>risunest_sync_wire::MAX_METADATA_BYTES as u64) {return Err(validation("snapshot control exceeds its byte limit"));}
+                    // Content bodies may exceed the Sync reference-page bound; the inventory validates each format.
                     Ok(source.query_row("SELECT body FROM message_page_objects WHERE hash=?1",[hash],|row|row.get(0)).optional()?)
                 },&|hash| {
                     let size:Option<i64>=source.query_row("SELECT byte_size FROM asset_objects WHERE object_hash=?1 UNION ALL SELECT length(body) FROM message_page_objects WHERE hash=?1 LIMIT 1",[hash],|row|row.get(0)).optional()?;
@@ -1524,11 +1559,20 @@ impl super::PersistentStore {
                     super::lww::insert_replacement_source(&tx,&stage.staging_id,super::lww::STAGED_SOURCE,&key,&value)?;
                 }
                 drop(cursor);
+                // Inventory validation includes controls that do not receive message-page verification marks.
+                let mut controls=source.prepare("SELECT body FROM message_page_objects WHERE hash=?1")?;
+                for hash in inventory.controls.keys() {
+                    cancelled(probe)?;
+                    let body:Option<Vec<u8>>=controls.query_row([hash],|row|row.get(0)).optional()?;
+                    if let Some(body)=body {super::message_pages::put_object(&tx,hash,&body)?;}
+                }
                 let mut statement = source.prepare("SELECT o.hash,o.body FROM message_page_objects o JOIN message_page_verified_objects v ON v.hash=o.hash")?;
                 let mut rows = statement.query([])?;
                 while let Some(row) = rows.next()? {
                     cancelled(probe)?;
-                    super::message_pages::put_object(&tx,&row.get::<_,String>(0)?,&row.get::<_,Vec<u8>>(1)?)?;
+                    let hash:String=row.get(0)?;
+                    if inventory.controls.contains_key(&hash) {continue;}
+                    super::message_pages::put_object(&tx,&hash,&row.get::<_,Vec<u8>>(1)?)?;
                 }
                 cancelled(probe)?;
                 tx.commit()?;
@@ -1737,7 +1781,7 @@ mod lww_inline_root_tests {
             let steps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let observed = steps.clone();
             connection.progress_handler(1, Some(move || { observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed); false })).unwrap();
-            let roots = collect_lww_asset_roots(&connection).unwrap();
+            let roots = collect_lww_asset_roots(&connection, None).unwrap();
             connection.progress_handler(0, None::<fn() -> bool>).unwrap();
             assert!(!roots.retain_all_objects);
             assert_eq!(roots.object_hashes, [body, dependency].into_iter().collect());
@@ -1776,7 +1820,7 @@ mod lww_inline_root_tests {
             let expected = decoded_value_roots(&value);
             reached.0 += usize::from(!expected.legacy_asset_keys.is_empty());
             reached.1 += usize::from(expected.retain_all_objects);
-            assert_eq!(collect_lww_asset_roots(&connection).unwrap(), expected, "{value:?}");
+            assert_eq!(collect_lww_asset_roots(&connection, None).unwrap(), expected, "{value:?}");
         }
         assert_eq!(reached, (4, 2), "the cases must reach both outcomes");
     }

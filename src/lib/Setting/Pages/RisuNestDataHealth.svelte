@@ -15,6 +15,7 @@
         discardNativeDataHealthIntent,
         completeNativeDataHealthIntent,
         getNativeDataHealthResult,
+        holdNativeDataHealthScan,
         listNativeDataHealthJournals,
         planNativeDataHealthRepair,
         previewNativeDataHealthRepair,
@@ -63,6 +64,7 @@
         scan: scanNativeDataHealth,
         deepScan: deepScanNativeDataHealth,
         cancel: cancelNativeDataHealthScan,
+        holdBackground: holdNativeDataHealthScan,
         planRepair: planNativeDataHealthRepair,
         previewRepair: previewNativeDataHealthRepair,
         applyRepair: (selection, snapshot, revision, scannedAt) => repair(

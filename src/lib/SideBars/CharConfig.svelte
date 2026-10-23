@@ -1,7 +1,13 @@
 <script lang="ts">
+    import { imageAliases, selectedImageFormat } from "src/ts/media/imageFormats"
+    import { mapSelectedFiles } from "src/ts/util"
+    import AssetGallery from "src/lib/Gallery/AssetGallery.svelte";
+    import { galleryText } from "src/ts/gallery/strings";
+    import type { AssetSection } from "src/ts/gallery/assetGallery";
+    let galleryOwner = $state<{ id: string; section: AssetSection } | null>(null)
     import { language } from "../../lang";
     import { tokenizeAccurate } from "../../ts/tokenizer";
-    import { getCurrentCharacter, saveImage as saveAsset, type character } from "../../ts/storage/database.svelte";
+    import { getCurrentCharacter, type character } from "../../ts/storage/database.svelte";
     import { DBState } from 'src/ts/stores.svelte';
     import { untrack } from 'svelte';
     import { CharConfigSubMenu, MobileGUI, ShowRealmFrameStore, selectedCharID, hypaV3ModalOpen } from "../../ts/stores.svelte";
@@ -16,7 +22,7 @@
     import Help from "../Others/Help.svelte";
     import { exportChar } from "src/ts/characterCards";
     import { getElevenTTSVoices, getWebSpeechTTSVoices, getVOICEVOXVoices, oaiVoices, getNovelAIVoices } from "src/ts/process/tts";
-    import { getFileSrc } from "src/ts/globalApi.svelte";
+    import { getFileSrc, saveAsset } from "src/ts/globalApi.svelte";
 
     import TextInput from "../UI/GUI/TextInput.svelte";
     import NumberInput from "../UI/GUI/NumberInput.svelte";
@@ -35,6 +41,7 @@
     import SliderInput from "../UI/GUI/SliderInput.svelte";
     import Toggles from "./Toggles.svelte";
     import { convertCharacterToModule } from "src/ts/interchangeability";
+    import OnboardingEditor from "./OnboardingEditor.svelte";
     import { mutatePersistentCharacterDetail } from "src/ts/storage/persistentDataRuntime.svelte";
 
     let iconRemoveMode = $state(false)
@@ -309,6 +316,8 @@
         </button>
     </div>
 
+    <div class="flex justify-end mb-2"><Button styled="outlined" size="sm" onclick={() => { galleryOwner = { id: DBState.db.characters[$selectedCharID].chaId, section: viewSubMenu === 0 ? 'icons' : viewSubMenu === 1 ? 'emotions' : 'assets' } }}>{galleryText().gallery}</Button></div>
+
     {#if viewSubMenu === 0}
         <div class="p-2 border-darkborderc border rounded-md flex flex-wrap gap-2">
                 {#if DBState.db.characters[$selectedCharID].image !== '' && DBState.db.characters[$selectedCharID].image}
@@ -494,14 +503,11 @@
             {#if DBState.db.newImageHandlingBeta}
             <CheckInput bind:check={DBState.db.characters[$selectedCharID].prebuiltAssetCommand} name={language.insertAssetPrompt}/>
 
-            {#if DBState.db.characters[$selectedCharID].prebuiltAssetCommand}
-
             <span class="text-textcolor mt-2">{language.assetStyle}</span>
             <SelectInput className="mb-2" bind:value={DBState.db.characters[$selectedCharID].prebuiltAssetStyle}>
                 <OptionInput value="">{language.static}</OptionInput>
                 <OptionInput value="dynamic">{language.dynamic}</OptionInput>
             </SelectInput>
-            {/if}
             {/if}
             <div class="w-full max-w-full border border-selected rounded-md p-2 mt-2">
                 <table class="contain w-full max-w-full tabler mt-2">
@@ -512,18 +518,20 @@
                             <button class="hover:text-green-500" onclick={async () => {
                                 const characterId = DBState.db.characters[$selectedCharID].chaId
                                 {
-                                    const da = await selectMultipleFile(['png', 'webp', 'mp4', 'mp3', 'gif', 'jpeg', 'jpg', 'ttf', 'otf', 'css', 'webm', 'woff', 'woff2', 'svg', 'avif'])
+                                    const failures: string[] = []
+                                    const da = await selectMultipleFile([...imageAliases, 'mp4', 'mp3', 'ttf', 'otf', 'css', 'webm', 'woff', 'woff2', 'svg'], { failures })
                                     if(!da?.length){
                                         return
                                     }
                                     const assets: [string, string, string][] = []
-                                    for(const f of da){
+                                    await mapSelectedFiles(da, async f => {
                                         const img = f.data
                                         const name = f.name
-                                        const extension = name.split('.').pop().toLowerCase()
+                                        const extension = selectedImageFormat(img, name)?.ext ?? name.split('.').pop().toLowerCase()
                                         const imgp = await saveAsset(img,'', extension)
                                         assets.push([name, imgp, extension])
-                                    }
+                                    }, failures)
+                                    if (!assets.length) return
                                     await mutatePersistentCharacterDetail(characterId, 'add-character-assets', ({ character }) => {
                                         (character.additionalAssets ??= []).push(...assets)
                                     })
@@ -632,6 +640,8 @@
 
         <span class="text-textcolor mt-4">{language.triggerScript} <Help key="triggerScript"/></span>
         <TriggerList bind:value={(DBState.db.characters[$selectedCharID] as character).triggerscript} lowLevelAble={DBState.db.characters[$selectedCharID].lowLevelAccess} />
+
+        <OnboardingEditor />
 
 
         {#if DBState.db.characters[$selectedCharID].virtualscript || DBState.db.showUnrecommended}
@@ -1211,3 +1221,7 @@
     }
 
 </style>
+
+{#if galleryOwner}
+    <AssetGallery owner={{ kind: 'character', id: galleryOwner.id }} initialSection={galleryOwner.section} onclose={() => galleryOwner = null}/>
+{/if}

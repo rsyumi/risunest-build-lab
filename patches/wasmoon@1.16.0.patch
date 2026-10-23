@@ -1,0 +1,108 @@
+diff --git a/dist/factory.d.ts b/dist/factory.d.ts
+index 55d5591b1c25f0b28294f5a10aa50de4af9e8680..8af2b87d98bbc4e65e60e0ab512634b87f073697 100644
+--- a/dist/factory.d.ts
++++ b/dist/factory.d.ts
+@@ -3,7 +3,7 @@ import LuaEngine from './engine';
+ import LuaWasm from './luawasm';
+ export default class LuaFactory {
+     private luaWasmPromise;
+-    constructor(customWasmUri?: string, environmentVariables?: EnvironmentVariables);
++    constructor(customWasmUri?: string, environmentVariables?: EnvironmentVariables, compiledModule?: WebAssembly.Module);
+     mountFile(path: string, content: string | ArrayBufferView): Promise<void>;
+     mountFileSync(luaWasm: LuaWasm, path: string, content: string | ArrayBufferView): void;
+     createEngine(options?: ConstructorParameters<typeof LuaEngine>[1]): Promise<LuaEngine>;
+diff --git a/dist/index.js b/dist/index.js
+index 571ad16cfe6e769733172c5650dba0e45f407638..0fc56550b23dee44436fe6a05dc659841d149b0d 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -142,6 +142,7 @@
+             this.lua.lua_setfield(this.address, index, name);
+         }
+         async run(argCount = 0, options) {
++            if (this.lua.module.risuRun) return this.lua.module.risuRun(this, argCount, options);
+             const originalTimeout = this.timeout;
+             try {
+                 if ((options === null || options === void 0 ? void 0 : options.timeout) !== undefined) {
+@@ -628,7 +629,11 @@
+             this.functionRegistry = typeof FinalizationRegistry !== 'undefined'
+                 ? new FinalizationRegistry((func) => {
+                     if (!this.thread.isClosed()) {
+-                        this.thread.lua.luaL_unref(this.thread.address, LUA_REGISTRYINDEX, func);
++                        if (this.thread.lua.module.risuRelease) {
++                            this.thread.lua.module.risuRelease(() => { if (!this.thread.isClosed()) this.thread.lua.luaL_unref(this.thread.address, LUA_REGISTRYINDEX, func); });
++                        } else {
++                            this.thread.lua.luaL_unref(this.thread.address, LUA_REGISTRYINDEX, func);
++                        }
+                     }
+                 })
+                 : undefined;
+@@ -732,7 +737,9 @@
+             var _a;
+             thread.lua.lua_pushvalue(thread.address, index);
+             const func = thread.lua.luaL_ref(thread.address, LUA_REGISTRYINDEX);
++            const risuInvocation = thread.lua.module.risuInvocation?.();
+             const jsFunc = (...args) => {
++                if (thread.lua.module.risuCall) return thread.lua.module.risuCall(this.callbackContext, func, args, risuInvocation);
+                 var _a;
+                 if (this.callbackContext.isClosed()) {
+                     console.warn('Tried to call a function after closing lua state');
+@@ -1269,7 +1276,7 @@
+     if(e.locateFile){if(M="glue.wasm",!Oa(M)){var Pa=M;M=e.locateFile?e.locateFile(Pa,r):r+Pa;}}else M=(new URL("glue.wasm",(typeof document === 'undefined' && typeof location === 'undefined' ? require('u' + 'rl').pathToFileURL(__filename).href : typeof document === 'undefined' ? location.href : (_documentCurrentScript && _documentCurrentScript.src || new URL('index.js', document.baseURI).href)))).href;function Qa(a){if(ka)return ka(a);throw "both async and sync fetching of the wasm failed";}
+     function Ra(a){if(fa||k){if("function"==typeof fetch&&!oa(a))return fetch(a,{credentials:"same-origin"}).then(b=>{if(!b.ok)throw "failed to load wasm binary file at '"+a+"'";return b.arrayBuffer()}).catch(()=>Qa(a));if(ja)return new Promise((b,c)=>{ja(a,d=>b(new Uint8Array(d)),c);})}return Promise.resolve().then(()=>Qa(a))}
+     function Sa(a,b,c){return Ra(a).then(d=>WebAssembly.instantiate(d,b)).then(d=>d).then(c,d=>{z(`failed to asynchronously prepare wasm: ${d}`);oa(M)&&z(`warning: Loading from a file URI (${M}) is not supported in most browsers. See https://emscripten.org/docs/getting_started/FAQ.html#how-do-i-run-a-local-webserver-for-testing-why-does-my-program-stall-in-downloading-or-preparing`);g(d);})}
+-    function Ta(a,b){var c=M;return "function"!=typeof WebAssembly.instantiateStreaming||Oa(c)||oa(c)||n||"function"!=typeof fetch?Sa(c,a,b):fetch(c,{credentials:"same-origin"}).then(d=>WebAssembly.instantiateStreaming(d,a).then(b,function(f){z(`wasm streaming compile failed: ${f}`);z("falling back to ArrayBuffer instantiation");return Sa(c,a,b)}))}
++    function Ta(a,b){if(e.risuCompiledModule)return WebAssembly.instantiate(e.risuCompiledModule,a).then(instance=>b({instance}));var c=M;return "function"!=typeof WebAssembly.instantiateStreaming||Oa(c)||oa(c)||n||"function"!=typeof fetch?Sa(c,a,b):fetch(c,{credentials:"same-origin"}).then(d=>WebAssembly.instantiateStreaming(d,a).then(b,function(f){z(`wasm streaming compile failed: ${f}`);z("falling back to ArrayBuffer instantiation");return Sa(c,a,b)}))}
+     function D(a,b){Object.getOwnPropertyDescriptor(e,a)||Object.defineProperty(e,a,{configurable:!0,get(){g(`\`Module.${a}\` has been replaced by \`${b}\``+" (the initial value can be provided on Module, but after startup the value is only looked for on a local variable of that name)");}});}function C(a){Object.getOwnPropertyDescriptor(e,a)&&g(`\`Module.${a}\` was supplied but \`${a}\` not included in INCOMING_MODULE_JS_API`);}
+     function Ua(a){return "FS_createPath"===a||"FS_createDataFile"===a||"FS_createPreloadedFile"===a||"FS_unlink"===a||"addRunDependency"===a||"FS_createLazyFile"===a||"FS_createDevice"===a||"removeRunDependency"===a}function Va(a,b){"undefined"!==typeof globalThis&&Object.defineProperty(globalThis,a,{configurable:!0,get(){Wa(`\`${a}\` is not longer defined by emscripten. ${b}`);}});}Va("buffer","Please use HEAP8.buffer or wasmMemory.buffer");Va("asm","Please use wasmExports instead");
+     function Xa(a){Object.getOwnPropertyDescriptor(e,a)||Object.defineProperty(e,a,{configurable:!0,get(){var b=`'${a}' was not exported. add it to EXPORTED_RUNTIME_METHODS (see the Emscripten FAQ)`;Ua(a)&&(b+=". Alternatively, forcing filesystem support (-sFORCE_FILESYSTEM) can export this for you");g(b);}});}function pa(a){this.name="ExitStatus";this.message=`Program terminated with exit(${a})`;this.status=a;}
+@@ -1361,7 +1368,7 @@
+     "%G":l=>y(l),"%H":l=>h(l.$,2),"%I":l=>{l=l.$;0==l?l=12:12<l&&(l-=12);return h(l,2)},"%j":l=>{for(var w=0,v=0;v<=l.aa-1;w+=(Vb(l.P+1900)?cc:dc)[v++]);return h(l.la+w,3)},"%m":l=>h(l.aa+1,2),"%M":l=>h(l.Ua,2),"%n":()=>"\n","%p":l=>0<=l.$&&12>l.$?"AM":"PM","%S":l=>h(l.Va,2),"%t":()=>"\t","%u":l=>l.H||7,"%U":l=>h(Math.floor((l.O+7-l.H)/7),2),"%V":l=>{var w=Math.floor((l.O+7-(l.H+6)%7)/7);2>=(l.H+371-l.O-2)%7&&w++;if(w)53==w&&(v=(l.H+371-l.O)%7,4==v||3==v&&Vb(l.P)||(w=1));else {w=52;var v=(l.H+7-l.O-1)%
+     7;(4==v||5==v&&Vb(l.P%400-1))&&w++;}return h(w,2)},"%w":l=>l.H,"%W":l=>h(Math.floor((l.O+7-(l.H+6)%7)/7),2),"%y":l=>(l.P+1900).toString().substring(2),"%Y":l=>l.P+1900,"%z":l=>{l=l.Ta;var w=0<=l;l=Math.abs(l)/60;return (w?"+":"-")+String("0000"+(l/60*100+l%60)).slice(-4)},"%Z":l=>l.Wa,"%%":()=>"%"};c=c.replace(/%%/g,"\x00\x00");for(x in q)c.includes(x)&&(c=c.replace(new RegExp(x,"g"),q[x](d)));c=c.replace(/\0\0/g,"%");x=lb(c,!1);if(x.length>b)return 0;ec(x,a);return x.length-1},system:a=>{if(n){if(!a)return 1;
+     a=X(a);if(!a.length)return 0;a=require$1("child_process").ub(a,[],{tb:!0,stdio:"inherit"});var b=(c,d)=>c<<8|d;return null===a.status?b(0,(c=>{switch(c){case "SIGHUP":return 1;case "SIGQUIT":return 3;case "SIGFPE":return 8;case "SIGKILL":return 9;case "SIGALRM":return 14;case "SIGTERM":return 15}return 2})(a.signal)):a.status<<8|0}if(!a)return 0;F[lc()>>2]=52;return -1}},L=function(){var a={env:oc,wasi_snapshot_preview1:oc};Ma("wasm-instantiate");var b=e;Ta(a,function(c){u(e===b,"the Module object should not be replaced during async compilation - perhaps the order of HTML elements is wrong?");
+-    b=null;L=c.instance.exports;ra=L.memory;u(ra,"memory not found in wasm exports");ya();Z=L.__indirect_function_table;u(Z,"table not found in wasm exports");Fa.unshift(L.__wasm_call_ctors);Na("wasm-instantiate");}).catch(ba);return {}}();e._lua_checkstack=J("lua_checkstack");e._lua_xmove=J("lua_xmove");e._lua_atpanic=J("lua_atpanic");e._lua_version=J("lua_version");e._lua_absindex=J("lua_absindex");e._lua_gettop=J("lua_gettop");e._lua_settop=J("lua_settop");e._lua_closeslot=J("lua_closeslot");
++    b=null;L=c.instance.exports;e.risuAsyncifyExports=L;ra=L.memory;u(ra,"memory not found in wasm exports");ya();Z=L.__indirect_function_table;u(Z,"table not found in wasm exports");Fa.unshift(L.__wasm_call_ctors);Na("wasm-instantiate");}).catch(ba);return {}}();e._lua_checkstack=J("lua_checkstack");e._lua_xmove=J("lua_xmove");e._lua_atpanic=J("lua_atpanic");e._lua_version=J("lua_version");e._lua_absindex=J("lua_absindex");e._lua_gettop=J("lua_gettop");e._lua_settop=J("lua_settop");e._lua_closeslot=J("lua_closeslot");
+     e._lua_rotate=J("lua_rotate");e._lua_copy=J("lua_copy");e._lua_pushvalue=J("lua_pushvalue");e._lua_type=J("lua_type");e._lua_typename=J("lua_typename");e._lua_iscfunction=J("lua_iscfunction");e._lua_isinteger=J("lua_isinteger");e._lua_isnumber=J("lua_isnumber");e._lua_isstring=J("lua_isstring");e._lua_isuserdata=J("lua_isuserdata");e._lua_rawequal=J("lua_rawequal");e._lua_arith=J("lua_arith");e._lua_compare=J("lua_compare");e._lua_stringtonumber=J("lua_stringtonumber");e._lua_tonumberx=J("lua_tonumberx");
+     e._lua_tointegerx=J("lua_tointegerx");e._lua_toboolean=J("lua_toboolean");e._lua_tolstring=J("lua_tolstring");e._lua_rawlen=J("lua_rawlen");e._lua_tocfunction=J("lua_tocfunction");e._lua_touserdata=J("lua_touserdata");e._lua_tothread=J("lua_tothread");e._lua_topointer=J("lua_topointer");e._lua_pushnil=J("lua_pushnil");e._lua_pushnumber=J("lua_pushnumber");e._lua_pushinteger=J("lua_pushinteger");e._lua_pushlstring=J("lua_pushlstring");e._lua_pushstring=J("lua_pushstring");e._lua_pushcclosure=J("lua_pushcclosure");
+     e._lua_pushboolean=J("lua_pushboolean");e._lua_pushlightuserdata=J("lua_pushlightuserdata");e._lua_pushthread=J("lua_pushthread");e._lua_getglobal=J("lua_getglobal");e._lua_gettable=J("lua_gettable");e._lua_getfield=J("lua_getfield");e._lua_geti=J("lua_geti");e._lua_rawget=J("lua_rawget");e._lua_rawgeti=J("lua_rawgeti");e._lua_rawgetp=J("lua_rawgetp");e._lua_createtable=J("lua_createtable");e._lua_getmetatable=J("lua_getmetatable");e._lua_getiuservalue=J("lua_getiuservalue");e._lua_setglobal=J("lua_setglobal");
+@@ -1392,8 +1399,9 @@
+     })();
+ 
+     class LuaWasm {
+-        static async initialize(customWasmFileLocation, environmentVariables) {
++        static async initialize(customWasmFileLocation, environmentVariables, compiledModule) {
+             const module = await initWasmModule({
++                risuCompiledModule: compiledModule,
+                 locateFile: (path, scriptDirectory) => {
+                     return customWasmFileLocation || scriptDirectory + path;
+                 },
+@@ -1662,7 +1670,7 @@
+     var version = '1.16.0';
+ 
+     class LuaFactory {
+-        constructor(customWasmUri, environmentVariables) {
++        constructor(customWasmUri, environmentVariables, compiledModule) {
+             var _a;
+             if (customWasmUri === undefined) {
+                 const isBrowser = (typeof window === 'object' && typeof window.document !== 'undefined') ||
+@@ -1671,7 +1679,7 @@
+                     customWasmUri = `https://unpkg.com/wasmoon@${version}/dist/glue.wasm`;
+                 }
+             }
+-            this.luaWasmPromise = LuaWasm.initialize(customWasmUri, environmentVariables);
++            this.luaWasmPromise = LuaWasm.initialize(customWasmUri, environmentVariables, compiledModule);
+         }
+         async mountFile(path, content) {
+             this.mountFileSync(await this.getLuaModule(), path, content);
+diff --git a/dist/luawasm.d.ts b/dist/luawasm.d.ts
+index 5b8d58f67f1c6c6b3232539f1139a29588046e0e..edd0eee7a5dc5e1e35e4cd3f868b375f956ecc0a 100644
+--- a/dist/luawasm.d.ts
++++ b/dist/luawasm.d.ts
+@@ -14,7 +14,7 @@ interface LuaEmscriptenModule extends EmscriptenModule {
+     _realloc: (pointer: number, size: number) => number;
+ }
+ export default class LuaWasm {
+-    static initialize(customWasmFileLocation?: string, environmentVariables?: EnvironmentVariables): Promise<LuaWasm>;
++    static initialize(customWasmFileLocation?: string, environmentVariables?: EnvironmentVariables, compiledModule?: WebAssembly.Module): Promise<LuaWasm>;
+     module: LuaEmscriptenModule;
+     luaL_checkversion_: (L: LuaState, ver: number, sz: number) => void;
+     luaL_getmetafield: (L: LuaState, obj: number, e: string | null) => LuaType;

@@ -136,12 +136,34 @@ fn prepare_png_portrait(
     if bytes.len() > limits.max_input_bytes {
         return Err(NativeJobError::too_large("card", "character portrait exceeds the PNG input limit"));
     }
+    if bytes.starts_with(PNG_SIGNATURE) {
+        // PNG card export changes metadata only. Validate every image row
+        // without allocating a full decoded surface or limiting its pixel count.
+        parse_chunks(&bytes)?;
+        let mut decoder = png::Decoder::new(Cursor::new(bytes.as_slice()));
+        decoder.set_limits(png::Limits { bytes: (limits.max_alloc / 2) as usize });
+        decoder.set_ignore_text_chunk(true);
+        decoder.set_ignore_iccp_chunk(true);
+        let decode_error = |error: png::DecodingError| match error {
+            png::DecodingError::LimitsExceeded => NativeJobError::too_large("card", "PNG validation exceeds its memory limit"),
+            error => invalid_input(format!("character portrait is invalid: {error}")),
+        };
+        let mut reader = decoder.read_info().map_err(decode_error)?;
+        if reader.output_line_size(reader.info().width).is_none_or(|bytes| bytes as u64 > limits.max_alloc / 4) {
+            return Err(NativeJobError::too_large("card", "PNG row exceeds its memory limit"));
+        }
+        loop {
+            if is_cancelled() { return Err(cancelled("PNG export cancelled during portrait validation")); }
+            if reader.next_row().map_err(decode_error)?.is_none() { break; }
+        }
+        reader.finish().map_err(decode_error)?;
+        drop(reader);
+        return Ok(bytes);
+    }
     let mut reader = image::ImageReader::new(Cursor::new(bytes.as_slice()))
         .with_guessed_format()
         .map_err(|error| invalid_input(format!("character portrait is invalid: {error}")))?;
-    let source_format = reader
-        .format()
-        .ok_or_else(|| invalid_input("character portrait format is unsupported"))?;
+    reader.format().ok_or_else(|| invalid_input("character portrait format is unsupported"))?;
     let mut image_limits = image::Limits::default();
     image_limits.max_image_width = Some(limits.max_dimension);
     image_limits.max_image_height = Some(limits.max_dimension);
@@ -162,11 +184,6 @@ fn prepare_png_portrait(
         .map_err(portrait_decode_error)?;
     if is_cancelled() {
         return Err(cancelled("PNG export cancelled before portrait encoding"));
-    }
-    if source_format == image::ImageFormat::Png {
-        drop(decoded);
-        parse_chunks(&bytes)?;
-        return Ok(bytes);
     }
     let rgba = decoded.to_rgba8();
     let mut png = Vec::new();
@@ -243,6 +260,7 @@ pub(crate) fn export_character_png(
     handoff_directory: &Path,
     destination_path: Option<&Path>,
     job: &JobControl,
+    rendition: Option<&super::portrait_rendition::PortraitRendition>,
 ) -> Result<JobResultSummary, NativeJobError> {
     export_character_png_with_release(
         prepared,
@@ -254,6 +272,7 @@ pub(crate) fn export_character_png(
         job,
         PngCardLimits::default(),
         PreparedRisuSaveExport::release_reader,
+        rendition,
     )
 }
 
@@ -268,6 +287,7 @@ fn export_character_png_with_release<F>(
     job: &JobControl,
     limits: PngCardLimits,
     release_reader: F,
+    rendition: Option<&super::portrait_rendition::PortraitRendition>,
 ) -> Result<JobResultSummary, NativeJobError>
 where
     F: FnOnce(&mut PreparedRisuSaveExport) -> StoreResult<()>,
@@ -298,6 +318,7 @@ where
                 &repository,
             )?;
             let portrait = portrait_bytes(&projected.value, reader, &repository, job)?;
+            let portrait = super::portrait_rendition::apply(portrait, rendition)?;
             (portrait, sources)
         };
         let assets = metadata
@@ -493,11 +514,7 @@ fn portrait_bytes(
     repository: &PayloadCas,
     job: &JobControl,
 ) -> Result<Vec<u8>, NativeJobError> {
-    let Some(key) = character
-        .get("image")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-    else {
+    let Some(key) = character_json_export::available_portrait_key(character, reader, repository)? else {
         return Ok(FALLBACK_PORTRAIT.to_vec());
     };
     let alias =
@@ -924,9 +941,22 @@ mod tests {
     fn valid_png_portrait_reuses_its_owned_buffer() {
         let png = synthetic_png();
         let pointer = png.as_ptr();
-        let prepared = prepare_png_portrait(png, PngExportLimits::default(), || false).unwrap();
+        let limits = PngExportLimits { max_pixels: 1, max_dimension: 1, ..PngExportLimits::default() };
+        let prepared = prepare_png_portrait(png, limits, || false).unwrap();
         assert_eq!(prepared.as_ptr(), pointer);
         assert!(parse_chunks(&prepared).is_ok());
+    }
+
+    #[test]
+    fn png_row_validation_keeps_memory_and_cancellation_limits() {
+        let checks = std::cell::Cell::new(0);
+        let error = prepare_png_portrait(synthetic_png(), PngExportLimits::default(), || {
+            checks.set(checks.get() + 1);
+            checks.get() > 1
+        }).unwrap_err();
+        assert_eq!(error.code, "cancelled");
+        let limits = PngExportLimits { max_alloc: 1, ..PngExportLimits::default() };
+        assert!(prepare_png_portrait(synthetic_png(), limits, || false).is_err());
     }
 
     #[test]
@@ -1033,6 +1063,7 @@ mod tests {
                         message: "injected checkpoint failure".to_owned(),
                     })
                 },
+                None,
             )
             .unwrap_err();
 
@@ -1070,6 +1101,7 @@ mod tests {
             &directory.path().join("handoffs"),
             Some(&destination),
             &job,
+            None,
         )
         .unwrap_err();
         assert_eq!(error.code, "cancelled");
@@ -1136,6 +1168,7 @@ mod tests {
                 &owned, &directory.path().join("handoffs"), Some(&destination),
                 &JobRegistry::default().create(JobKind::ExportCharacterCard).unwrap(),
                 refused_limits, PreparedRisuSaveExport::release_reader,
+                None,
             ).unwrap_err();
             assert_eq!(refused.code, "payload-too-large");
             assert!(!destination.exists());
@@ -1150,6 +1183,7 @@ mod tests {
             &job,
             limits,
             PreparedRisuSaveExport::release_reader,
+            None,
         )
         .unwrap();
         let parse_root = directory.path().join("parse");
@@ -1171,6 +1205,68 @@ mod tests {
         let card: Value = serde_json::from_slice(&card).unwrap();
         assert_eq!(card["data"]["assets"][0]["uri"], "__asset:1");
         assert_eq!(card["data"]["assets"][1]["uri"], "ccdefault:");
+    }
+
+    #[test]
+    fn unreadable_portrait_exports_the_fallback_portrait() {
+        let exported_portrait = |state: &str| {
+            let directory = TempDir::new().unwrap();
+            let mut store = PersistentStore::open(directory.path()).unwrap();
+            let cas = PayloadCas::new(directory.path()).unwrap();
+            let portrait = alias("assets/portrait.png", &synthetic_png(), "png", &cas);
+            let (image, aliases) = match state {
+                "unset" => ("", vec![]),
+                "missing-alias" => (portrait.key.as_str(), vec![]),
+                "missing-payload" => (portrait.key.as_str(), vec![AssetAlias {
+                    object_hash: Some(hex::encode(Sha256::digest(b"never stored"))),
+                    ..portrait.clone()
+                }]),
+                _ => unreachable!(),
+            };
+            let character = json!({
+                "type": "character", "chaId": "png-publication", "name": "PNG Card",
+                "image": image, "ccAssets": [], "additionalAssets": [],
+                "emotionImages": [], "triggerscript": [], "customscript": [], "chats": []
+            });
+            let staging = store.replace_begin().unwrap().staging_id;
+            store.replace_put_root(&staging, &json!({})).unwrap();
+            store.replace_put_presets(&staging, &[]).unwrap();
+            store.replace_add_characters(&staging, &[character]).unwrap();
+            store.replace_put_asset_aliases(&staging, &aliases).unwrap();
+            let revision = store.replace_commit(&staging, Some(0)).unwrap().revision;
+            let metadata = json!({
+                "spec": "chara_card_v3", "spec_version": "3.0",
+                "data": {
+                    "name": "PNG Card",
+                    "extensions": {"risuai": {"triggerscript": [], "customScripts": []}},
+                    "assets": [{"type": "icon", "uri": "ccdefault:", "name": "main", "ext": "png"}]
+                }
+            });
+            let owned = directory.path().join("owned");
+            fs::create_dir(&owned).unwrap();
+            let destination = directory.path().join("card.png");
+            export_character_png_with_release(
+                store.prepare_risu_save_export(revision).unwrap(), "png-publication", metadata,
+                &owned, &directory.path().join("handoffs"), Some(&destination),
+                &JobRegistry::default().create(JobKind::ExportCharacterCard).unwrap(),
+                PngCardLimits::default(), PreparedRisuSaveExport::release_reader, None,
+            )
+            .unwrap_or_else(|error| panic!("{state}: {}", error.message));
+            let parse_root = directory.path().join("parse");
+            fs::create_dir(&parse_root).unwrap();
+            parse_png_card(
+                &mut fs::File::open(destination).unwrap(),
+                &parse_root,
+                PngCardLimits::default(),
+                || false,
+            )
+            .unwrap()
+            .base_image
+            .sha256
+        };
+        let fallback = exported_portrait("unset");
+        assert_eq!(exported_portrait("missing-alias"), fallback);
+        assert_eq!(exported_portrait("missing-payload"), fallback);
     }
 
     #[test]
@@ -1197,6 +1293,7 @@ mod tests {
             &directory.path().join("handoffs"),
             Some(&destination),
             &job,
+            None,
         )
         .unwrap();
         let parsed = parse_png_card(

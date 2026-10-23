@@ -43,6 +43,7 @@ export interface ImmutablePayloadCas {
         expectedSize?: number,
     ): Promise<Uint8Array | null>
     statObject(contentHash: string): Promise<number | null>
+    statObjects?(contentHashes: readonly string[]): Promise<(number | null)[]>
 }
 
 export async function hashPayloadBytes(bytes: Uint8Array): Promise<string> {

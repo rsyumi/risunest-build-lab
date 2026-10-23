@@ -3,13 +3,16 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 import { get, writable } from 'svelte/store'
 import { language } from 'src/lang'
-import { DBState } from 'src/ts/stores.svelte'
+import { DBState, onboardingModalStore, ScriptDisplayRebuildPointer } from 'src/ts/stores.svelte'
+import { createConversationSummaryStubFromChat } from 'src/ts/storage/conversationResidency'
 import DefaultChatScreen from './DefaultChatScreen.svelte'
 import { chatScreenState } from '../../ts/ui/chatScreenState.svelte'
 import { doingChat } from 'src/ts/process/index.svelte'
 import { updateDeviceSettings } from 'src/ts/storage/deviceSettings'
 import { noteGenerationMessage, noteGenerationStarted, subscribeGenerationEnd, type GenerationEndRecord } from 'src/ts/process/generationEnd'
 import { ActiveConversationSession } from 'src/ts/storage/activeConversationSession'
+import { installDisplayRecovery } from 'src/ts/displayRecovery.svelte'
+import { recoveryStore } from 'src/ts/displayRecovery.testSupport'
 
 const mocks = vi.hoisted(() => ({ trigger: vi.fn(), generate: vi.fn(), process: vi.fn(), error: vi.fn(), postFile: vi.fn(),
     bounded: false, appended: [] as any[], acquireComplete: vi.fn(), flush: vi.fn(async () => {}),
@@ -20,9 +23,11 @@ const mocks = vi.hoisted(() => ({ trigger: vi.fn(), generate: vi.fn(), process: 
 }))
 vi.mock('src/ts/stores.svelte', () => {
     const DBState = $state({ db: {} })
-    return { DBState, selectedCharID: writable(0), PlaygroundStore: writable(0), hypaV3ModalOpen: writable(false),
+    const onboardingModalStore = $state({ open: false })
+    return { DBState, onboardingModalStore, selectedCharID: writable(0), PlaygroundStore: writable(0), hypaV3ModalOpen: writable(false),
         ScrollToMessageStore: writable(null), additionalChatMenu: writable([]), additionalFloatingActionButtons: writable([]),
-        easyPanelStore: writable(false), chatPanelStore: writable(false), HideIconStore: writable(false) }
+        easyPanelStore: writable(false), chatPanelStore: writable(false), HideIconStore: writable(false),
+        ScriptDisplayRebuildPointer: writable(0), ScriptDisplayRefreshPointer: writable(0), ReloadChatPointer: writable({}) }
 })
 vi.mock('src/ts/process/index.svelte', async () => ({ doingChat: (await import('src/ts/process/generationState')).doingChat, chatProcessStage: writable(0), sendChat: mocks.generate, getSelectedBoundedGenerationFallbackReason: () => mocks.bounded ? null : 'test-complete-conversation',
     getHistoryWindowMemoryMode: (historyLimit: boolean) => historyLimit && mocks.historyLimit ? 'none' : null, openSelectedHistoryWindow: mocks.openWindow, notifyGenerationCompletion: mocks.notify }))
@@ -85,6 +90,7 @@ function send() {
 }
 beforeEach(async () => {
     vi.clearAllMocks()
+    onboardingModalStore.open = false
     updateDeviceSettings({ messageSendKey: 'enter' })
     chatScreenState.clear()
     mocks.translate.mockResolvedValue('')
@@ -148,6 +154,14 @@ it('shows the scroll buttons for a while after the chat scrolls and runs each mo
     expect(mocks.viewport.navigateMessage.mock.calls).toEqual([['previous', 0], ['next', 0]])
     expect(mocks.viewport.jumpToTop).toHaveBeenCalledOnce()
     expect(mocks.viewport.jumpToBottom).toHaveBeenCalledOnce()
+    DBState.db.risunestScrollNavigation = false
+    mocks.chatsProps.onScrollMove()
+    await tick()
+    expect(nav.classList.contains('invisible')).toBe(true)
+    DBState.db.risunestScrollNavigation = true
+    mocks.chatsProps.onScrollMove()
+    await tick()
+    expect(nav.classList.contains('invisible')).toBe(false)
 })
 
 it('keeps the scroll buttons hidden while the chat menu is open', async () => {
@@ -795,5 +809,83 @@ it('refuses send and regenerate while plugins wait, retaining the draft and conv
     } finally {
         pluginStartupState.set({ phase: 'released', since: 0 })
         configurePluginStartup(() => false, async () => {})
+    }
+})
+
+function setOnboarding(overrides: Record<string, unknown> = {}) {
+    DBState.db.characters[0].onboarding = {
+        enabled: true, mode: 'form', questions: [{ id: 'q', title: 'Route', type: 'single', varName: 'route', options: [{ label: 'A', value: 'a' }] }],
+        ...overrides,
+    } as any
+}
+const onboardingBanner = () => [...document.querySelectorAll('button')].find(button => button.textContent?.includes(language.onboardingAvailable))
+
+it('shows the onboarding banner on a chat with messages until it is done or skipped', async () => {
+    DBState.db.characters[0].chats[0].message = [
+        { role: 'char', data: 'First', chatId: 'm1' }, { role: 'user', data: 'Second', chatId: 'm2' }, { role: 'char', data: 'Third', chatId: 'm3' },
+    ] as any
+    setOnboarding()
+    await tick()
+    onboardingBanner()!.click()
+    expect(onboardingModalStore.open).toBe(true)
+    DBState.db.characters[0].chats[0].onboardingDone = true
+    await tick()
+    expect(onboardingBanner()).toBeUndefined()
+    DBState.db.characters[0].chats.push({ id: 'new', message: [] } as any)
+    DBState.db.characters[0].chatPage = 1
+    await tick()
+    expect(onboardingBanner()).toBeDefined()
+    setOnboarding({ enabled: false })
+    await tick()
+    expect(onboardingBanner()).toBeUndefined()
+})
+
+it('does not offer the onboarding for a chat that is only a summary', async () => {
+    setOnboarding()
+    const chat = DBState.db.characters[0].chats[0]
+    DBState.db.characters[0].chats[0] = createConversationSummaryStubFromChat('character', chat, 0)
+    await tick()
+    expect(onboardingBanner()).toBeUndefined()
+})
+
+it('opens the onboarding from the side menu and from its optional floating button', async () => {
+    const floatingButton = () => document.querySelector<HTMLButtonElement>(`button[aria-label="${language.onboarding}"]`)
+    const menuItem = () => [...document.querySelectorAll('span')].find(span => span.textContent === language.onboarding)
+    const openMenu = async () => {
+        document.querySelector<HTMLButtonElement>('.button-icon-send')!.nextElementSibling!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await tick()
+    }
+    await openMenu()
+    expect(menuItem()).toBeUndefined()
+    setOnboarding()
+    await tick()
+    expect(floatingButton()).toBeNull()
+    menuItem()!.parentElement!.click()
+    await tick()
+    expect(onboardingModalStore.open).toBe(true)
+    expect(menuItem()).toBeUndefined()
+    onboardingModalStore.open = false
+    setOnboarding({ floatingButton: true })
+    await tick()
+    floatingButton()!.click()
+    expect(onboardingModalStore.open).toBe(true)
+})
+
+it('tells that a chat left in the display recovery record opened without Modify Display and turns it back on', async () => {
+    const device = recoveryStore({ working: [{ characterId: 'character', conversationId: 'chat' }], marked: [] }, { commitAtOnce: true })
+    const notice = () => document.querySelector('[data-display-recovery]')
+    try {
+        await installDisplayRecovery(device.store)
+        await tick()
+        expect(notice()?.textContent).toContain(language.risuNest.displayRecovery.notice)
+        const rebuilds = get(ScriptDisplayRebuildPointer)
+
+        const button = [...notice()!.querySelectorAll('button')].find(button => button.textContent?.trim() === language.risuNest.displayRecovery.turnBackOn)
+        button!.click()
+        await vi.waitFor(() => expect(get(ScriptDisplayRebuildPointer)).toBe(rebuilds + 1))
+        expect(notice()).toBeNull()
+        expect(device.record).toBeNull()
+    } finally {
+        await installDisplayRecovery(null)
     }
 })

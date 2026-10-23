@@ -20,6 +20,7 @@ import type { NativeFileJobOptions, NativeFileJobSource } from '../storage/nativ
 import { importDesktopNativeModulePath } from '../storage/nativeModuleFileRoute'
 import { assertModuleMCPImportAllowed, StdioModuleImportError } from './mcp/moduleImport'
 import { selectConversationModules } from './moduleSelection'
+import { runWithMobileBackgroundTask } from '../mobileBackgroundTask'
 
 export interface MCPModule{
     url: string
@@ -97,10 +98,11 @@ export async function exportModule(module:RisuModule, arg:{
     }
     const writer = new LocalWriter()
     await writer.init(module.name + '.module', ['charx'])
-    await exportCharacterCard(char, 'charx', {
+    // The destination is chosen, so the picker never holds the background task.
+    await runWithMobileBackgroundTask('export', () => exportCharacterCard(char, 'charx', {
         spec: 'v3',
         writer
-    })
+    }), undefined, true)
     if(alertEnd){
         alertNormal(language.successExport)
     }
@@ -313,15 +315,23 @@ export async function readModule(buf:Buffer):Promise<RisuModule> {
 }
 
 export async function importModule() {
-    if (isTauriIOS) {
-        const { importIOSContentFromPicker } = await import('../storage/iosContentPicker')
-        return await importIOSContentFromPicker('module')
-    }
-    if (isTauriAndroid) {
-        const { importAndroidContentFromPicker } = await import(
-            '../storage/androidContentPicker'
-        )
-        return await importAndroidContentFromPicker('module')
+    const callStartedAt = Date.now()
+    try {
+        if (isTauriIOS) {
+            const { importIOSContentFromPicker } = await import('../storage/iosContentPicker')
+            return await importIOSContentFromPicker('module')
+        }
+        if (isTauriAndroid) {
+            const { importAndroidContentFromPicker } = await import(
+                '../storage/androidContentPicker'
+            )
+            return await importAndroidContentFromPicker('module')
+        }
+    } catch (error) {
+        // The picker import shows how it ended, so only a failure to start is reported here.
+        const { presentFileOperationError } = await import('../storage/fileOperationErrorPresentation')
+        presentFileOperationError('import', error, callStartedAt)
+        return null
     }
     let desktopFile: { name: string; data: Uint8Array } | undefined
     if (isTauriDesktop) {
@@ -342,12 +352,15 @@ export async function importModule() {
                 displayName.split('.').at(-1)?.toLocaleLowerCase('en-US') ?? '',
             )
         ) {
+            const { fileOperationErrorWasPresented } = await import('../storage/fileOperationErrorPresentation')
             const result = await importDesktopNativeModulePath(
                 selected,
                 importPreparedNativeModuleContent,
                 {},
                 (error) => {
                     console.error(error)
+                    // The shared import dialog already shows a failure after the import started.
+                    if (fileOperationErrorWasPresented('import', callStartedAt)) return
                     alertError(error instanceof Error ? error : String(error))
                 },
             )

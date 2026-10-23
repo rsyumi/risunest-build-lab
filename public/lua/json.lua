@@ -215,44 +215,58 @@ local function parse_unicode_escape(s)
 end
 
 
+local string_stop_chars = '[\0-\31\\"]'
+
 local function parse_string(str, i)
-  local res = ""
+  local parts, n
   local j = i + 1
   local k = j
 
-  while j <= #str do
-    local x = str:byte(j)
+  while true do
+    -- One C scan per plain segment; the pattern has no repetition, so it cannot backtrack.
+    local x = str:find(string_stop_chars, j)
+    if not x then
+      decode_error(str, i, "expected closing quote for string")
+    end
+    local byte = str:byte(x)
 
-    if x < 32 then
-      decode_error(str, j, "control character in string")
+    if byte == 34 then -- `"`: End of string
+      if not parts then
+        return str:sub(k, x - 1), x + 1
+      end
+      n = n + 1
+      parts[n] = str:sub(k, x - 1)
+      return table.concat(parts, "", 1, n), x + 1
 
-    elseif x == 92 then -- `\`: Escape
-      res = res .. str:sub(k, j - 1)
-      j = j + 1
+    elseif byte == 92 then -- `\`: Escape
+      if not parts then
+        parts, n = {}, 0
+      end
+      n = n + 1
+      parts[n] = str:sub(k, x - 1)
+      j = x + 1
       local c = str:sub(j, j)
       if c == "u" then
         local hex = str:match("^[dD][89aAbB]%x%x\\u%x%x%x%x", j + 1)
                  or str:match("^%x%x%x%x", j + 1)
                  or decode_error(str, j - 1, "invalid unicode escape in string")
-        res = res .. parse_unicode_escape(hex)
+        n = n + 1
+        parts[n] = parse_unicode_escape(hex)
         j = j + #hex
       else
         if not escape_chars[c] then
           decode_error(str, j - 1, "invalid escape char '" .. c .. "' in string")
         end
-        res = res .. escape_char_map_inv[c]
+        n = n + 1
+        parts[n] = escape_char_map_inv[c]
       end
-      k = j + 1
+      j = j + 1
+      k = j
 
-    elseif x == 34 then -- `"`: End of string
-      res = res .. str:sub(k, j - 1)
-      return res, j + 1
+    else
+      decode_error(str, x, "control character in string")
     end
-
-    j = j + 1
   end
-
-  decode_error(str, i, "expected closing quote for string")
 end
 
 

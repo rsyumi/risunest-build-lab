@@ -63,6 +63,10 @@ export interface ActiveConversationWindow {
     sessionVersion: number
 }
 
+export interface ActiveConversationMetadataWindow extends Omit<ActiveConversationWindow, 'messages'> {
+    messages: Pick<Message, 'disabled'>[]
+}
+
 export interface ActiveConversationMessageTarget {
     absoluteIndex: number
     message: Message
@@ -94,6 +98,10 @@ export interface ActiveConversationBackwardScan {
     totalMessages: number
     storeRevision: DataRevision
     sessionVersion: number
+}
+
+export interface ActiveConversationMetadataBackwardScan extends Omit<ActiveConversationBackwardScan, 'entries'> {
+    entries: Array<{ absoluteIndex: number; disabled: Message['disabled'] }>
 }
 
 export interface ActiveConversationVariableUpdate {
@@ -1534,6 +1542,57 @@ export class ActiveConversationSession {
             limit,
         )
         return window
+    }
+
+    readMetadataRange(requestedStart: number, limit: number): ActiveConversationMetadataWindow {
+        this.assertActive()
+        validateIndex(requestedStart, 'Conversation range startIndex')
+        validateCount(limit)
+        const startIndex = Math.min(this.totalMessages, requestedStart)
+        const endIndex = Math.min(this.totalMessages, startIndex + limit)
+        const messages: ActiveConversationMetadataWindow['messages'] = []
+        const locators: MessageLocator[] = []
+        for (let index = startIndex; index < endIndex; index++) {
+            messages.push({ disabled: this.conversation.message[index].disabled })
+            locators.push(this.locate(index))
+        }
+        return {
+            characterId: this.characterId,
+            conversationId: this.conversationId,
+            messages,
+            locators,
+            startIndex,
+            endIndex,
+            totalMessages: this.totalMessages,
+            storeRevision: this.storeRevision,
+            sessionVersion: this.sessionVersion,
+        }
+    }
+
+    scanMetadataBackward(
+        startIndexExclusive = this.totalMessages,
+        limit = CONVERSATION_RANGE_MAX_LIMIT,
+    ): ActiveConversationMetadataBackwardScan {
+        this.assertActive()
+        validateIndex(startIndexExclusive, 'Backward scan startIndex')
+        validateCount(limit)
+        const start = Math.min(this.totalMessages, startIndexExclusive)
+        const entries: ActiveConversationMetadataBackwardScan['entries'] = []
+        for (let absoluteIndex = start - 1; absoluteIndex >= 0 && entries.length < limit; absoluteIndex--) {
+            entries.push({
+                absoluteIndex,
+                disabled: this.conversation.message[absoluteIndex].disabled,
+            })
+        }
+        return {
+            characterId: this.characterId,
+            conversationId: this.conversationId,
+            entries,
+            startIndexExclusive: start,
+            totalMessages: this.totalMessages,
+            storeRevision: this.storeRevision,
+            sessionVersion: this.sessionVersion,
+        }
     }
 
     scanBackward(

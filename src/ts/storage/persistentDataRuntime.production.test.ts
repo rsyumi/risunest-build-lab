@@ -1,3 +1,4 @@
+import { assetGalleryItems, deleteGalleryAssets, replaceGalleryAsset, prepareGalleryModuleMutation, readPinnedAssetOwner } from '../gallery/assetGallery'
 import { UNOWNED_PLUGIN_OWNER } from '../plugins/pluginOwner'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { get } from 'svelte/store'
@@ -48,6 +49,61 @@ afterEach(() => {
 })
 
 describe('production persistent working-set publication', () => {
+    it('commits a large gallery deletion once and drops its stale owner manifest without changing the greeting', async () => {
+        const assets = Array.from({length: 5000}, (_, i) => [`synthetic ${i}`, `assets/${i}.png`, 'png'])
+        const initial = {
+            username: 'Synthetic', botPresets: [], botPresetsId: 0, plugins: [],
+            characters: [{type: 'character', chaId: 'gallery-owner', name: 'Synthetic owner', chatPage: 0, chatFolders: [],
+                additionalAssets: assets, prebuiltAssetExclude: ['assets/0.png'],
+                chats: [{id: 'gallery-chat', name: 'Synthetic chat', fmIndex: 3, message: []}],
+            }],
+        } as unknown as Database
+        const store = new IndexedDbPersistentDataStore('gallery-bulk-commit', new IDBFactory(), IDBKeyRange)
+        await store.open()
+        await store.replaceFromDatabase(initial)
+        setDatabase(structuredClone(initial))
+        selectedCharID.set(-1)
+        const runtime = createPersistentDataRuntime({store, state: createProductionStateAdapter(), prepareDatabase: async value => value})
+        await runtime.initializeActiveWorkingSet(getDatabase())
+        const owner = {kind: 'character' as const, id: 'gallery-owner'}
+        const locator = {kind: 'character-additional-assets' as const, characterId: owner.id}
+        await runtime.upsertPersistentCompleteCharacter(owner.id, 'prepare-gallery-owner', current => current!, {
+            assetOwnerHeads: [{owner: locator, present: true, manifestHash: 'ab'.repeat(32), entryCount: assets.length}],
+        })
+        const before = await store.readRoot()
+        const snapshots = [...assetGalleryItems(owner, getDatabase().characters.find(value => value.chaId === owner.id)!, 'assets')]
+        await runtime.mutatePersistentCharacterDetail(owner.id, 'gallery-delete-assets', ({character}) => deleteGalleryAssets(owner, character, snapshots))
+        expect((await store.readRoot()).revision).toBe(before.revision + 1)
+        const persisted = (await store.readCharacter(owner.id))!.value
+        expect(persisted.additionalAssets).toEqual([])
+        expect(persisted.prebuiltAssetExclude).toEqual([])
+        expect((await store.readConversation(owner.id, 'gallery-chat'))!.value.fmIndex).toBe(3)
+        expect(await store.readAssetOwnerHead(locator)).toBeNull()
+    })
+
+    it('commits the module gallery tuple with no stale owner manifest', async () => {
+        const initial = {
+            username: 'Synthetic', botPresets: [], botPresetsId: 0, plugins: [], characters: [],
+            modules: [{id: 'gallery-module', name: 'Synthetic module', description: '', assets: [['background', 'assets/old.png', 'png']]}],
+        } as unknown as Database
+        const store = new IndexedDbPersistentDataStore('gallery-module-commit', new IDBFactory(), IDBKeyRange)
+        await store.open()
+        const imported = await store.replaceFromDatabase(initial)
+        const locator = {kind: 'root-module-assets' as const, moduleId: 'gallery-module'}
+        await store.commit({expectedRevision: imported.revision, root: capturePersistentRoot(initial), assetOwnerHeads: [{owner: locator, present: true, manifestHash: 'ab'.repeat(32), entryCount: 1}]})
+        setDatabase(structuredClone(initial))
+        selectedCharID.set(-1)
+        const runtime = createPersistentDataRuntime({store, state: createProductionStateAdapter(), prepareDatabase: async value => value})
+        await runtime.initializeActiveWorkingSet(getDatabase())
+        const owner = {kind: 'module' as const, id: 'gallery-module'}
+        const module = getDatabase().modules[0]
+        const [snapshot] = assetGalleryItems(owner, module, 'assets')
+        await runtime.commitPreparedUnitIntent('gallery-replace-asset', reader => prepareGalleryModuleMutation(reader, owner.id,
+            value => replaceGalleryAsset(owner, value, snapshot, 'assets/new.webp', 'webp')))
+        expect((await store.readRoot()).value.modules[0].assets).toEqual([['background', 'assets/new.webp', 'webp']])
+        expect(await store.readAssetOwnerHead(locator)).toBeNull()
+    })
+
     it.each(['absent', 'empty', 'populated'] as const)('persists a prepared owner head when an existing character has unchanged %s assets', async (shape) => {
         const initial = {
             username: 'Before', botPresets: [], botPresetsId: 0, plugins: [],
@@ -75,6 +131,56 @@ describe('production persistent working-set publication', () => {
         await reopened.open()
         expect((await reopened.readCharacter('prepared-owner'))?.value.name).toBe('Edited after import')
         expect((await reopened.readAssetOwnerHead(owner))?.value).toEqual(head)
+    })
+
+    it('keeps a failed module gallery mutation out of the working copy and later unrelated saves', async () => {
+        const initial = normalizeDatabaseDefaults({} as Database)
+        initial.botPresets[0].id = 'gallery-failure-preset'
+        initial.personas[0].id = 'gallery-failure-persona'
+        initial.modules = [{id: 'gallery-failure', name: 'Synthetic module', description: '', assets: [['background', 'assets/old.png', 'png']]}]
+        const store = new IndexedDbPersistentDataStore('gallery-module-failure', new IDBFactory(), IDBKeyRange)
+        await store.open()
+        await store.replaceFromDatabase(initial)
+        setDatabase(structuredClone(initial))
+        selectedCharID.set(-1)
+        const runtime = createPersistentDataRuntime({store, state: createProductionStateAdapter(), prepareDatabase: async value => value})
+        await runtime.initializeActiveWorkingSet(getDatabase())
+        await runtime.flushPendingDataLocally('gallery-initial-settle')
+        const owner = {kind: 'module' as const, id: 'gallery-failure'}
+        const [snapshot] = assetGalleryItems(owner, getDatabase().modules[0], 'assets')
+        const committed = store.commit.bind(store)
+        const failure = vi.spyOn(store, 'commit').mockImplementationOnce(async () => { throw new Error('Synthetic gallery commit failure') })
+        await expect(runtime.commitPreparedUnitIntent('gallery-replace-asset', reader => prepareGalleryModuleMutation(reader, owner.id,
+            value => replaceGalleryAsset(owner, value, snapshot, 'assets/failed.webp', 'webp')))).rejects.toThrow('Synthetic gallery commit failure')
+        expect(getDatabase().modules[0].assets).toEqual([['background', 'assets/old.png', 'png']])
+        expect((await store.readRoot()).value.modules[0].assets).toEqual([['background', 'assets/old.png', 'png']])
+        failure.mockImplementation(committed)
+        getDatabase().loreBookDepth = 17
+        await runtime.flushPendingDataLocally('gallery-later-save')
+        expect((await store.readRoot()).value.loreBookDepth).toBe(17)
+        expect((await store.readRoot()).value.modules[0].assets).toEqual([['background', 'assets/old.png', 'png']])
+    })
+
+    it.each(['character', 'module'] as const)('reads %s gallery entries from the export lease despite later changes', async (kind) => {
+        const initial = {
+            username: 'Synthetic', botPresets: [], botPresetsId: 0, plugins: [],
+            characters: [{type: 'character', chaId: 'pinned-owner', name: 'Synthetic', chats: [], chatPage: 0,
+                additionalAssets: [['old', 'assets/old.png', 'png']]}],
+            modules: [{id: 'pinned-owner', name: 'Synthetic module', description: '', assets: [['old', 'assets/old.png', 'png']]}],
+        } as unknown as Database
+        const store = new IndexedDbPersistentDataStore(`gallery-lease-${kind}`, new IDBFactory(), IDBKeyRange)
+        await store.open()
+        const before = await store.replaceFromDatabase(initial)
+        const lease = await store.acquireRevision(before.revision)
+        try {
+            const changed = structuredClone(initial)
+            changed.characters[0].additionalAssets = [['new', 'assets/new.webp', 'webp']]
+            changed.modules[0].assets = [['new', 'assets/new.webp', 'webp']]
+            await store.replaceFromDatabase(changed, before.revision)
+            const owner = {kind, id: 'pinned-owner'}
+            const pinned = await readPinnedAssetOwner(lease, owner)
+            expect([...assetGalleryItems(owner, pinned, 'assets')].map(entry => [entry.name, entry.key])).toEqual([['old', 'assets/old.png']])
+        } finally { await lease.release() }
     })
 
     it('invalidates the actual shared device keyspace after a remote plugin-local change', async () => {

@@ -2,7 +2,7 @@
     import { risuChatParser } from 'src/ts/parser/parser.svelte'
     import { type character } from 'src/ts/storage/database.svelte'
     import { DBState } from 'src/ts/stores.svelte'
-    import { moduleBackgroundEmbedding, ReloadGUIPointer, ScriptDisplayRefreshPointer, selIdState } from 'src/ts/stores.svelte'
+    import { moduleBackgroundEmbedding, ReloadGUIPointer, ScriptDisplayRebuildPointer, ScriptDisplayRefreshPointer, selIdState } from 'src/ts/stores.svelte'
     import DeferredMarkdown from 'src/lib/UI/DeferredMarkdown.svelte'
     import LiveDisplayParserBoundary from './LiveDisplayParserBoundary.svelte'
 
@@ -35,6 +35,7 @@
                             mode="back"
                             {signal}
                             scriptContext={projection?.context}
+                            rebuildRevision={$ScriptDisplayRebuildPointer}
                             preservePendingContent
                         />
                     {/snippet}

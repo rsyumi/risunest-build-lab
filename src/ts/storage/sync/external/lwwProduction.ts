@@ -1,8 +1,9 @@
+import { joinAbortSignals } from '../../../abortSignals'
 import { notifySyncReceiveCompleted } from '../bindingChanges'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { isTauri } from '../../../platform'
-import { runWithMobileBackgroundTask } from '../../../mobileBackgroundTask'
+import { beginDeferredMobileBackgroundTask, runWithMobileBackgroundTask, type MobileBackgroundTask } from '../../../mobileBackgroundTask'
 import { generatingConversations } from '../../generatingConversationRegistry'
 import { flushPendingDataLocally, getPersistentDataRuntime } from '../../persistentDataRuntime.svelte'
 import { subscribeLocalPersistentRevision } from '../../persistentRevisionEvents'
@@ -18,7 +19,7 @@ import { createLwwScheduler, type LwwCall, type LwwOperation, type LwwTurn } fro
 import type { ExternalStorageState } from './types'
 import { beginExternalProgress, clearExternalProgress, clearExternalSyncProgress, externalProgressFailure, type ExternalProgressRun } from './progress'
 
-interface Adapter { transport: SyncBindingTransport; scheduler: ReturnType<typeof createLwwScheduler>; stopHydration(): Promise<void>; resumeHydration(pendingOnly?: boolean): void; dispose(): void; state?: SyncBindingState; generation: number; foreground?: Promise<void>; recovery?: string }
+interface Adapter { transport: SyncBindingTransport; scheduler: ReturnType<typeof createLwwScheduler>; stopHydration(): Promise<void>; resumeHydration(pendingOnly?: boolean, continuation?: boolean): void; hide(publish: boolean): Promise<void>; dispose(): void; state?: SyncBindingState; generation: number; foreground?: Promise<void>; recovery?: string }
 const adapters = new Map<string, Adapter>()
 const failures = new Map<string, unknown>()
 const failureListeners = new Set<(failures: ReadonlyMap<string, unknown>) => void>()
@@ -31,13 +32,27 @@ export function subscribeExternalLwwFailures(listener: (failures: ReadonlyMap<st
     failureListeners.add(listener); listener(new Map(failures))
     return () => { failureListeners.delete(listener) }
 }
+const catchingUp = new Set<string>()
+const catchUpListeners = new Set<(ids: ReadonlySet<string>) => void>()
+function reportCatchingUp(id: string, value: boolean): void {
+    if (value === catchingUp.has(id)) return
+    if (value) catchingUp.add(id)
+    else catchingUp.delete(id)
+    for (const listener of catchUpListeners) listener(new Set(catchingUp))
+}
+/** The connections whose last receive left changes that the next receive continues at once. */
+export function subscribeExternalLwwCatchUp(listener: (ids: ReadonlySet<string>) => void): () => void {
+    catchUpListeners.add(listener); listener(new Set(catchingUp))
+    return () => { catchUpListeners.delete(listener) }
+}
 export function supportsExternalLwwNewDevice(id: string): boolean {
     const transport = adapters.get(id)?.transport
     return !!(transport?.prepareNewDeviceBinding && transport.replaceAsNewDevice && transport.resumeNewDeviceBinding)
 }
 const header = (connectionId: string, context: BindingContext, requestId: string = crypto.randomUUID()) => ({ connectionId, bindingAuthority: context.state.targetAuthority, requestId, generating: generatingConversations.snapshot() })
 const native = createNativeSyncBindingBridge()
-const foregroundAvailable = () => document.visibilityState !== 'hidden' && navigator.onLine && !isLibraryFileOperationReserved()
+const networkAvailable = () => navigator.onLine && !isLibraryFileOperationReserved()
+const foregroundAvailable = () => document.visibilityState !== 'hidden' && networkAvailable()
 // A start that left sync off registers the transports, so settings can still change the sync target,
 // but leaves the bound target stopped until the user starts it.
 let resumeBoundTarget = true
@@ -67,15 +82,17 @@ function createAdapter(connectionId: string): Adapter {
         else operationFailures.set(operation, error)
         reportFailure(connectionId, [...operationFailures.values()].at(-1))
     }
-    const continueHydration = () => {
+    /** `continuation` lets hydration that received pages or a manual sync requested start or continue while hidden. */
+    const continueHydration = (continuation = false) => {
         if (!hydrationEnabled || !hydrationPending || hydrating || hydrationBlocked || Date.now() < hydrationRetryAt
-            || !active || active.signal.aborted || !foregroundAvailable()) return
+            || !active || active.signal.aborted || !(foregroundAvailable() || continuation && networkAvailable())) return
         const captured = active
         hydrationController = new AbortController()
-        const signal = AbortSignal.any([captured.signal, hydrationController.signal])
+        const joined = joinAbortSignals([captured.signal, hydrationController.signal])
+        const signal = joined.signal
         hydrationPending = false
         // A connection-only download excludes bodies that multiple storage connections hold.
-        hydrating = downloadRemoteAssets(undefined, { progressConnectionId: connectionId, signal, showEmpty: false }).then(() => {
+        hydrating = downloadRemoteAssets(undefined, { progressConnectionId: connectionId, signal, showEmpty: false, routine: true }).then(() => {
             if (active === captured && !signal.aborted) reportOperation('assets')
         }).catch(error => {
             if (active !== captured || signal.aborted) return
@@ -88,9 +105,10 @@ function createAdapter(connectionId: string): Adapter {
                 || ['unauthorized', 'reauthRequired', 'deviceVaultUnavailable', 'repositoryKeyUnavailable', 'localStorageFull', 'localPermissionDenied', 'storageFull', 'endpointRejected', 'corrupt', 'repositoryMismatch'].includes(failure?.kind ?? failure?.code ?? '')
             reportOperation('assets', error)
         }).finally(() => {
+            joined.dispose()
             hydrating = undefined
             hydrationController = undefined
-            continueHydration()
+            continueHydration(true)
         })
     }
     const stopHydration = () => {
@@ -98,26 +116,53 @@ function createAdapter(connectionId: string): Adapter {
         hydrationController?.abort()
         return hydrating ?? Promise.resolve()
     }
-    const resumeHydration = (pendingOnly = false) => {
+    const resumeHydration = (pendingOnly = false, continuation = false) => {
         hydrationEnabled = true
         hydrationPending ||= !pendingOnly
         hydrationBlocked = false
         hydrationRetryAt = hydrationServiceRetryAt
-        continueHydration()
+        continueHydration(continuation)
     }
-    const context = async (signal?: AbortSignal): Promise<BindingContext> => {
+    // Routine sync holds the service only if the app leaves the screen while it runs.
+    let hold: MobileBackgroundTask | Promise<MobileBackgroundTask> | undefined
+    let hidePublication: AbortController | undefined
+    const hide = (publish: boolean) => {
+        const controller = new AbortController()
+        hidePublication = controller
+        return scheduler.background(publish, controller.signal).finally(() => { if (hidePublication === controller) hidePublication = undefined })
+    }
+    const holdWhileBusy = (busy: boolean) => {
+        if (busy === !!hold) return
+        if (!busy) {
+            const released = hold
+            hold = undefined
+            void Promise.resolve(released).then(task => task?.dispose())
+            return
+        }
+        const current = beginDeferredMobileBackgroundTask('sync')
+        hold = current
+        // Hydration and manual requests hold their own time; returning to the screen resumes routine sync.
+        void Promise.resolve(current).then(task => task.signal?.addEventListener('abort', () => {
+            if (hold !== current) return
+            hidePublication?.abort(task.signal?.reason)
+            scheduler.expire()
+        }, { once: true }))
+    }
+    const withContext = async <T>(signal: AbortSignal | undefined, run: (binding: BindingContext) => Promise<T>): Promise<T> => {
         const state = await native.state()
         if (state.target.kind !== 'external' || state.target.connectionId !== connectionId) throw new Error('Sync binding changed')
-        return { state, signal: signal ? AbortSignal.any([signal, ...(active ? [active.signal] : [])]) : active?.signal ?? new AbortController().signal }
+        const joined = joinAbortSignals([signal, active?.signal])
+        try { return await run({ state, signal: joined.signal }) } finally { joined.dispose() }
     }
-    // Native code returns one bounded page per call until none remain.
-    const receive = async (binding: BindingContext, turnLimit?: number): Promise<LwwTurn> => {
+    // Native code returns one bounded page per call and lists the next batch at once while segments remain;
+    // with `completeAvailable` it also lists again after a finished listing, so later arrivals are received too.
+    const receive = async (binding: BindingContext, turnLimit?: number, completeAvailable = false): Promise<LwwTurn> => {
         const progress = beginExternalProgress(connectionId, 'sync')
         let received = 0
         try {
             for (;;) {
                 binding.signal.throwIfAborted()
-                const request = await progress.invoke<LwwStageReceive | null>('external_lww_receive', { request: header(connectionId, binding) }, binding.state.targetAuthority)
+                const request = await progress.invoke<LwwStageReceive | null>('external_lww_receive', { request: { ...header(connectionId, binding), ...(completeAvailable ? { completeAvailable } : {}) } }, binding.state.targetAuthority)
                 binding.signal.throwIfAborted()
                 if (!request) { progress.finish('complete', received > 0); notifySyncReceiveCompleted(); return { count: received, more: false } }
                 binding.signal.throwIfAborted()
@@ -130,10 +175,9 @@ function createAdapter(connectionId: string): Adapter {
             }
         } catch (error) { progress.finish(externalProgressFailure(error)); throw error }
     }
-    const publish = async (binding?: BindingContext, flush = true, call?: LwwCall): Promise<LwwTurn> => {
-        const current = binding ?? await context(call?.signal)
+    const publishTurn = async (current: BindingContext, bound: boolean, flush: boolean, call?: LwwCall): Promise<LwwTurn> => {
         current.signal.throwIfAborted()
-        const progress = (binding && bindingProgress) || beginExternalProgress(connectionId, 'sync')
+        const progress = (bound && bindingProgress) || beginExternalProgress(connectionId, 'sync')
         const owned = progress !== bindingProgress
         let result: { segments: string; more: boolean } = { segments: '0', more: false }
         let meaningful = false
@@ -158,12 +202,17 @@ function createAdapter(connectionId: string): Adapter {
         } catch (error) { if (owned) progress.finish(externalProgressFailure(error)); throw error }
         return { count: Number(result.segments), more: result.more }
     }
+    const publish = (binding?: BindingContext, flush = true, call?: LwwCall): Promise<LwwTurn> => binding
+        ? publishTurn(binding, true, flush, call)
+        : withContext(call?.signal, current => publishTurn(current, false, flush, call))
     const scheduler = createLwwScheduler({
-        available: () => !!active && !active.signal.aborted && foregroundAvailable(),
+        available: () => !!active && !active.signal.aborted && networkAvailable(),
+        busy: holdWhileBusy,
+        catchingUp: value => reportCatchingUp(connectionId, value),
         publish: call => publish(undefined, true, call),
-        receive: async call => receive(await context(call.signal), call.turnLimit),
-        maintain: async call => { const current = await context(call.signal); current.signal.throwIfAborted(); await invoke('external_lww_maintenance', { request: header(connectionId, current) }); current.signal.throwIfAborted() },
-        succeeded: operation => { reportOperation(operation); if (operation === 'receive') continueHydration() },
+        receive: call => withContext(call.signal, binding => receive(binding, call.turnLimit)),
+        maintain: call => withContext(call.signal, async current => { current.signal.throwIfAborted(); await invoke('external_lww_maintenance', { request: header(connectionId, current) }); current.signal.throwIfAborted() }),
+        succeeded: operation => { reportOperation(operation); if (operation === 'receive') continueHydration(true) },
         failed: (error, operation) => {
             reportOperation(operation, error)
             const kind = (error as { kind?: string })?.kind
@@ -173,14 +222,17 @@ function createAdapter(connectionId: string): Adapter {
     const transport: SyncBindingTransport & { receiveAvailableChanges(context: BindingContext): Promise<void> } = {
         async observeBinding(operation) {
             if (bindingProgress) return operation()
-            const progress = beginExternalProgress(connectionId, 'binding')
-            bindingProgress = progress
-            try {
-                const result = await operation()
-                progress.finish(result.kind === 'cancelled' ? 'cancelled' : 'complete')
-                return result
-            } catch (error) { progress.finish(externalProgressFailure(error)); throw error }
-            finally { if (bindingProgress === progress) bindingProgress = undefined }
+            // Inspecting, staging and applying continue while the app is in the background.
+            return runWithMobileBackgroundTask('sync', async () => {
+                const progress = beginExternalProgress(connectionId, 'binding')
+                bindingProgress = progress
+                try {
+                    const result = await operation()
+                    progress.finish(result.kind === 'cancelled' ? 'cancelled' : 'complete')
+                    return result
+                } catch (error) { progress.finish(externalProgressFailure(error)); throw error }
+                finally { if (bindingProgress === progress) bindingProgress = undefined }
+            }, undefined, true)
         },
         setConfirmationPending(waiting) { bindingProgress?.stage(waiting ? 'waiting' : 'checking') },
         inspectTarget: binding => bindingProgress ? bindingProgress.invoke<InspectedSyncTarget>('external_lww_inspect', { request: header(connectionId, binding) }, binding.state.targetAuthority) : invoke<InspectedSyncTarget>('external_lww_inspect', { request: header(connectionId, binding) }),
@@ -239,7 +291,8 @@ function createAdapter(connectionId: string): Adapter {
         async resumeNewDeviceBinding(_preparation, _result, binding) { await transport.resumeBinding(binding) },
         async receiveAvailableChanges(binding) {
             if (!active || active.signal.aborted || active.state.targetAuthority !== binding.state.targetAuthority || active.state.selectionEpoch !== binding.state.selectionEpoch) throw new Error('Sync is stopped')
-            await receive({ ...binding, signal: AbortSignal.any([binding.signal, active.signal]) })
+            const joined = joinAbortSignals([binding.signal, active.signal])
+            try { await receive({ ...binding, signal: joined.signal }, undefined, true) } finally { joined.dispose() }
         },
     }
     const unregister = registerSyncBindingTransport({ kind: 'external', connectionId }, transport)
@@ -249,7 +302,7 @@ function createAdapter(connectionId: string): Adapter {
         await scheduler.settled()
         await hydrating
     })
-    const adapter: Adapter = { transport, scheduler, stopHydration, resumeHydration, generation: 0, dispose() { adapter.generation++; scheduler.stop(); void stopHydration(); active = undefined; reportFailure(connectionId); unregister(); unregisterGate(); clearExternalProgress(connectionId); if (adapters.get(connectionId) === adapter) adapters.delete(connectionId) } }
+    const adapter: Adapter = { transport, scheduler, stopHydration, resumeHydration, hide, generation: 0, dispose() { adapter.generation++; scheduler.stop(); void stopHydration(); active = undefined; reportFailure(connectionId); unregister(); unregisterGate(); clearExternalProgress(connectionId); if (adapters.get(connectionId) === adapter) adapters.delete(connectionId) } }
     return adapter
 }
 
@@ -307,8 +360,9 @@ export async function installExternalLwwAdapters(state: ExternalStorageState, re
         hiddenFlushed = document.visibilityState === 'hidden'
         for (const adapter of adapters.values()) if (adapter.state) {
             if (document.visibilityState === 'hidden' || !navigator.onLine) {
-                if (flushHidden || wentOffline) { adapter.generation++; adapter.scheduler.stop(); void adapter.stopHydration() }
-                if (flushHidden && navigator.onLine) void runWithMobileBackgroundTask('sync', task => adapter.scheduler.publishNow(true, task.signal)).catch(() => {})
+                if (wentOffline) { adapter.generation++; adapter.scheduler.stop(); void adapter.stopHydration() }
+                // Running sends, receives and hydration continue hidden; the scheduler's hold covers the publication.
+                else if (flushHidden) void adapter.hide(navigator.onLine).catch(() => {})
             }
             else if (!adapter.foreground) {
                 adapter.generation++
@@ -364,8 +418,8 @@ export async function requestExternalLwwNow(connectionId: string): Promise<void>
         task.signal?.throwIfAborted()
         if (adapters.get(connectionId) !== adapter || !adapter.state) throw new DOMException('Binding changed', 'AbortError')
         await adapter.scheduler.manualNow(task.signal)
-        adapter.resumeHydration(true)
-    })
+        adapter.resumeHydration(true, true)
+    }, undefined, true)
 }
 
 export function externalLwwExitDrain(connectionId: string, selectionEpoch: string, fenced = false): SyncExitDrainAdapter | null {

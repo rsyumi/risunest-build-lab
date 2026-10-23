@@ -1,3 +1,4 @@
+import { imageFixture } from '../../../tests/support/imageFixtures'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 import { writable } from 'svelte/store'
@@ -6,7 +7,7 @@ import { DBState, CharConfigSubMenu, selectedCharID } from 'src/ts/stores.svelte
 import CharConfig from './CharConfig.svelte'
 
 const mocks = vi.hoisted(() => ({
-    selectMultiple: vi.fn(), selectSingle: vi.fn(), importRegex: vi.fn(), registerModel: vi.fn(),
+    alertError: vi.fn(), selectMultiple: vi.fn(), selectSingle: vi.fn(), importRegex: vi.fn(), registerModel: vi.fn(),
     saveAsset: vi.fn(async () => 'assets/synthetic.bin'), mutate: vi.fn(), fileSrc: vi.fn(async () => ''),
 }))
 vi.mock('src/ts/stores.svelte', () => {
@@ -15,14 +16,14 @@ vi.mock('src/ts/stores.svelte', () => {
         MobileGUI: writable(false), ShowRealmFrameStore: writable(false), hypaV3ModalOpen: writable(false) }
 })
 vi.mock('src/ts/tokenizer', () => ({ tokenizeAccurate: vi.fn(async () => 1) }))
-vi.mock('src/ts/storage/database.svelte', () => ({ saveImage: mocks.saveAsset }))
+vi.mock('src/ts/storage/database.svelte', () => ({}))
 vi.mock('src/ts/characters', () => ({ getCharImage: vi.fn(async () => ''), addingEmotion: writable(false) }))
 vi.mock('src/ts/storage/characterArchive', () => ({ archiveIsAvailable: () => false }))
-vi.mock('src/ts/alert', () => ({}))
-vi.mock('src/ts/util', () => ({ selectMultipleFile: mocks.selectMultiple, selectSingleFile: mocks.selectSingle }))
+vi.mock('src/ts/alert', () => ({ alertError: mocks.alertError }))
+vi.mock('src/ts/util', async importOriginal => ({ ...await importOriginal<typeof import('src/ts/util')>(), selectMultipleFile: mocks.selectMultiple, selectSingleFile: mocks.selectSingle }))
 vi.mock('src/ts/characterCards', () => ({}))
 vi.mock('src/ts/process/tts', () => ({}))
-vi.mock('src/ts/globalApi.svelte', () => ({ getFileSrc: mocks.fileSrc }))
+vi.mock('src/ts/globalApi.svelte', () => ({ getFileSrc: mocks.fileSrc, saveAsset: mocks.saveAsset }))
 vi.mock('src/ts/process/inlayScreen', () => ({}))
 vi.mock('src/ts/process/transformers', () => ({ registerOnnxModel: mocks.registerModel }))
 vi.mock('src/ts/process/modules', () => ({}))
@@ -32,10 +33,12 @@ vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({ mutatePersistent
 vi.mock('./LoreBook/LoreBookSetting.svelte', () => ({ default: () => {} }))
 vi.mock('./Scripts/RegexList.svelte', () => ({ default: () => {} }))
 vi.mock('./Scripts/TriggerList.svelte', () => ({ default: () => {} }))
+vi.mock('./OnboardingEditor.svelte', () => ({ default: () => {} }))
 vi.mock('./Toggles.svelte', () => ({ default: () => {} }))
 vi.mock('../UI/GUI/TextAreaInput.svelte', () => ({ default: () => {} }))
 vi.mock('../UI/GUI/MultiLangInput.svelte', () => ({ default: () => {} }))
 vi.mock('../Others/Help.svelte', () => ({ default: () => {} }))
+vi.mock('src/lib/Gallery/AssetGallery.svelte', () => ({ default: () => {} }))
 
 let instance: ReturnType<typeof mount> | undefined
 function deferred<T>() {
@@ -106,7 +109,12 @@ it.each(['vits', 'gptsovits'])('applies a pending %s selection to the original c
 
 it('adds files to the original character after selection changes during asset storage', async () => {
     const saved = deferred<string>()
-    mocks.selectMultiple.mockResolvedValueOnce([{ name: 'synthetic.png', data: new Uint8Array([1]) }])
+    mocks.selectMultiple.mockResolvedValueOnce([
+        { name: 'synthetic.png', data: imageFixture('png') },
+        { name: 'bad.PNG', data: new Uint8Array([1]) },
+        { name: 'generic.svg', data: new TextEncoder().encode('<svg/>') },
+        { name: 'renamed.PNG', data: imageFixture('webp') },
+    ])
     mocks.saveAsset.mockReturnValueOnce(saved.promise)
     await setup(1)
     button(languageEnglish.additionalAssets).click()
@@ -116,8 +124,9 @@ it('adds files to the original character after selection changes during asset st
     selectedCharID.set(1)
     await tick()
     saved.resolve('assets/synthetic.png')
-    await vi.waitFor(() => expect(DBState.db.characters[0].additionalAssets).toHaveLength(1))
+    await vi.waitFor(() => expect(DBState.db.characters[0].additionalAssets.map(asset => [asset[0], asset[2]])).toEqual([['synthetic.png', 'png'], ['generic.svg', 'svg'], ['renamed.PNG', 'webp']]))
     expect(DBState.db.characters[1].additionalAssets).toEqual([])
+    expect(mocks.alertError).toHaveBeenCalledWith(`bad.PNG: ${languageEnglish.risuNest.imageFormats.unsupported}`)
 })
 
 it('ignores an old asset preview that resolves after character navigation', async () => {
@@ -154,4 +163,18 @@ it('resolves a large additional-asset list only while its submenu is open and ig
     await tick()
     expect(mocks.fileSrc).toHaveBeenCalledTimes(300)
     expect(document.querySelector('img[src="data:,synthetic-late"]')).toBeNull()
+})
+
+it('offers the asset style with new image handling even when the asset prompt is off', async () => {
+    const assetStyle = () => [...document.querySelectorAll('span')].find(span => span.textContent?.trim() === languageEnglish.assetStyle)
+    DBState.db.newImageHandlingBeta = true
+    DBState.db.characters[0].prebuiltAssetCommand = false
+    await setup(1)
+    button(languageEnglish.additionalAssets).click()
+    await tick()
+    const select = assetStyle()!.nextElementSibling as HTMLSelectElement
+    expect([...select.options].map(option => option.value)).toEqual(['', 'dynamic'])
+    DBState.db.newImageHandlingBeta = false
+    await tick()
+    expect(assetStyle()).toBeUndefined()
 })

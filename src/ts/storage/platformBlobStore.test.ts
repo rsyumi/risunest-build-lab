@@ -58,6 +58,20 @@ describe('platform BlobStore', () => {
         expect(await store.read('synthetic')).toBeNull()
     })
 
+    test('conditional rewrites preserve provenance while an explicit put can clear it', async () => {
+        const { backend } = memoryBackend()
+        const store = createGatedBlobStore(createBackedBlobStore(backend), createStorageMutationGate({ locks: createInRealmStorageLockManager() }))
+        const metadata = { kind: 'inlay' as const, inlayType: 'image' as const, mime: 'image/png', name: 'synthetic', ext: 'png' }
+        const provenance = { createdAt: 123, charId: 'character', chatId: 'chat', pocketRisu: { createdAt: 99, updatedAt: 101, charId: 'original', chatId: 'original-chat' } }
+        await store.put('synthetic', Uint8Array.of(1, 2), { ...metadata, metadata: provenance })
+        const writer = await store.captureConditionalWrite!('synthetic')
+        await writer!(Uint8Array.of(9), { ...metadata, mime: 'image/webp', ext: 'webp' }, Uint8Array.of(1, 2))
+        expect(await store.stat('synthetic')).toMatchObject({ ext: 'webp', metadata: provenance })
+        expect(await store.read('synthetic')).toEqual(Uint8Array.of(9))
+        await store.put('synthetic', Uint8Array.of(3), metadata)
+        expect(await store.stat('synthetic')).not.toHaveProperty('metadata')
+    })
+
     test('rejects a changed read even if the original bytes were restored before writing', async () => {
         const { backend } = memoryBackend()
         const store = createGatedBlobStore(createBackedBlobStore(backend), createStorageMutationGate({ locks: createInRealmStorageLockManager() }))

@@ -2,6 +2,7 @@
 
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
+import { get } from 'svelte/store'
 
 const f = vi.hoisted(() => ({
     fetch: vi.fn(),
@@ -23,6 +24,7 @@ vi.mock('src/ts/parser/parser.svelte', async () => (await import('src/ts/parser/
 
 let doingChat: typeof import('src/ts/process/generationState').doingChat
 let DBState: typeof import('src/ts/stores.svelte').DBState
+let alertStore: typeof import('src/ts/stores.svelte').alertStore
 let ChatBody: typeof import('./ChatBody.svelte').default
 
 beforeAll(async () => {
@@ -32,7 +34,7 @@ beforeAll(async () => {
     ;({ doingChat } = await import('src/ts/process/generationState'))
     // Loaded before ChatBody so the translator binds the mocked fetch.
     await import('src/ts/translator/translator')
-    ;({ DBState } = await import('src/ts/stores.svelte'))
+    ;({ DBState, alertStore } = await import('src/ts/stores.svelte'))
     ;({ default: ChatBody } = await import('./ChatBody.svelte'))
     vi.runAllTicks()
     vi.useRealTimers()
@@ -76,7 +78,7 @@ describe('live row translation around a generation', () => {
         f.fetch.mockReset().mockImplementation(async (_url: string, init: { body: { text: string[] } }) => (
             { ok: true, data: { translations: [{ text: `KO(${init.body.text[0]})` }] } }
         ))
-        f.parse.mockClear()
+        f.parse.mockReset().mockImplementation(async (value: string) => value)
         target = document.createElement('div')
         document.body.append(target)
     })
@@ -85,11 +87,13 @@ describe('live row translation around a generation', () => {
         if (mounted) await unmount(mounted)
         mounted = undefined
         doingChat.set(false)
+        alertStore.set({ type: 'none', msg: '' })
+        vi.unstubAllGlobals()
         document.body.replaceChildren()
     })
 
-    function mountLiveRow(message: string) {
-        const database = liveDatabase()
+    function mountLiveRow(message: string, settings: Partial<ReturnType<typeof liveDatabase>> = {}) {
+        const database = { ...liveDatabase(), ...settings }
         DBState.db = database as unknown as typeof DBState.db
         const props = $state({
             msgDisplay: message,
@@ -135,5 +139,16 @@ describe('live row translation around a generation', () => {
         expect(target.textContent).toBe('KO(reply before a generation)')
         expect(f.parse).toHaveBeenCalledTimes(parses)
         expect(f.fetch).toHaveBeenCalledOnce()
+    })
+
+    test('shows a row untranslated when its translation request fails', async () => {
+        const translationRequests = vi.fn(async () => { throw new TypeError('Load failed') })
+        vi.stubGlobal('fetch', translationRequests)
+        f.parse.mockImplementation(async (value: string) => `rendered ${value}`)
+        mountLiveRow('reply the translator cannot reach', { translatorType: 'google' })
+
+        await vi.waitFor(() => expect(target.textContent).toBe('rendered reply the translator cannot reach'))
+        expect(get(alertStore)).toMatchObject({ type: 'error', msg: 'Error while parsing chat message: Load failed' })
+        expect(translationRequests).toHaveBeenCalledOnce()
     })
 })

@@ -50,11 +50,14 @@ class RendererRestartGateTest {
     assertEquals(0, restarts)
   }
 
-  @Test fun compiledGeneratedClassesContainBothRecoveryHooks() {
+  @Test fun compiledGeneratedClassesContainRecoveryAndDiagnosticHooks() {
     assertNotNull(RustWebViewClient::class.java.getDeclaredMethod(
       "onRenderProcessGone", WebView::class.java, RenderProcessGoneDetail::class.java,
     ))
     assertNotNull(WryActivity::class.java.getDeclaredMethod("releaseFailedWebView", WebView::class.java))
+    val diagnostic = MainActivity::class.java.getDeclaredMethod("recordRendererExit", Boolean::class.javaPrimitiveType)
+    assertTrue(java.lang.reflect.Modifier.isNative(diagnostic.modifiers))
+    assertEquals(Void.TYPE, diagnostic.returnType)
   }
 
   @Test fun failedViewDestructionCannotBeReportedAsHandled() {

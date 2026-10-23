@@ -32,7 +32,7 @@ use std::{
 pub(crate) const MINUTE_MS: u64 = 60_000;
 pub(crate) const LEASE_TTL_MS: u64 = 60 * MINUTE_MS;
 pub(crate) const RENEW_AFTER_MS: u64 = 15 * MINUTE_MS;
-pub(crate) const RELATIVE_CLOCK_ERROR_MS: u64 = 10 * MINUTE_MS;
+pub(crate) const RELATIVE_CLOCK_ERROR_MS: u64 = 10 * MINUTE_MS + 2 * super::clock::MAX_DISCONTINUITY_MS;
 pub(crate) const CONTROL_DEADLINE_MS: u64 = MINUTE_MS;
 pub(crate) const SAFETY_MARGIN_MS: u64 = 12 * MINUTE_MS;
 pub(crate) const CLEANUP_RUN_LIMIT_MS: u64 = 45 * MINUTE_MS;
@@ -77,18 +77,12 @@ impl TimeSample {
     pub(crate) fn trusted(&self) -> bool {
         let Some(date_ms) = self.date_ms else { return false; };
         if !self.cache_bypassed || self.cache_hit || self.age_ms.is_some_and(|age| age > 0)
-            || !(200..300).contains(&self.status) || self.local_after_ms < self.local_before_ms
+            || !(200..300).contains(&self.status)
         {
             return false;
         }
-        let elapsed = i128::from(self.local_after_ms - self.local_before_ms);
-        if (elapsed - i128::from(self.round_trip_ms)).abs() > 1000 {
-            return false;
-        }
-        let local_mid = (i128::from(self.local_before_ms) + i128::from(self.local_after_ms)) / 2;
-        let server_mid = i128::from(date_ms) + 500;
-        let uncertainty = (i128::from(self.round_trip_ms) + 1) / 2 + 500;
-        (server_mid - local_mid).abs() + uncertainty <= i128::from(5 * MINUTE_MS)
+        super::clock::validate_sample(date_ms, self.local_before_ms,
+            self.local_after_ms, self.round_trip_ms).is_ok()
     }
 }
 
@@ -106,7 +100,7 @@ pub(crate) trait LeaseClock: Send + Sync {
 
 struct ClockState {
     previous: Option<(u64, u64)>,
-    verified_at: Option<u64>,
+    verified_at: Option<(u64, u64)>,
     foreground: bool,
     epoch: u64,
 }
@@ -119,12 +113,14 @@ impl ClockState {
         }
     }
     fn observe_reading(&mut self, wall_ms: u64, monotonic_ms: u64) {
-        if let Some((before_wall, before_monotonic)) = self.previous {
-            if wall_ms.checked_sub(before_wall).zip(monotonic_ms.checked_sub(before_monotonic))
-                .is_none_or(|(wall, monotonic)| (i128::from(wall) - i128::from(monotonic)).abs() > 1000)
-            {
-                self.invalidate();
-            }
+        let discontinuous = |(before_wall, before_monotonic)| {
+            monotonic_ms.checked_sub(before_monotonic).is_none_or(|elapsed|
+                super::clock::movement(before_wall, wall_ms, elapsed).abs()
+                    > i128::from(super::clock::MAX_DISCONTINUITY_MS))
+        };
+        // Bound accumulated corrections since verification, not just each small step.
+        if self.previous.is_some_and(discontinuous) || self.verified_at.is_some_and(discontinuous) {
+            self.invalidate();
         }
         self.previous = Some((wall_ms, monotonic_ms));
     }
@@ -154,7 +150,7 @@ impl SystemLeaseClock {
             && now.wall_ms.checked_sub(sample.local_after_ms)
                 .is_some_and(|age| age <= CONTROL_DEADLINE_MS)
         {
-            Some(now.monotonic_ms)
+            Some((now.wall_ms, now.monotonic_ms))
         } else {
             None
         };
@@ -196,7 +192,7 @@ impl SystemLeaseClock {
             monotonic_ms,
             epoch: state.epoch,
             foreground: state.foreground && wall.is_some() && monotonic.is_some(),
-            trusted: state.foreground && state.verified_at.is_some_and(|verified| {
+            trusted: state.foreground && state.verified_at.is_some_and(|(_, verified)| {
                 monotonic_ms.checked_sub(verified).is_some_and(|age| age < RENEW_AFTER_MS)
             }),
         }
@@ -959,8 +955,9 @@ mod tests {
         assert_eq!(checked_expiry(u64::MAX), None);
         let expiry = checked_expiry(NOW).unwrap();
         assert!(!foreign_lease_expired(expiry, NOW + 60 * MINUTE_MS));
-        assert!(!foreign_lease_expired(expiry, NOW + 70 * MINUTE_MS - 1));
-        assert!(foreign_lease_expired(expiry, NOW + 70 * MINUTE_MS));
+        assert!(!foreign_lease_expired(expiry, NOW + 70 * MINUTE_MS + 9999));
+        assert!(foreign_lease_expired(expiry, NOW + 70 * MINUTE_MS + 10_000));
+        assert!(SAFETY_MARGIN_MS > RELATIVE_CLOCK_ERROR_MS + CONTROL_DEADLINE_MS);
         assert!(!foreign_lease_expired(u64::MAX, u64::MAX));
         assert!(!can_start_control_request(SAFETY_MARGIN_MS, true));
         assert!(can_start_control_request(SAFETY_MARGIN_MS + 1, true));
@@ -984,21 +981,26 @@ mod tests {
             TimeSample { date_ms: None, ..sample }, TimeSample { cache_bypassed: false, ..sample },
             TimeSample { cache_hit: true, ..sample }, TimeSample { age_ms: Some(1), ..sample },
             TimeSample { status: 304, ..sample }, TimeSample { status: 401, ..sample },
-            TimeSample { local_after_ms: NOW, ..sample },
+            TimeSample { local_after_ms: NOW - 5000, ..sample },
             TimeSample { local_after_ms: NOW + 500 + 600_000, round_trip_ms: 600_000, ..sample },
-            TimeSample { round_trip_ms: 1001, ..sample },
+            TimeSample { round_trip_ms: 5001, ..sample },
         ] {
             assert!(!invalid.trusted(), "{invalid:?}");
+        }
+        for delta in [-5001_i64, -5000, -4999, 4999, 5000, 5001] {
+            let corrected = TimeSample { local_before_ms: NOW + 20_000,
+                local_after_ms: (NOW as i64 + 20_100 + delta) as u64, round_trip_ms: 100, ..sample };
+            assert_eq!(corrected.trusted(), delta.abs() <= 5000, "{delta}");
         }
     }
 
     #[test]
     fn c_wall_clock_discontinuities_invalidate_instead_of_extending_protection() {
-        let mut state = ClockState { previous: None, verified_at: Some(0), foreground: true, epoch: 0 };
+        let mut state = ClockState { previous: None, verified_at: Some((NOW, 0)), foreground: true, epoch: 0 };
         state.observe_reading(NOW, 0);
         state.observe_reading(NOW + MINUTE_MS, MINUTE_MS);
         assert_eq!(state.epoch, 0);
-        state.observe_reading(NOW + 2 * MINUTE_MS + 1001, 2 * MINUTE_MS);
+        state.observe_reading(NOW + 2 * MINUTE_MS + 5001, 2 * MINUTE_MS);
         assert_eq!(state.epoch, 1);
         assert_eq!(state.verified_at, None);
         state.observe_reading(NOW, 3 * MINUTE_MS);
@@ -1021,14 +1023,21 @@ mod tests {
     }
 
     #[test]
-    fn c_clock_discontinuity_boundary_is_one_second_in_both_directions() {
-        for (offset, trusted) in [(-1001_i64, false), (-1000, true), (1000, true), (1001, false)] {
-            let mut state = ClockState { previous: None, verified_at: Some(0), foreground: true, epoch: 0 };
+    fn c_clock_discontinuity_boundary_is_five_seconds_in_both_directions() {
+        for (offset, trusted) in [(-5001_i64, false), (-5000, true), (-4999, true), (4999, true), (5000, true), (5001, false)] {
+            let mut state = ClockState { previous: None, verified_at: Some((NOW, 0)), foreground: true, epoch: 0 };
             state.observe_reading(NOW, 0);
             state.observe_reading((NOW as i64 + MINUTE_MS as i64 + offset) as u64, MINUTE_MS);
             assert_eq!(state.verified_at.is_some(), trusted, "{offset}");
             assert_eq!(state.epoch, u64::from(!trusted), "{offset}");
         }
+        let mut state = ClockState { previous: None, verified_at: Some((NOW, 0)), foreground: true, epoch: 0 };
+        state.observe_reading(NOW, 0);
+        state.observe_reading(NOW + 3100, 100);
+        assert!(state.verified_at.is_some());
+        state.observe_reading(NOW + 6200, 200);
+        assert_eq!(state.verified_at, None, "small corrections cannot accumulate beyond the bound");
+        assert_eq!(state.epoch, 1);
     }
 
     #[test]
@@ -1072,7 +1081,7 @@ mod tests {
             let h = Harness::new();
             let (id, bytes) = h.foreign(LeaseKind::Work, 1, NOW);
             h.provider.seed(&id, ObjectRole::Lease, bytes);
-            h.clock.advance(70 * MINUTE_MS);
+            h.clock.advance(70 * MINUTE_MS + 10_000);
             h.clock.set_trusted(false);
             assert!(matches!(admit(&h.context(), "job", LeaseKind::Work, &Cancellation::default()).await.unwrap(), Admission::Yield { .. }));
             h.clock.set_trusted(true);
@@ -1119,6 +1128,21 @@ mod tests {
             let owner = h.owner(LeaseKind::Work).await;
             let old = owner.primary().unwrap();
             h.clock.advance(RENEW_AFTER_MS - 1);
+            struct CorrectedClock(ClockReading);
+            impl LeaseClock for CorrectedClock {
+                fn reading(&self) -> ClockReading { self.0 }
+            }
+            for delta in [-5000_i64, 5000] {
+                let reading = h.clock.reading();
+                let corrected = CorrectedClock(ClockReading {
+                    wall_ms: (reading.wall_ms as i64 + delta) as u64, ..reading
+                });
+                let mut context = h.context();
+                context.clock = &corrected;
+                assert_eq!(owner.remaining_ms(&context, false).unwrap(), LEASE_TTL_MS - RENEW_AFTER_MS + 1);
+                owner.renew_if_due(&context, &Cancellation::default()).await.unwrap();
+                assert_eq!(owner.primary().unwrap(), old);
+            }
             owner.renew_if_due(&h.context(), &Cancellation::default()).await.unwrap();
             assert_eq!(owner.primary().unwrap(), old);
             h.clock.advance(1);

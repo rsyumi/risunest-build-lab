@@ -11,9 +11,10 @@
     import { closeTextEditorPopup, openTextEditorPopup } from "src/ts/gui/textEditorPopup.svelte"
     import { forgetEditorPopup, type ChatEditorDraft, type ChatEditorPopup, type ChatEditorPopupHandlers } from "src/ts/chatEditorDrafts"
     import { getModelInfo } from "src/ts/model/modellist"
-    import { runLuaButtonTrigger } from 'src/ts/process/scriptings'
+    import { runLuaInteractionTrigger } from 'src/ts/process/scriptings'
     import { risuChatParser } from "src/ts/process/scripts"
     import { DisplayReadRecord, recordChatVariableReads, registerDisplayRow } from 'src/ts/process/scriptVariableReads'
+    import { rebuildScriptDisplayRow } from 'src/ts/process/scriptDisplayRefresh'
     import { runTrigger } from 'src/ts/process/triggers'
     import { sayTTS } from "src/ts/process/tts"
     import { DBState, ReloadChatPointer, CurrentTriggerIdStore, popupStore } from 'src/ts/stores.svelte'
@@ -131,6 +132,8 @@
         parserProjection?: BoundedLiveChatParserProjection
         parserAbortSignal?: AbortSignal
         onDisplaySettled?: () => void
+        /** When the view asked for this row, from `nextDisplayListenerOrder`. */
+        displayRequestOrder?: number
         restoredEditor?: ChatEditorDraft
         onEditorOpen?: () => void
         onEditorClose?: () => void
@@ -174,6 +177,7 @@
         parserProjection,
         parserAbortSignal,
         onDisplaySettled,
+        displayRequestOrder,
         restoredEditor,
         onEditorOpen,
         onEditorClose,
@@ -402,6 +406,7 @@
         parserProjection = state.parserProjection
         parserAbortSignal = state.parserAbortSignal
         onDisplaySettled = state.onDisplaySettled
+        if (state.displayRequestOrder !== undefined) displayRequestOrder = state.displayRequestOrder
         if (state.viewportBinding) {
             updateViewportBinding({
                 ...state.viewportBinding,
@@ -945,18 +950,57 @@
         const triggerId = origin.getAttribute('risu-id')
         const btnEvent = origin.getAttribute('risu-btn')
 
-        const runManualTrigger = async (
-            currentChar: CharacterRecord,
-            currentChat: ReturnType<typeof getCurrentChat>,
-        ) => triggerName
+        await runMessageTrigger(async (currentChar, currentChat) => triggerName
             ? runTrigger(currentChar, 'manual', {
                 chat: currentChat,
                 manualName: triggerName,
                 triggerId: triggerId || undefined,
             })
             : btnEvent
-                ? runLuaButtonTrigger(currentChar, btnEvent)
-                : null
+                ? runLuaInteractionTrigger('button', currentChar, btnEvent)
+                : null)
+
+        if(triggerName && triggerId) {
+            setTimeout(() => {
+                CurrentTriggerIdStore.set(null)
+            }, 100) // Small delay to allow display mode to complete
+        }
+    }
+
+    async function handleFormTriggerWithin(event: SubmitEvent) {
+        // Regardless of attribute presence, prevent undesirable site exits via form submission
+        event.preventDefault()
+
+        const target = event.target as HTMLFormElement
+        const formEvent = target.getAttribute('risu-form')
+        if (!formEvent) {
+            return
+        }
+
+        const data: Record<string, FormDataEntryValue | FormDataEntryValue[]> = Object.create(null)
+        for (const [key, value] of new FormData(target, event.submitter)) {
+            if (Object.hasOwn(data, key)) {
+                const existing = data[key]
+                if (Array.isArray(existing)) {
+                    existing.push(value)
+                } else {
+                    data[key] = [existing, value]
+                }
+            } else {
+                data[key] = value
+            }
+        }
+
+        await runMessageTrigger((currentChar) =>
+            runLuaInteractionTrigger('form', currentChar, formEvent, { data }))
+    }
+
+    async function runMessageTrigger(
+        runManualTrigger: (
+            currentChar: CharacterRecord,
+            currentChat: ReturnType<typeof getCurrentChat>,
+        ) => Promise<{ chat: ReturnType<typeof getCurrentChat> } | null | undefined>,
+    ) {
         if (selectedConversationOperations) {
             try {
                 await selectedConversationOperations.withCompleteSelectedConversation(
@@ -970,10 +1014,7 @@
                         )
                         context.requireCurrent()
                         if (triggerResult) setCurrentChat(triggerResult.chat)
-                        if (triggerResult) ReloadChatPointer.update((v) => {
-                            v[idx] = (v[idx] ?? 0) + 1
-                            return v
-                        })
+                        if (triggerResult) rebuildScriptDisplayRow(idx)
                     },
                 )
             } catch (error) {
@@ -985,17 +1026,8 @@
             const triggerResult = await runManualTrigger(currentChar, getCurrentChat())
             if(triggerResult) {
                 setCurrentChat(triggerResult.chat)
-                ReloadChatPointer.update((v) => {
-                    v[idx] = (v[idx] ?? 0) + 1
-                    return v
-                })
+                rebuildScriptDisplayRow(idx)
             }
-        }
-        
-        if(triggerName && triggerId) {
-            setTimeout(() => {
-                CurrentTriggerIdStore.set(null)
-            }, 100) // Small delay to allow display mode to complete
         }
     }
 
@@ -1204,6 +1236,7 @@
                     {captureParserIndex}
                     {parserAbortSignal}
                     {onDisplaySettled}
+                    {displayRequestOrder}
                     displayRow={displayRow ?? undefined}
                     {parserProjection} />
         </span>
@@ -1859,7 +1892,8 @@
      data-chat-index={idx}
      data-chat-id={presentedChatId}
      style={isLastMemory ? `border-top:${captureSettings?.memoryLimitThickness ?? DBState.db.memoryLimitThickness}px solid rgba(98, 114, 164, 0.7);` : ''}
-     onclickcapture={handleButtonTriggerWithin}>
+     onclickcapture={handleButtonTriggerWithin}
+     onsubmitcapture={handleFormTriggerWithin}>
     <div class="text-textcolor mt-1 ml-4 mr-4 mb-1 p-2 bg-transparent grow border-t-gray-900 border-opacity/30 border-transparent flexium items-start max-w-full" >
         {#if captureTheme === 'mobilechat' && !blankMessage}
             <div class={role === 'user' ? "flex items-start w-full justify-end" : "flex items-start"}>

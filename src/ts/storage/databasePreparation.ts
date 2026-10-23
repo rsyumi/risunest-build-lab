@@ -171,18 +171,18 @@ export function assignIds(database: Database, createId: () => string = uuidv4): 
 
 export function checkCharOrder(database: Database): Database {
     database.characterOrder ??= []
-    const ordered: string[] = []
+    const ordered = new Set<string>()
     for (const entry of database.characterOrder) {
-        if (typeof entry === 'string') ordered.push(entry)
-        else if (entry) ordered.push(...entry.data)
+        if (typeof entry === 'string') ordered.add(entry)
+        else if (entry) for (const id of entry.data) ordered.add(id)
     }
-    const characterIds: string[] = []
+    const characterIds = new Set<string>()
     for (const character of database.characters) {
-        if (!character.trashTime) characterIds.push(character.chaId)
+        if (!character.trashTime) characterIds.add(character.chaId)
         if (
             !character.trashTime &&
             character.chaId !== '§playground' &&
-            !ordered.includes(character.chaId)
+            !ordered.has(character.chaId)
         ) {
             database.characterOrder.push(character.chaId)
         }
@@ -191,7 +191,7 @@ export function checkCharOrder(database: Database): Database {
     for (let index = 0; index < database.characterOrder.length; index++) {
         const entry = database.characterOrder[index]
         if (typeof entry === 'string') {
-            if (!characterIds.includes(entry)) {
+            if (!characterIds.has(entry)) {
                 database.characterOrder.splice(index, 1)
                 index--
             }
@@ -203,7 +203,7 @@ export function checkCharOrder(database: Database): Database {
             continue
         }
         for (let folderIndex = 0; folderIndex < entry.data.length; folderIndex++) {
-            if (!characterIds.includes(entry.data[folderIndex])) {
+            if (!characterIds.has(entry.data[folderIndex])) {
                 entry.data.splice(folderIndex, 1)
                 folderIndex--
             }

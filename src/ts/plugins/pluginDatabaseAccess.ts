@@ -85,11 +85,17 @@ export interface PluginConversationWindow extends ConversationWindow {
 
 export type PluginCompleteCharacter = Database['characters'][number]
 
+/** `current` omits the `message` property of every conversation in `char.chats`. */
+export type PluginChatOutputHistory = 'full' | 'current'
+
 export interface PluginChatOutputProjectionInput {
     characterId: string
     conversationId: string
     liveCharacter: PluginCompleteCharacter
     liveConversation: Chat
+    /** Absolute index of `liveConversation.message[0]`. */
+    windowStart: number
+    history: PluginChatOutputHistory
 }
 
 export interface PluginChatOutputProjection {
@@ -1419,13 +1425,38 @@ export function createProductionPluginDatabaseAccess(
     })
 }
 
+function withoutMessages(chat: Chat): Chat {
+    const { message: _message, ...metadata } = chat
+    return metadata as Chat
+}
+
+/** Stored messages before a history window, read through the listener's lease. */
+async function readListenerMessagePrefix(
+    reader: PersistentRevisionLease,
+    input: PluginChatOutputProjectionInput,
+): Promise<Chat['message']> {
+    const messages: Chat['message'] = []
+    for (let startIndex = 0; startIndex < input.windowStart; startIndex += PLUGIN_MESSAGE_QUERY_MAX_LIMIT) {
+        const limit = Math.min(PLUGIN_MESSAGE_QUERY_MAX_LIMIT, input.windowStart - startIndex)
+        const page = await reader.readConversationWindow({
+            characterId: input.characterId, conversationId: input.conversationId, startIndex, limit,
+        })
+        if (!page) throw new Error(`Missing listener conversation ${input.conversationId}`)
+        assertPinnedRevision(reader.revision, page.revision, 'Listener messages')
+        if (page.value.startIndex !== startIndex || page.value.messages.length !== limit) {
+            throw new Error('Incomplete listener message page')
+        }
+        for (const message of page.value.messages) messages.push(message)
+    }
+    return messages
+}
+
 export function createProductionPluginChatOutputProjector(
     snapshot: <T>(value: T) => T,
 ): PluginChatOutputProjector {
-    let store: ReturnType<typeof getPersistentDataStore> | undefined
     let openPromise: Promise<void> | undefined
     return async (input) => {
-        const persistentStore = store ??= getPersistentDataStore()
+        const persistentStore = getPersistentDataStore()
         await (openPromise ??= persistentStore.open().finally(() => {
             openPromise = undefined
         }))
@@ -1438,41 +1469,55 @@ export function createProductionPluginChatOutputProjector(
             if (!detail) throw new Error(`Missing listener character ${input.characterId}`)
             assertPinnedRevision(reader.revision, detail.revision, 'Listener character')
 
-            const liveCompleteChats = new Map(
-                input.liveCharacter.chats
-                    .filter((chat) => !isConversationSummaryStub(chat) && chat.id)
-                    .map((chat) => [chat.id!, snapshot(chat)]),
+            // Store reads are already detached values; only live state is copied.
+            const chat = snapshot(input.liveConversation)
+            if (input.windowStart > 0) {
+                chat.message = (await readListenerMessagePrefix(reader, input)).concat(chat.message)
+            }
+            const { chats: liveChats, ...liveFields } = input.liveCharacter
+            const hydrated = new Map(
+                liveChats
+                    .filter((candidate) => !isConversationSummaryStub(candidate) && candidate.id && candidate.id !== input.conversationId)
+                    .map((candidate) => [candidate.id!, candidate]),
             )
-            liveCompleteChats.set(input.conversationId, snapshot(input.liveConversation))
-
+            const full = input.history === 'full'
             const chats: Chat[] = []
+            let foundCurrent = false
             let cursor: string | undefined
             do {
                 const page = await reader.queryConversations({ characterId: input.characterId, order: 'configured', limit: 100, cursor })
                 assertPinnedRevision(reader.revision, page.revision, 'Listener conversations')
                 for (const summary of page.items) {
-                    const live = liveCompleteChats.get(summary.id)
-                    if (live) chats.push(live)
-                    else {
+                    if (summary.id === input.conversationId) {
+                        foundCurrent = true
+                        // A separate copy, so the event's `chat` never aliases `char.chats`.
+                        chats.push(snapshot(full ? chat : withoutMessages(chat)))
+                        continue
+                    }
+                    const live = hydrated.get(summary.id)
+                    if (live) {
+                        chats.push(full ? snapshot(live) : snapshot(withoutMessages(live)))
+                    } else if (full) {
                         const conversation = await reader.readConversation(input.characterId, summary.id)
                         if (!conversation) throw new Error(`Missing listener conversation ${summary.id}`)
                         assertPinnedRevision(reader.revision, conversation.revision, 'Listener conversation')
                         chats.push(conversation.value as Chat)
+                    } else {
+                        const metadata = await reader.readConversationMetadata(input.characterId, summary.id)
+                        if (!metadata) throw new Error(`Missing listener conversation ${summary.id}`)
+                        assertPinnedRevision(reader.revision, metadata.revision, 'Listener conversation')
+                        chats.push(metadata.value.conversation as Chat)
                     }
                 }
                 cursor = page.nextCursor
             } while (cursor !== undefined)
-            const { chats: _liveChats, ...liveDetail } = snapshot(input.liveCharacter)
+            if (!foundCurrent) throw new Error(`Missing listener conversation ${input.conversationId}`)
             const char = {
                 ...detail.value,
-                ...liveDetail,
+                ...snapshot(liveFields),
                 chats,
             } as PluginCompleteCharacter
-            const chat = char.chats.find(
-                (candidate) => candidate.id === input.conversationId,
-            )
-            if (!chat) throw new Error(`Missing listener conversation ${input.conversationId}`)
-            return { char: snapshot(char), chat: snapshot(chat) }
+            return { char, chat }
         })
     }
 }

@@ -3232,6 +3232,7 @@ checksum = "d49e936b501e5c5bf01fda3a9452ff86dc3ea98ad5f283e1455153142d97518c"
 dependencies = [
  "bitflags 2.13.2",
  "block2",
+ "libc",
  "objc2",
  "objc2-core-foundation",
  "objc2-foundation",
@@ -4272,12 +4273,13 @@ dependencies = [
 
 [[package]]
 name = "risunest"
-version = "1.0.6"
+version = "1.1.0"
 dependencies = [
  "aes",
  "async-trait",
  "axum",
  "base64 0.23.1",
+ "block2",
  "cap-primitives",
  "cc",
  "core-foundation 0.10.1",
@@ -4289,6 +4291,7 @@ dependencies = [
  "futures",
  "getrandom 0.2.17",
  "ghash",
+ "gtk",
  "hex",
  "hmac 0.13.0",
  "httpdate",
@@ -4300,7 +4303,12 @@ dependencies = [
  "native-tls",
  "notify-rust",
  "oauth2",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "os_info",
  "percent-encoding",
+ "png 0.18.1",
  "quick-xml",
  "regex",
  "reqwest 0.12.28",
@@ -4351,9 +4359,11 @@ dependencies = [
  "webp",
  "webview2-com",
  "windows 0.62.2",
+ "windows-future 0.3.2",
  "windows-sys 0.61.2",
  "zeroize",
  "zip 0.6.6",
+ "zune-jpeg",
 ]
 
 [[package]]

@@ -1,5 +1,6 @@
 import { vi } from 'vitest'
 import * as coldStorageData from '../process/coldstorageData'
+import type { ColdItemRead } from '../process/coldPayloadExpansion'
 import { decryptBuffer, encryptBuffer } from '../bufferCrypto'
 import type { BlobStore } from '../storage/blobStore'
 import type { Database } from '../storage/database.svelte'
@@ -56,7 +57,7 @@ export function coldStorageModule() {
         replaceColdStoragePayloadResources: coldStorageData.replaceColdStoragePayloadResources,
         listColdDataKeysFromDb: coldStorageData.listColdDataKeysFromDb,
         listColdDataKeys: async (db?: Pick<Database, 'characters'>) => coldStorageData.listColdDataKeysFromDb(db),
-        getAccountColdStorageItem: vi.fn(async () => null),
+        getAccountColdStorageItem: vi.fn(async (): Promise<ColdItemRead> => ({ kind: 'missing' })),
         confirmIncompleteColdStorageRestore: vi.fn(async () => true),
     } satisfies typeof import('../process/coldstorage.svelte')
 }

@@ -1010,7 +1010,7 @@ mod tests {
                             inlay_type: Some("image".into()),
                             width: Some(1),
                             height: Some(1),
-                            metadata: json!({}),
+                            metadata: json!({"createdAt":123,"charId":"synthetic","chatId":"chat"}),
                         },
                         AssetAlias {
                             key: "assets/nested/icon.webp".into(),
@@ -1212,6 +1212,8 @@ mod tests {
             assert!(db.get("unknownRoot").is_none());
             assert!(db.get("risunestInlayMode").is_none());
             let chat = &db["characters"][0]["chats"][0];
+            assert_eq!(db["characters"][0]["chaId"], "synthetic");
+            assert_eq!(chat["id"], "chat");
             assert_eq!(chat["message"].as_array().unwrap().len(), 2);
             assert!(chat.get("unknownChat").is_none());
             let message = &chat["message"][0];
@@ -1227,6 +1229,7 @@ mod tests {
                 );
                 assert_eq!(message["swipeId"], 1);
                 assert_eq!(chat["savedToggleValues"], json!({"test":"1"}));
+                assert_eq!(report.converted.iter().find(|item| item.code == "converted-inlay-provenance").unwrap().items, "1");
             } else {
                 assert_eq!(db["characters"].as_array().unwrap().len(), 2);
                 assert!(message.get("swipes").is_none());

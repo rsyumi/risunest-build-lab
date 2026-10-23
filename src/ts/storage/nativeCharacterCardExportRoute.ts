@@ -1,3 +1,4 @@
+import { prepareCharacterPortraitRendition } from './characterPortraitRendition'
 import { save } from './fileSelection'
 
 import { isTauriIOS, isTauriAndroid, isTauriDesktop } from '../platform'
@@ -11,7 +12,11 @@ import {
     type NativeFileJobResult,
 } from './nativeFileJobs'
 import { getPersistentDataRuntime } from './persistentDataRuntime.svelte'
-import { prepareNativeContentExportFromPicker } from './nativeContentExportPicker'
+import {
+    prepareNativeContentExportFromPicker,
+    withNativeContentExportDestination,
+    type NativeContentExportPickerDependencies,
+} from './nativeContentExportPicker'
 
 interface NativeCharacterCardPickerInput {
     characterId: string
@@ -29,6 +34,7 @@ interface NativeCharacterCardExportRouteDependencies {
     isDesktop(): boolean
     isAndroid(): boolean
     isIOS?(): boolean
+    reserveAndroidDestination?: NativeContentExportPickerDependencies['reserveAndroidDestination']
     chooseDestination(
         suggestedName: string,
         format: NativeCharacterCardPickerInput['format'],
@@ -38,6 +44,7 @@ interface NativeCharacterCardExportRouteDependencies {
         characterId: string,
         revision: DataRevision,
     ): Promise<CharacterDetail>
+    preparePortrait?: typeof prepareCharacterPortraitRendition
     runExport(
         input: NativeCharacterCardExportInput,
         options?: NativeFileJobOptions,
@@ -68,6 +75,7 @@ const productionDependencies: NativeCharacterCardExportRouteDependencies = {
             characterId,
             revision,
         ),
+    preparePortrait: prepareCharacterPortraitRendition,
     runExport: runNativeCharacterCardExport,
 }
 
@@ -84,13 +92,21 @@ export async function exportNativeCharacterCardFromPicker(
     }, options, dependencies)
     if (flow.kind === 'unsupported') return undefined
     if (flow.kind === 'cancelled') return null
-    const character = await dependencies.readCharacter(input.characterId, flow.expectedRevision)
-    const metadata = input.projectCharacter(character)
-    return dependencies.runExport({
-        characterId: input.characterId,
-        destination: flow.destination,
-        expectedRevision: flow.expectedRevision,
-        format: input.format,
-        metadata,
-    }, options)
+    return withNativeContentExportDestination(flow.destination, async () => {
+        const character = await dependencies.readCharacter(input.characterId, flow.expectedRevision)
+        const metadata = input.projectCharacter(character)
+        const rendition = input.format === 'png-card'
+            ? await dependencies.preparePortrait?.(character, flow.expectedRevision, 'png-card', options.signal) : undefined
+        try {
+            options.signal?.throwIfAborted()
+            return await dependencies.runExport({
+                characterId: input.characterId,
+                destination: flow.destination,
+                expectedRevision: flow.expectedRevision,
+                ...(rendition ? { portraitRendition: rendition.descriptor } : {}),
+                format: input.format,
+                metadata,
+            }, options)
+        } finally { await rendition?.release() }
+    })
 }

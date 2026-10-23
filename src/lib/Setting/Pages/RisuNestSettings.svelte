@@ -12,6 +12,8 @@
     import { DBState } from 'src/ts/stores.svelte'
     import RisuNestSettingRows from '../RisuNest/RisuNestSettingRows.svelte'
     import RisuNestPerformanceSettings from './RisuNestPerformanceSettings.svelte'
+    import RisuNestAttachmentGallery from './RisuNestAttachmentGallery.svelte'
+    import { galleryText } from 'src/ts/gallery/strings'
     import RisuNestInlayInventory from './RisuNestInlayInventory.svelte'
     import RisuNestImageGeometry from './RisuNestImageGeometry.svelte'
     import RisuNestPluginData from './RisuNestPluginData.svelte'
@@ -27,6 +29,7 @@
     import RisuNestNetworkLog from './RisuNestNetworkLog.svelte'
     import RisuNestLogViewer from './RisuNestLogViewer.svelte'
     import RisuNestUpdateSettings from './RisuNestUpdateSettings.svelte'
+    import RisuNestAppLockSettings from './RisuNestAppLockSettings.svelte'
     import ExternalStorageSettings from '../ExternalStorage/ExternalStorageSettings.svelte'
     import LocalDataReset from '../RisuNest/LocalDataReset.svelte'
     import RisuNestStartupExclusions from './RisuNestStartupExclusions.svelte'
@@ -34,6 +37,7 @@
     const tabLabels: Record<RisuNestSettingsTab, string> = {
         settings: language.risuNest.tabs.settings,
         storage: language.risuNest.tabs.storage,
+        attachments: galleryText().attachmentTab,
         sync: language.risuNest.tabs.sync,
         'plugin-data': language.risuNest.tabs.pluginData,
         'network-logs': language.risuNest.tabs.networkLogs,
@@ -75,7 +79,7 @@
 </script>
 
 <!-- Korean has no spaces inside a word, so the default break rule splits words mid-syllable. -->
-<div class="@container w-full max-w-3xl" class:break-keep={DBState.db.language === 'ko'}>
+<div class="@container w-full" class:max-w-3xl={activeTab !== 'attachments'} class:break-keep={DBState.db.language === 'ko'}>
     <h1 class="text-2xl font-bold">{language.risuNest.menuTitle}</h1>
     <div
         role="tablist"
@@ -107,6 +111,7 @@
             <RisuNestSettingRows items={risuNestStreamingSettingsItems} />
             <RisuNestSettingRows items={risuNestInlaySettingsItems} />
             {#if isTauri}
+                <RisuNestAppLockSettings />
                 <RisuNestUpdateSettings />
             {/if}
             {#if isTauri && !isTauriAndroid && !isTauriIOS}
@@ -132,6 +137,8 @@
             {/if}
             <RisuNestBackupRestore />
             <LocalDataReset />
+        {:else if activeTab === 'attachments'}
+            <RisuNestAttachmentGallery />
         {:else if activeTab === 'sync'}
             {#if isTauri}
                 <ServerSyncSettings />

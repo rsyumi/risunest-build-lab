@@ -2,6 +2,8 @@
   "extends": "../tsconfig.json",
   "include": [
     "./harnessConfig.ts",
+    "./generation-memory/**/*.ts",
+    "./generation-send/**/*.ts",
     "./tokenizer/*.ts",
     "./streaming/**/*.ts",
     "./streaming/**/*.svelte",
@@ -11,6 +13,7 @@
     "./sync-ui/**/*.ts",
     "./device-backup/**/*.ts",
     "./legacy-restore/**/*.ts",
+    "./official-account/**/*.ts",
     "./plugin-review/**/*.ts",
     "../src/**/*.d.ts"
   ],

@@ -372,8 +372,16 @@ describe('selected conversation live parser projection', () => {
             expect(testHarness.releases()).toBe(1)
         },
     )
-    test('keeps a plain greeting windowed and prepares it again when a later pass reads a skipped edit', async () => {
+    test.each(['history', 'revision'] as const)('keeps a plain greeting windowed and prepares it again when a later pass meets a skipped %s change', async (change) => {
         const testHarness = await cachedHarness({ metadataOnly: true })
+        const runtime = testHarness.dependencies.runtime
+        const captureTarget = runtime.captureSelectedConversationTarget
+        const captureAuthority = runtime.captureSelectedConversationAuthority
+        const snapshot = testHarness.source.snapshot.bind(testHarness.source)
+        let revision = 4
+        runtime.captureSelectedConversationTarget = () => ({ ...captureTarget()!, storeRevision: revision })
+        runtime.captureSelectedConversationAuthority = () => ({ ...captureAuthority()!, storeRevision: revision })
+        vi.spyOn(testHarness.source, 'snapshot').mockImplementation(() => ({ ...snapshot(), storeRevision: revision }))
         const controller = new AbortController()
         const onStale = vi.fn()
         const lease = await testHarness.resolver.acquireConversationStart!({
@@ -386,7 +394,8 @@ describe('selected conversation live parser projection', () => {
         expect(testHarness.acquire).not.toHaveBeenCalled()
         expect(testHarness.forbiddenHistoryReads()).toBe(0)
         // The greeting read no row, so refreshes skip this edit until a later pass reads it.
-        testHarness.source.applyOptimisticRange(7, 1, [message(7, 'pending tail')])
+        if (change === 'history') testHarness.source.applyOptimisticRange(7, 1, [message(7, 'pending tail')])
+        else revision = 5
         const prepareHistory = lease!.projection!.context.parserContext.prepareHistory!
         await expect(prepareHistory('{{lastmessage}}', -1, false)).rejects.toThrow('Chat parser history projection became stale')
         expect(onStale).toHaveBeenCalledOnce()
@@ -400,12 +409,23 @@ describe('selected conversation live parser projection', () => {
         expect(onStale).toHaveBeenCalledTimes(2)
     })
 
-    test('asks a row to prepare again only when its later pass fails on changed history', async () => {
+    test.each(['history', 'revision', 'unpinned revision'] as const)('asks a row to prepare again only when its later pass fails on a changed %s', async (change) => {
         const testHarness = await cachedHarness()
+        const runtime = testHarness.dependencies.runtime
+        const captureTarget = runtime.captureSelectedConversationTarget
+        const captureAuthority = runtime.captureSelectedConversationAuthority
+        const snapshot = testHarness.source.snapshot.bind(testHarness.source)
+        let revision = 4
+        runtime.captureSelectedConversationTarget = () => ({ ...captureTarget()!, storeRevision: revision })
+        runtime.captureSelectedConversationAuthority = () => ({ ...captureAuthority()!, storeRevision: revision })
+        vi.spyOn(testHarness.source, 'snapshot').mockImplementation(() => ({ ...snapshot(), storeRevision: revision }))
         const controller = new AbortController()
         const onStale = vi.fn()
+        const row = testHarness.source.snapshot().rowAt(5)!
+        // Without a viewport source the row reads its history from storage and keeps no resident rows.
+        if (change === 'unpinned revision') runtime.getActiveConversationViewportSource = () => null
         const result = await testHarness.resolver.resolve({
-            row: testHarness.source.snapshot().rowAt(5)!,
+            row,
             totalMessages: 8,
             signal: controller.signal,
             onStale,
@@ -416,7 +436,9 @@ describe('selected conversation live parser projection', () => {
         testHarness.reads.mockRejectedValueOnce(new Error('Synthetic read failure'))
         await expect(prepareHistory('{{previouschatlog::0}}', 5, false)).rejects.toThrow('Synthetic read failure')
         expect(onStale).not.toHaveBeenCalled()
-        testHarness.source.applyOptimisticRange(7, 1, [message(7, 'pending tail')])
+        if (change === 'history') testHarness.source.applyOptimisticRange(7, 1, [message(7, 'pending tail')])
+        // A storage-only commit, such as a character edit while a response streams, changes no row.
+        else revision = 5
         await expect(prepareHistory('{{lastmessage}}', 5, false)).rejects.toThrow('Chat parser history projection became stale')
         expect(onStale).toHaveBeenCalledOnce()
         controller.abort()

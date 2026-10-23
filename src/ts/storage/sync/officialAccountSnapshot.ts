@@ -6,7 +6,11 @@ import {
     listCharacterResources,
     listDatabaseRootResources,
 } from '../../process/coldstorageData'
-import { expandColdPayloads } from '../../process/coldPayloadExpansion'
+import {
+    expandColdPayloads,
+    importColdPluginStorage,
+    type ColdItemRead,
+} from '../../process/coldPayloadExpansion'
 import type {
     AccountStorage,
     AccountWriteResult,
@@ -56,7 +60,13 @@ export interface OfficialPublicationOptions {
 const databaseKey = 'database/database.bin'
 
 export interface OfficialColdStorageTransport {
-    readRemote(key: string, signal?: AbortSignal): Promise<unknown | null>
+    readRemote(key: string, signal?: AbortSignal): Promise<ColdItemRead>
+}
+
+/** Counts of data the restore leaves out, for the replacement confirmation. */
+export interface OfficialRestoreOmissions {
+    pluginStorage: number
+    oversizedPluginStorage: number
 }
 
 export interface OfficialAssociationRecord {
@@ -98,8 +108,15 @@ export interface OfficialAccountSnapshotDependencies {
     account: Pick<AccountStorage, 'readItem' | 'writeItem'>
     cold: OfficialColdStorageTransport
     prepareCandidate(database: Database): Promise<Database>
+    /** Asks before a web restore leaves data out; a decline leaves the library unchanged. */
+    confirmOmissions?(omissions: OfficialRestoreOmissions): Promise<boolean>
     /** Explicit native restores use the runtime's confirmed and fenced replacement path. */
-    restoreCandidate?(database: Database, expectedRevision: DataRevision, signal?: AbortSignal): Promise<{ revision: DataRevision }>
+    restoreCandidate?(
+        database: Database,
+        expectedRevision: DataRevision,
+        signal?: AbortSignal,
+        omissions?: OfficialRestoreOmissions,
+    ): Promise<{ revision: DataRevision }>
     markPublished(revision: DataRevision): Promise<void> | void
     ledger: OfficialAssetLedger
     /** Persists the published association so a restart can tell local from remote progress. */
@@ -138,6 +155,8 @@ export type OfficialPullResult =
     | { kind: 'unchanged' }
     | { kind: 'kept-local'; conflict: boolean }
     | { kind: 'activated'; revision: DataRevision }
+    /** The user declined a restore that leaves data out. Nothing changed. */
+    | { kind: 'declined' }
 
 interface PinnedAsset {
     key: string
@@ -682,16 +701,27 @@ export class OfficialAccountSnapshotAdapter implements OfficialRevisionPublisher
         // Upstream account data can reference cold payloads. They become record bodies here,
         // because nothing downstream resolves a reference. Unresolved payloads prevent activation.
         throwIfAborted(signal)
-        const expansion = await expandColdPayloads(candidate, (key) => this.dependencies.cold.readRemote(key, signal))
+        const readCold = (key: string) => this.dependencies.cold.readRemote(key, signal)
+        const expansion = await expandColdPayloads(candidate, readCold)
         if (expansion.unavailableKeys.length > 0) {
             throw new ColdPayloadUnavailableError(expansion.unavailableKeys.length)
+        }
+        // Plugin values that cannot be resolved are left out instead of blocking activation.
+        const plugins = await importColdPluginStorage(candidate, readCold)
+        const omissions: OfficialRestoreOmissions = { pluginStorage: plugins.omitted, oversizedPluginStorage: plugins.tooLarge }
+        if (plugins.omitted + plugins.tooLarge > 0 && !this.dependencies.restoreCandidate) {
+            if (this.dependencies.confirmOmissions) {
+                if (!await this.dependencies.confirmOmissions(omissions)) return { kind: 'declined' }
+            } else {
+                console.warn(`Official snapshot restore left out ${plugins.omitted + plugins.tooLarge} plugin storage values`)
+            }
         }
 
         // Referenced assets load lazily on use, matching the upstream client;
         // a missing one degrades that item instead of failing the whole pull.
         throwIfAborted(signal)
         const activated = this.dependencies.restoreCandidate
-            ? await this.dependencies.restoreCandidate(candidate, expectedRevision, signal)
+            ? await this.dependencies.restoreCandidate(candidate, expectedRevision, signal, omissions)
             : await this.dependencies.store.replaceFromDatabase(candidate, expectedRevision)
         this.rememberAssociation(this.dependencies.getAccountId ? accountId : candidate.account?.id ?? accountId, {
             revision: activated.revision,

@@ -10,6 +10,8 @@
     import SettingButton from '../RisuNest/SettingButton.svelte'
     import SettingProgress from '../RisuNest/SettingProgress.svelte'
     import { publishNativeOfficialAccountBackup, restoreNativeOfficialAccountBackup } from 'src/ts/storage/sync/nativeOfficialAccountOperations'
+    import { inspectNativeOfficialAccountAssets, resumeNativeOfficialAccountAssets } from 'src/ts/storage/sync/nativeOfficialAccountOperations'
+    import type { OfficialAssetRecovery } from 'src/ts/storage/sync/officialAccountAssetContinuation'
     import { presentFileOperationError } from 'src/ts/storage/fileOperationErrorPresentation'
     import { DBState } from 'src/ts/stores.svelte'
     import {
@@ -31,6 +33,16 @@
     } from 'src/ts/gui/nativeFileJobProgress'
 
     let nativeAccountBusy = $state(false)
+    let pendingAssets = $state<OfficialAssetRecovery>({ kind: 'none' })
+    $effect(() => {
+        const accountId = DBState.db.account?.id
+        const operation = $nativeFileOperation
+        if (!isTauri || !accountId || operation) return
+        let current = true
+        void inspectNativeOfficialAccountAssets().then(value => { if (current) pendingAssets = value })
+            .catch(() => { if (current) pendingAssets = { kind: 'none' } })
+        return () => { current = false }
+    })
     let risuSaveOperation = $derived($nativeFileOperation?.kind ?? null)
     let risuSaveStatus = $derived($nativeFileOperation?.status)
     // Imports open the shared progress dialog; only inline operations (exports) use this row.
@@ -132,6 +144,14 @@
         })
     }
 
+    function resumeOfficialAssets() {
+        return runNativeAccountOperation(async () => {
+            const startedAt = Date.now()
+            try { await resumeNativeOfficialAccountAssets({ operationId: pendingAssets.operationId, currentLibrary: pendingAssets.kind === 'current-library' }) }
+            catch (error) { presentFileOperationError('import', error, startedAt) }
+        })
+    }
+
 </script>
 
 <SettingGroup id="risunest-backup" title={language.risuNest.backup.title}>
@@ -207,6 +227,11 @@
                 onclick={restoreOfficialBackup}
                 >{language.risuNest.backup.officialRestore}</SettingButton
             >
+            {#if pendingAssets.kind !== 'none'}
+                <SettingButton variant="secondary" disabled={nativeAccountBusy || risuSaveOperation !== null} onclick={resumeOfficialAssets}>
+                    {pendingAssets.kind === 'current-library' ? language.risuNest.backup.downloadMissingAccountAssets : language.retry}
+                </SettingButton>
+            {/if}
         </SettingRow>
     {/if}
 </SettingGroup>

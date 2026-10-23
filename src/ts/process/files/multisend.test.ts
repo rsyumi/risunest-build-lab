@@ -1,3 +1,4 @@
+import { imageFixture } from '../../../../tests/support/imageFixtures'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { get } from 'svelte/store'
 
@@ -78,6 +79,7 @@ import { postChatFile } from './multisend'
 import { InlayInputTooLargeError } from './inlays'
 import { doingChat, reserveGeneration } from '../generationState'
 import { language } from 'src/lang'
+import { selectMultipleFile } from 'src/ts/util'
 
 function createDatabase(): Database {
     const conversation = {
@@ -400,33 +402,46 @@ describe('postChatFile attachment errors', () => {
         mocks.alertError.mockReset()
     })
 
+    it.each([false, true])('does not repeat selection failures when attachment storage fails: %s', async storageFails => {
+        vi.mocked(selectMultipleFile).mockImplementationOnce(async (_extensions, options) => {
+            options!.failures!.push('rejected.png: damaged')
+            mocks.alertError('rejected.png: damaged')
+            return [{ name: 'valid.png', data: imageFixture('png') }]
+        })
+        if (storageFails) mocks.postInlayAsset.mockRejectedValueOnce(new Error('cannot store'))
+        else mocks.postInlayAsset.mockResolvedValueOnce('inlay-id')
+        expect(await postChatFile('')).toEqual(storageFails ? [] : [{ type: 'asset', data: 'inlay-id' }])
+        expect(mocks.alertError.mock.calls.map(([message]) => message)).toEqual(storageFails
+            ? ['rejected.png: damaged', 'valid.png: cannot store'] : ['rejected.png: damaged'])
+    })
+
     it.each(['gif', 'png'])('skips an oversized %s attachment without appending an asset or message', async (extension) => {
         mocks.postInlayAsset.mockRejectedValueOnce(new InlayInputTooLargeError('over the input limit'))
         const conversation = mocks.dbState.db!.characters[0].chats[0]
 
-        await expect(postChatFile({ name: `huge.${extension}`, data: new Uint8Array([1]) })).resolves.toEqual([])
+        await expect(postChatFile({ name: `huge.${extension}`, data: imageFixture(extension as 'png' | 'gif') })).resolves.toEqual([])
 
-        expect(mocks.alertError).toHaveBeenCalledWith(language.risuNest.inlay.tooLarge)
+        expect(mocks.alertError).toHaveBeenCalledWith(`huge.${extension}: ${language.risuNest.inlay.tooLarge}`)
         expect(conversation.message).toEqual([{ role: 'char', data: 'before' }])
         expect(mocks.sendChat).not.toHaveBeenCalled()
     })
 
-    it.each(['png', 'mp3'])('propagates ordinary %s attachment failures', async (extension) => {
+    it.each(['png', 'mp3', 'txt'])('reports ordinary %s attachment failures by name', async (extension) => {
         const failure = new Error('storage failed')
         mocks.postInlayAsset.mockRejectedValueOnce(failure)
 
-        await expect(postChatFile({ name: `attachment.${extension}`, data: new Uint8Array([1]) }))
-            .rejects.toBe(failure)
+        await expect(postChatFile({ name: `attachment.${extension}`, data: extension === 'mp3' ? new Uint8Array([1]) : imageFixture('png') }))
+            .resolves.toEqual([])
 
-        expect(mocks.alertError).not.toHaveBeenCalled()
+        expect(mocks.alertError).toHaveBeenCalledWith(`attachment.${extension}: storage failed`)
     })
 
-    it('keeps null unsupported-extension results as a silent skip', async () => {
+    it('reports an unrecognized attachment instead of silently skipping it', async () => {
         mocks.postInlayAsset.mockResolvedValueOnce(null)
 
         await expect(postChatFile({ name: 'attachment.avi', data: new Uint8Array([1]) }))
             .resolves.toEqual([])
 
-        expect(mocks.alertError).not.toHaveBeenCalled()
+        expect(mocks.alertError).toHaveBeenCalledWith(`attachment.avi: ${language.risuNest.importDialog.reasonUnsupportedFormat}`)
     })
 })

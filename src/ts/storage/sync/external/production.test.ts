@@ -55,6 +55,7 @@ vi.mock('../../../mobileBackgroundTask', async original => {
     const actual = await original<typeof import('../../../mobileBackgroundTask')>()
     return {
         ...actual,
+        beginMobileBackgroundTask: vi.fn(actual.beginMobileBackgroundTask),
         hasMobileBackgroundTasks: () => mocks.protected || (mocks.protectScopes && mocks.scopes > 0),
         runWithMobileBackgroundTask<T>(kind: MobileTaskKind, operation: (task: MobileBackgroundTask) => Promise<T>, signal?: AbortSignal) {
             mocks.scopes++
@@ -602,7 +603,50 @@ describe('external storage production integration', () => {
             mocks.backgroundChanged?.()
             await vi.waitFor(() => expect(mocks.bridge.setExecutionSession).toHaveBeenCalledTimes(2))
             expect(mocks.bridge.setExecutionSession.mock.lastCall?.[0].kind).toBe('hidden')
+            // Routine work that begins on return does not keep the hidden session.
+            mocks.protected = true
+            visibility = 'visible'
+            document.dispatchEvent(new Event('visibilitychange'))
+            await vi.waitFor(() => expect(mocks.bridge.setExecutionSession).toHaveBeenCalledTimes(3))
+            expect(mocks.bridge.setExecutionSession.mock.lastCall?.[0].kind).toBe('foreground')
         } finally { visible.mockRestore() }
+    })
+
+    it('holds a keep or check job until it settles and leaves an unprotected one unpolled', async () => {
+        vi.useFakeTimers()
+        try {
+            const { beginMobileBackgroundTask } = await import('../../../mobileBackgroundTask')
+            const { startExternalStorageMaintenanceJob } = await import('./production')
+            const hold = (state: 'active' | 'refused') => ({
+                protection: state === 'active' ? { state } as const : { state, reason: 'background' } as const,
+                progress: vi.fn(), dispose: vi.fn(async (_success?: boolean) => {}),
+            })
+            const running: ExternalJobSummary = {
+                ...succeeded('old-sync', '8'), kind: 'check-repository', state: 'running', phase: 'verify',
+                completedBytes: '1', totalBytes: '4', result: undefined,
+            }
+            mocks.bridge.startJob.mockResolvedValue(running)
+            mocks.bridge.getJob
+                .mockResolvedValueOnce({ ...running, completedBytes: '2' })
+                .mockResolvedValueOnce({ ...running, state: 'succeeded', completedBytes: '4' })
+            const active = hold('active')
+            vi.mocked(beginMobileBackgroundTask).mockResolvedValueOnce(active)
+            const request = { connectionId: 'old-sync', kind: 'check-repository', reason: 'manual' } as const
+            await expect(startExternalStorageMaintenanceJob(request)).resolves.toEqual(running)
+            expect(beginMobileBackgroundTask).toHaveBeenCalledExactlyOnceWith('maintenance', undefined, true)
+            await vi.advanceTimersByTimeAsync(500)
+            expect(active.progress).toHaveBeenLastCalledWith(50)
+            expect(active.dispose).not.toHaveBeenCalled()
+            await vi.advanceTimersByTimeAsync(500)
+            expect(active.dispose).toHaveBeenCalledExactlyOnceWith(true)
+
+            const refused = hold('refused')
+            vi.mocked(beginMobileBackgroundTask).mockResolvedValueOnce(refused)
+            await startExternalStorageMaintenanceJob(request)
+            expect(refused.dispose).toHaveBeenCalledOnce()
+            await vi.advanceTimersByTimeAsync(1_000)
+            expect(mocks.bridge.getJob).toHaveBeenCalledTimes(2)
+        } finally { vi.useRealTimers() }
     })
 
     it('serializes hidden invalidation before a new foreground inspection', async () => {

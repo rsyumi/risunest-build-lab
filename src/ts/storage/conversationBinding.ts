@@ -3,7 +3,7 @@ import type { Chat } from './database.svelte'
 /** Chat-level bindings that only touch conversation metadata. */
 export type ConversationBindingPatch = Partial<Pick<
     Chat,
-    'bindedPersona' | 'savedToggleValues' | 'useLocallySetGlobalVariables' | 'GLGlobalVariables'
+    'bindedPersona' | 'savedToggleValues' | 'useLocallySetGlobalVariables' | 'GLGlobalVariables' | 'onboardingDone'
 >>
 
 /** Writes the patch onto a conversation record; `undefined` removes the field instead of storing it. */

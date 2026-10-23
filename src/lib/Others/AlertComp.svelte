@@ -777,7 +777,7 @@
                 <SelectInput bind:value={cardExportType2} className="mt-2">
                     <OptionInput value="charx">CHARX</OptionInput>
                     <OptionInput value="charxJpeg">CHARX-JPEG</OptionInput>
-                    <OptionInput value="">PNG</OptionInput>
+                    <OptionInput value="png">PNG</OptionInput>
                     <OptionInput value="json">JSON</OptionInput>
                 </SelectInput>
             {/if}

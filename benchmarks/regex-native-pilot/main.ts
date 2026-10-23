@@ -1,3 +1,5 @@
+import { isTauri } from '@tauri-apps/api/core'
+import { showNativeHarness } from '../nativeAppLock'
 import {
     executeNativeRegexBatch,
     tryExecuteNativeRegexBatch,
@@ -143,6 +145,7 @@ async function run(): Promise<{
     userAgent: string
     cells: PilotCell[]
 }> {
+    if (isTauri()) await showNativeHarness()
     const worker = new RegexWorkerClient()
     const cells: PilotCell[] = []
     for (const rules of ruleCounts) {

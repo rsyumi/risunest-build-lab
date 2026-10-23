@@ -161,6 +161,15 @@ describe('coordinated staged asset activation', () => {
         await expect(writer!(Uint8Array.of(2), metadata, Uint8Array.of(1))).rejects.toThrow('already used')
     })
 
+    it('checks download ownership inside activation and aborts a rejected prepared write', async () => {
+        const setup = harness()
+        await expect(setup.blob.putVerified!('assets/item.bin', Uint8Array.of(1), metadata, async () => {
+            throw new Error('Download library was replaced')
+        })).rejects.toThrow('Download library was replaced')
+        expect(setup.handles[0].activate).not.toHaveBeenCalled()
+        expect(setup.handles[0].abort).toHaveBeenCalledOnce()
+    })
+
     it('rejects transformed B when the captured A alias was restored before activation', async () => {
         const setup = harness()
         const writer = await setup.blob.captureConditionalWrite!('assets/item.bin')

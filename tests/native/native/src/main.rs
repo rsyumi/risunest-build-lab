@@ -8,7 +8,8 @@ fn boundary_phase(app: tauri::AppHandle) -> serde_json::Value {
     let root = app.path().app_data_dir().unwrap();
     assert_eq!(root, PathBuf::from(value("RISUNEST_BOUNDARY_ROOT")));
     assert_eq!(fs::read_to_string(root.join("boundary-owner")).unwrap(), value("RISUNEST_BOUNDARY_ID"));
-    serde_json::json!({"runId": value("RISUNEST_BOUNDARY_ID"), "phase": value("RISUNEST_BOUNDARY_PHASE")})
+    serde_json::json!({"runId": value("RISUNEST_BOUNDARY_ID"), "phase": value("RISUNEST_BOUNDARY_PHASE"),
+        "accountOrigin": std::env::var("RISUNEST_BOUNDARY_ACCOUNT_ORIGIN").ok()})
 }
 
 fn write_report(report: &serde_json::Value, options: &mut fs::OpenOptions) -> Result<(), String> {

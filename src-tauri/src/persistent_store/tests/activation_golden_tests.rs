@@ -503,7 +503,9 @@ fn manifest_mismatches(store: &mut PersistentStore) -> Vec<String> {
     let generation = active_generation(&store.connection).unwrap();
     let conversations = store
         .connection
-        .prepare("SELECT character_id,conversation_id FROM conversations WHERE generation=?1 ORDER BY 1,2")
+        .prepare("SELECT character_id,conversation_id FROM conversations WHERE generation=?1
+            UNION SELECT character_id,conversation_id FROM message_page_manifests WHERE generation=?1
+            UNION SELECT character_id,conversation_id FROM message_page_indexes WHERE generation=?1 ORDER BY 1,2")
         .unwrap()
         .query_map([&generation], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
         .unwrap()
@@ -512,9 +514,15 @@ fn manifest_mismatches(store: &mut PersistentStore) -> Vec<String> {
     let transaction = store.connection.transaction().unwrap();
     let mut mismatches = Vec::new();
     for (character, conversation) in conversations {
+        // Both manifest helpers can rebuild pages, so observe the stored index first.
+        let had_index = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM message_page_indexes WHERE generation=?1 AND character_id=?2 AND conversation_id=?3)",
+            params![generation, character, conversation], |row| row.get::<_, bool>(0),
+        ).unwrap();
         let current = message_pages::current_manifest(&transaction, &generation, &character, &conversation).unwrap();
         let captured = message_pages::capture_manifest(&transaction, &generation, &character, &conversation, None).unwrap();
-        if current != captured {
+        let orphan_index = captured == risunest_sync_wire::unit::UnitValue::Deleted && had_index;
+        if current != captured || orphan_index {
             mismatches.push(format!("{character}/{conversation}"));
         }
     }
@@ -558,6 +566,15 @@ fn active_manifests_equal_a_full_capture_after_every_mutation_kind() {
         })
         .unwrap();
     results.push(("conversation edits", manifest_mismatches(&mut store)));
+
+    let revision = store.revision().unwrap();
+    store.commit(&WorkingSetCommit {
+        conversations: Some(vec![ConversationMutation::Delete {
+            character_id: "char-a".into(), conversation_id: "conv-long".into(),
+        }]),
+        ..empty_working_set_commit(revision)
+    }).unwrap();
+    results.push(("delete_conversation", manifest_mismatches(&mut store)));
 
     let revision = store.revision().unwrap();
     store

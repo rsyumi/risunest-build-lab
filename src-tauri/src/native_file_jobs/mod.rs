@@ -1,3 +1,4 @@
+mod portrait_rendition;
 pub(crate) mod admission;
 mod character_charx_export;
 mod character_json_export;
@@ -5,6 +6,7 @@ mod character_png_export;
 pub mod charx;
 mod content;
 mod dataset_export;
+mod gallery_export;
 pub(crate) mod download_handoff;
 mod error;
 mod jpeg_asset;
@@ -36,6 +38,7 @@ pub(crate) fn native_portable_source_cleanup_orphans(app:AppHandle)->Result<port
 pub(crate) mod raw_recovery;
 pub(crate) use backup_source::*;
 mod official_snapshot;
+pub(crate) mod official_assets;
 mod transfer_retry;
 mod risum_export;
 mod verified_read;
@@ -315,6 +318,8 @@ pub(crate) enum NativeFileJobStartRequest {
         expected_revision: i64,
     },
     ExportCharacterCharx {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        portrait_rendition: Option<portrait_rendition::PortraitRenditionDescriptor>,
         destination: Option<String>,
         expected_revision: i64,
         character_id: String,
@@ -326,6 +331,8 @@ pub(crate) enum NativeFileJobStartRequest {
         module: Option<Value>,
     },
     ExportCharacterCard {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        portrait_rendition: Option<portrait_rendition::PortraitRenditionDescriptor>,
         destination: Option<String>,
         expected_revision: i64,
         character_id: String,
@@ -340,6 +347,16 @@ pub(crate) enum NativeFileJobStartRequest {
     ExportDataset {
         destination: Option<String>,
         expected_revision: i64,
+    },
+    ExportGalleryFile {
+        destination: Option<String>,
+        expected_revision: i64,
+        selection: gallery_export::GallerySelection,
+    },
+    ExportGalleryZip {
+        destination: Option<String>,
+        expected_revision: i64,
+        selection: gallery_export::GallerySelection,
     },
     PrepareContentImport {
         source: JobSource,
@@ -367,6 +384,16 @@ pub(crate) enum NativeFileJobStartRequest {
         session: Option<String>,
         save_date: String,
         credential: OfficialPublicationCredential,
+    },
+    RestoreOfficialAccountAssets {
+        base_url: String,
+        credential: official_snapshot::OfficialSnapshotCredential,
+        account_id: String,
+        expected_library: String,
+        key_count: u64,
+        #[serde(default)]
+        concurrency: Option<u8>,
+        reauthenticated: bool,
     },
 }
 
@@ -1656,6 +1683,7 @@ impl NativeFileJobState {
                 }
             }
             NativeFileJobStartRequest::ExportCharacterCharx {
+                portrait_rendition,
                 destination,
                 expected_revision,
                 character_id,
@@ -1675,6 +1703,10 @@ impl NativeFileJobState {
                         "character CharX export requires module metadata",
                     )
                 })?;
+                if portrait_rendition.is_some() && container != CharacterCharxContainer::AppendedCharxJpeg {
+                    return Err(error::invalid_input("plain CharX does not use a portrait rendition"));
+                }
+                let portrait_rendition = portrait_rendition.map(|value| value.read(&self.root)).transpose()?;
                 let destination = destination.map(PathBuf::from);
                 if let Some(destination) = destination.as_deref() {
                     validate_desktop_destination(destination)?;
@@ -1699,6 +1731,7 @@ impl NativeFileJobState {
                     })
                     .map_err(native_store_error)?;
                 NativeFileJobTask::ExportCharacterCharx {
+                    portrait_rendition,
                     destination,
                     character_id,
                     card,
@@ -1708,12 +1741,17 @@ impl NativeFileJobState {
                 }
             }
             NativeFileJobStartRequest::ExportCharacterCard {
+                portrait_rendition,
                 destination,
                 expected_revision,
                 character_id,
                 format,
                 metadata,
             } => {
+                if portrait_rendition.is_some() && format != CharacterCardExportFormat::PngCard {
+                    return Err(error::invalid_input("JSON cards do not use a portrait rendition"));
+                }
+                let portrait_rendition = portrait_rendition.map(|value| value.read(&self.root)).transpose()?;
                 let destination = destination.map(PathBuf::from);
                 if let Some(destination) = destination.as_deref() {
                     validate_desktop_destination(destination)?;
@@ -1738,6 +1776,7 @@ impl NativeFileJobState {
                     })
                     .map_err(native_store_error)?;
                 NativeFileJobTask::ExportCharacterCard {
+                    portrait_rendition,
                     destination,
                     character_id,
                     format,
@@ -1782,6 +1821,26 @@ impl NativeFileJobState {
                     destination,
                     prepared,
                 }
+            }
+            request @ (NativeFileJobStartRequest::ExportGalleryFile { .. }
+                | NativeFileJobStartRequest::ExportGalleryZip { .. }) => {
+                let archive = matches!(&request, NativeFileJobStartRequest::ExportGalleryZip { .. });
+                let (destination, expected_revision, selection) = match request {
+                    NativeFileJobStartRequest::ExportGalleryFile { destination, expected_revision, selection }
+                    | NativeFileJobStartRequest::ExportGalleryZip { destination, expected_revision, selection } => (destination, expected_revision, selection),
+                    _ => unreachable!(),
+                };
+                selection.validate(archive)?;
+                let destination = destination.map(PathBuf::from);
+                if let Some(path) = destination.as_deref() { validate_desktop_destination(path)?; }
+                let selected_alias = if archive { None } else { Some(selection.single_alias()?) };
+                let prepared = crate::persistent_store::commands::with_store_mut(app.state(), |store| {
+                    match selected_alias {
+                        Some((kind, key)) => store.prepare_gallery_file_export(expected_revision, kind, key),
+                        None => store.prepare_risu_save_export(expected_revision),
+                    }
+                }).map_err(native_store_error)?;
+                NativeFileJobTask::ExportGallery { destination, prepared, selection, archive }
             }
             request @ NativeFileJobStartRequest::PrepareContentImport { .. } => {
                 return self.start_content(request);
@@ -1896,6 +1955,49 @@ impl NativeFileJobState {
                         "capability-unavailable",
                         "native official publication jobs are not compiled in this build",
                     ));
+                }
+            }
+            NativeFileJobStartRequest::RestoreOfficialAccountAssets {
+                base_url,
+                credential,
+                account_id,
+                expected_library,
+                key_count,
+                concurrency,
+                reauthenticated,
+            } => {
+                let (key_count, concurrency) = official_assets::validate_start(
+                    &base_url,
+                    &account_id,
+                    &expected_library,
+                    key_count,
+                    concurrency,
+                )?;
+                let store =
+                    crate::persistent_store::commands::with_store_mut(app.state(), |store| {
+                        store.open_native_job_store()
+                    })
+                    .map_err(native_store_error)?;
+                let revision = store.revision().map_err(native_store_error)?;
+                if store.library_identity().map_err(native_store_error)? != expected_library {
+                    return Err(NativeJobError::new(
+                        "library-changed",
+                        "The library changed before the official asset restore started",
+                    ));
+                }
+                NativeFileJobTask::RestoreOfficialAssets {
+                    request: official_assets::Request {
+                        base_url,
+                        credential,
+                        account_id,
+                        expected_library,
+                        key_count,
+                        concurrency,
+                        reauthenticated,
+                        store,
+                        revision,
+                        shared: official_assets::Handle::new(key_count),
+                    },
                 }
             }
         };
@@ -2131,6 +2233,10 @@ impl NativeFileJobState {
         if upstream_staging {
             job.set_activation_permit(Arc::downgrade(&admission))
                 .map_err(|error| NativeJobError::new("store-error", error))?;
+        }
+        if let NativeFileJobTask::RestoreOfficialAssets { request } = &task {
+            job.status.lock().map_err(|_| NativeJobError::new("store-error", "native job status mutex poisoned"))?
+                .official_asset_shared = Some(request.shared.clone());
         }
         let job_id = job.id();
         let owned_directory = match create_owned_directory(&self.root.join("jobs"), &job_id) {
@@ -2379,6 +2485,7 @@ impl NativeFileJobState {
                         &job,
                     ),
                     NativeFileJobTask::ExportCharacterCharx {
+                        portrait_rendition,
                         destination,
                         character_id,
                         card,
@@ -2395,8 +2502,10 @@ impl NativeFileJobState {
                         &root.join("handoffs"),
                         destination.as_deref(),
                         &job,
+                        portrait_rendition.as_ref(),
                     ),
                     NativeFileJobTask::ExportCharacterCard {
+                        portrait_rendition,
                         destination,
                         character_id,
                         format,
@@ -2423,6 +2532,7 @@ impl NativeFileJobState {
                                 &root.join("handoffs"),
                                 destination.as_deref(),
                                 &job,
+                                portrait_rendition.as_ref(),
                             )
                         }
                     },
@@ -2438,6 +2548,9 @@ impl NativeFileJobState {
                         destination.as_deref(),
                         &job,
                     ),
+                    NativeFileJobTask::ExportGallery { destination, prepared, selection, archive } =>
+                        gallery_export::export_gallery(prepared, selection, archive, &owned_directory,
+                            &root.join("handoffs"), destination.as_deref(), &job),
                     NativeFileJobTask::ExportDataset {
                         destination,
                         prepared,
@@ -2480,6 +2593,9 @@ impl NativeFileJobState {
                     #[cfg(feature = "native-official-publication")]
                     NativeFileJobTask::OfficialPublication { request, app } => {
                         publication::run_job(request, app, Arc::clone(&job))
+                    }
+                    NativeFileJobTask::RestoreOfficialAssets { request } => {
+                        official_assets::run(request, &owned_directory, &job)
                     }
                 },
                 "native file job worker panicked",
@@ -2816,6 +2932,7 @@ enum NativeFileJobTask {
         store: crate::persistent_store::PersistentStore,
     },
     ExportCharacterCharx {
+        portrait_rendition: Option<portrait_rendition::PortraitRendition>,
         destination: Option<PathBuf>,
         character_id: String,
         card: Value,
@@ -2824,6 +2941,7 @@ enum NativeFileJobTask {
         prepared: crate::persistent_store::PreparedRisuSaveExport,
     },
     ExportCharacterCard {
+        portrait_rendition: Option<portrait_rendition::PortraitRendition>,
         destination: Option<PathBuf>,
         character_id: String,
         format: CharacterCardExportFormat,
@@ -2838,6 +2956,12 @@ enum NativeFileJobTask {
     ExportDataset {
         destination: Option<PathBuf>,
         prepared: crate::persistent_store::PreparedRisuSaveExport,
+    },
+    ExportGallery {
+        destination: Option<PathBuf>,
+        prepared: crate::persistent_store::PreparedRisuSaveExport,
+        selection: gallery_export::GallerySelection,
+        archive: bool,
     },
     ImportJpegAsset {
         opened_source: Option<OpenedJobSource>,
@@ -2855,6 +2979,9 @@ enum NativeFileJobTask {
     OfficialPublication {
         request: OfficialPublicationJobRequest,
         app: AppHandle,
+    },
+    RestoreOfficialAssets {
+        request: official_assets::Request,
     },
 }
 
@@ -2874,11 +3001,13 @@ impl NativeFileJobTask {
             Self::ExportCharacterCard { .. } => JobKind::ExportCharacterCard,
             Self::ExportRisuModule { .. } => JobKind::ExportRisuModule,
             Self::ExportDataset { .. } => JobKind::ExportDataset,
+            Self::ExportGallery { archive, .. } => if *archive { JobKind::ExportGalleryZip } else { JobKind::ExportGalleryFile },
             Self::ImportJpegAsset { .. } => JobKind::ImportJpegAsset,
             #[cfg(feature = "native-kei-upload-pilot")]
             Self::KeiBackup { .. } => JobKind::KeiBackupUpload,
             #[cfg(feature = "native-official-publication")]
             Self::OfficialPublication { .. } => JobKind::OfficialPublicationUpload,
+            Self::RestoreOfficialAssets { .. } => JobKind::RestoreOfficialAccountAssets,
         }
     }
 
@@ -2915,11 +3044,13 @@ impl NativeFileJobTask {
             Self::ExportCharacterCharx { prepared, .. }
             | Self::ExportCharacterCard { prepared, .. }
             | Self::ExportRisuModule { prepared, .. }
-            | Self::ExportDataset { prepared, .. } => Some(prepared.revision),
+            | Self::ExportDataset { prepared, .. }
+            | Self::ExportGallery { prepared, .. } => Some(prepared.revision),
             #[cfg(feature = "native-kei-upload-pilot")]
             Self::KeiBackup { prepared } => Some(prepared.revision()),
             #[cfg(feature = "native-official-publication")]
             Self::OfficialPublication { request, .. } => Some(request.expected_revision),
+            Self::RestoreOfficialAssets { .. } => None,
         }
     }
 }
@@ -3641,10 +3772,13 @@ pub(crate) enum JobKind {
     ExportCharacterCard,
     ExportRisuModule,
     ExportDataset,
+    ExportGalleryFile,
+    ExportGalleryZip,
     PrepareContentImport,
     ImportJpegAsset,
     KeiBackupUpload,
     OfficialPublicationUpload,
+    RestoreOfficialAccountAssets,
 }
 
 #[allow(dead_code)]
@@ -3696,6 +3830,7 @@ pub(crate) struct JobProgress {
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum JobStage {
+    DownloadingAccountBackup,
     ReadingArchive,
     RequestingBackupKey,
     DecryptingDatabase,
@@ -3978,6 +4113,10 @@ pub(crate) struct JobStatus {
     pub(crate) plugin_value_preview: Option<crate::persistent_store::commit::StagedPluginPreview>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) incomplete_restore_preview: Option<IncompleteRestorePreview>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) official_asset_restore: Option<official_assets::RestoreProgress>,
+    #[serde(skip_serializing)]
+    pub(crate) official_asset_shared: Option<official_assets::Handle>,
 }
 
 impl JobStatus {
@@ -4009,6 +4148,8 @@ impl JobStatus {
             restore_preview: self.restore_preview.clone(),
             plugin_value_preview: self.plugin_value_preview.clone(),
             incomplete_restore_preview: self.incomplete_restore_preview.clone(),
+            official_asset_restore: self.official_asset_restore.clone(),
+            official_asset_shared: self.official_asset_shared.clone(),
         }
     }
 }
@@ -4030,6 +4171,8 @@ pub(crate) struct RestoreOmissions {
     pub(crate) missing: u64,
     pub(crate) values: u64,
     pub(crate) plugin_storage: u64,
+    pub(crate) damaged_plugin_storage: u64,
+    pub(crate) oversized_plugin_storage: u64,
     pub(crate) inlays: u64,
     pub(crate) excluded_characters: u64,
 }
@@ -4047,6 +4190,8 @@ impl IncompleteRestorePreview {
             ("missing-backup-data", self.omissions.missing),
             ("skipped-backup-values", self.omissions.values),
             ("skipped-plugin-storage", self.omissions.plugin_storage),
+            ("damaged-plugin-storage", self.omissions.damaged_plugin_storage),
+            ("oversized-plugin-storage", self.omissions.oversized_plugin_storage),
             ("skipped-backup-inlays", self.omissions.inlays),
             ("excluded-backup-characters", self.omissions.excluded_characters),
         ] {
@@ -4237,6 +4382,8 @@ impl JobRegistry {
                 restore_preview: None,
                 plugin_value_preview: None,
                 incomplete_restore_preview: None,
+                official_asset_restore: None,
+                official_asset_shared: None,
             }),
         });
         self.jobs
@@ -4426,6 +4573,8 @@ impl JobControl {
             "missing" => &mut omissions.missing,
             "values" => &mut omissions.values,
             "pluginStorage" => &mut omissions.plugin_storage,
+            "damagedPluginStorage" => &mut omissions.damaged_plugin_storage,
+            "oversizedPluginStorage" => &mut omissions.oversized_plugin_storage,
             "inlays" => &mut omissions.inlays,
             "excludedCharacters" => &mut omissions.excluded_characters,
             _ => return Err("unknown restore omission category".to_owned()),
@@ -4772,7 +4921,7 @@ impl JobControl {
             || (status.kind == JobKind::ExportCharacterCharx && status.state.is_terminal())
             || (status.kind == JobKind::ExportCharacterCard && status.state.is_terminal())
             || (status.kind == JobKind::ExportRisuModule && status.state.is_terminal())
-            || (status.kind == JobKind::ExportDataset && status.state.is_terminal())
+            || (matches!(status.kind, JobKind::ExportDataset | JobKind::ExportGalleryFile | JobKind::ExportGalleryZip) && status.state.is_terminal())
             || (status.kind == JobKind::ExportPortableBackup && status.state.is_terminal())
             || (status.kind == JobKind::SnapshotBodies && status.state.is_terminal())
             || (status.kind == JobKind::ExportCompatibleLocalBackup && status.state.is_terminal())
@@ -5102,11 +5251,12 @@ impl JobControl {
             JobKind::ExportCharacterCharx => JobPhase::WritingExport,
             JobKind::ExportCharacterCard => JobPhase::WritingExport,
             JobKind::ExportRisuModule => JobPhase::WritingExport,
-            JobKind::ExportDataset => JobPhase::WritingExport,
+            JobKind::ExportDataset | JobKind::ExportGalleryFile | JobKind::ExportGalleryZip => JobPhase::WritingExport,
             JobKind::PrepareContentImport => JobPhase::ReadingSource,
             JobKind::ImportJpegAsset => JobPhase::ReadingSource,
             JobKind::KeiBackupUpload => JobPhase::WritingExport,
             JobKind::OfficialPublicationUpload => JobPhase::WritingExport,
+            JobKind::RestoreOfficialAccountAssets => JobPhase::ReadingSource,
         };
         if status.state != JobState::Queued || phase != expected {
             return Err("native job can only start from queued".to_owned());
@@ -7999,6 +8149,7 @@ mod tests {
         assert!(matches!(
             plain,
             NativeFileJobStartRequest::ExportCharacterCharx {
+                portrait_rendition: None,
                 container: CharacterCharxContainer::PlainCharx,
                 ..
             }
@@ -8050,6 +8201,7 @@ mod tests {
         assert!(matches!(
             appended,
             NativeFileJobStartRequest::ExportCharacterCharx {
+                portrait_rendition: None,
                 destination: None,
                 expected_revision: 8,
                 character_id,
@@ -8063,6 +8215,7 @@ mod tests {
         assert!(matches!(
             json_card,
             NativeFileJobStartRequest::ExportCharacterCard {
+                portrait_rendition: None,
                 destination: None,
                 expected_revision: 9,
                 character_id,
@@ -8075,6 +8228,7 @@ mod tests {
         assert!(matches!(
             png_card,
             NativeFileJobStartRequest::ExportCharacterCard {
+                portrait_rendition: None,
                 destination: Some(destination),
                 expected_revision: 10,
                 character_id,

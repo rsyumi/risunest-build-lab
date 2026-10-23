@@ -516,6 +516,10 @@ impl restore::ReplacementSink for LegacyReplacementSink {
         self.payloads.cold_payloads.get(key).cloned()
     }
 
+    fn unavailable_cold_payload_reason(&self, key: &str) -> Option<restore::ColdPayloadUnavailable> {
+        self.payloads.unavailable_cold_payloads.get(key).copied()
+    }
+
     fn unavailable_cold_payload(&self, key: &str, character_name: &str) -> StoreResult<()> {
         let mut preview = self.incomplete.lock().map_err(|error| crate::persistent_store::StoreError::Store { message: error.to_string() })?;
         preview.unavailable_cold_keys.push(key.to_owned());
@@ -687,6 +691,8 @@ pub(crate) struct PreparedLegacyRestorePayloads {
     pub(crate) skipped_inlays: u64,
     /// Upstream cold payload key to the staged file that holds its body.
     pub(crate) cold_payloads: HashMap<String, std::path::PathBuf>,
+    /// Upstream cold payload keys whose entry could not be staged.
+    pub(crate) unavailable_cold_payloads: HashMap<String, restore::ColdPayloadUnavailable>,
 }
 
 #[cfg(test)]
@@ -741,6 +747,7 @@ pub(super) fn prepare_legacy_restore_payloads_with_limits(
     let mut invalid_inlays = Vec::new();
     let mut skipped_inlays = 0;
     let mut cold_payloads = HashMap::new();
+    let mut unavailable_cold_payloads = HashMap::new();
     let mut asset_keys = HashSet::new();
     let mut incoming = Vec::new();
     let mut incoming_names = Vec::new();
@@ -805,10 +812,14 @@ pub(super) fn prepare_legacy_restore_payloads_with_limits(
         if let Some(key) = cold_key(&entry.logical_name) {
             observer.item_started(&entry.logical_name);
             let staged = prepare_cold_with_limits(entry, cancellation, observer, limits)?;
-            if cold_payloads.insert(key, staged).is_some() {
+            if cold_payloads.contains_key(&key) || unavailable_cold_payloads.contains_key(&key) {
                 return Err(invalid(
                     "legacy backup contains a duplicate cold payload key",
                 ));
+            }
+            match staged {
+                Ok(path) => { cold_payloads.insert(key, path); }
+                Err(reason) => { unavailable_cold_payloads.insert(key, reason); }
             }
         } else if let Some(encoded_key) = inlay_key_hex(&entry.logical_name) {
             observer.item_started(&entry.logical_name);
@@ -860,6 +871,7 @@ pub(super) fn prepare_legacy_restore_payloads_with_limits(
         skipped_inlays,
         asset_aliases,
         cold_payloads,
+        unavailable_cold_payloads,
     })
 }
 
@@ -1002,13 +1014,15 @@ fn prepare_inlay(
 
 /// Validates a staged upstream cold payload without materializing its full body.
 /// The body is spliced into its referencing record when characters are staged.
+/// An entry that is not one JSON value, or exceeds the decoded limit, is staged
+/// as unavailable, and whatever references it reports the omission.
 #[cfg(test)]
 fn prepare_cold_with_limit(
     entry: &StagedLocalBackupEntry,
     cancellation: &dyn CancellationProbe,
     observer: &dyn LegacyPrepareObserver,
     max_decoded_bytes: u64,
-) -> Result<std::path::PathBuf, LocalBackupError> {
+) -> Result<Result<std::path::PathBuf, restore::ColdPayloadUnavailable>, LocalBackupError> {
     prepare_cold_with_limits(entry, cancellation, observer, restore::RestoreLimits {
         max_decoded_block_bytes: max_decoded_bytes, ..Default::default()
     })
@@ -1019,30 +1033,30 @@ fn prepare_cold_with_limits(
     cancellation: &dyn CancellationProbe,
     observer: &dyn LegacyPrepareObserver,
     limits: restore::RestoreLimits,
-) -> Result<std::path::PathBuf, LocalBackupError> {
+) -> Result<Result<std::path::PathBuf, restore::ColdPayloadUnavailable>, LocalBackupError> {
     let file = open_staged(entry)?;
     if entry.byte_length > limits.max_decoded_block_bytes || file.metadata().map_err(LocalBackupError::io)?.len() > limits.max_decoded_block_bytes {
-        return Err(LocalBackupError::new(LocalBackupErrorCode::DecodedBlockTooLarge, "decoded block limit exceeded for cold payload"));
+        return Ok(Err(restore::ColdPayloadUnavailable::TooLarge));
     }
     let source = CancellationReader::observed(file, cancellation, observer);
     // Cold plugin values may be any JSON. Apply record limits only when a character
     // or conversation references the payload, through the common restore reader.
     let mut deserializer = serde_json::Deserializer::from_reader(BufReader::new(source));
-    <IgnoredAny as serde::Deserialize>::deserialize(&mut deserializer).map_err(|_| {
-        if cancellation.is_cancelled() {
-            LocalBackupError::new(LocalBackupErrorCode::Cancelled, "legacy backup job was cancelled")
-        } else {
-            invalid("legacy backup cold payload is invalid")
+    let parsed = <IgnoredAny as serde::Deserialize>::deserialize(&mut deserializer)
+        .and_then(|_| deserializer.end());
+    if let Err(error) = parsed {
+        check_cancelled(cancellation)?;
+        if error.is_io() {
+            return Err(LocalBackupError::io(error.into()));
         }
-    })?;
-    deserializer
-        .end()
-        .map_err(|_| invalid("legacy backup cold payload has trailing data"))?;
+        return Ok(Err(restore::ColdPayloadUnavailable::Damaged));
+    }
 
     check_cancelled(cancellation)?;
     entry
         .staged_path
         .clone()
+        .map(Ok)
         .ok_or_else(|| invalid("legacy backup cold payload is not staged"))
 }
 
@@ -1324,7 +1338,7 @@ mod tests {
             drop(output);
             let entry = StagedLocalBackupEntry { logical_name:"coldstorage/large.json".to_owned(), byte_length:fs::metadata(&path).unwrap().len(), sha256:String::new(), staged_path:Some(path) };
             let observed = ObservedBytes { total: Cell::new(0), largest: Cell::new(0) };
-            prepare_cold_with_limits(&entry, &NeverCancelled, &observed, restore::RestoreLimits { max_record_bytes: 64 * 1024, ..Default::default() }).unwrap();
+            prepare_cold_with_limits(&entry, &NeverCancelled, &observed, restore::RestoreLimits { max_record_bytes: 64 * 1024, ..Default::default() }).unwrap().unwrap();
             assert_eq!(observed.total.get(), entry.byte_length);
             assert!(observed.largest.get() <= 64 * 1024);
             let error = cold_expansion::load_with_limits(entry.staged_path.as_ref().unwrap(), entry.byte_length, 64 * 1024).unwrap_err();
@@ -1343,8 +1357,8 @@ mod tests {
         fs::write(&path, br#"{"message":[]}"#).unwrap();
         for (byte_length, limit) in [(0, 8), (1024, 8), (1024, 64)] {
             let entry = StagedLocalBackupEntry { logical_name:"coldstorage/large.json".to_owned(), byte_length, sha256:String::new(), staged_path:Some(path.clone()) };
-            let error = prepare_cold_with_limit(&entry, &NeverCancelled, &UnexpectedRead, limit).unwrap_err();
-            assert!(error.message.contains("decoded block limit exceeded"));
+            let staged = prepare_cold_with_limit(&entry, &NeverCancelled, &UnexpectedRead, limit).unwrap();
+            assert_eq!(staged, Err(restore::ColdPayloadUnavailable::TooLarge));
         }
     }
 
@@ -1364,6 +1378,13 @@ mod tests {
             cancellation_io(error, &AlwaysCancelled).code,
             LocalBackupErrorCode::Cancelled
         );
+
+        // A cancelled cold entry read cancels the restore instead of staging the entry as damaged.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cold.json");
+        fs::write(&path, b"{broken").unwrap();
+        let entry = StagedLocalBackupEntry { logical_name:"coldstorage/cold.json".to_owned(), byte_length:7, sha256:String::new(), staged_path:Some(path) };
+        assert_eq!(prepare_cold_with_limit(&entry, &AlwaysCancelled, &NoopPrepareObserver, 1024).unwrap_err().code, LocalBackupErrorCode::Cancelled);
     }
 
     #[derive(Default)]

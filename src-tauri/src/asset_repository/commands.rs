@@ -947,6 +947,42 @@ pub(crate) async fn asset_remote_stat_object(
 }
 
 #[tauri::command(async)]
+pub(crate) async fn asset_cas_stat_objects(
+    app: AppHandle,
+    content_hashes: Vec<String>,
+) -> Result<Vec<Option<u64>>, String> {
+    if content_hashes.len() > 512 { return Err("asset-stat-batch-too-large".to_owned()); }
+    logged("asset_cas_stat_objects", async move {
+        let root = repository_root(&app)?;
+        tauri::async_runtime::spawn_blocking(move || {
+            let _operation = app.state::<PersistentStoreState>()
+                .admit_renderer_operation().map_err(|error| error.to_string())?;
+            PayloadCas::new(&root)
+                .and_then(|cas| cas.stat_objects(content_hashes.iter().map(String::as_str)))
+                .map_err(|error| error.to_string())
+        }).await.map_err(|error| format!("failed to join CAS batch stat operation: {error}"))?
+    }.await)
+}
+
+#[tauri::command(async)]
+pub(crate) async fn asset_remote_stat_objects(
+    app: AppHandle,
+    content_hashes: Vec<String>,
+) -> Result<Vec<Option<u64>>, String> {
+    if content_hashes.len() > 512 { return Err("asset-stat-batch-too-large".to_owned()); }
+    logged("asset_remote_stat_objects", async move {
+        let root = repository_root(&app)?;
+        tauri::async_runtime::spawn_blocking(move || {
+            let _operation = app.state::<PersistentStoreState>()
+                .admit_renderer_operation().map_err(|error| error.to_string())?;
+            let store = crate::server_sync::residency::Residency::open(&root).map_err(|error| error.code)?;
+            content_hashes.iter().map(|hash| store.object(hash, None)
+                .map(|object| object.map(|object| object.size)).map_err(|error| error.code)).collect()
+        }).await.map_err(|_| "remote-stat-unavailable".to_owned())?
+    }.await)
+}
+
+#[tauri::command(async)]
 pub(crate) async fn asset_remote_hydrate_object(
     app: AppHandle,
     content_hash: String,

@@ -37,7 +37,10 @@ vi.mock('src/ts/androidGenerationKeepAlive', () => ({
     requestAndroidGenerationNotifications: mocks.requestAndroidGenerationNotifications,
 }))
 
+import { language } from 'src/lang'
 import RisuNestAndroidPlatform from './RisuNestAndroidPlatform.svelte'
+
+const hiddenNotificationNote = () => language.risuNest.platform.keepAliveWithoutNotification
 
 describe('RisuNest Android platform settings', () => {
     let mounted: ReturnType<typeof mount> | null = null
@@ -55,8 +58,6 @@ describe('RisuNest Android platform settings', () => {
     async function mountPlatform(status: boolean | null): Promise<HTMLDivElement> {
         mocks.notificationStatus = status
         window.RisuGenerationKeepAlive = {
-            begin: () => false,
-            end: () => undefined,
             notificationsEnabled: () => status === true,
             requestNotifications: vi.fn(),
             openNotificationSettings: mocks.openNotificationSettings,
@@ -81,7 +82,7 @@ describe('RisuNest Android platform settings', () => {
         expect(target.textContent).toContain('Android 16')
         expect(target.textContent).toContain('140.0.1')
         expect(target.querySelector('[role="status"]')).toBeNull()
-        expect(target.querySelector('[role="alert"]')).toBeNull()
+        expect(target.textContent).not.toContain(hiddenNotificationNote())
     })
 
     it('renders notification state, diagnostics, settings action, and persisted keep-alive toggle', async () => {
@@ -113,11 +114,10 @@ describe('RisuNest Android platform settings', () => {
         expect(mocks.updateDeviceSettings).toHaveBeenCalledWith({ androidKeepAliveDuringGeneration: true })
     })
 
-    it('warns while notifications are off and refreshes when focus returns from settings', async () => {
+    it('notes the hidden notification while notifications are off and refreshes when focus returns from settings', async () => {
         const target = await mountPlatform(false)
         await tick()
-        expect(target.textContent).toContain("This feature doesn't work while notifications are off.")
-        expect(target.querySelector('[role="alert"]')).not.toBeNull()
+        expect(target.textContent).toContain(hiddenNotificationNote())
         const notificationBadge = target.querySelector('[role="status"]')
         expect(notificationBadge?.textContent).toBe('Off')
         expect(notificationBadge?.classList.contains('rounded-full')).toBe(true)
@@ -129,7 +129,7 @@ describe('RisuNest Android platform settings', () => {
         await vi.waitFor(() => expect(target.textContent).toContain('Allowed'))
         expect(notificationBadge?.classList.contains('border-success-500')).toBe(true)
         expect(notificationBadge?.classList.contains('border-draculared')).toBe(false)
-        expect(target.textContent).not.toContain("This feature doesn't work while notifications are off.")
+        expect(target.textContent).not.toContain(hiddenNotificationNote())
     })
 
     it('requests permission when enabling without treating the request as a grant', async () => {
@@ -139,7 +139,7 @@ describe('RisuNest Android platform settings', () => {
         toggle.click()
         await vi.waitFor(() => expect(mocks.requestAndroidGenerationNotifications).toHaveBeenCalledOnce())
         expect(target.querySelector('[role="status"]')?.textContent).toBe('Off')
-        expect(target.querySelector('[role="alert"]')).not.toBeNull()
+        expect(target.textContent).toContain(hiddenNotificationNote())
         toggle.click()
         await tick()
         expect(mocks.requestAndroidGenerationNotifications).toHaveBeenCalledOnce()
@@ -148,18 +148,18 @@ describe('RisuNest Android platform settings', () => {
     it('refreshes permission on native resume without browser focus or visibility events', async () => {
         const target = await mountPlatform(false)
         await tick()
-        expect(target.querySelector('[role="alert"]')).not.toBeNull()
+        expect(target.textContent).toContain(hiddenNotificationNote())
         target.querySelector('button')?.click()
 
         mocks.notificationStatus = true
         window.dispatchEvent(new Event('risunest-android-notifications-changed'))
         await vi.waitFor(() => expect(target.querySelector('[role="status"]')?.textContent).toBe('Allowed'))
-        expect(target.querySelector('[role="alert"]')).toBeNull()
+        expect(target.textContent).not.toContain(hiddenNotificationNote())
 
         mocks.notificationStatus = false
         window.dispatchEvent(new Event('risunest-android-notifications-changed'))
         await vi.waitFor(() => expect(target.querySelector('[role="status"]')?.textContent).toBe('Off'))
-        expect(target.querySelector('[role="alert"]')).not.toBeNull()
+        expect(target.textContent).toContain(hiddenNotificationNote())
 
         await unmount(mounted!)
         mounted = null

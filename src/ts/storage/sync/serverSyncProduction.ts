@@ -7,7 +7,8 @@ import { createSyncBindingRecoveryRegistration, installSyncBindingFlow } from '.
 import { withPausedPersistentWrites, beginActivatedLibraryGuard, refreshActivatedLibraryUnderPause, applyPersistentLwwReceive, flushPendingDataLocally, getPersistentDataRuntime } from '../persistentDataRuntime.svelte'
 import type { PersistentMutationToken } from '../saveCoordinator'
 import { RevisionConflictError, type LwwStageReceive, type LwwRemoteChange } from '../persistentDataStore'
-import { runWithMobileBackgroundTask } from '../../mobileBackgroundTask'
+import { beginDeferredMobileBackgroundTask, runWithDeferredMobileBackgroundTask, runWithMobileBackgroundTask, type MobileBackgroundTask } from '../../mobileBackgroundTask'
+import { isBackgroundExpiryReason } from '../../iosNative'
 import { fencePluginExecutionForAuthorityReplacement, invalidatePluginCachesAfterAuthorityReplacement, restartPluginsAfterAuthorityReplacement } from 'src/ts/plugins/apiV3/v3.svelte'
 import { registerSyncBindingTransport, resumeCurrentSyncBinding } from './bindingRegistry'
 import type { SyncBindingTransport, BindingContext, BindingOutcome, SyncBindingOptions, StagedSyncTarget } from './bindingFlow'
@@ -71,6 +72,9 @@ let persistedBinding: BindingContext['state'] | undefined
 let context: BindingContext | undefined
 let activationPending: BindingContext | undefined
 let activating: Promise<void> | undefined
+let startupIdentity = ''
+let initialReceive = true
+let startupFailure: unknown
 let error = ''
 let serverUnavailable = false
 const recordFailure = (value: unknown) => {
@@ -78,6 +82,30 @@ const recordFailure = (value: unknown) => {
     serverUnavailable = isServerSyncUnavailable(value)
 }
 let foreground = false
+// Hidden after starting on screen: in-flight work continues, and only a halt stops it.
+let continuing = false
+const active = () => foreground || continuing
+const halt = () => { foreground = false; continuing = false }
+type Hold = MobileBackgroundTask | Promise<MobileBackgroundTask>
+const releaseHold = (hold: Hold | undefined) => { if (hold) void Promise.resolve(hold).then(task => task.dispose()) }
+// Routine sync takes service time only if the app leaves the screen while it runs.
+const holdRoutineSync = (): Hold => {
+    const hold = beginDeferredMobileBackgroundTask('sync')
+    // When the platform's time runs out, routine sync stops where it stands; returning to the screen resumes it.
+    void Promise.resolve(hold).then(task => task.signal?.addEventListener('abort', () => {
+        if (!isBackgroundExpiryReason(task.signal?.reason)) return
+        halt(); if (hydrating) hydrationPending = true
+        void scheduler.fence()
+    }, { once: true }))
+    return hold
+}
+let attemptHold: Hold | undefined
+let pendingHold: Hold | undefined
+let localChanges = 0
+const noteLocalChange = () => {
+    localChanges++
+    if (foreground && !pendingHold) pendingHold = holdRoutineSync()
+}
 let heldForCommittedRestore = false
 let replacing = false
 let hydrating: Promise<void> | undefined
@@ -178,7 +206,7 @@ const watchSamples = () => {
 async function during<T>(stage: ServerSyncStage, operation: () => Promise<T>, countsAsSync = true): Promise<T> {
     // Connecting and downloading every asset show their steps; a routine attempt they join becomes one of them.
     const mode = binding || operations ? 'full' : 'routine'
-    if (!attempt) { attempt = { mode, startedAt: Date.now(), stages: [], active: [], current: stage }; attemptFailed = false; attemptCountsAsSync = false; baseline = undefined; remaining.reset(); clearFinished(); watchSamples() }
+    if (!attempt) { attempt = { mode, startedAt: Date.now(), stages: [], active: [], current: stage }; attemptFailed = false; attemptCountsAsSync = false; baseline = undefined; remaining.reset(); clearFinished(); watchSamples(); attemptHold ??= holdRoutineSync() }
     else if (mode === 'full') attempt.mode = mode
     attemptCountsAsSync ||= countsAsSync
     const entered = attempt
@@ -193,6 +221,7 @@ const settleAttempt = () => {
     const ended = attempt, start = baseline
     if (!attemptFailed && attemptCountsAsSync) lastSuccessAt = Date.now()
     attempt = undefined
+    releaseHold(attemptHold); attemptHold = undefined
     watchSamples()
     if (!attemptFailed && ended.mode === 'routine' && start) void finish(ended, start)
     changed()
@@ -218,12 +247,39 @@ const checkContext = (captured: BindingContext) => {
     captured.signal.throwIfAborted()
     if (captured !== context) throw new Error('Sync binding changed')
 }
+const bindingIdentity = (state: BindingContext['state']) => JSON.stringify([state.libraryId, state.targetAuthority, state.selectionEpoch, state.target])
+const checkReceiveContext = (c: BindingContext) => {
+    c.signal.throwIfAborted()
+    if (!context || bindingIdentity(context.state) !== bindingIdentity(c.state)) throw new Error('Sync binding changed')
+    context.signal.throwIfAborted()
+}
+async function startupRequest<T>(captured: BindingContext, command: string, args: Record<string, unknown>): Promise<T> {
+    try {
+        const result = await invoke<T>(command, args)
+        if (captured === context) startupFailure = undefined
+        return result
+    } catch (value) {
+        if (captured === context && initialReceive) {
+            const activationReady = typeof value === 'object' && value !== null && 'startupLocalReady' in value && value.startupLocalReady === true
+            startupFailure = command !== 'server_sync_lww_activate' || activationReady ? value : undefined
+        }
+        throw value
+    }
+}
+function canStartPluginsOffline(value: unknown): boolean {
+    if (!initialReceive || binding || bindingIncomplete || heldForCommittedRestore || isLibraryFileOperationReserved()
+        || scheduler.isBlocked() || !context || !persistedBinding || bindingIdentity(persistedBinding) !== bindingIdentity(context.state)) return false
+    if (typeof value !== 'object' || !value || ('retryable' in value && value.retryable === false)) return false
+    const code = serverSyncErrorCode(value)
+    if (['server-unreachable', 'server-timeout', 'directory-unreachable', 'directory-response-error', 'directory-incomplete-response', 'request-timeout', 'server-updating'].includes(code)) return true
+    return code === 'server-response-error' && isServerSyncUnavailable(value)
+}
 async function ensureActivated(captured: BindingContext): Promise<void> {
     checkContext(captured)
     if (activationPending !== captured) return
     if (!activating) {
         activating = during('applying', async () => {
-            await invoke('server_sync_lww_activate', { request: header() })
+            await startupRequest(captured, 'server_sync_lww_activate', { request: header(), startup: initialReceive && !binding })
             checkContext(captured)
             if (remoteAssetsRequested(captured)) await keepAssetsRemote(captured)
             activationPending = undefined
@@ -246,8 +302,9 @@ const receivedRepresentativeReferences = (changes: LwwRemoteChange[]) => changes
         || key[0] === 'archive' || key[0] === 'asset'
         || key[0] === 'order' && key[1] === 'characters'
 })
-function continueHydration(): void {
-    if ((!hydrationPending && !representativesPending) || !foreground || !context || context.signal.aborted || scheduler.isBlocked() || scheduler.isWaiting() || isLibraryFileOperationReserved()) return
+/** `continuation` lets hydration that a received page triggered start or continue while hidden. */
+function continueHydration(continuation = false): void {
+    if ((!hydrationPending && !representativesPending) || !(foreground || continuation && continuing) || !context || context.signal.aborted || scheduler.isBlocked() || scheduler.isWaiting() || isLibraryFileOperationReserved()) return
     if (hydrating) { hydrationAgain = true; return }
     const captured = context
     const representativesOnly = !hydrationPending
@@ -262,7 +319,7 @@ function continueHydration(): void {
         if (captured !== context || captured.signal.aborted) return
         if (representativesOnly) representativesPending = true
         else hydrationPending = true
-        if (serverSyncErrorCode(value) !== 'cancelled' && foreground && !scheduler.isBlocked()) {
+        if (serverSyncErrorCode(value) !== 'cancelled' && active() && !scheduler.isBlocked()) {
             recordFailure(value); hydrationError = error
             if (isServerSyncUnavailable(value)) scheduler.reportFailure(value)
         }
@@ -271,14 +328,21 @@ function continueHydration(): void {
         const again = hydrationAgain
         hydrationAgain = false
         changed()
-        if (again) continueHydration()
+        if (again) continueHydration(true)
         settleAttempt()
     })
 }
 async function updateForeground(visible: boolean): Promise<void> {
-    foreground = visible && !replacing && !!context && !context.signal.aborted
-    if (!foreground && hydrating) hydrationPending = true
-    await scheduler.foreground(foreground, !visible)
+    const usable = !replacing && !!context && !context.signal.aborted
+    continuing = !visible && usable && (foreground || continuing)
+    foreground = visible && usable
+    if (!active() && hydrating) hydrationPending = true
+    // Work in flight hands its protection to the hide-time publication without a moment unheld.
+    const bridge = !visible && (attemptHold || pendingHold) ? holdRoutineSync() : undefined
+    try { await scheduler.foreground(foreground, !visible) }
+    finally { releaseHold(bridge) }
+    // Changes still unpublished after the hide-time publication wait for the next visible transition.
+    if (!visible) { releaseHold(pendingHold); pendingHold = undefined }
     continueHydration()
 }
 async function retryNativeClock(automatic = false): Promise<void> {
@@ -313,19 +377,21 @@ async function resumeCurrentServerBinding(state: BindingContext['state']): Promi
     try { await resumeCurrentSyncBinding(state.target) }
     catch (value) { recordFailure(failures(value)[0]); await controller.ensureStatus(); throw value }
 }
-/** Sends queued pages until none remain; without `drain` it stops when the app leaves the foreground. */
+/** Sends queued pages until none remain; without `drain` it stops when sync halts. */
 async function pushAvailable(captured: BindingContext, drain = false): Promise<void> {
+    const changesBefore = localChanges
     await ensureActivated(captured)
     for (;;) {
         captured.signal.throwIfAborted()
         if (captured !== context) throw new Error('Sync binding changed')
-        if ((!foreground || isLibraryFileOperationReserved()) && !drain) return
+        if ((!active() || isLibraryFileOperationReserved()) && !drain) return
         const receipt = await during('publishing', () => invoke('server_sync_lww_push', { request: header(), generating: generatingConversations.snapshot() }))
         captured.signal.throwIfAborted()
         if (captured !== context) throw new Error('Sync binding changed')
-        if ((!foreground || isLibraryFileOperationReserved()) && !drain) return
+        if ((!active() || isLibraryFileOperationReserved()) && !drain) return
         if (!receipt) break
     }
+    if (localChanges === changesBefore) { releaseHold(pendingHold); pendingHold = undefined }
     changed()
 }
 const scheduler = createServerSyncScheduler({
@@ -340,28 +406,30 @@ const scheduler = createServerSyncScheduler({
         for (;;) {
             captured.signal.throwIfAborted()
             if (captured !== context) throw new Error('Sync binding changed')
-            const request = await during('downloading', () => invoke<LwwStageReceive & { receiveFrontier?: string; more?: boolean }>('server_sync_lww_pull', { request: header() }))
+            const request = await during('downloading', () => startupRequest<LwwStageReceive & { receiveFrontier?: string; more?: boolean }>(captured, 'server_sync_lww_pull', { request: header(), startup: initialReceive }))
             receiveFrontier ??= request.receiveFrontier
             captured.signal.throwIfAborted()
+            checkContext(captured)
+            initialReceive = false
             // A page is applied under the stage that received it, so reading many pages shows one stage.
             try { await during('downloading', () => applyPersistentLwwReceive(request)) }
             catch (value) { throw localApplyFailure(value) }
             checkContext(captured)
             if (receivedBodyReferences(request.changes)) { receivedBodies = true; hydrationPending = true }
             if (status.assetPolicy === 'remote' && receivedRepresentativeReferences(request.changes)) { receivedBodies = true; representativesPending = true }
-            if ((!foreground || isLibraryFileOperationReserved()) && !completeAvailable) break
+            if ((!active() || isLibraryFileOperationReserved()) && !completeAvailable) break
             await invoke('server_sync_lww_ack', { request: { bindingAuthority: request.bindingAuthority, requestId: request.requestId } })
             checkContext(captured)
             if (request.more === false || (receiveFrontier !== undefined && BigInt(request.progress.cursor) >= BigInt(receiveFrontier))
                 || (request.more === undefined && request.changes.length === 0)) { notifySyncReceiveCompleted(); break }
         }
-        if (receivedBodies) continueHydration()
+        if (receivedBodies) continueHydration(true)
     }),
     retryClock: () => retryNativeClock(true),
     publishHidden: () => attempted(async () => {
         const captured = context
         if (!captured || captured.signal.aborted) return
-        await runWithMobileBackgroundTask('sync', async () => {
+        await runWithDeferredMobileBackgroundTask('sync', async () => {
             // A failed local save is reported where it happened; what is already queued still goes out.
             await flushPendingDataLocally('server-sync-hidden').catch(() => {})
             await pushAvailable(captured, true)
@@ -369,6 +437,7 @@ const scheduler = createServerSyncScheduler({
     }),
     connect: async operationId => { if (context) { await ensureActivated(context); await invoke('server_sync_notify_start', { request: header(), operationId }) } },
     disconnect: async () => { await invoke('server_sync_notify_stop'); await invoke('server_sync_cancel') },
+    stopNotifications: async () => { await invoke('server_sync_notify_stop') },
     failed(value) { recordFailure(value); changed() },
     recovered() { if (error && error !== hydrationError) { error = ''; changed() }; continueHydration() },
     retrying: continueHydration,
@@ -384,6 +453,8 @@ async function keepAssetsRemote(c: BindingContext): Promise<void> {
 }
 // Scheduler blocks and errors belong to one binding authority and never carry over to another.
 const adoptSchedulerAuthority = (c: BindingContext) => {
+    const identity = bindingIdentity(c.state)
+    if (startupIdentity !== identity) { startupIdentity = identity; initialReceive = true; startupFailure = undefined }
     if (schedulerAuthority === c.state.targetAuthority) return
     scheduler.reset(); error = ''; hydrationError = ''; schedulerAuthority = c.state.targetAuthority
 }
@@ -398,8 +469,14 @@ const transport: SyncBindingTransport = {
         const code = serverSyncErrorCode(failures(value)[0])
         if (code !== 'cancelled') { recordFailure(failures(value)[0]); changed() }
     },
-    async fenceOldJobs(c) { foreground = false; context = undefined; persistedBinding = undefined; await scheduler.fence(); await hydrating; activationPending = undefined; await invoke('server_sync_lww_fence', { newDevice: c.mode === 'new-device' || c.mode === 'fresh-writer' }); hydrationPending = false; representativesPending = false; hydrationAgain = false },
-    async receiveAvailableChanges(c) { c.signal.throwIfAborted(); if (!context || context.state.targetAuthority !== c.state.targetAuthority || context.state.selectionEpoch !== c.state.selectionEpoch) throw new Error('Sync binding changed'); await receiveAvailableServerChanges(); c.signal.throwIfAborted() },
+    async fenceOldJobs(c) { halt(); context = undefined; persistedBinding = undefined; await scheduler.fence(); await hydrating; activationPending = undefined; await invoke('server_sync_lww_fence', { newDevice: c.mode === 'new-device' || c.mode === 'fresh-writer' }); hydrationPending = false; representativesPending = false; hydrationAgain = false },
+    async receiveAvailableChanges(c) { checkReceiveContext(c); await receiveAvailableServerChanges(); checkReceiveContext(c) },
+    async preparePluginStartup(c) {
+        checkReceiveContext(c)
+        if (canStartPluginsOffline(startupFailure)) return
+        try { await transport.receiveAvailableChanges!(c) }
+        catch (value) { checkReceiveContext(c); if (startupFailure !== value || !canStartPluginsOffline(value)) throw value }
+    },
     async publishInitialSharedState(c) {
         context = c
         await invoke('server_sync_lww_activate', { request: header() })
@@ -486,14 +563,17 @@ export function dismissServerSyncConnectionFailure(): void {
 }
 /** Stops automatic sync until the returned release runs, so an asset download is not refused as busy. */
 export const holdServerSync = () => controller.beginReplacement()
-export async function retryServerSync(): Promise<void> {
+export function retryServerSync(): Promise<void> {
+    return runWithMobileBackgroundTask('sync', () => syncServerNow(), undefined, true)
+}
+async function syncServerNow(): Promise<void> {
     await controller.ensureStatus()
     const current = persistedBinding
     if (!current || current.target.kind !== 'server') throw new Error('Sync binding is unavailable')
     if (!context || context.signal.aborted || context.state.targetAuthority !== current.targetAuthority || context.state.selectionEpoch !== current.selectionEpoch || context.state.libraryId !== current.libraryId || context.state.target.kind !== 'server' || context.state.target.connectionId !== current.target.connectionId) {
         await resumeCurrentServerBinding(current)
     }
-    foreground = false
+    halt()
     try {
         await scheduler.fence()
         await hydrating
@@ -513,11 +593,12 @@ export async function installServerSyncProduction({ resumeBound = true }: { resu
         controller.assertFileOperationAvailable()
     }))
     disposers.push(subscribeLibraryFileOperationReleased(() => {
-        void scheduler.resumeAutomaticSync().then(continueHydration)
+        void scheduler.resumeAutomaticSync().then(() => continueHydration())
     }))
     disposers.push(subscribeLocalPersistentRevision((_revision,cause) => {
         // Saves come in bursts while chatting, so character icons are checked once they settle.
         if (status.assetPolicy === 'remote') { clearTimeout(representativesTimer); representativesTimer = setTimeout(() => { representativesTimer = undefined; representativesPending = true; continueHydration() }, 2000) }
+        noteLocalChange()
         scheduler.localChange(cause === 'generation-complete')
     }))
     // Another sync target taking over fences this one without a status read, so the server card reads it again.
@@ -533,10 +614,10 @@ export async function installServerSyncProduction({ resumeBound = true }: { resu
         const identity = source ? conversationIdentity() : ''
         if (!identity || identity === openedConversation) return
         openedConversation = identity
-        void scheduler.conversationOpened().then(continueHydration)
+        void scheduler.conversationOpened().then(() => continueHydration())
     }))
     disposers.push(await listen(SERVER_SYNC_REMOTE_HINT_EVENT, () => scheduler.remoteHint()))
-    disposers.push(await listen(SERVER_SYNC_DEVICE_CHANGED_EVENT, () => scheduler.localChange()))
+    disposers.push(await listen(SERVER_SYNC_DEVICE_CHANGED_EVENT, () => { noteLocalChange(); scheduler.localChange() }))
     disposers.push(subscribeRepresentativeImagePriority(() => {
         if (status.assetPolicy !== 'remote') return
         clearTimeout(priorityTimer)
@@ -547,7 +628,7 @@ export async function installServerSyncProduction({ resumeBound = true }: { resu
     const visibility = () => { void updateForeground(document.visibilityState !== 'hidden').catch(value => { if (serverSyncErrorCode(value) === 'cancelled') return; recordFailure(value); changed() }) }
     document.addEventListener('visibilitychange', visibility)
     disposers.push(() => document.removeEventListener('visibilitychange', visibility))
-    disposeServer = () => { scheduler.dispose(); for (const dispose of disposers) dispose(); context = undefined; persistedBinding = undefined; foreground = false; hydrationPending = false; representativesPending = false; clearTimeout(representativesTimer); representativesTimer = undefined; hydrationAgain = false; attempt = undefined; clearFinished(); watchSamples() }
+    disposeServer = () => { scheduler.dispose(); for (const dispose of disposers) dispose(); context = undefined; persistedBinding = undefined; halt(); hydrationPending = false; representativesPending = false; clearTimeout(representativesTimer); representativesTimer = undefined; hydrationAgain = false; attempt = undefined; releaseHold(attemptHold); attemptHold = undefined; releaseHold(pendingHold); pendingHold = undefined; clearFinished(); watchSamples() }
     await controller.ensureStatus()
     if (!resumeBound || heldForCommittedRestore) return
     const current = await invoke<BindingContext['state']>('pds_lww_binding_state')
@@ -594,13 +675,13 @@ const controller = {
         }
     },
     beginReplacement: async () => {
-        replacing = true; foreground = false; if (hydrating) hydrationPending = true
+        replacing = true; halt(); if (hydrating) hydrationPending = true
         const release = async () => { replacing = false; await updateForeground(document.visibilityState !== 'hidden'); changed() }
         try { await scheduler.fence(); await hydrating } catch (value) { await release().catch(() => {}); throw value }
         changed(); return release
     },
     confirmReplacement: async () => {},
-    holdAutomaticSync: () => { foreground = false; if (hydrating) hydrationPending = true; void scheduler.fence() },
+    holdAutomaticSync: () => { halt(); if (hydrating) hydrationPending = true; void scheduler.fence() },
     ensureStatus: async () => {
         const previousPolicy = status.assetPolicy
         if (isTauri) { [status,persistedBinding] = await Promise.all([invoke<Status>('server_sync_status'),invoke<BindingContext['state']>('pds_lww_binding_state')]) }
@@ -617,7 +698,7 @@ export function createServerSyncExitDrainAdapter(id = 'server', _fence?: Retaina
         try {
             signal.throwIfAborted()
             if (!context || context.state.selectionEpoch !== target.selectionEpoch) return { kind: 'blocked', reason: 'binding-authority-changed' }
-            foreground = false; if (hydrating) hydrationPending = true
+            halt(); if (hydrating) hydrationPending = true
             await scheduler.fence()
             await hydrating
             if (context) await ensureActivated(context)
@@ -626,7 +707,7 @@ export function createServerSyncExitDrainAdapter(id = 'server', _fence?: Retaina
             return { kind: 'complete' }
         } catch (value) { return { kind: 'blocked', reason: typeof value === 'object' && value && 'code' in value ? String(value.code) : 'server-unreachable' } }
         finally { signal.removeEventListener('abort', cancel) }
-    }, cancel: async () => { foreground = false; if (hydrating) hydrationPending = true; await scheduler.fence(); await hydrating }, resumeAfterExitCancel: async () => { await updateForeground(document.visibilityState !== 'hidden') } }
+    }, cancel: async () => { halt(); if (hydrating) hydrationPending = true; await scheduler.fence(); await hydrating }, resumeAfterExitCancel: async () => { await updateForeground(document.visibilityState !== 'hidden') } }
 }
 export function holdServerSyncAfterRestore(): void { heldForCommittedRestore = true; controller.holdAutomaticSync() }
 export function resumeServerSyncAfterBackup(): void { if (context) void updateForeground(document.visibilityState !== 'hidden') }

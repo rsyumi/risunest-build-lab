@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { imageAliases } from "src/ts/media/imageFormats"
     import {
     CharEmotion,
     DynamicGUI,
@@ -45,7 +46,8 @@
     import BaseRoundedButton from "../UI/BaseRoundedButton.svelte";
     import { getCharacterIndexObject, selectSingleFile } from "src/ts/util";
     import { v4 } from "uuid";
-    import { checkCharOrder, getFileSrc, saveAsset } from "src/ts/globalApi.svelte";
+    import { checkCharOrder, getFileSrc } from "src/ts/globalApi.svelte";
+    import { saveImage } from "src/ts/storage/database.svelte";
     import { alertInput, alertSelect } from "src/ts/alert";
     import SideChatList from "./SideChatList.svelte";
 
@@ -657,17 +659,13 @@
                       break;
                   
                     case 1:
-                      const folderImage = await selectSingleFile([
-                        'png',
-                        'jpg',
-                        'webp',
-                      ])
+                      const folderImage = await selectSingleFile(imageAliases, { image: true })
 
                       if(!folderImage) {
                         return
                       }
 
-                      const folderImageData = await saveAsset(folderImage.data)
+                      const folderImageData = await saveImage(folderImage.data)
 
                       oder.imgFile = folderImageData
                       oder.img = await getFileSrc(folderImageData)

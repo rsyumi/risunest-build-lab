@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import ts from 'typescript'
 import { open } from '@tauri-apps/plugin-shell'
 import { openUrl } from '@tauri-apps/plugin-opener'
+import { language } from '../lang'
 
 const native = { invoke: vi.fn().mockResolvedValue(undefined) }
 
@@ -22,8 +23,8 @@ async function loadOpenURL(userAgent: string, tauri = true): Promise<(url: strin
     const body = ts.transpileModule(declaration.getText(source), {
         compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
     }).outputText
-    return new Function('exports', 'isTauri', 'isTauriIOS', 'isTauriMobile', 'open', 'openUrl', 'alertError', 'window', `${body}; return exports.openURL;`)(
-        {}, platform.isTauri, platform.isTauriIOS, platform.isTauriMobile, open, openUrl, (message: string) => errors.push(message), window,
+    return new Function('exports', 'isTauri', 'isTauriIOS', 'isTauriMobile', 'open', 'openUrl', 'alertError', 'window', 'language', `${body}; return exports.openURL;`)(
+        {}, platform.isTauri, platform.isTauriIOS, platform.isTauriMobile, open, openUrl, (message: string) => errors.push(message), window, language,
     )
 }
 
@@ -65,9 +66,13 @@ test.each(['Mozilla/5.0 (Linux; Android 14)', 'Mozilla/5.0 (Windows NT 10.0; Win
     },
 )
 
-test('Android reports a failed native URL handoff', async () => {
-    const openURL = await loadOpenURL('Mozilla/5.0 (Linux; Android 14)')
-    native.invoke.mockRejectedValueOnce('No activity can open this URL')
+test.each([
+    ['Android', 'Mozilla/5.0 (Linux; Android 14)', 'No activity can open this URL'],
+    ['Linux', 'Mozilla/5.0 (X11; Linux x86_64)', 'Scoped shell IO error: No such file or directory (os error 2)'],
+])('%s reports a failed native URL handoff', async (_name, userAgent, failure) => {
+    const openURL = await loadOpenURL(userAgent)
+    native.invoke.mockRejectedValueOnce(failure)
     openURL(url)
-    await vi.waitFor(() => expect(errors).toEqual(['No activity can open this URL']))
+    await vi.waitFor(() => expect(errors).toEqual([language.errors.urlOpenFailed]))
+    expect(errors).not.toContain(failure)
 })

@@ -8,6 +8,7 @@ pub(crate) mod cache_hydration;
 pub(crate) mod capabilities;
 pub(crate) mod capture;
 pub(crate) mod cleanup;
+pub(crate) mod clock;
 pub(crate) mod connection;
 pub(crate) mod connection_commands;
 pub(crate) mod connection_store;

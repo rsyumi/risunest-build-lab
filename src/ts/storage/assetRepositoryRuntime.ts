@@ -47,11 +47,12 @@ export type RuntimeAssetRepositoryDispatcher = BlobStore &
             key: string,
             ownedData: Uint8Array,
             metadata: BlobWriteMetadata,
+            verifyContent?: boolean,
         ): Promise<StagedRuntimeAssetWrite>
         stageNewInlayImage(
             key: string,
             ownedData: Uint8Array,
-            input: { name: string },
+            input: { name: string, metadata?: Record<string, unknown> },
         ): Promise<StagedRuntimeAssetWrite>
         activateStagedWrite(staged: StagedRuntimeAssetWrite, expectedAlias?: AssetAlias): Promise<BlobMetadata>
         abortStagedWrite(staged: StagedRuntimeAssetWrite): Promise<void>
@@ -128,6 +129,7 @@ export function createCoordinatorOwnedAssetBlobStore(
     const stageInInvocationOrder = async <T>(
         key: string,
         prepare: () => ReturnType<RuntimeAssetRepositoryDispatcher['stagePut']>,
+        beforeActivate?: () => Promise<void>,
     ): Promise<T> => {
         const invocation = reserveInvocation(key)
         const expectedAuthorityEpoch = runtime.getStorageAuthorityEpoch()
@@ -138,7 +140,10 @@ export function createCoordinatorOwnedAssetBlobStore(
             try {
                 return await mutate(
                     key,
-                    () => store.activateStagedWrite(staged!) as Promise<T>,
+                    async () => {
+                        await beforeActivate?.()
+                        return store.activateStagedWrite(staged!) as Promise<T>
+                    },
                     expectedAuthorityEpoch,
                 )
             } catch (error) {
@@ -184,7 +189,7 @@ export function createCoordinatorOwnedAssetBlobStore(
                 const invocation = reserveInvocation(key)
                 let staged: StagedRuntimeAssetWrite | undefined
                 try {
-                    staged = await store.stagePut(key, data.slice(), { ...metadata })
+                    staged = await store.stagePut(key, data.slice(), { ...metadata, ...(metadata.kind === 'inlay' ? { metadata: original.value.metadata } : {}) })
                     await invocation.previous
                     return await mutate(key, async () => {
                         const current = await authority.rawStore.readAssetAlias(identity)
@@ -211,8 +216,16 @@ export function createCoordinatorOwnedAssetBlobStore(
                 () => store.stagePut(key, ownedData, ownedMetadata),
             )
         },
+        async putVerified(key, data, metadata, beforeActivate) {
+            const ownedData = data.slice()
+            const ownedMetadata = { ...metadata }
+            return stageInInvocationOrder(
+                key, () => store.stagePut(key, ownedData, ownedMetadata, true), beforeActivate,
+            )
+        },
         read: (key, range) => store.read(key, range),
         stat: (key) => store.stat(key),
+        statMany: store.statMany?.bind(store),
         list: (query) => store.list(query),
         remove: (key) => mutateInInvocationOrder(key, () => store.remove(key)),
         resolveUrl: (key) => store.resolveUrl(key),
@@ -246,8 +259,8 @@ export function createRuntimeAssetRepositoryDispatcher(
     const activationStarted = new WeakSet<StagedRuntimeAssetWrite>()
     const abortStarted = new WeakSet<StagedRuntimeAssetWrite>()
     return {
-        async stagePut(key, ownedData, metadata) {
-            return { prepared: await store.prepareOwnedPut(key, ownedData, metadata) }
+        async stagePut(key, ownedData, metadata, verifyContent) {
+            return { prepared: await store.prepareOwnedPut(key, ownedData, metadata, verifyContent) }
         },
         async stageNewInlayImage(key, ownedData, request) {
             return {
@@ -267,6 +280,7 @@ export function createRuntimeAssetRepositoryDispatcher(
         putNewInlayImage: (key, data, request) => store.putNewInlayImage(key, data, request),
         read: (key, range) => store.read(key, range),
         stat: (key) => store.stat(key),
+        statMany: store.statMany?.bind(store),
         list: (query) => store.list(query),
         remove: (key) => store.remove(key),
         resolveUrl: (key) => store.resolveUrl(key),

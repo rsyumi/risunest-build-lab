@@ -29,6 +29,7 @@ function makeHarness(input: {
     if (input.syncRequested) markers.set('dosync', 'sync')
     const getMarker = vi.fn((key: string) => markers.get(key) ?? null)
     const events: string[] = []
+    let installed: Database | undefined
     const publication = {
         publish: vi.fn(async () => { events.push('push') }),
         dispose: vi.fn(async () => { events.push('dispose') }),
@@ -68,10 +69,17 @@ function makeHarness(input: {
         configureAssetReader: vi.fn((reader) => {
             events.push(reader ? 'asset:on' : 'asset:off')
         }),
-        chooseExistingRemote: vi.fn(async (): Promise<'pull' | 'push'> => 'pull'),
+        chooseExistingRemote: vi.fn(async (): Promise<'pull' | 'push' | 'cancel'> => 'pull'),
         confirmInitialPush: vi.fn(async () => true),
-        installDatabase: vi.fn(() => { events.push('install') }),
+        installDatabase: vi.fn((database) => {
+            installed = database
+            events.push('install')
+        }),
         initializeWorkingSet: vi.fn(async () => { events.push('initialize') }),
+        disableAccountSync: vi.fn(() => {
+            if (installed?.account) installed.account.useSync = false
+            events.push('sync:off')
+        }),
         onRemoteError: vi.fn((error) => { events.push(`error:${(error as Error).message}`) }),
     }
     return { adapter, dependencies, events, getMarker, local, markers, publication }
@@ -217,6 +225,26 @@ describe('official account production bootstrap', () => {
         ])
     })
 
+    it('keeps local data and turns sync off without publishing when the user declines a lossy pull', async () => {
+        const harness = makeHarness({
+            accountEnabled: true,
+            pull: async () => ({ kind: 'declined' }),
+        })
+        harness.local.account = { token: 'synthetic-token', useSync: true } as Database['account']
+        harness.dependencies.onPullSkipped = vi.fn()
+
+        const result = await initializeOfficialAccountBootstrap(harness.dependencies)
+
+        expect(result).toMatchObject({ database: harness.local, revision: 1, officialEnabled: false })
+        expect(result.database.account?.useSync).toBe(false)
+        expect(harness.adapter.pin).not.toHaveBeenCalled()
+        expect(harness.dependencies.confirmInitialPush).not.toHaveBeenCalled()
+        expect(harness.dependencies.onPullSkipped).not.toHaveBeenCalled()
+        expect(harness.dependencies.resolveWorkingSet).not.toHaveBeenCalled()
+        expect(harness.markers.get('dosync')).toBe('avoid')
+        expect(harness.dependencies.accountMode.isAccount).toBe(false)
+    })
+
     it('publishes the local revision explicitly when a new account has no remote database', async () => {
         const harness = makeHarness({ syncRequested: true })
 
@@ -261,6 +289,37 @@ describe('official account production bootstrap', () => {
         })
         expect(harness.adapter.pull).toHaveBeenCalledOnce()
         expect(harness.dependencies.confirmInitialPush).toHaveBeenCalledOnce()
+    })
+
+    it('leaves local and remote data alone and keeps sync off when the user cancels account sync', async () => {
+        const harness = makeHarness({ syncRequested: true, remoteRead: { kind: 'value', bytes: Uint8Array.of(1) } })
+        harness.local.account = { token: 'synthetic-token', useSync: true } as Database['account']
+        harness.dependencies.chooseExistingRemote = vi.fn(async () => 'cancel' as const)
+
+        const result = await initializeOfficialAccountBootstrap(harness.dependencies)
+
+        expect(result).toMatchObject({ database: harness.local, revision: 1, officialEnabled: false })
+        expect(result.database.username).toBe('Local user')
+        expect(result.database.account?.useSync).toBe(false)
+        expect(harness.adapter.pull).not.toHaveBeenCalled()
+        expect(harness.adapter.pin).not.toHaveBeenCalled()
+        expect(harness.dependencies.confirmInitialPush).not.toHaveBeenCalled()
+        expect(harness.dependencies.resolveWorkingSet).not.toHaveBeenCalled()
+        expect(harness.markers.get('dosync')).toBe('avoid')
+        expect(harness.markers.has('accountst')).toBe(false)
+        expect(harness.dependencies.accountMode.isAccount).toBe(false)
+        expect(harness.events).toEqual([
+            'publisher:off',
+            'asset:off',
+            'marker:dosync',
+            'install',
+            'initialize',
+            'sync:off',
+        ])
+
+        await initializeOfficialAccountBootstrap(harness.dependencies)
+        expect(harness.dependencies.readRemoteDatabase).toHaveBeenCalledOnce()
+        expect(harness.dependencies.chooseExistingRemote).toHaveBeenCalledOnce()
     })
 
     it('propagates one pull CAS conflict without markers or bootstrap continuation', async () => {

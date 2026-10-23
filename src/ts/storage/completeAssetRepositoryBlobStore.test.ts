@@ -1,10 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { InlayBlobMetadata } from './blobStore'
 import { createTauriCasObjectUrl } from './platformBlobStore'
+import { createCoordinatorOwnedAssetBlobStore, createRuntimeAssetRepositoryDispatcher } from './assetRepositoryRuntime'
+import { createInRealmStorageLockManager, createStorageMutationGate } from './storageMutationGate'
 import {
     createCompleteAssetRepositoryBlobStore,
     createCompleteTypedAssetRepository,
     ConditionalAssetWriteConflictError,
+    AssetAliasSizeMismatchError,
     type CompleteAssetAliasStore,
     type DurableAssetWriteSessionFactory,
     type RemoteAssetReader,
@@ -104,6 +107,64 @@ function createFacade(input: {
 }
 
 describe('complete AssetRepository BlobStore facade', () => {
+    it('checks batched presence with the same local, remote and missing residency without reading bodies', async () => {
+        const aliases = [assetAlias(), assetAlias({ key: 'assets/remote', objectHash: inlayHash }),
+            assetAlias({ key: 'assets/missing', objectHash: 'c'.repeat(64) }), assetAlias({ key: 'assets/no-hash', objectHash: null })]
+        const cas = createCas({
+            statObjects: async hashes => hashes.map(hash => hash === assetHash ? 4 : null),
+            statObject: async () => { throw new Error('Per-object stat is not a batch') },
+            readObject: async () => { throw new Error('Presence must not read bodies') },
+        })
+        const { facade } = createFacade({ cas, remote: {
+            statObjects: async hashes => hashes.map(hash => hash === inlayHash ? 4 : null),
+            statObject: async () => { throw new Error('Per-object remote stat is not a batch') },
+            readObject: async () => { throw new Error('Presence must not hydrate bodies') },
+        }, store: createStore({
+            readAssetAlias: async () => { throw new Error('Per-key alias read is not a batch') },
+            readAssetAliasesByKeys: async (_kind, keys) => {
+                if (keys.length > 512) throw new Error('Batch overflow')
+                return { revision: 10, value: aliases.filter(alias => keys.includes(alias.key)) }
+            },
+        }) })
+        const keys = [...aliases.map(alias => alias.key), 'assets/unregistered', ...Array.from({ length: 600 }, (_, index) => `assets/extra-${index}`)]
+        const results = await facade.statMany!(keys)
+        expect(results.slice(0, 5).map(result => result?.size ?? null)).toEqual([4, 4, null, null, null])
+        expect(results.slice(5).every(result => result === null)).toBe(true)
+        aliases[0].size = 5
+        const mismatch = facade.statMany!([aliases[0].key])
+        await expect(mismatch).rejects.toBeInstanceOf(AssetAliasSizeMismatchError)
+        await expect(mismatch).rejects.toMatchObject({ key: aliases[0].key })
+    })
+
+    it.each(['assets/photo.bin', 'assets\\photo.bin'])('verifies downloaded content before replacing %s without rereading the body', async key => {
+        const data = Uint8Array.of(1, 2, 3)
+        const { hashPayloadBytes } = await import('./payloadCas')
+        const hash = await hashPayloadBytes(data)
+        const original = assetAlias({ key })
+        let current = original
+        let nativeHash = 'f'.repeat(64)
+        const outcomes: string[] = []
+        const { facade } = createFacade({
+            store: createStore({
+                readAssetAlias: async () => ({ revision: 10, value: current }),
+                commitAssetAlias: async alias => { current = alias; return { revision: 11 } },
+            }),
+            cas: createCas({ readObject: async () => { throw new Error('Unexpected verification reread') } }),
+            writeSessions: { begin: async () => ({
+                prepare: async () => ({ contentHash: nativeHash, byteSize: 3, physicalKey: 'synthetic', deduplicated: false }),
+                seal: async () => {}, release: async outcome => { outcomes.push(outcome) },
+            }) },
+        })
+        const metadata = { kind: 'asset' as const, mime: '', name: 'photo.bin', ext: 'bin' }
+        await expect(facade.putVerified!(original.key, data, metadata)).rejects.toThrow('integrity mismatch')
+        expect(current).toEqual(original)
+        expect(outcomes).toEqual(['aborted'])
+        nativeHash = hash
+        await expect(facade.putVerified!(original.key, data, metadata)).resolves.toMatchObject({ size: 3 })
+        expect(current.objectHash).toBe(hash)
+        expect(outcomes).toEqual(['aborted', 'committed'])
+    })
+
     it('resolves a remote asset without fetching its bytes and validates full byte reads', async () => {
         const { hashPayloadBytes } = await import('./payloadCas')
         const data = new Uint8Array([4, 2, 9, 8])
@@ -690,6 +751,31 @@ describe('complete AssetRepository BlobStore facade', () => {
         expect(alias.mime).toBe('image/png\0text/html')
     })
 
+    it('keeps alias provenance through a coordinated conditional rewrite and permits explicit clearing', async () => {
+        const provenance = { createdAt: 123, charId: 'character', chatId: 'chat', pocketRisu: { createdAt: 99, updatedAt: 100, charId: 'old-character', chatId: 'old-chat' } }
+        const original = { kind: 'inlay' as const, inlayType: 'image' as const, mime: 'image/png', name: 'original.png', ext: 'png' }
+        let revision = 1
+        let alias: AssetAlias = { ...original, key: 'inlay-origin', size: 1, objectHash: '4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a', metadata: provenance }
+        const store = createStore({
+            readRoot: async () => ({ revision, value: {} as never }),
+            readAssetAlias: async () => ({ revision, value: structuredClone(alias) }),
+            commitAssetAlias: async value => { alias = structuredClone(value); return { revision: ++revision } },
+        })
+        const { facade } = createFacade({ store, cas: createCas({ statObject: async () => 1 }) })
+        const blob = createCoordinatorOwnedAssetBlobStore(createRuntimeAssetRepositoryDispatcher(facade), {
+            rawStore: store, gate: createStorageMutationGate({ locks: createInRealmStorageLockManager() }),
+        } as never, {
+            getStorageAuthorityEpoch: () => 1,
+            runStorageOnlyMutation: async operation => { await operation(revision) },
+        })
+        const writer = await blob.captureConditionalWrite!('inlay-origin')
+        await writer!(Uint8Array.of(2), { ...original, mime: 'image/webp', ext: 'webp' }, Uint8Array.of(1))
+        expect(await blob.stat('inlay-origin')).toMatchObject({ ext: 'webp', metadata: provenance })
+        expect(alias.metadata).toEqual(provenance)
+        await blob.put('inlay-origin', Uint8Array.of(3), original)
+        expect(await blob.stat('inlay-origin')).not.toHaveProperty('metadata')
+    })
+
     it('returns the preservation outcome after activation without storing it in the alias', async () => {
         const { facade, encodeNewInlayImage, store } = createFacade()
         const encoded = await encodeNewInlayImage()
@@ -713,14 +799,16 @@ describe('complete AssetRepository BlobStore facade', () => {
         const { facade, encodeNewInlayImage, store } = createFacade({ cas })
         const source = new Uint8Array([1, 2, 3, 4])
 
-        const metadata = await facade.putNewInlayImage('inlay-key', source, { name: 'fresh.png' })
+        const provenance = { createdAt: 123, charId: 'synthetic-character', chatId: 'synthetic-chat' }
+        const metadata = await facade.putNewInlayImage('inlay-key', source, { name: 'fresh.png', metadata: provenance })
 
         expect(encodeNewInlayImage).toHaveBeenCalledTimes(1)
-        expect(encodeNewInlayImage).toHaveBeenCalledWith('inlay-key', source, { name: 'fresh.png' })
+        expect(encodeNewInlayImage).toHaveBeenCalledWith('inlay-key', source, { name: 'fresh.png', metadata: provenance })
         expect(cas.prepare).toHaveBeenCalledWith(new Uint8Array([8, 6, 7]))
         expect(store.commitAssetAlias).toHaveBeenCalledWith({
             kind: 'inlay',
             key: 'inlay-key',
+            metadata: provenance,
             objectHash: inlayHash,
             size: 3,
             mime: 'image/webp',
@@ -733,6 +821,7 @@ describe('complete AssetRepository BlobStore facade', () => {
         expect(metadata).toEqual(expect.objectContaining({
             kind: 'inlay',
             key: 'inlay-key',
+            metadata: provenance,
             size: 3,
             width: 19,
             height: 23,

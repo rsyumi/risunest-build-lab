@@ -9,13 +9,15 @@
     import { stagingProgressView } from 'src/ts/storage/sync/stagingProgress'
     import type { ExternalStorageStrings } from './strings'
 
-    let { connectionId, strings, job, remaining, onboarding = false, syncing = false, exportActions }: {
+    let { connectionId, strings, job, remaining, onboarding = false, syncing = false, catchingUp = false, exportActions }: {
         connectionId: string
         strings: ExternalStorageStrings
         job?: ExternalJobSummary
         remaining?: number
         onboarding?: boolean
         syncing?: boolean
+        /** Receiving continues after the last sync turn, so a finished turn is not the end of the sync. */
+        catchingUp?: boolean
         exportActions?: Snippet
     } = $props()
     let observations = $state<ReadonlyMap<string, ExternalOperationProgress>>(new Map())
@@ -51,11 +53,12 @@
 
 <div class="external-progress">
     {#each operations as operation (operation.kind)}
-        {@const done = operation.state === 'complete'}
+        {@const continuing = catchingUp && operation.kind === 'sync' && operation.state === 'complete'}
+        {@const done = operation.state === 'complete' && !continuing}
         {@const stopped = operation.state === 'failed' || operation.state === 'cancelled' || operation.stage === 'waiting'}
         {@const staging = !done && !stopped && operation.stage === 'applying' ? stagingProgressView(operation.staging, strings.staging) : undefined}
         {@const title = operation.kind === 'export' ? strings.download : operation.kind === 'download' ? copy.filesDownloading : operation.kind === 'binding' ? copy.connecting : copy.syncing}
-        {@const label = staging?.label ?? (done ? operation.kind === 'export' ? strings.completed : operation.kind === 'download' ? copy.downloadComplete : operation.kind === 'binding' ? copy.connectionComplete : copy.syncComplete : operation.state === 'cancelled' ? strings.cancelled : operation.state === 'failed' ? strings.failed : operation.kind === 'export' ? strings.download : operation.kind === 'download' ? copy.filesDownloading : copy[operation.stage])}
+        {@const label = staging?.label ?? (continuing ? copy.syncing : done ? operation.kind === 'export' ? strings.completed : operation.kind === 'download' ? copy.downloadComplete : operation.kind === 'binding' ? copy.connectionComplete : copy.syncComplete : operation.state === 'cancelled' ? strings.cancelled : operation.state === 'failed' ? strings.failed : operation.kind === 'export' ? strings.download : operation.kind === 'download' ? copy.filesDownloading : copy[operation.stage])}
         {@const exported = operation.exported}
         {@const detail = exported ? `${bytes(Number(exported.completedBytes))}${exported.totalBytes ? ` / ${bytes(Number(exported.totalBytes))}` : ''}` : stopped || done || title === label ? '' : title}
         <div data-external-progress={operation.kind}>

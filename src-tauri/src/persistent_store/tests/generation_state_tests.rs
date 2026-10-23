@@ -167,22 +167,75 @@ fn a_reader_lease_keeps_reading_the_previous_library_across_activation_and_purge
 
 #[test]
 fn startup_keeps_the_active_generation_and_hands_abandoned_stages_to_the_purge() {
-    let directory = tempfile::tempdir().unwrap();
-    let (active, abandoned) = {
-        let mut store = PersistentStore::open(directory.path()).unwrap();
-        let active = activated(&mut store, "Active");
-        (active, stage_root(&mut store, "Abandoned"))
-    };
+    let (directory, mut store, _) = open_fixture();
+    let active = active_generation(&store.connection).unwrap();
+    let abandoned = stage_root(&mut store, "Abandoned");
+    let old_page: String = store.connection.query_row(
+        "SELECT hash FROM message_page_indexes WHERE generation=?1 AND character_id='char-a' AND conversation_id='conv-short' LIMIT 1",
+        [&active], |row| row.get(0),
+    ).unwrap();
+    store.connection.execute_batch("CREATE TEMP TABLE legacy_manifests AS
+        SELECT * FROM message_page_manifests WHERE character_id='char-a' AND conversation_id='conv-short';
+        CREATE TEMP TABLE legacy_indexes AS
+        SELECT * FROM message_page_indexes WHERE character_id='char-a' AND conversation_id='conv-short';").unwrap();
+    store.commit(&WorkingSetCommit {
+        conversations: Some(vec![ConversationMutation::Delete {
+            character_id: "char-a".into(), conversation_id: "conv-short".into(),
+        }]),
+        ..empty_working_set_commit(store.revision().unwrap())
+    }).unwrap();
+    // Released stores left these rows behind; an unfinished stage may also lack their parent.
+    for (table, saved) in [("message_page_manifests", "legacy_manifests"), ("message_page_indexes", "legacy_indexes")] {
+        store.connection.execute(&format!("INSERT INTO {table} SELECT * FROM {saved}"), []).unwrap();
+        store.connection.execute(&format!("UPDATE {saved} SET generation=?1"), [&abandoned]).unwrap();
+        store.connection.execute(&format!("INSERT INTO {table} SELECT * FROM {saved}"), []).unwrap();
+    }
+    let expected = store.materialize(None).unwrap();
+    let revision = store.revision().unwrap();
+    let clock = serde_json::to_value(store.lww_clock_state().unwrap()).unwrap();
+    let mut orphan_counts = Vec::new();
     assert!(active.starts_with("staging-"));
-    let mut store = PersistentStore::open(directory.path()).unwrap();
-    assert_eq!(active_generation(&store.connection).unwrap(), active);
-    assert_eq!(store.read_root(None).unwrap().value["username"], "Active");
+    for _ in 0..2 {
+        drop(store);
+        store = PersistentStore::open(directory.path()).unwrap();
+        assert_eq!(active_generation(&store.connection).unwrap(), active);
+        assert_eq!(store.revision().unwrap(), revision);
+        assert_eq!(serde_json::to_value(store.lww_clock_state().unwrap()).unwrap(), clock);
+        assert_eq!(store.materialize(None).unwrap(), expected);
+        for table in ["message_page_manifests", "message_page_indexes"] {
+            orphan_counts.push(store.connection.query_row(
+                &format!("SELECT count(*) FROM {table} WHERE generation=?1 AND character_id='char-a' AND conversation_id='conv-short'"),
+                [&active], |row| row.get::<_, i64>(0),
+            ).unwrap());
+            assert_eq!(store.connection.query_row(
+                &format!("SELECT count(*) FROM {table} WHERE generation=?1"), [&abandoned], |row| row.get::<_, i64>(0),
+            ).unwrap(), 1, "opening must not normalize an unfinished generation");
+        }
+    }
     assert_eq!(state(&store, &abandoned).as_deref(), Some("retired"));
     assert!(store.replace_commit(&abandoned, None).is_err());
+    assert_eq!(orphan_counts, [0, 0, 0, 0]);
+    let present = |store: &PersistentStore| store.connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM message_page_objects WHERE hash=?1)", [&old_page], |row| row.get::<_, bool>(0),
+    ).unwrap();
+    let now = 1_900_000_000_000i64;
+    for time in [now, now + ASSET_GC_PRODUCT_MINIMUM_GRACE_MS] {
+        assert!(store.sweep_message_page_objects(
+            super::super::MessageObjectStore::Library, time, super::super::MESSAGE_PAGE_SWEEP_LIMIT,
+        ).unwrap().wrapped);
+    }
+    assert!(present(&store), "sweeps preserve objects still held by another generation");
     purge_all(&mut store);
     assert_eq!(rows(&store, &abandoned), 0);
     assert_eq!(state(&store, &abandoned), None);
-    assert_eq!(store.read_root(None).unwrap().value["username"], "Active");
+    let after_purge = now + 2 * ASSET_GC_PRODUCT_MINIMUM_GRACE_MS;
+    for time in [after_purge, after_purge + ASSET_GC_PRODUCT_MINIMUM_GRACE_MS] {
+        assert!(store.sweep_message_page_objects(
+            super::super::MessageObjectStore::Library, time, super::super::MESSAGE_PAGE_SWEEP_LIMIT,
+        ).unwrap().wrapped);
+    }
+    assert!(!present(&store), "deleted conversation pages become collectible after their final root is purged");
+    assert_eq!(store.materialize(None).unwrap(), expected);
 }
 
 #[test]

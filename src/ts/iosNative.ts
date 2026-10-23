@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { generationDiagnostics } from "./generationDiagnostics";
 import { isTauriIOS } from "./platform";
 
 export class BackgroundExecutionExpiredError extends DOMException {
@@ -58,7 +59,8 @@ const productionDependencies: IOSGenerationDependencies = {
   progress: (id, completed) =>
     invoke("plugin:ios-native|generation_progress", { id, completed }),
   state: getIOSNativeState,
-  events: window,
+  // Read on use, so model requests can load this module where no window exists.
+  get events() { return window; },
 };
 
 export async function beginIOSBackgroundTask(
@@ -77,7 +79,13 @@ export async function beginIOSBackgroundTask(
     unavailable: release,
     expired: release,
   });
-  return { ...task, progress: (percent: number | null) => task.progress(percent ?? -1) };
+  return {
+    ...task,
+    protection: task.admitted()
+      ? { state: "active" as const }
+      : { state: "refused" as const, reason: "background" as const },
+    progress: (percent: number | null) => task.progress(percent ?? -1),
+  };
 }
 
 /** Retain the caller's cancellation and pair every native assertion with release. */
@@ -86,12 +94,13 @@ export async function beginIOSGeneration(
   deps: IOSGenerationDependencies = productionDependencies,
 ): Promise<{
   signal: AbortSignal | undefined;
+  admitted(): boolean;
   expired(): boolean;
   progress(completed: number): void;
   dispose(success?: boolean): Promise<void>;
 }> {
   if (!deps.enabled())
-    return { signal, expired: () => false, progress: () => {}, dispose: async () => {} };
+    return { signal, admitted: () => false, expired: () => false, progress: () => {}, dispose: async () => {} };
   const controller = new AbortController();
   const abort = () => controller.abort(signal?.reason);
   signal?.addEventListener("abort", abort, { once: true });
@@ -133,6 +142,7 @@ export async function beginIOSGeneration(
   let pendingProgress = Promise.resolve();
   return {
     signal: controller.signal,
+    admitted: () => id !== null,
     expired: () => didExpire,
     progress(completed) {
       if (!id || disposed || (deps.monotonicProgress !== false ? completed <= reported : completed === reported)) return;
@@ -155,19 +165,52 @@ export async function beginIOSGeneration(
   };
 }
 
+/** Work that keeps the background-entry assertion until it settles. */
+export interface IOSBackgroundHolds {
+  settled(): Promise<void>;
+  expire(): void;
+}
+
 export function installIOSPersistenceLifecycle(
   flush: (reason: string) => Promise<void>,
+  holds?: IOSBackgroundHolds,
 ): () => void {
   if (!isTauriIOS) return () => {};
   let pending = Promise.resolve();
+  let backgroundId: string | undefined;
+  // Each background entry counts up; returning to the screen marks every entry so far as returned.
+  let entries = 0;
+  let returnedThrough = 0;
+  const waits = new Set<() => void>();
+  const stopWaiting = () => {
+    for (const stop of [...waits]) stop();
+  };
   const save = (id?: string) => {
-    pending = pending
+    if (id) backgroundId = id;
+    const entry = id ? ++entries : entries;
+    // Saves run in order and never wait for another entry's background work.
+    const flushed = (pending = pending
       .then(() => flush("ios-lifecycle"))
       .catch((error) => {
         console.error("iOS lifecycle save failed", error);
+      }));
+    if (!id) return;
+    void flushed
+      .then(async () => {
+        if (!holds || returnedThrough >= entry) return;
+        // The assertion lasts until deferred holds settle, the app returns, or iOS expires it.
+        await new Promise<void>((resolve) => {
+          const stop = () => {
+            waits.delete(stop);
+            resolve();
+          };
+          waits.add(stop);
+          void holds.settled().then(stop, stop);
+        });
       })
       .finally(async () => {
-        if (id) await invoke("plugin:ios-native|end", { id }).catch(() => {});
+        await invoke("plugin:ios-native|end", { id }).catch(() => {});
+        if (backgroundId === id) backgroundId = undefined;
       });
   };
   const visibility = () => {
@@ -176,14 +219,26 @@ export function installIOSPersistenceLifecycle(
   const native = (event: Event) => {
     const detail = (event as CustomEvent<{ event: string; id?: string }>)
       .detail;
+    if (detail?.event === "background" || detail?.event === "memory-warning") {
+      generationDiagnostics.lifecycle(detail.event);
+    } else if (detail?.event === "expired") {
+      generationDiagnostics.lifecycle("expiry");
+    }
     if (detail?.event === "active") {
+      returnedThrough = entries;
+      stopWaiting();
       void import("./storage/platformBlobStore").then(({ getNativeMediaEndpoint }) =>
         getNativeMediaEndpoint.ensure()
       ).catch(error => console.error("Native media recovery failed", error));
     }
     if (detail?.event === "background") save(detail.id);
-    else if (detail?.event === "expired" || detail?.event === "memory-warning")
+    else if (detail?.event === "expired" || detail?.event === "memory-warning") {
+      if (detail.event === "expired" && detail.id && detail.id === backgroundId) {
+        holds?.expire();
+        stopWaiting();
+      }
       save();
+    }
   };
   document.addEventListener("visibilitychange", visibility);
   window.addEventListener("risunest-ios-lifecycle", native);

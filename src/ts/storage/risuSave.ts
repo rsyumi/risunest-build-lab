@@ -559,7 +559,13 @@ export class RisuSaveDecoder {
                         break;
                     }
                     case RisuSaveType.PLUGIN_STORAGE_META:{
-                        if(this.blocks[key].name !== 'pluginStorageMeta') break;
+                        // Upstream SaveKV shares type 12 under `kv:<namespace>` names; it is not restored.
+                        const name = this.blocks[key].name;
+                        if(name.startsWith('kv:')){
+                            console.warn('Skipped unsupported RisuSave data block', name);
+                            break;
+                        }
+                        if(name !== 'pluginStorageMeta') break;
                         const meta = JSON.parse(this.blocks[key].content);
                         if(meta && Object.keys(meta).length > 0){
                             db.pluginStorageMeta = meta;

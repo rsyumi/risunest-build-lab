@@ -560,7 +560,6 @@ await (async function() {
     try {
         // Initialize cached properties
         const propsToInit = await window.risuai._getPropertiesForInitialization();
-        console.log('Initializing risuai properties:', JSON.stringify(propsToInit.list));
         for (let i = 0; i < propsToInit.list.length; i++) {
             const key = propsToInit.list[i];
             const value = propsToInit[key];
