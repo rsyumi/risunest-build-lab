@@ -10,7 +10,7 @@ on:
       scope:
         type: choice
         default: full
-        options: [full, harness, packages, appearance-light, appearance-dark, appearance-codec]
+        options: [full, harness, packages, appearance-light, appearance-dark, appearance-codec, app-lock]
 permissions:
   contents: read
 concurrency:
@@ -38,7 +38,7 @@ jobs:
           set -euo pipefail
           test "$GITHUB_REF" = refs/heads/main
           [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
-          case "$CHECK_SCOPE" in full|harness|packages|appearance-light|appearance-dark|appearance-codec) ;; *) exit 1;; esac
+          case "$CHECK_SCOPE" in full|harness|packages|appearance-light|appearance-dark|appearance-codec|app-lock) ;; *) exit 1;; esac
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
@@ -71,8 +71,12 @@ jobs:
             libssl-dev libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev patchelf \
             desktop-file-utils shared-mime-info libfuse2t64 dbus-x11 gnome-keyring \
             xdg-utils webkit2gtk-driver xvfb
-          if [[ "$CHECK_SCOPE" == appearance-* ]]; then
+          if [[ "$CHECK_SCOPE" == appearance-* || "$CHECK_SCOPE" == app-lock ]]; then
             sudo apt-get install -y ffmpeg openbox x11-utils gsettings-desktop-schemas
+          fi
+          if [[ "$CHECK_SCOPE" == app-lock ]]; then
+            sudo apt-get install -y xdotool
+            command -v xmessage
           fi
       - name: Record environment and cache identity
         id: environment
@@ -116,7 +120,7 @@ jobs:
           dbus-run-session -- cargo test --manifest-path crates/wry/Cargo.toml --package wry --release --locked --target x86_64-unknown-linux-gnu --lib -- --test-threads=1 2>&1 | tee artifacts/wry-contracts.log
           dbus-run-session -- bash scripts/linux-native-tests.sh --package tauri-plugin-updater --release --target x86_64-unknown-linux-gnu --lib -- --test-threads=1 2>&1 | tee artifacts/updater-contracts.log
       - name: Build agent packages
-        if: inputs.scope != 'harness'
+        if: inputs.scope != 'harness' && inputs.scope != 'app-lock'
         run: |
           set -euo pipefail
           printf '%s\n' '{"build":{"beforeBuildCommand":"test -f dist/index.html"}}' > "$RUNNER_TEMP/linux-prebuilt.json"
@@ -124,7 +128,7 @@ jobs:
             --config src-tauri/tauri.agent.conf.json \
             --config "$RUNNER_TEMP/linux-prebuilt.json" -- --locked 2>&1 | tee artifacts/native-build.log
       - name: Inspect and archive packages
-        if: inputs.scope != 'harness'
+        if: inputs.scope != 'harness' && inputs.scope != 'app-lock'
         run: |
           set -euo pipefail
           bundle="$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release/bundle"
@@ -144,7 +148,7 @@ jobs:
           cp "$package" artifacts/
           cat artifacts/binary.txt artifacts/packages.sha256
       - name: Verify packaged product is not the harness entry
-        if: inputs.scope != 'harness'
+        if: inputs.scope != 'harness' && inputs.scope != 'app-lock'
         run: |
           python3 - <<'PY'
           import os
@@ -192,6 +196,9 @@ jobs:
       - name: Capture owned desktop startup appearance
         if: startsWith(inputs.scope, 'appearance-')
         run: dbus-run-session -- bash ../control/scripts/linux-appearance.sh 2>&1 | tee artifacts/appearance.log
+      - name: Verify native app-lock return frames
+        if: inputs.scope == 'app-lock'
+        run: dbus-run-session -- bash ../control/scripts/linux-app-lock.sh 2>&1 | tee artifacts/app-lock.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
