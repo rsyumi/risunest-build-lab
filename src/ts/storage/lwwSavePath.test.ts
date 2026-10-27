@@ -201,10 +201,15 @@ describe('LWW renderer save path', () => {
         expect(runtime.captureSelectedConversationTarget()!.storeRevision).toBe(runtime.revision)
         await source.ensureRange({ startIndex: 8, limit: 2, reason: 'viewport' })
         expect(source.snapshot().rowAt(8)!.message.data).toBe('synthetic-8')
-        mutations = [{ key: '["conversation","selected","selected-chat","note"]', type: 'set', value: 'Received note' }]
+        const link = { id: 'received-preset', fingerprint: 'received fingerprint' }
+        mutations = [
+            { key: '["conversation","selected","selected-chat","note"]', type: 'set', value: 'Received note' },
+            { key: '["conversation","selected","selected-chat","authorNotePreset"]', type: 'set', value: link },
+        ]
         await receive()
         expect(runtime.getActiveConversationViewportSource()).not.toBe(source)
         expect(selected().chats[0].note).toBe('Received note')
+        expect(selected().chats[0].authorNotePreset).toEqual(link)
         const afterReceiveRevision = runtime.revision
         await runtime.flushPendingDataLocally('after-relevant-receive')
         expect(runtime.revision).toBe(afterReceiveRevision)

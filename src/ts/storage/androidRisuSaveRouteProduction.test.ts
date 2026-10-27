@@ -46,30 +46,101 @@ import {
 } from './androidRisuSaveRouteProduction.svelte'
 import type { PreparedNativeContent, PreparedNativeContentReceipt } from './nativeFileJobs'
 import type { AndroidSafJavascriptBridge } from './androidSafBridge'
+import { createPortableExportIntentStore, rememberPortableExport, resumePendingPortableExport, portableAndroidPublicationDependencies } from './deviceBackup/job'
 
 describe('Android opened spool production route', () => {
-    it('alerts the existing partial-file text once for a native-reconciled RisuSave terminal', async () => {
+    it('leaves portable intent receipts to recovery and alerts unowned partial files once', async () => {
         const terminal = {
             requestId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
             exportId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', sourceKind: 'risuSave',
             state: 'failed', code: 'destination-interrupted', copyStarted: true,
             publicationPrerequisitesComplete: true, warningCodes: ['partial-destination-may-remain'],
         }
-        const acknowledge = vi.fn(async (_requestId: string) => true)
-        const bridge = {copyExport: () => {}, getExportStatus: () => JSON.stringify(terminal),
+        const owned = {...terminal, requestId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+            state: 'succeeded', code: undefined, bytes: 1234, warningCodes: []}
+        let receipt: typeof terminal | typeof owned | null = owned
+        const acknowledge = vi.fn(async (requestId: string) => {
+            if (receipt?.requestId === requestId) receipt = null
+            return true
+        })
+        const getStatus = vi.fn(() => receipt ? JSON.stringify(receipt) : null)
+        const bridge = {copyExport: () => {}, getExportStatus: getStatus,
             acknowledgeExport: acknowledge} satisfies AndroidSafJavascriptBridge
         const target = Object.assign(new EventTarget(), {RisuSafBridge: bridge})
         vi.stubGlobal('window', target)
+        const values = new Map<string, string>()
+        vi.stubGlobal('localStorage', {
+            getItem: (key: string) => values.get(key) ?? null,
+            setItem: (key: string, value: string) => { values.set(key, value) },
+            removeItem: (key: string) => { values.delete(key) },
+        })
         vi.mocked(alertError).mockClear()
         try {
+            const store = createPortableExportIntentStore()
+            rememberPortableExport('synthetic-job', {type: 'androidSaf', suggestedName: 'synthetic.risunest'}, store, owned.requestId)
             registerAndroidRisuSaveRoute()
+            await vi.waitFor(() => expect(getStatus).toHaveBeenCalled())
+            window.dispatchEvent(new CustomEvent('risu-android-saf-destination', {detail: {
+                ...owned, state: 'failed', code: 'destination-write-failed', warningCodes: ['partial-destination-may-remain'],
+            }}))
+            await Promise.resolve()
+            expect(receipt).toEqual(owned)
+            expect(acknowledge).not.toHaveBeenCalled()
+            expect(alertError).not.toHaveBeenCalled()
+            const result = {revision: 1, sourceBytes: 1234, characterCount: 0, presetCount: 0,
+                warningCodes: [], handoffPath: '/synthetic/risunest-backup-synthetic-job.risunest'}
+            const cleanup = vi.fn(async () => {
+                expect(receipt).toBeNull()
+            })
+            const onResult = vi.fn()
+            const dependencies = {
+                store, ...portableAndroidPublicationDependencies(),
+                invoke: async <T,>(command: string): Promise<T> => {
+                    if (command === 'native_file_job_status') return {
+                        jobId: 'synthetic-job', kind: 'export-portable-backup', state: 'succeeded', phase: 'done', result,
+                    } as T
+                    if (command === 'native_file_job_forget') return true as T
+                    throw new Error(`Unexpected command: ${command}`)
+                },
+                wait: async () => {}, cleanupHandoff: cleanup, onResult,
+            }
+            for (const state of ['failed', 'cancelled']) {
+                receipt = {...owned, state, code: 'destination-write-failed', warningCodes: ['partial-destination-may-remain']}
+                await expect(resumePendingPortableExport(dependencies)).rejects.toMatchObject({
+                    code: 'destination-write-failed', warningCodes: ['partial-destination-may-remain'],
+                })
+                expect(store.read()?.requestId).toBe(owned.requestId)
+                expect(cleanup).not.toHaveBeenCalled()
+                expect(acknowledge).not.toHaveBeenCalled()
+                expect(alertError).not.toHaveBeenCalled()
+            }
+            receipt = owned
+            await expect(resumePendingPortableExport(dependencies)).resolves.toEqual(result)
+            expect(onResult).toHaveBeenCalledExactlyOnceWith(result)
+            expect(cleanup).toHaveBeenCalledExactlyOnceWith(result.handoffPath)
+            expect(store.read()).toBeNull()
+            expect(alertError).not.toHaveBeenCalled()
+            acknowledge.mockClear()
+            window.dispatchEvent(new CustomEvent('risu-android-saf-destination', {detail: terminal}))
             await vi.waitFor(() => expect(alertError).toHaveBeenCalledExactlyOnceWith(language.screenshotPartialDestinationMayRemain))
             window.dispatchEvent(new CustomEvent('risu-android-saf-destination', {detail: terminal}))
             window.dispatchEvent(new CustomEvent('risu-android-saf-destination', {detail: {...terminal,
-                requestId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', warningCodes: []}}))
+                requestId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', state: 'succeeded', code: undefined, bytes: 1234, warningCodes: []}}))
             await vi.waitFor(() => expect(acknowledge).toHaveBeenCalledTimes(2))
             expect(alertError).toHaveBeenCalledExactlyOnceWith(language.screenshotPartialDestinationMayRemain)
+            for (const [index, corrupt] of ['{broken', '{"version":999}'].entries()) {
+                rememberPortableExport('synthetic-job', {type: 'androidSaf', suggestedName: 'synthetic.risunest'}, store, owned.requestId)
+                for (const key of values.keys()) values.set(key, corrupt)
+                window.dispatchEvent(new CustomEvent('risu-android-saf-destination', {detail: {...terminal,
+                    requestId: index === 0 ? 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee' : 'ffffffff-ffff-4fff-8fff-ffffffffffff'}}))
+                await vi.waitFor(() => expect(acknowledge).toHaveBeenCalledTimes(3 + index))
+                expect(alertError).toHaveBeenCalledTimes(2 + index)
+                expect(alertError).toHaveBeenLastCalledWith(language.screenshotPartialDestinationMayRemain)
+                values.clear()
+            }
         } finally {
+            values.clear()
+            createPortableExportIntentStore().clear('synthetic-job')
             vi.unstubAllGlobals()
         }
     })

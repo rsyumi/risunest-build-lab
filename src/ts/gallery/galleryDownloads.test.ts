@@ -1,5 +1,13 @@
-import {describe, expect, it} from 'vitest'
+import {describe, expect, it, vi} from 'vitest'
+
+const nativePlatform = vi.hoisted(() => ({android: false}))
+vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule(() =>
+    nativePlatform.android ? {runtime: 'tauri', os: 'android'} : {runtime: 'web', os: 'windows'}))
+
+import {get} from 'svelte/store'
 import {downloadGallery, galleryArchiveDate, galleryDownloadName, type GalleryDownloadDependencies} from './galleryDownloads'
+import {isLibraryFileOperationReserved, registerLibraryFileOperationGate} from '../storage/libraryFileOperation'
+import {nativeFileOperation} from '../storage/nativeFileJobManager'
 import {RevisionConflictError} from '../storage/persistentDataStore'
 import type {NativeFileJobResult, NativeGalleryExportInput} from '../storage/nativeFileJobs'
 
@@ -93,6 +101,53 @@ describe('gallery downloads', () => {
         deps.chooseDestination = async () => null
         expect(await downloadGallery({kind: 'inlay', keys: ['first'], archive: false, suggestedName: 'photo.png'}, {}, deps))
             .toEqual({cancelled: true, skipped: 0})
+    })
+    it('holds the Android background task from the picker return through the export', async () => {
+        const events: string[] = []
+        nativePlatform.android = true
+        window.RisuBackgroundTasks = {
+            begin: async (_id, kind) => { events.push(`hold ${kind}`); return 'active' },
+            progress: async () => undefined,
+            end: async () => { events.push('end hold') },
+        }
+        try {
+            const deps = dependencies(async () => { events.push('export'); return result })
+            deps.isDesktop = () => false
+            deps.isAndroid = () => true
+            deps.reserveAndroidDestination = async () => {
+                events.push('pick')
+                return {requestId: 'synthetic-request', bind: async () => {}, release: async () => { events.push('release') }}
+            }
+            await downloadGallery({kind: 'inlay', keys: ['first'], archive: true, suggestedName: 'attachments.zip'}, {}, deps)
+        } finally {
+            nativePlatform.android = false
+            delete window.RisuBackgroundTasks
+        }
+        expect(events).toEqual(['pick', 'hold export', 'export', 'release', 'end hold'])
+    })
+    it('waits for sync and backups to settle before the picker, and its cancel ends the wait', async () => {
+        const picks: string[] = []
+        let settle!: () => void
+        const unregister = registerLibraryFileOperationGate(() => new Promise<void>(resolve => { settle = resolve }))
+        try {
+            const deps = dependencies(async () => result)
+            deps.chooseDestination = async name => { picks.push(name); return '/synthetic/chosen.zip' }
+            const input = {kind: 'inlay' as const, keys: ['first'], archive: true, suggestedName: 'attachments.zip'}
+            const exporting = downloadGallery(input, {}, deps)
+            await vi.waitFor(() => expect(get(nativeFileOperation)?.waitingForSync).toBe(true))
+            expect(picks).toEqual([])
+            settle()
+            expect(await exporting).toEqual({cancelled: false, skipped: 0})
+            expect(picks).toEqual(['attachments.zip'])
+
+            const controller = new AbortController()
+            const waiting = downloadGallery(input, {signal: controller.signal}, deps)
+            await vi.waitFor(() => expect(get(nativeFileOperation)?.waitingForSync).toBe(true))
+            controller.abort()
+            expect(await waiting).toEqual({cancelled: true, skipped: 0})
+            expect(picks).toEqual(['attachments.zip'])
+            expect(isLibraryFileOperationReserved()).toBe(false)
+        } finally { unregister() }
     })
     it('propagates a second stale revision failure', async () => {
         await expect(downloadGallery({kind: 'inlay', keys: ['first'], archive: false, suggestedName: 'photo.png'}, {},

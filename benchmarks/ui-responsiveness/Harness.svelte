@@ -26,7 +26,6 @@
     const characters = createFixtureCharacters()
     let activeIndex = $state(0)
     let currentCharacter = $derived(characters[activeIndex])
-    const EXPECTED_MOUNTED_MESSAGE_COUNT = 64
 
     DBState.db = {
         characters,
@@ -105,8 +104,8 @@
                 index: Number(element.dataset.chatIndex),
             }))
             .sort((left, right) => left.index - right.index)
-        const firstMountedIndex =
-            FIXTURE_MESSAGE_COUNT - EXPECTED_MOUNTED_MESSAGE_COUNT
+        // The viewport mounts the newest rows that fit the window, so the count follows its size.
+        const firstMountedIndex = rows.at(0)?.index ?? -1
         const allRowsComplete = rows.every(({ element, index }, offset) => {
             const normalizedText = (element.textContent ?? '')
                 .replace(/\s+/g, ' ')
@@ -136,13 +135,12 @@
             getComputedStyle(firstChatRoot).display === 'flex'
         return {
             validOutput:
-                rows.length === EXPECTED_MOUNTED_MESSAGE_COUNT &&
+                rows.length > 0 &&
                 allRowsComplete &&
-                rows.at(0)?.index === firstMountedIndex &&
                 rows.at(-1)?.index === FIXTURE_MESSAGE_COUNT - 1 &&
                 styledOutput,
             mountedMessageCount: rows.length,
-            firstMountedIndex: rows.at(0)?.index ?? -1,
+            firstMountedIndex,
             lastMountedIndex: rows.at(-1)?.index ?? -1,
             styledOutput,
             outputSignature: fnv1a(`${signatureInput}|styled:${styledOutput}`),

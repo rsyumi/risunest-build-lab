@@ -1,5 +1,5 @@
 use std::{cell::RefCell, collections::HashMap, time::Duration};
-use gtk::{prelude::*, gdk_pixbuf::{Colorspace, InterpType, Pixbuf}, glib};
+use gtk::{prelude::*, gdk::prelude::GdkPixbufExt, gdk_pixbuf::{InterpType, Pixbuf}, glib};
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 use super::{desktop::{Lifecycle, color_rgb}, *};
 
@@ -87,31 +87,60 @@ fn set_session_locked(app: &AppHandle, locked: bool) {
     });
 }
 
+fn session_path<T, E>(by_pid: Result<T, E>, session_id: Option<&str>, by_id: impl FnOnce(&str) -> Result<T, E>, display: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
+    if let Ok(path) = by_pid { return Ok(path); }
+    if let Some(id) = session_id.filter(|id| !id.is_empty()) {
+        if let Ok(path) = by_id(id) { return Ok(path); }
+    }
+    display()
+}
+
 fn observe_session(app: AppHandle) {
     std::thread::spawn(move || {
         let result = (|| -> Result<(), Box<dyn std::error::Error>> {
             use dbus::{blocking::{Connection, stdintf::org_freedesktop_dbus::Properties}, message::MatchRule};
             let connection = Connection::new_system()?;
-            let manager = connection.with_proxy("org.freedesktop.login1", "/org/freedesktop/login1", Duration::from_secs(5));
-            let (path,): (dbus::Path<'static>,) = manager.method_call("org.freedesktop.login1.Manager", "GetSessionByPID", (std::process::id(),))?;
-            let session = connection.with_proxy("org.freedesktop.login1", path.clone(), Duration::from_secs(5));
-            let locked: bool = session.get("org.freedesktop.login1.Session", "LockedHint")?;
-            set_session_locked(&app, locked);
-            let mut rule = MatchRule::new_signal("org.freedesktop.DBus.Properties", "PropertiesChanged");
-            rule.path = Some(path);
-            let changed_app = app.clone();
-            connection.add_match(rule, move |(interface, values, _): (String, dbus::arg::PropMap, Vec<String>), _, _| {
-                if interface == "org.freedesktop.login1.Session" {
-                    if let Some(locked) = values.get("LockedHint").and_then(|value| value.0.as_u64()) { set_session_locked(&changed_app, locked != 0); }
-                }
-                true
-            })?;
             let sleep_app = app.clone();
             connection.add_match(MatchRule::new_signal("org.freedesktop.login1.Manager", "PrepareForSleep"), move |(sleeping,): (bool,), _, _| {
                 let app = sleep_app.clone();
                 let _ = app.run_on_main_thread(move || { if sleeping { transition(false); } else { reconcile(); } });
                 true
             })?;
+            let observe_lock = (|| -> Result<(), dbus::Error> {
+                let manager = connection.with_proxy("org.freedesktop.login1", "/org/freedesktop/login1", Duration::from_secs(5));
+                let uid = unsafe { libc::getuid() };
+                let validate = |path: dbus::Path<'static>| -> Result<dbus::Path<'static>, dbus::Error> {
+                    let session = connection.with_proxy("org.freedesktop.login1", path.clone(), Duration::from_secs(5));
+                    let (owner, _): (u32, dbus::Path<'static>) = session.get("org.freedesktop.login1.Session", "User")?;
+                    if owner != uid { return Err(dbus::Error::new_failed("session belongs to another user")); }
+                    Ok(path)
+                };
+                let by_pid: Result<(dbus::Path<'static>,), _> = manager.method_call("org.freedesktop.login1.Manager", "GetSessionByPID", (std::process::id(),));
+                let path = session_path(by_pid.map(|(path,)| path), std::env::var("XDG_SESSION_ID").ok().as_deref(), |id| {
+                    let (path,): (dbus::Path<'static>,) = manager.method_call("org.freedesktop.login1.Manager", "GetSession", (id,))?;
+                    validate(path)
+                }, || {
+                    let (user,): (dbus::Path<'static>,) = manager.method_call("org.freedesktop.login1.Manager", "GetUser", (uid,))?;
+                    let user = connection.with_proxy("org.freedesktop.login1", user, Duration::from_secs(5));
+                    let (id, path): (String, dbus::Path<'static>) = user.get("org.freedesktop.login1.User", "Display")?;
+                    if id.is_empty() { return Err(dbus::Error::new_failed("graphical session is unavailable")); }
+                    validate(path)
+                })?;
+                let session = connection.with_proxy("org.freedesktop.login1", path.clone(), Duration::from_secs(5));
+                let mut rule = MatchRule::new_signal("org.freedesktop.DBus.Properties", "PropertiesChanged");
+                rule.path = Some(path);
+                let changed_app = app.clone();
+                connection.add_match(rule, move |(interface, values, _): (String, dbus::arg::PropMap, Vec<String>), _, _| {
+                    if interface == "org.freedesktop.login1.Session" {
+                        if let Some(locked) = values.get("LockedHint").and_then(|value| value.0.as_u64()) { set_session_locked(&changed_app, locked != 0); }
+                    }
+                    true
+                })?;
+                let locked: bool = session.get("org.freedesktop.login1.Session", "LockedHint")?;
+                set_session_locked(&app, locked);
+                Ok(())
+            })();
+            if let Err(error) = observe_lock { crate::nlog!("warn", "app-lock session lock observation unavailable: {error}"); }
             loop { connection.process(Duration::from_secs(10))?; }
         })();
         if let Err(error) = result { crate::nlog!("warn", "app-lock session observation unavailable: {error}"); }
@@ -119,10 +148,13 @@ fn observe_session(app: AppHandle) {
 }
 
 pub(super) fn setup(app: &AppHandle) -> Result<(), String> {
-    RUNTIME.with(|slot| *slot.borrow_mut() = Some(Runtime { app: app.clone(), state: Lifecycle::default(), surfaces: HashMap::new(), observed: Vec::new(), session_locked: false, provisional: false }));
-    for window in app.webview_windows().values() {
+    let windows = app.webview_windows().into_values().map(|window| {
         let native = window.gtk_window().map_err(|error| error.to_string())?;
-        let Some(content) = native.child() else { return Err("app-lock window content is unavailable".into()); };
+        let content = native.child().ok_or("app-lock window content is unavailable")?;
+        Ok((window.label().to_string(), native, content))
+    }).collect::<Result<Vec<_>, String>>()?;
+    RUNTIME.with(|slot| *slot.borrow_mut() = Some(Runtime { app: app.clone(), state: Lifecycle::default(), surfaces: HashMap::new(), observed: Vec::new(), session_locked: false, provisional: false }));
+    for (label, native, content) in windows {
         let overlay = gtk::Overlay::new();
         native.remove(&content);
         overlay.add(&content);
@@ -133,25 +165,46 @@ pub(super) fn setup(app: &AppHandle) -> Result<(), String> {
         cover.set_valign(gtk::Align::Fill);
         let style = gtk::CssProvider::new();
         cover.style_context().add_provider(&style, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
-        if let Some(icon) = app.default_window_icon() {
-            let image = Pixbuf::from_mut_slice(icon.rgba().to_vec(), Colorspace::Rgb, true, 8, icon.width() as i32, icon.height() as i32, (icon.width() * 4) as i32);
-            if let Some(image) = image.scale_simple(56, 56, InterpType::Bilinear) {
-                let icon = gtk::Image::from_pixbuf(Some(&image));
-                icon.set_halign(gtk::Align::Center);
-                icon.set_valign(gtk::Align::Center);
-                cover.add(&icon);
-            }
+        if let Ok(source) = Pixbuf::from_read(std::io::Cursor::new(include_bytes!("../../icons/icon.png").as_slice())) {
+            let icon = gtk::Image::new();
+            icon.set_halign(gtk::Align::Center);
+            icon.set_valign(gtk::Align::Center);
+            let refresh = move |icon: &gtk::Image| {
+                let scale = icon.scale_factor().max(1);
+                if let Some(image) = source.scale_simple(56 * scale, 56 * scale, InterpType::Bilinear) {
+                    if let Some(surface) = image.create_surface(scale, None::<&gtk::gdk::Window>) {
+                        icon.set_from_surface(Some(&surface));
+                    }
+                }
+            };
+            refresh(&icon);
+            icon.connect_scale_factor_notify(refresh);
+            cover.add(&icon);
         }
         overlay.add_overlay(&cover);
         overlay.set_overlay_pass_through(&cover, false);
         native.add(&overlay);
         overlay.show_all();
         cover.hide();
-        RUNTIME.with(|slot| { if let Some(runtime) = slot.borrow_mut().as_mut() { runtime.surfaces.insert(window.label().to_string(), Surface { cover, style }); } });
+        RUNTIME.with(|slot| { if let Some(runtime) = slot.borrow_mut().as_mut() { runtime.surfaces.insert(label, Surface { cover, style }); } });
     }
     reconcile();
     observe_session(app.clone());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::session_path;
+
+    #[test]
+    fn systemd_user_apps_resolve_their_session_without_a_pid_session() {
+        assert_eq!(session_path(Ok("pid"), Some("environment"), |_| Err("unused"), || Err("unused")), Ok("pid"));
+        assert_eq!(session_path(Err("no PID session"), Some("environment"), |id| Ok(id.to_owned()), || Err("unused")), Ok("environment".to_owned()));
+        assert_eq!(session_path(Err("no PID session"), None, |_| Err("unused"), || Ok("display")), Ok("display"));
+        assert_eq!(session_path(Err("no PID session"), Some("stale"), |_| Err("unknown or foreign session"), || Ok("display")), Ok("display"));
+        assert_eq!(session_path::<&str, _>(Err("no PID session"), Some(""), |_| Ok("invalid"), || Err("no graphical session")), Err("no graphical session"));
+    }
 }
 
 pub(super) async fn check(_: &AppHandle) -> Result<Capabilities, String> {

@@ -8,8 +8,7 @@ use objc2_app_kit::{
     NSTitlePosition, NSRunningApplication, NSWindow, NSWindowDidDeminiaturizeNotification, NSWindowDidBecomeKeyNotification,
     NSWindowWillMiniaturizeNotification, NSWindowOrderingMode, NSWorkspace,
     NSWorkspaceDidActivateApplicationNotification, NSWorkspaceApplicationKey, NSWorkspaceSessionDidResignActiveNotification,
-    NSWorkspaceWillSleepNotification, NSWorkspaceScreensDidSleepNotification, NSWorkspaceDidWakeNotification,
-    NSWorkspaceScreensDidWakeNotification, NSWorkspaceSessionDidBecomeActiveNotification,
+    NSWorkspaceWillSleepNotification, NSWorkspaceDidWakeNotification, NSWorkspaceSessionDidBecomeActiveNotification,
 };
 use objc2_foundation::{NSError, NSNotification, NSNotificationCenter, NSNotificationName, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 use std::{cell::RefCell, collections::HashMap, ptr::NonNull};
@@ -145,8 +144,18 @@ fn cover_color(value: &str) -> Retained<NSColor> {
         ((rgb >> 16) & 255) as f64 / 255.0, ((rgb >> 8) & 255) as f64 / 255.0, (rgb & 255) as f64 / 255.0, 1.0)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Signal { Resign, WillActivate, Active, Hide, Minimize, WindowActive, WorkspaceActive, SessionAway }
+
+fn workspace_notifications() -> [(&'static NSNotificationName, Signal); 5] {
+    unsafe { [
+        (NSWorkspaceDidActivateApplicationNotification, Signal::WorkspaceActive),
+        (NSWorkspaceSessionDidResignActiveNotification, Signal::SessionAway),
+        (NSWorkspaceWillSleepNotification, Signal::SessionAway),
+        (NSWorkspaceDidWakeNotification, Signal::WindowActive),
+        (NSWorkspaceSessionDidBecomeActiveNotification, Signal::WindowActive),
+    ] }
+}
 
 fn handle_signal(signal: Signal, notification: &NSNotification) {
     let Some(mtm) = MainThreadMarker::new() else { return };
@@ -231,15 +240,7 @@ pub(super) fn setup(app: &AppHandle) -> Result<(), String> {
                 (NSWindowDidBecomeKeyNotification, Signal::WindowActive),
                 (NSWindowDidDeminiaturizeNotification, Signal::WindowActive),
             ] { state.observers.push(observe(&center, name, signal)); }
-            for (name, signal) in [
-                (NSWorkspaceDidActivateApplicationNotification, Signal::WorkspaceActive),
-                (NSWorkspaceSessionDidResignActiveNotification, Signal::SessionAway),
-                (NSWorkspaceWillSleepNotification, Signal::SessionAway),
-                (NSWorkspaceScreensDidSleepNotification, Signal::SessionAway),
-                (NSWorkspaceDidWakeNotification, Signal::WindowActive),
-                (NSWorkspaceScreensDidWakeNotification, Signal::WindowActive),
-                (NSWorkspaceSessionDidBecomeActiveNotification, Signal::WindowActive),
-            ] { state.observers.push(observe(&workspace, name, signal)); }
+            for (name, signal) in workspace_notifications() { state.observers.push(observe(&workspace, name, signal)); }
         }
         state.render_covers(mtm, false);
         *slot = Some(state);
@@ -392,4 +393,23 @@ pub(super) fn window_created(window: &WebviewWindow) -> Result<(), String> {
     });
     let _ = window;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn departure_notifications_follow_system_sleep_and_sessions_not_display_idle() {
+        let notifications = workspace_notifications();
+        let signal = |name: &NSNotificationName| notifications.iter()
+            .find_map(|(observed, signal)| (*observed == name).then_some(*signal));
+        unsafe {
+            assert_eq!(signal(NSWorkspaceWillSleepNotification), Some(Signal::SessionAway));
+            assert_eq!(signal(NSWorkspaceSessionDidResignActiveNotification), Some(Signal::SessionAway));
+            assert_eq!(signal(NSWorkspaceDidWakeNotification), Some(Signal::WindowActive));
+            assert_eq!(signal(NSWorkspaceSessionDidBecomeActiveNotification), Some(Signal::WindowActive));
+            assert_eq!(signal(objc2_app_kit::NSWorkspaceScreensDidSleepNotification), None);
+            assert_eq!(signal(objc2_app_kit::NSWorkspaceScreensDidWakeNotification), None);
+        }
+    }
 }

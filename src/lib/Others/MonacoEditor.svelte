@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { onMount, onDestroy } from 'svelte';
+    import { onMount } from 'svelte';
     import * as monaco from 'monaco-editor';
     import { registerCBSMonaco } from 'src/ts/gui/codearea/cbsMonaco';
     import { registerLuaMonaco } from 'src/ts/gui/codearea/luaMonaco';
@@ -77,17 +77,25 @@
             const visible = position && editor.getScrolledVisiblePosition(position);
             compositionOffscreen = !visible || visible.top + visible.height <= 0 || visible.top >= editor.getLayoutInfo().height;
         };
-        editor.onDidScrollChange(trackCompositionLine);
-        editor.onDidChangeCursorPosition(trackCompositionLine);
+        let compositionFrame: number | undefined;
+        const scheduleCompositionLine = () => {
+            if (compositionFrame !== undefined) return;
+            // Position lookup can render synchronously; wait until Monaco finishes changing view zones.
+            compositionFrame = requestAnimationFrame(() => {
+                compositionFrame = undefined;
+                trackCompositionLine();
+            });
+        };
+        const scrollSubscription = editor.onDidScrollChange(scheduleCompositionLine);
+        const cursorSubscription = editor.onDidChangeCursorPosition(scheduleCompositionLine);
         onready?.(editor);
 
         return () => {
-            editor?.dispose();
+            scrollSubscription.dispose();
+            cursorSubscription.dispose();
+            if (compositionFrame !== undefined) cancelAnimationFrame(compositionFrame);
+            editor.dispose();
         };
-    });
-
-    onDestroy(() => {
-        editor?.dispose();
     });
 
     // Sync external value changes into editor without triggering onDidChangeModelContent loop

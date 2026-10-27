@@ -227,10 +227,11 @@ export function createProductionStateAdapter(options: {
                 forceScalableProjection,
             ) ?? database
             if (isTauri) replacement.account = getDatabase().account
-            for (const character of replacement.characters) {
+            setDatabase(replacement)
+            // Loading clears every streaming flag, so running generations restore theirs afterwards.
+            for (const character of getDatabase().characters) {
                 for (const chat of character.chats) restoreStreamingConversationState(chat)
             }
-            setDatabase(replacement)
             notifyPluginStorageAuthorityReplacement()
             restoreStableWorkingSetSelection(
                 replacement,
@@ -307,6 +308,7 @@ export function createProductionStateAdapter(options: {
             if (index < 0) return
             workingSetResidency.markCharacterHydrated(character.chaId)
             workingSetResidency.reconcileConversationResidency(character)
+            for (const chat of character.chats) restoreStreamingConversationState(chat)
             database.characters[index] = carryCatalogCharacterMetadata(database.characters[index], character)
             selectedCharID.set(index)
         },
@@ -327,6 +329,7 @@ export function createProductionStateAdapter(options: {
             )
             if (conversationIndex < 0) return
             if (!nextCharacter) character.chats[conversationIndex] = conversation
+            for (const chat of character.chats) restoreStreamingConversationState(chat)
             character.chatPage = conversationIndex
             database.characters[characterIndex] = carryCatalogCharacterMetadata(database.characters[characterIndex], character)
             workingSetResidency.reconcileConversationResidency(character)
@@ -536,6 +539,12 @@ export const flushPendingData = (reason: string): Promise<void> =>
     getPersistentDataRuntime().flushPendingData(reason)
 export const flushPendingDataLocally = (reason: string): Promise<void> =>
     getPersistentDataRuntime().flushPendingDataLocally(reason)
+export const flushPendingDataLocallyForCheckpoint = (reason: string): Promise<boolean> =>
+    getPersistentDataRuntime().flushPendingDataLocallyForCheckpoint(reason)
+export const capturesImmutableCharacters = (): boolean =>
+    getPersistentDataRuntime().capturesImmutableCharacters()
+export const pendingConversationMutationDiagnostics = (): { pendingEvents: number; unacknowledgedMs?: number } =>
+    getPersistentDataRuntime().pendingConversationMutationDiagnostics()
 export const acknowledgeGenerationCompletion = async (expectedAuthorityEpoch?: number): Promise<void> => {
     const runtime = getPersistentDataRuntime()
     const authorityEpoch = expectedAuthorityEpoch ?? runtime.getStorageAuthorityEpoch()

@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { isTauri } from '../platform'
 import { acquireCurrentRevisionWithRetry, assertPinnedRevision, withPersistentRevisionLease } from '../storage/persistentRecordIterator'
-import type { PluginStorageValueCursor } from '../storage/persistentDataStore'
+import { readCurrentRevision, type PluginStorageValueCursor } from '../storage/persistentDataStore'
 import { getPersistentDataStore } from '../storage/persistentDataStoreFactory'
 import { isUnownedPluginOwner, UNOWNED_PLUGIN_OWNER } from './pluginOwner'
 import {
@@ -21,6 +21,8 @@ export interface PluginDataItem {
     /** Set for device values only, where a plugin chose which space to write in. */
     space?: PluginDeviceSpace
     valueType: 'json' | 'string'
+    /** The root's type for a device value kept in structure form, which has no text to show. */
+    structureType?: string
     byteSize: number
     /** Set when the value moved to its owner on its own after an import. */
     automatic: boolean
@@ -41,6 +43,7 @@ interface DeviceListRow {
     space: PluginDeviceSpace
     key: string
     byteSize: number
+    structureType?: string
 }
 
 async function deviceRows(): Promise<DeviceListRow[]> {
@@ -58,6 +61,7 @@ export async function listPluginDataItems(
             key: row.key,
             space: row.space,
             valueType: row.space === 'json' ? 'json' : 'string',
+            ...(row.structureType === undefined ? {} : { structureType: row.structureType }),
             byteSize: row.byteSize,
             automatic: false,
         }))
@@ -100,7 +104,7 @@ export async function searchPluginDataValues(
     if (library.length > 0) {
         const store = getPersistentDataStore()
         const lease = await acquireCurrentRevisionWithRetry(
-            (revision) => store.acquireRevision(revision), async () => (await store.readRoot()).revision)
+            (revision) => store.acquireRevision(revision), () => readCurrentRevision(store))
         await withPersistentRevisionLease(lease, async (reader) => {
             for (const owner of new Set(library.map((item) => item.owner))) {
                 let afterKey: PluginStorageValueCursor | undefined
@@ -121,7 +125,7 @@ export async function searchPluginDataValues(
         })
     }
     for (const item of items) {
-        if (item.space === undefined) continue
+        if (item.space === undefined || item.structureType !== undefined) continue
         if (cancelled()) return matches
         const value = await readPluginDataValue(item)
         if (cancelled()) return matches

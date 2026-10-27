@@ -124,10 +124,12 @@ fn metadata_for(id: &str, ext: &str, own: Option<&Map<String, Value>>, index: &M
         .map(|entry| read_metadata::<Map<String, Value>>(entry, cancellation)).transpose()?;
     let object = external.as_ref().or(own);
     let string = |key| object.and_then(|value| value.get(key)).and_then(Value::as_str);
+    let media_string = |key| object.and_then(|value| value.get(key))
+        .or_else(|| own.and_then(|value| value.get(key))).and_then(Value::as_str);
     Ok(Metadata {
-        ext: normalize_extension(string("ext").unwrap_or(if object.is_some() { "" } else { ext })),
+        ext: normalize_extension(media_string("ext").unwrap_or(if object.is_some() { "" } else { ext })),
         name: string("name").unwrap_or(id).to_owned(),
-        inlay_type: string("type").unwrap_or("image").to_owned(),
+        inlay_type: media_string("type").unwrap_or("image").to_owned(),
         width: object.and_then(|value| value.get("width")).and_then(Value::as_i64),
         height: object.and_then(|value| value.get("height")).and_then(Value::as_i64),
     })

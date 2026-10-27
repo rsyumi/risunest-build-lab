@@ -30,6 +30,7 @@ import {
     type ContentChangeKey,
     type ContentChangeWindow,
     type ConversationPage,
+    type AuthorNotePresetUsage,
     type ConversationQuery,
     type ConversationMessageMetadataWindow,
     type ConversationWindow,
@@ -303,6 +304,10 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
 
     queryConversations(input: ConversationQuery): Promise<ConversationPage> {
         return invokeStore('pds_query_conversations', { query: input })
+    }
+
+    queryAuthorNotePresetUsage(presetId: string): Promise<AuthorNotePresetUsage[]> {
+        return invokeStore('pds_query_author_note_preset_usage', { presetId })
     }
 
     readConversation(

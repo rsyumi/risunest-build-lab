@@ -818,6 +818,16 @@ pub(crate) fn pds_query_conversations(
 }
 
 #[tauri::command(async)]
+pub(crate) fn pds_query_author_note_preset_usage(
+    state: State<'_, PersistentStoreState>,
+    preset_id: String,
+) -> Result<Vec<super::AuthorNotePresetUsage>, StoreError> {
+    logged("pds_query_author_note_preset_usage", with_store(state, |store| {
+        store.query_author_note_preset_usage(&preset_id)
+    }))
+}
+
+#[tauri::command(async)]
 pub(crate) fn pds_read_conversation(
     state: State<'_, PersistentStoreState>,
     character_id: String,
@@ -2057,6 +2067,80 @@ pub(crate) fn pds_abort_plugin_device_write(
         store.device_store_mut()?.abort_plugin_device_write(&owner, &session_id);
         Ok(())
     }))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_open_plugin_device_part(
+    app: AppHandle, state: State<'_, PersistentStoreState>, owner: String, byte_length: u64,
+) -> Result<String, StoreError> {
+    logged("pds_open_plugin_device_part", with_store_mut(state, |store| {
+        let device = store.device_store_mut()?;
+        let id = device.open_plugin_device_part(&owner, byte_length)?;
+        #[cfg(target_os = "android")]
+        {
+            let receiver_id = id.clone();
+            let receiver: Arc<crate::asset_byte_transport::AndroidReceiver> = Arc::new(move |offset, bytes| {
+                with_store_mut(app.state::<PersistentStoreState>(), |store| {
+                    store.device_store_mut()?.append_plugin_device_part(&receiver_id, offset, bytes)
+                }).map_err(|error| error.to_string())
+            });
+            let receiver = crate::asset_byte_transport::register_android_receiver(&id, receiver).map_err(|error| {
+                device.abort_plugin_device_part(&owner, &id);
+                StoreError::Validation { message: error }
+            })?;
+            device.attach_plugin_device_part_receiver(&id, receiver)?;
+        }
+        #[cfg(not(target_os = "android"))]
+        let _ = app;
+        Ok(id)
+    }))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_append_plugin_device_part(
+    state: State<'_, PersistentStoreState>, upload_id: String, offset: u64, data: Vec<u8>,
+) -> Result<u64, StoreError> {
+    logged("pds_append_plugin_device_part", with_store_mut(state, |store| {
+        store.device_store_mut()?.append_plugin_device_part(&upload_id, offset, &data)
+    }))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_append_plugin_device_part_raw(
+    state: State<'_, PersistentStoreState>, request: tauri::ipc::Request<'_>,
+) -> Result<u64, crate::asset_byte_transport::ByteTransferError> {
+    logged("pds_append_plugin_device_part_raw", crate::asset_byte_transport::raw_part(&request).and_then(|(id, offset, bytes)| {
+        with_store_mut(state, |store| store.device_store_mut()?.append_plugin_device_part(&id, offset, bytes))
+            .map_err(|error| error.to_string().into())
+    }))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_finish_plugin_device_part(
+    state: State<'_, PersistentStoreState>, owner: String, upload_id: String,
+) -> Result<String, StoreError> {
+    logged("pds_finish_plugin_device_part", with_store_mut(state, |store| {
+        store.device_store_mut()?.finish_plugin_device_part(&owner, &upload_id)
+    }))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_abort_plugin_device_part(
+    state: State<'_, PersistentStoreState>, owner: String, upload_id: String,
+) -> Result<(), StoreError> {
+    logged("pds_abort_plugin_device_part", with_store_mut(state, |store| {
+        store.device_store_mut()?.abort_plugin_device_part(&owner, &upload_id);
+        Ok(())
+    }))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_read_plugin_device_part(
+    state: State<'_, PersistentStoreState>, hash: String, offset: u64,
+) -> Result<tauri::ipc::Response, StoreError> {
+    logged("pds_read_plugin_device_part", with_store(state, |store| {
+        store.device_store()?.read_plugin_device_part(&hash, offset)
+    }).map(tauri::ipc::Response::new))
 }
 
 #[tauri::command(async)]

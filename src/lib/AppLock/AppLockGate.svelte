@@ -13,19 +13,18 @@
     let { onSurface }: Props = $props()
     const state = $derived(appLock.state)
     const text = $derived(language.risuNest.appLock)
+    const flow = $derived(state.flow)
     const method = $derived(state.availability.status === 'available' ? state.availability.method : 'device')
     const nativeAction = $derived(state.availability.status === 'available' ? (state.record.nativeUnlock ? 'unlock' : 'reset') : null)
 
+    const presentation = $derived(appLock.gated && state.initialized && state.active
+        ? `${state.epoch}:${flow}:${state.returnPending}:${state.readFailed}:${state.presentationRevision}` : null)
+
     $effect(() => {
-        const epoch = state.epoch
-        const flow = state.flow
-        const pending = state.returnPending
-        const readFailed = state.readFailed
-        const revision = state.presentationRevision
-        if (!appLock.gated || !state.initialized || !state.active) return
+        const renderedPresentation = presentation
+        if (renderedPresentation === null) return
         let cancelled = false
-        const current = () => !cancelled && state.active && state.epoch === epoch && state.flow === flow
-            && state.returnPending === pending && state.readFailed === readFailed && state.presentationRevision === revision
+        const current = () => !cancelled && presentation === renderedPresentation
         void tick().then(() => {
             const restoreFocus = captureAppLockPresentationFocus()
             requestAnimationFrame(() => requestAnimationFrame(async () => {
@@ -42,12 +41,12 @@
 </script>
 
 {#if appLock.gated}
-    {#if state.readFailed || state.returnPending || !state.flow}
+    {#if state.readFailed || state.returnPending || !flow}
         <AppLockCover readFailed={state.readFailed} busy={state.busy || state.nativeBusy}
             canReset={state.readFailed && state.failure === 'record' && state.availability.status === 'available'}
             onRetry={() => void appLock.retryRead()} onReset={() => void appLock.resetPin(text.resetPin)} {onSurface} />
     {:else}
-        <AppLockScreen mode={state.flow} phase={state.phase} count={state.digits.length} compact={!$MobileGUI}
+        <AppLockScreen mode={flow} phase={state.phase} count={state.digits.length} compact={!$MobileGUI}
             busy={state.busy} nativeBusy={state.nativeBusy} issue={state.issue} saveFailed={state.saveFailed}
             {nativeAction} nativeMethod={method}
             onDigit={digit => void appLock.digit(digit)} onDelete={() => appLock.deleteDigit()}

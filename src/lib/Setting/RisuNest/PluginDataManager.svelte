@@ -131,6 +131,7 @@
     }
 
     function typeLabel(item: PluginDataItem): string {
+        if (item.structureType !== undefined) return item.structureType
         if (item.space !== undefined) {
             return item.space === 'json' ? strings.spaceJson : strings.spaceString
         }
@@ -291,6 +292,7 @@
     async function open(item: PluginDataItem): Promise<void> {
         openItem = item
         openValue = ''
+        if (item.structureType !== undefined) return
         const generation = loadGeneration
         const value = (await readPluginDataValue(item)) ?? ''
         if (generation === loadGeneration && openItem === item) openValue = value
@@ -635,9 +637,13 @@
                 <span><b class="font-semibold">{strings.detailOwner}</b> {ownerLabel(openItem.owner)}</span>
                 <span><b class="font-semibold">{strings.detailType}</b> {typeLabel(openItem)}</span>
                 <span><b class="font-semibold">{strings.detailSize}</b> {formatRisuNestStorageBytes(openItem.byteSize)}</span>
-                <span><b class="font-semibold">{strings.detailChars}</b> {openValue.length.toLocaleString()}</span>
+                {#if openItem.structureType === undefined}
+                    <span><b class="font-semibold">{strings.detailChars}</b> {openValue.length.toLocaleString()}</span>
+                {/if}
             </div>
-            <pre class="max-h-80 overflow-auto rounded-md border border-darkborderc bg-bgcolor p-3 font-mono text-xs whitespace-pre-wrap">{openValue}</pre>
+            {#if openItem.structureType === undefined}
+                <pre class="max-h-80 overflow-auto rounded-md border border-darkborderc bg-bgcolor p-3 font-mono text-xs whitespace-pre-wrap">{openValue}</pre>
+            {/if}
             <div class="flex justify-end gap-2">
                 <SettingButton variant="danger" busy={busy} onclick={() => remove(openItem ? [openItem] : [])}>{language.remove}</SettingButton>
                 <SettingButton variant="secondary" onclick={() => { openItem = null }}>{language.risuNest.importDialog.close}</SettingButton>

@@ -98,6 +98,8 @@ export interface SharedNativeFileOperationOptions {
     userInitiated?: boolean
     /** The operation opens a system picker first and calls `protect` once it returns. */
     protectAfterPicker?: boolean
+    /** Cancels the operation like the dialog's cancel control, including while it waits for sync. */
+    signal?: AbortSignal
     presentation?: NativeFileOperationPresentation
     format?: NativeFileOperationFormat
     snapshotBodyOwner?: NativeSnapshotBodiesStarted
@@ -335,9 +337,15 @@ function runSharedNativeFileOperationWithAdmission<T>(
         partialWritesPossible: false,
     }
     if (presentation === 'dialog') nativeFileOperationOutcome.set(null)
+    const cancel = () => {
+        if (activeController !== controller) return
+        controller.abort()
+        updateActiveState({ cancelRequested: true })
+    }
 
     const settle = (settlement: Settlement) => {
         if (activeOperation !== promise) return
+        options.signal?.removeEventListener('abort', cancel)
         const state = activeState
         activeOperation = null
         activeOperationKey = null
@@ -356,6 +364,8 @@ function runSharedNativeFileOperationWithAdmission<T>(
     const promise = new Promise<T>((resolve, reject) => { resolveOperation = resolve; rejectOperation = reject })
     activeOperation = promise
     publishActiveState()
+    if (options.signal?.aborted) cancel()
+    else options.signal?.addEventListener('abort', cancel, { once: true })
     const context: SharedNativeFileOperationContext = {
         signal: controller.signal,
         onStatus: status => { if (activeController === controller) recordStatus(status) },

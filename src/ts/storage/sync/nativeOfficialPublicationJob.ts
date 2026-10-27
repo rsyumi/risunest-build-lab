@@ -3,8 +3,12 @@ import type { AccountStorage } from '../accountStorage'
 import {
     cancelNativeOfficialPublication,
     continueNativeOfficialPublication,
+    runNativeOfficialAssetPublication,
     runNativeOfficialPublicationAttempt,
     type NativeFileJobOptions,
+    type NativeOfficialAssetPublicationOptions,
+    type NativeOfficialAssetPublicationRequest,
+    type NativeOfficialAssetPublicationResult,
     type NativeOfficialPublicationReceipt,
     type NativeOfficialPublicationRequest,
     type NativeOfficialPublicationRetryRequest,
@@ -15,6 +19,7 @@ import {
     nativePersistentRevisionLease,
 } from '../nativePersistentExport'
 import type {
+    OfficialNativeAssetPublisher,
     OfficialNativeDatabasePublisher,
     OfficialRecoveredPublication,
 } from './officialAccountSnapshot'
@@ -178,4 +183,58 @@ export function createNativeOfficialPublicationJobPublisher(
             completeReload: result.completeReload,
         }
     }, input.signal)
+}
+
+export interface NativeOfficialAssetPublisherDependencies {
+    account: Pick<AccountStorage, 'writeOfficialDatabaseFromNative'>
+    baseUrl: string
+    run?(
+        request: NativeOfficialAssetPublicationRequest,
+        options?: NativeOfficialAssetPublicationOptions,
+    ): Promise<NativeOfficialAssetPublicationResult>
+}
+
+/** Account sessions, warnings, reloads and reauthentication follow the native database write. */
+export function createNativeOfficialAssetPublisher(
+    dependencies: NativeOfficialAssetPublisherDependencies,
+): OfficialNativeAssetPublisher {
+    const run = dependencies.run ?? runNativeOfficialAssetPublication
+    return async (input) => {
+        if (!hasNativePersistentRevisionLease(input.lease)) return false
+        let remaining = input.assets
+        const result = await dependencies.account.writeOfficialDatabaseFromNative(async (context) => {
+            const outcome = await run({
+                baseUrl: dependencies.baseUrl,
+                credential: context.credential,
+                accountId: input.accountId,
+                lease: input.lease[nativePersistentRevisionLease],
+                session: context.session,
+                assets: remaining,
+            }, { signal: context.signal, guard: input.guard, written: input.written })
+            const unwritten = new Set(outcome.unwritten)
+            remaining = remaining.filter(asset => unwritten.has(asset.key))
+            if (outcome.cancelled) {
+                throw new DOMException('Official account asset publication was cancelled', 'AbortError')
+            }
+            const reported = { session: outcome.session, warning: outcome.warning }
+            if (outcome.reason === 'reauthentication-needed') return { kind: 'reauthentication-needed', ...reported }
+            if (outcome.reason === 'auth-warning') return { kind: 'auth-warning', ...reported }
+            return {
+                kind: 'written',
+                ...reported,
+                replacementKey: '',
+                reloadSession: outcome.reloadSession,
+                receipt: outcome,
+            }
+        }, { signal: input.signal })
+        if (result === null) return false
+        if (result.kind === 'auth-warning') {
+            throw new Error('Official account authorization warning while writing assets')
+        }
+        await result.completeReload()
+        if (result.receipt.reason || remaining.length > 0) {
+            throw new Error('Official account asset publication did not complete')
+        }
+        return true
+    }
 }

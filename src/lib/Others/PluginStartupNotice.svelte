@@ -18,16 +18,17 @@
 
     let { inline = false }: { inline?: boolean } = $props()
     let elapsed = $state(false)
-    // Closing holds for the current wait or failure; the next one shows again.
-    let dismissed = $state<{ phase: string; since: number }>()
+    // Closing holds for the current wait, stop or failure; the next one shows again.
+    let dismissed = $state<{ phase: string; since: number; stop?: string }>()
     const failed = $derived($pluginStartupState.phase === 'failed')
     const stopped = $derived.by(() => {
         const display = $syncStatus && syncStatusDisplay($syncStatus, externalStorageStrings(DBState.db.language), false)
         return display?.stopped ? display : undefined
     })
-    const shown = $derived(!dismissed || dismissed.phase !== $pluginStartupState.phase || dismissed.since !== $pluginStartupState.since)
-    // With the sync UI turned off, only plugins that did not load are reported.
-    const visible = $derived($pluginStartupState.phase !== 'released' && (inline || ($inlineShown === 0 && shown && (failed || (elapsed && (DBState.db.risunestSyncStatusUi ?? true))))))
+    const shown = $derived(!dismissed || dismissed.phase !== $pluginStartupState.phase || dismissed.since !== $pluginStartupState.since
+        || (!!stopped && dismissed.stop !== stopped.stopKey))
+    // With the sync UI turned off, only a failure or stop that holds plugins is reported.
+    const visible = $derived($pluginStartupState.phase !== 'released' && (inline || ($inlineShown === 0 && shown && (failed || !!stopped || (elapsed && (DBState.db.risunestSyncStatusUi ?? true))))))
     const error = $derived.by(() => {
         const value = $pluginStartupState.error
         const unavailable = value instanceof Error && value.message === 'Sync is unavailable'
@@ -54,7 +55,7 @@
         $settingsOpen = true
     }
     function dismiss() {
-        dismissed = { phase: $pluginStartupState.phase, since: $pluginStartupState.since }
+        dismissed = { phase: $pluginStartupState.phase, since: $pluginStartupState.since, stop: stopped?.stopKey }
     }
 </script>
 

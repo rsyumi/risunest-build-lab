@@ -999,6 +999,8 @@
             }
         } catch (error) {
             if (!chatScreenState.matchesComposer(snapshot)) return
+            if (reverse) snapshot.composer.text = input
+            else snapshot.composer.translation = input
             if (!inputTranslationFailed) alertError(error)
             inputTranslationFailed = true
         }
@@ -1100,7 +1102,7 @@
         source: character,
         chat: ChatRecord,
     ) {
-        const character = snapshotChatScreenshotCharacter(source, chat)
+        const character = snapshotChatScreenshotCharacter(source, chat, DBState.db.authorNotePresets)
         const database = {
             characters: [character],
             mainPrompt: DBState.db.mainPrompt,

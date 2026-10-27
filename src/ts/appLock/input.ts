@@ -6,21 +6,67 @@ export interface AppLockSurface {
 }
 
 let blocked = false
+let framesHidden = false
 let gate: AppLockSurface | null = null
 let exit: AppLockSurface | null = null
 let previousFocus: HTMLElement | null = null
 let focusGeneration = 0
 let interactionRevision = 0
+const blockedFrames = new Map<HTMLIFrameElement, { inert: string | null; covered: string | null }>()
+let frameObserver: MutationObserver | null = null
+
+const activeSurface = () => exit?.element.isConnected ? exit : gate?.element.isConnected ? gate : null
+
+function restoreFrameFocus(): void {
+    const frame = document.activeElement
+    if (!framesHidden || !(frame instanceof HTMLIFrameElement) || !blockedFrames.has(frame)) return
+    const surface = activeSurface()
+    if (surface) surface.element.focus({ preventScroll: true })
+    else frame.blur()
+}
+
+function isolateBodyFrames(): void {
+    for (const child of document.body.children) {
+        if (!(child instanceof HTMLIFrameElement)) continue
+        if (!blockedFrames.has(child)) blockedFrames.set(child, {
+            inert: child.getAttribute('inert'), covered: child.getAttribute('data-app-lock-covered'),
+        })
+        child.setAttribute('inert', '')
+        // Inert on an iframe does not stop its document from focusing its own controls.
+        child.setAttribute('data-app-lock-covered', '')
+    }
+    restoreFrameFocus()
+}
+
+function restoreBodyFrames(): void {
+    frameObserver?.disconnect()
+    frameObserver = null
+    for (const [frame, previous] of blockedFrames) {
+        if (previous.inert === null) frame.removeAttribute('inert')
+        else frame.setAttribute('inert', previous.inert)
+        if (previous.covered === null) frame.removeAttribute('data-app-lock-covered')
+        else frame.setAttribute('data-app-lock-covered', previous.covered)
+    }
+    blockedFrames.clear()
+}
 
 export const isAppLockInputBlocked = (): boolean => blocked
-export function setAppLockInputBlocked(value: boolean): void {
-    if (blocked === value) return
+export function setAppLockInputBlocked(value: boolean, concealFrames = value): void {
+    const changed = blocked !== value
+    if (changed && value) previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
     blocked = value
-    const generation = ++focusGeneration
-    if (value) {
-        previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
-        return
+    if (changed) focusGeneration++
+    if (framesHidden !== concealFrames) {
+        framesHidden = concealFrames
+        if (concealFrames) {
+            // Fullscreen plugins live beside the application root and keep running while covered.
+            isolateBodyFrames()
+            frameObserver = new MutationObserver(isolateBodyFrames)
+            frameObserver.observe(document.body, { childList: true })
+        } else restoreBodyFrames()
     }
+    if (!changed || value) return
+    const generation = focusGeneration
     const target = previousFocus
     const oldGate = gate?.element
     const oldExit = exit?.element
@@ -84,11 +130,10 @@ export function handleAppLockSurfaceNavigation(event: KeyboardEvent, root: HTMLE
 }
 
 export function installAppLockInput(): () => void {
-    const active = () => exit?.element.isConnected ? exit : gate?.element.isConnected ? gate : null
     const keydown = (event: KeyboardEvent) => {
         if (!blocked) return
         interactionRevision++
-        const surface = active()
+        const surface = activeSurface()
         if (surface) surface.keydown(event)
         else event.preventDefault()
         if (event.key === 'Escape') event.preventDefault()
@@ -96,9 +141,10 @@ export function installAppLockInput(): () => void {
     }
     const keyup = (event: KeyboardEvent) => { if (blocked) event.stopImmediatePropagation() }
     const pointerdown = () => { if (blocked) interactionRevision++ }
+    const blur = () => { if (framesHidden) queueMicrotask(restoreFrameFocus) }
     const focusin = (event: FocusEvent) => {
         if (!blocked) return
-        const surface = active()
+        const surface = activeSurface()
         if (surface && !surface.element.contains(event.target as Node)) {
             event.stopImmediatePropagation()
             surface.element.focus()
@@ -108,10 +154,12 @@ export function installAppLockInput(): () => void {
     window.addEventListener('keyup', keyup, true)
     window.addEventListener('pointerdown', pointerdown, true)
     window.addEventListener('focusin', focusin, true)
+    window.addEventListener('blur', blur, true)
     return () => {
         window.removeEventListener('keydown', keydown, true)
         window.removeEventListener('keyup', keyup, true)
         window.removeEventListener('pointerdown', pointerdown, true)
         window.removeEventListener('focusin', focusin, true)
+        window.removeEventListener('blur', blur, true)
     }
 }

@@ -1,7 +1,7 @@
 use super::classification::*;
 use super::*;
 use serde_json::{json, Map};
-use device_store::plugin_values::{self, text_value as plugin_text};
+use device_store::plugin_values::{self, structure, text_value as plugin_text};
 
 const PERSONA_FIELDS: &[&str] = &[
     "personaPrompt",
@@ -1181,13 +1181,14 @@ fn apply_value(
                 let (clock, writer): (String, String) = tx.query_row(
                     "SELECT write_clock,writer_id FROM plugin_device_storage WHERE owner=?1 AND space=?2 AND key=?3",
                     params![p[1], p[2], p[3]], |row| Ok((row.get(0)?, row.get(1)?))).optional()?.unwrap_or(("0".into(), String::new()));
-                return plugin_values::write_reserved(tx, &p[1], &p[2], &p[3], info.byte_length, &clock, &writer, |output| {
+                plugin_values::write_reserved(tx, &p[1], &p[2], &p[3], info.byte_length, &clock, &writer, |output| {
                     let input = tx.blob_open(rusqlite::MAIN_DB, "message_page_objects", "body", rowid, true)?;
                     if plugin_text::decode(input, output, plugin_text::MAX_VALUE_BYTES)? != info {
                         return Err(error("invalid-large-unit"));
                     }
                     Ok(())
-                });
+                })?;
+                return plugin_values::admit_structure_row(tx, &p[1], &p[2], &p[3], plugin_text::MAX_VALUE_BYTES);
             }
         }
     }
@@ -1396,6 +1397,7 @@ fn apply_value(
                 return Err(error("plugin device value is too large"));
             }
             tx.execute("INSERT INTO plugin_device_storage VALUES(?1,?2,?3,?4,?5,?6,'0','',NULL,NULL,NULL) ON CONFLICT(owner,space,key) DO UPDATE SET value=excluded.value,byte_size=excluded.byte_size,tombstone=excluded.tombstone",params![p[1],p[2],p[3],value,value.map(str::len).unwrap_or(0) as i64,i64::from(value.is_none())])?;
+            plugin_values::admit_structure_row(tx, &p[1], &p[2], &p[3], plugin_text::MAX_VALUE_BYTES)?;
         }
         "hypa" => apply_hypa(tx, &p[1], next)?,
         _ => {}
@@ -1440,10 +1442,22 @@ pub(in crate::persistent_store) fn device_replacement_changes(
         }
         for row in &rows.local_plugins {
             let value = match &row.value {
-                SectionValueRow::Plugin { value, .. } => unit_value(tx, &json!(value))?,
-                SectionValueRow::PluginObject { object, .. } => {
+                SectionValueRow::Plugin { space, value } => {
+                    let prefix = if space == "json" { structure::read_prefix(value.as_bytes())? } else { None };
+                    match prefix.filter(|prefix| !prefix.parts.is_empty()) {
+                        Some(prefix) => {
+                            let info = plugin_text::store_encoded(tx, || Ok(value.as_bytes()))?;
+                            wire(UnitValue::object(structure_descriptor(info.hash, &prefix.parts)))?
+                        }
+                        None => unit_value(tx, &json!(value))?,
+                    }
+                }
+                SectionValueRow::PluginObject { object, structure: parts, .. } => {
                     if local { plugin_unit_value(tx, &row.key1, &row.key2, &row.key3)? }
-                    else { wire(UnitValue::object(RecordDescriptor::content(object.hash.clone())))? }
+                    else {
+                        let parts: Vec<String> = parts.iter().flatten().map(|part| hex::encode(part.content_sha256)).collect();
+                        wire(UnitValue::object(structure_descriptor(object.hash.clone(), &parts)))?
+                    }
                 }
                 SectionValueRow::Tombstone { .. } => UnitValue::Deleted,
                 _ => return Err(error("replacement-plugin-row-invalid")),
@@ -1533,6 +1547,7 @@ pub(in crate::persistent_store) fn capture_device_changes(
 }
 fn validate_plugin_unit(db: &Connection, value: &UnitValue) -> StoreResult<()> {
     if let UnitValue::Object { descriptor, .. } = value {
+        if !descriptor.dependencies.is_empty() { return validate_structure_unit(db, descriptor); }
         let (_, length) = plugin_text::object_row(db, &descriptor.object_hash)?;
         if length <= plugin_text::PART_BYTES as u64 { return validate_large_unit(db, value).map(|_| ()); }
         if *descriptor != RecordDescriptor::content(descriptor.object_hash.clone()) {
@@ -1546,12 +1561,39 @@ fn validate_plugin_unit(db: &Connection, value: &UnitValue) -> StoreResult<()> {
     Ok(())
 }
 
+/// A structure-form value with parts: its body is the text, and its
+/// dependencies are exactly the parts the text names.
+fn validate_structure_unit(db: &Connection, descriptor: &RecordDescriptor) -> StoreResult<()> {
+    let (info, prefix) = structure::object_prefix(db, &descriptor.object_hash).map_err(|failure| {
+        if failure.to_string().contains("too large") { failure } else { error("invalid-large-unit") }
+    })?;
+    let prefix = prefix.ok_or_else(|| error("invalid-large-unit"))?;
+    if *descriptor != structure_descriptor(info.hash, &prefix.parts) { return Err(error("invalid-large-unit")); }
+    if info.encoded_length.checked_add(prefix.bytes).is_none_or(|size| size > plugin_text::MAX_VALUE_BYTES) {
+        return Err(error("plugin device value is too large"));
+    }
+    Ok(())
+}
+
+/// A structure-form text with parts is always an object, however short, and
+/// names its parts as dependencies.
+fn structure_descriptor(hash: String, parts: &[String]) -> RecordDescriptor {
+    let dependencies: BTreeSet<&String> = parts.iter().collect();
+    RecordDescriptor { dependencies: dependencies.into_iter().cloned().collect(), ..RecordDescriptor::content(hash) }
+}
+
 pub(in crate::persistent_store) fn plugin_unit_value(db: &Connection, owner: &str, space: &str, key: &str) -> StoreResult<UnitValue> {
     let row: Option<(i64, i64)> = db.query_row(
         "SELECT rowid,byte_size FROM plugin_device_storage WHERE owner=?1 AND space=?2 AND key=?3 AND tombstone=0",
         params![owner, space, key], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
     let Some((rowid, size)) = row else { return Ok(UnitValue::Deleted); };
     if size < 0 { return Err(error("plugin device size is invalid")); }
+    if space == "json" && size >= structure::MIN_TEXT_BYTES {
+        if let Some(prefix) = structure::row_prefix(db, "main", rowid)?.filter(|prefix| !prefix.parts.is_empty()) {
+            let info = plugin_text::store_encoded(db, || Ok(db.blob_open(rusqlite::MAIN_DB, "plugin_device_storage", "value", rowid, true)?))?;
+            return wire(UnitValue::object(structure_descriptor(info.hash, &prefix.parts)));
+        }
+    }
     if size <= plugin_text::PART_BYTES as i64 {
         let value: String = db.query_row("SELECT value FROM plugin_device_storage WHERE rowid=?1", [rowid], |row| row.get(0))?;
         return unit_value(db, &Value::String(value));

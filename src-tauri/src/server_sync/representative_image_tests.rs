@@ -427,6 +427,21 @@ fn visible_images_precede_selected_images_and_follow_display_order_instead_of_ha
         done.set(index+1);
     }).unwrap();
     assert_eq!(done.get(), 3);
+    // A download of every missing body, as external hydration runs, takes the images in the same order.
+    for asset in &assets {
+        let hash = asset.object_hash.as_ref().unwrap();
+        cas.unlink_exact_object(hash, asset.size as u64, &crate::asset_repository::object_physical_key(hash)).unwrap();
+    }
+    let landed = std::cell::RefCell::new(Vec::new());
+    let observe = || {
+        for (index, asset) in assets.iter().enumerate() {
+            if !landed.borrow().contains(&index) && cas.stat_object(asset.object_hash.as_ref().unwrap()).unwrap().is_some() { landed.borrow_mut().push(index); }
+        }
+        Ok(())
+    };
+    store.asset_residency_download_remote_prioritized(None, None, None, Some(&priority), observe).unwrap();
+    observe().unwrap();
+    assert_eq!(*landed.borrow(), [0, 1, 2]);
 }
 
 #[test]

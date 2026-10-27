@@ -52,6 +52,11 @@ pub(super) fn invalid_input(message: impl AsRef<str>) -> NativeJobError {
     NativeJobError::new("invalid-input", message)
 }
 
+/// A pinned body that no device, Sync server or external storage keeps.
+pub(super) fn asset_missing(message: impl AsRef<str>) -> NativeJobError {
+    NativeJobError::new("asset-missing", message)
+}
+
 pub(super) fn cancelled(message: impl AsRef<str>) -> NativeJobError {
     NativeJobError::new("cancelled", message)
 }

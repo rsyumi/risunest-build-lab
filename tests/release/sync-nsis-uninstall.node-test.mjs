@@ -13,7 +13,11 @@ test('Sync removal hooks compile in the uninstaller context', { skip }, () => {
   const directory = mkdtempSync(join(tmpdir(), 'risunest-sync-nsis-'));
   try {
     const script = join(directory, 'test.nsi');
-    writeFileSync(script, String.raw`
+    const hookSource = readFileSync('server/manager/install/windows.nsh', 'utf8');
+    const displayBlock = hookSource.slice(hookSource.indexOf('    StrCpy $SyncDisplayDataPath $R9'), hookSource.indexOf('    DetailPrint "$(SyncResumeDataKept)"'));
+    assert.ok(displayBlock.length > 0);
+    const paths = [String.raw`C:\data 경로`, String.raw`\\?\C:\data 경로`, String.raw`\\?\UNC\server\share\data`, String.raw`\\server\share\data`];
+    writeFileSync(script, '\ufeff' + String.raw`
 Unicode true
 RequestExecutionLevel user
 OutFile "${join(directory, 'test.exe')}"
@@ -29,7 +33,11 @@ Var UpdateMode
 Var DeleteAppDataCheckboxState
 !include "${resolve('server/manager/install/windows.nsh')}"
 Section
-WriteUninstaller "$INSTDIR\uninstall.exe"
+${paths.map((path, index) => `StrCpy $R9 "${q(path)}"
+${displayBlock}
+FileOpen $0 "${q(join(directory, `display-${index}`))}" w
+FileWriteUTF16LE $0 "$SyncDisplayDataPath$\\r$\\n$R9"
+FileClose $0`).join('\n')}
 SectionEnd
 Section Uninstall
 !insertmacro NSIS_HOOK_PREUNINSTALL
@@ -38,6 +46,11 @@ SectionEnd
 `);
     const result = spawnSync(compiler, ['/V2', script], { encoding: 'utf8', timeout: 30000, windowsHide: true });
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.equal(spawnSync(join(directory, 'test.exe'), ['/S'], { timeout: 30000, windowsHide: true }).status, 0);
+    const displayed = [String.raw`C:\data 경로`, String.raw`C:\data 경로`, String.raw`\\server\share\data`, String.raw`\\server\share\data`];
+    for (let index = 0; index < paths.length; index++) {
+      assert.equal(readFileSync(join(directory, `display-${index}`), 'utf16le'), `${displayed[index]}\r\n${paths[index]}`);
+    }
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 import { readFileSync, mkdirSync, copyFileSync, symlinkSync, unlinkSync } from 'node:fs';
@@ -170,7 +183,7 @@ fn main() {
  let data=if values.first().is_some_and(|v| v=="--data-dir") {let data=std::path::PathBuf::from(values[1].clone());values.drain(0..2);data} else {root.join("local/RisuNestSyncData")};
  if values.first().is_some_and(|v| v=="--server") {root=std::path::PathBuf::from(&values[1]).parent().unwrap().to_owned();values.drain(0..2);}
  if values.iter().any(|v| v=="forget-removal-resumable") {return;}
- assert!(data.starts_with(&root));
+ assert!(std::path::Path::new(data.to_str().unwrap().strip_prefix(r"\\?\").unwrap_or(data.to_str().unwrap())).starts_with(&root));
  let args=values.join(" ").trim().to_owned();
  if args=="installer removal-check normal delete" {println!("delete-data");}
  if args=="installer removal-check normal preserve" {println!("keep-data");}
@@ -197,6 +210,7 @@ fn main() {
   println!("removal-file-failed: synthetic");
   std::process::exit(7);
  }
+ if args.starts_with("installer resume-removal ") && root.join("fail-resume").exists() {println!("synthetic-resume-failure");std::process::exit(7);}
  if args=="installer commit-removal" || args.starts_with("installer resume-removal ") {
   if args=="installer resume-removal delete" {
    if data.join("risunest-sync-instance.json").exists() {fs::remove_dir_all(&data).unwrap();}
@@ -243,7 +257,7 @@ function holdDeletion(binary, path) {
 }
 function writeManagerHook(directory) {
   const hook = join(directory, 'hook.nsh');
-  writeFileSync(hook, readFileSync(resolve('server/manager/install/windows.nsh'), 'utf8').replaceAll('$LOCALAPPDATA', '$INSTDIR\\local').replace(/!include [^\r\n]+windows-common.nsh"/, `!include "${resolve('src-tauri/windows-common.nsh')}"`).replace('DetailPrint "$(SyncResumeDataKept)"', 'FileOpen $0 "$INSTDIR\\data-kept" w\nFileWriteUTF16LE $0 "$(SyncResumeDataKept)"\nFileClose $0'));
+  writeFileSync(hook, readFileSync(resolve('server/manager/install/windows.nsh'), 'utf8').replaceAll('$LOCALAPPDATA', '$INSTDIR\\local').replace(/!include [^\r\n]+windows-common.nsh"/, `!include "${resolve('src-tauri/windows-common.nsh')}"`).replace('Call un.SyncCommandError', 'Call un.SyncCommandError\nFileOpen $3 "$INSTDIR\\failure-message" w\nFileWriteUTF16LE $3 "$SyncFailureMessage"\nFileClose $3').replace('DetailPrint "$(SyncResumeDataKept)"', 'FileOpen $0 "$INSTDIR\\data-kept" w\nFileWriteUTF16LE $0 "$(SyncResumeDataKept)"\nFileClose $0'));
   return hook;
 }
 
@@ -274,6 +288,14 @@ Var DeleteAppDataCheckboxState
   Abort "Process check must use the installed executable path"
 !macroend
 !include "${q(hook)}"
+Function .onInit
+ReadEnvStr $LANGUAGE RISUNEST_NSIS_TEST_LANGUAGE
+FunctionEnd
+Function .onInstFailed
+FileOpen $0 "$INSTDIR\diagnostic" w
+FileWriteUTF16LE $0 "$SyncFailureMessage"
+FileClose $0
+FunctionEnd
 Function un.onUninstFailed
 FileOpen $0 "$INSTDIR\diagnostic" w
 FileWrite $0 "$SyncFailureMessage"
@@ -286,6 +308,7 @@ File /oname=risunest-sync-manager.exe "${q(binary)}"
 WriteUninstaller "$INSTDIR\uninstall.exe"
 SectionEnd
 Function un.onInit
+ReadEnvStr $LANGUAGE RISUNEST_NSIS_TEST_LANGUAGE
 ${'$'}{GetParameters} $0
 ClearErrors
 ${'$'}{GetOptions} $0 "/UPDATE" $1
@@ -446,7 +469,7 @@ SectionEnd
       assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true }).status, 0);
       const retry = join(location, '.risunest-sync-removal');
       mkdirSync(retry);
-      writeFileSync(join(retry, 'data-path'), Buffer.from(data, 'utf16le'));
+      writeFileSync(join(retry, 'data-path'), Buffer.from(`\\\\?\\${data}`, 'utf16le'));
       copyFileSync(binary, join(retry, 'manager.exe'));
       writeFileSync(join(retry, 'receipt.json'), '{}');
       rmSync(join(location, 'risunest-sync-manager.exe'));
@@ -460,6 +483,29 @@ SectionEnd
         const message = readFileSync(join(location, 'data-kept'), 'utf16le');
         assert.ok(message === `Server data could not be deleted. Data folder: ${data}` || message === `서버 데이터를 삭제하지 못했습니다. 데이터 폴더: ${data}`, message);
       }
+    }
+    for (const [language, pendingMessage, resumeMessage] of [
+      ['1033', 'A previous RisuNest Sync removal is incomplete. Run the removal again, then install.', 'RisuNest Sync removal could not be completed. Retry removal to finish.'],
+      ['1042', '이전 RisuNest Sync 제거가 완료되지 않았습니다. 제거를 다시 실행한 후 설치해주세요.', 'RisuNest Sync 제거를 완료하지 못했습니다. 다시 시도해주세요.'],
+    ]) {
+      const location = join(directory, `resume-failure-${language}`);
+      const data = join(location, 'custom data');
+      const rawData = `\\\\?\\${data}`;
+      const env = { ...process.env, RISUNEST_NSIS_TEST_LANGUAGE: language };
+      mkdirSync(data, { recursive: true });
+      assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { env, timeout: 30000, windowsHide: true }).status, 0);
+      const retry = join(location, '.risunest-sync-removal');
+      mkdirSync(retry);
+      writeFileSync(join(retry, 'data-path'), Buffer.from(rawData, 'utf16le'));
+      writeFileSync(join(retry, 'receipt.json'), '{}');
+      copyFileSync(binary, join(retry, 'manager.exe'));
+      writeFileSync(join(location, 'fail-resume'), 'fixture');
+      assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { env, timeout: 30000, windowsHide: true }).status, 1);
+      assert.ok(readFileSync(join(location, 'diagnostic'), 'utf16le').startsWith(pendingMessage));
+      assert.equal(spawnSync(join(location, 'uninstall.exe'), ['/S', `_?=${location}`], { env, timeout: 30000, windowsHide: true }).status, 1);
+      assert.ok(readFileSync(join(location, 'failure-message'), 'utf16le').startsWith(resumeMessage));
+      assert.ok(readFileSync(join(location, 'calls'), 'utf8').includes(`installer resume-removal preserve: ${rawData}`));
+      assert.equal(readFileSync(join(retry, 'data-path'), 'utf16le'), rawData);
     }
     for (const invalid of ['', 'relative', 'x'.repeat(20000)]) {
       const location = join(directory, `invalid-path-${invalid.length}`);

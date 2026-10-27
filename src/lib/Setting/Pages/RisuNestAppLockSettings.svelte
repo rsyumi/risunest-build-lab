@@ -100,8 +100,8 @@
         {#snippet below()}
             {#if lockState.availability.status !== 'available' || errors.enable}
                 <div class="mt-2 grid gap-2">
-                    {#if lockState.availability.status !== 'available'}<SettingNotice tone="info" text={text.noRecovery} />{/if}
                     {#if errors.enable}<SettingNotice tone="danger" text={errors.enable} role="alert" />{/if}
+                    {#if lockState.availability.status !== 'available'}<SettingNotice tone="info" text={text.noRecovery} />{/if}
                 </div>
             {/if}
         {/snippet}

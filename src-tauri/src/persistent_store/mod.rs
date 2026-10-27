@@ -1,4 +1,5 @@
 pub(crate) mod archive;
+pub(crate) mod author_note;
 mod asset_alias_orphans;
 pub(crate) mod gallery;
 pub(crate) mod asset_object_catalog;
@@ -706,6 +707,15 @@ pub(crate) struct ConversationSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct AuthorNotePresetUsage {
+    pub(crate) character_id: String,
+    pub(crate) character_name: String,
+    pub(crate) conversation_id: String,
+    pub(crate) conversation_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ConversationPage {
     pub(crate) revision: i64,
     pub(crate) items: Vec<ConversationSummary>,
@@ -876,6 +886,8 @@ pub(crate) struct WorkingSetCommit {
     pub(crate) expected_revision: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) gallery_pending_fence: Option<[u8; 32]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) device_plugin_fence: Option<device_store::plugin_gc::PluginGcFence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) root: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1804,6 +1816,14 @@ impl PersistentStore {
         query::query_conversations(connection, query, &target)
     }
 
+    pub(crate) fn query_author_note_preset_usage(
+        &self,
+        preset_id: &str,
+    ) -> StoreResult<Vec<AuthorNotePresetUsage>> {
+        let (connection, target) = self.read_view(None)?;
+        query::query_author_note_preset_usage(connection, preset_id, &target)
+    }
+
     pub(crate) fn read_conversation(
         &self,
         character_id: &str,
@@ -2180,7 +2200,7 @@ impl PersistentStore {
         &self,
         staging_id: &str,
     ) -> StoreResult<commit::StagedPluginPreview> {
-        commit::staged_plugin_preview(&self.connection, staging_id)
+        commit::staged_plugin_preview(&self.connection, &self.repository_root, staging_id)
     }
 
     pub(crate) fn staged_library_counts(&self, staging_id: &str) -> StoreResult<(u64, u64)> {
@@ -2240,6 +2260,7 @@ impl PersistentStore {
     ) -> StoreResult<RevisionResult> {
         let revision = commit::replace_preserve_repositories(
             &mut self.connection,
+            &self.repository_root,
             staging_id,
             expected_revision,
         )?;

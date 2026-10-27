@@ -1,10 +1,11 @@
 """Synthetic native return-frame verification, using product gates and native lifecycle."""
 import argparse
 import json
+import importlib.util
 import os
 from pathlib import Path
-import signal
 import subprocess
+import sys
 import time
 
 PHASES = ('app-lock-immediate', 'app-lock-timed', 'app-lock-immediate-mutant')
@@ -71,7 +72,7 @@ def frames(path, crop, tail=None, scale=None):
     if scale:
         filters += f',scale={scale[0]}:{scale[1]}:flags=neighbor'
         width, height = scale
-    command += ['-i', str(path), '-vf', filters, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']
+    command += ['-i', str(path), '-vf', filters, '-fps_mode', 'passthrough', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     size = width * height * 3
     try:
@@ -176,7 +177,7 @@ def wait_stage(path, stage, timeout, process=None):
     raise RuntimeError('Timed out waiting for ' + stage)
 
 
-def run_macos(app, artifacts, capture_input, start_capture, finish_capture):
+def run_macos(app, artifacts, capture_input, start_capture, finish_capture, activate_process):
     outcomes = []
     for phase in PHASES:
         report = artifacts / (phase + '.jsonl')
@@ -187,6 +188,10 @@ def run_macos(app, artifacts, capture_input, start_capture, finish_capture):
         with (artifacts / (phase + '.log')).open('w') as log:
             process = subprocess.Popen([str(app / 'Contents/MacOS/risunest-macos-bench')], env=environment, stdout=log, stderr=subprocess.STDOUT)
             try:
+                foreground = activate_process(process, app / 'Contents/MacOS/risunest-macos-bench')
+                (artifacts / (phase + '-foreground.json')).write_text(json.dumps(foreground, indent=2))
+                if foreground.get('confirmed') is not True:
+                    raise RuntimeError('Synthetic app did not become foreground before frame readiness')
                 ready = wait_stage(report, 'app-lock-ready', 120, process)
                 baseline = artifacts / (phase + '-baseline.png')
                 subprocess.run(['screencapture', '-x', str(baseline)], check=True)
@@ -217,11 +222,83 @@ def run_macos(app, artifacts, capture_input, start_capture, finish_capture):
     (artifacts / 'app-lock-result.json').write_text(json.dumps({'passed': True, 'observations': outcomes}, indent=2))
 
 
-def run_ios(device, artifacts):
+
+def dismiss_hosted_python_network_prompt():
+    if sys.platform != 'darwin' or os.environ.get('GITHUB_ACTIONS') != 'true':
+        raise RuntimeError('Host prompt preflight requires the fresh hosted macOS runner')
+    script = r"""
+function normalized(value) {
+    return typeof value === 'string' ? value.replace(/[“”]/g, '"').replace(/’/g, "'").replace(/\s+/g, ' ').trim() : '';
+}
+function property(element, name) {
+    try { return element[name](); } catch (_) { return null; }
+}
+function denialButton(window) {
+    var nodes = [window].concat(window.entireContents());
+    if (nodes.length > 2048) return null;
+    var texts = [];
+    var buttons = [];
+    nodes.forEach(function (node) {
+        ['name', 'value', 'description'].forEach(function (name) { texts.push(normalized(property(node, name))); });
+        if (property(node, 'role') === 'AXButton') buttons.push(node);
+    });
+    if (texts.indexOf('Allow "Python" to find devices on local networks?') < 0 || buttons.length !== 2) return null;
+    var deny = buttons.filter(function (button) { return normalized(property(button, 'name')) === "Don't Allow"; });
+    var allow = buttons.filter(function (button) { return normalized(property(button, 'name')) === 'Allow'; });
+    return deny.length === 1 && allow.length === 1 && property(deny[0], 'enabled') === true ? deny[0] : null;
+}
+function run() {
+    var system = Application('System Events');
+    if (!system.uiElementsEnabled()) throw new Error('Host UI scripting is unavailable');
+    var processes = system.processes();
+    var matches = [];
+    var inspected = 0;
+    if (processes.length > 256) throw new Error('Host process inspection limit exceeded');
+    processes.forEach(function (process) {
+        var windows;
+        try { windows = process.windows(); } catch (_) { return; }
+        windows.forEach(function (window) {
+            if (++inspected > 256) throw new Error('Host window inspection limit exceeded');
+            try { if (denialButton(window)) matches.push(window); } catch (_) {}
+        });
+    });
+    if (matches.length > 1) throw new Error('Ambiguous Python local-network prompts');
+    if (!matches.length) return JSON.stringify({status: 'not-found'});
+    var button = denialButton(matches[0]);
+    if (!button) throw new Error('Python local-network prompt changed before rejection');
+    system.click(button);
+    return JSON.stringify({status: 'denied'});
+}
+"""
+    result = subprocess.run(['osascript', '-l', 'JavaScript', '-e', script],
+                            capture_output=True, text=True, timeout=5)
+    if result.returncode != 0:
+        raise RuntimeError('Hosted Python prompt preflight failed: ' + result.stderr.strip())
+    observation = json.loads(result.stdout)
+    if observation.get('status') not in {'not-found', 'denied'}:
+        raise RuntimeError('Unexpected hosted prompt preflight result')
+    return observation
+
+
+def run_ios(device, artifacts, capture_input):
     if os.environ.get('GITHUB_ACTIONS') != 'true':
         raise RuntimeError('Simulator capture requires the fresh hosted synthetic CI profile')
     identifier = 'io.github.rsyumi.risunest.ios.bench'
     container = Path(output(['xcrun', 'simctl', 'get_app_container', device, identifier, 'data']))
+    devices = json.loads(output(['xcrun', 'simctl', 'list', 'devices', 'booted', '--json']))['devices']
+    booted = [item for runtime in devices.values() for item in runtime if item['state'] == 'Booted']
+    if len(booted) != 1 or booted[0]['udid'] != device or not booted[0]['name'].startswith('RisuNest synthetic'):
+        raise RuntimeError('Hosted capture requires only the owned synthetic Simulator to be booted')
+    (artifacts / 'simulator-selection.json').write_text(json.dumps({
+        'udid': device, 'name': booted[0]['name'], 'onlyBootedDevice': True, 'captureInput': capture_input}, indent=2))
+    specification = importlib.util.spec_from_file_location('appearance_capture', Path(__file__).resolve().parents[1] / 'macos/run.py')
+    capture_tools = importlib.util.module_from_spec(specification)
+    sys.path.insert(0, str(Path(specification.origin).parent))
+    try:
+        specification.loader.exec_module(capture_tools)
+    finally:
+        sys.path.pop(0)
+    subprocess.run(['open', '-a', 'Simulator'], check=True)
     outcomes = []
     for phase in PHASES:
         if list(container.rglob('verification-' + phase + '.jsonl')):
@@ -239,35 +316,35 @@ def run_ios(device, artifacts):
             time.sleep(.1)
         ready = wait_stage(report, 'app-lock-ready', 120)
         baseline = artifacts / (phase + '-baseline.png')
-        subprocess.run(['xcrun', 'simctl', 'io', device, 'screenshot', str(baseline)], check=True)
+        subprocess.run(['open', '-a', 'Simulator'], check=True)
+        deadline = time.monotonic() + 15
+        host_preflight = []
+        while True:
+            subprocess.run(['screencapture', '-x', str(baseline)], check=True)
+            try:
+                find_marker(*rgb_image(baseline))
+                break
+            except RuntimeError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('Owned Simulator synthetic content is not visible on the captured host display')
+                if len(host_preflight) < 3:
+                    host_preflight.append(dismiss_hosted_python_network_prompt())
+                    (artifacts / (phase + '-host-preflight.json')).write_text(json.dumps(host_preflight, indent=2))
+                    if host_preflight[-1]['status'] == 'denied':
+                        subprocess.run(['open', '-a', 'Simulator'], check=True)
+                time.sleep(.1)
         subprocess.run(['xcrun', 'simctl', 'launch', device, 'com.apple.Preferences'], check=True)
         time.sleep(.4)
         if phase == 'app-lock-timed':
             time.sleep(65)
-        video = artifacts / (phase + '.mov')
-        with (artifacts / (phase + '-capture.log')).open('w') as log:
-            recorder = subprocess.Popen(['xcrun', 'simctl', 'io', device, 'recordVideo', '--codec=h264', str(video)], stdout=log, stderr=subprocess.STDOUT)
-            try:
-                started = time.monotonic()
-                while not video.exists() or video.stat().st_size < 32:
-                    if recorder.poll() is not None or time.monotonic() - started > 5:
-                        raise RuntimeError('Simulator recorder did not start')
-                    time.sleep(.025)
-                time.sleep(.15)
-                subprocess.run(['xcrun', 'simctl', 'launch', device, identifier], check=True)
-                locked = wait_stage(report, 'app-lock-locked', 45)
-                time.sleep(.6)
-            finally:
-                if recorder.poll() is None:
-                    recorder.send_signal(signal.SIGINT)
-                try:
-                    recorder.wait(timeout=15)
-                except subprocess.TimeoutExpired:
-                    recorder.kill()
-                    recorder.wait(timeout=5)
-                    raise RuntimeError('Simulator recorder did not finish')
-        if recorder.returncode != 0:
-            raise RuntimeError('Simulator recording failed')
+        capture = capture_tools.start_appearance_capture(artifacts, phase, 'macos', capture_input)
+        try:
+            subprocess.run(['xcrun', 'simctl', 'launch', device, identifier], check=True)
+            locked = wait_stage(report, 'app-lock-locked', 45)
+            time.sleep(.6)
+        finally:
+            capture_tools.finish_appearance_capture(capture)
+        video = capture['video']
         (artifacts / (phase + '.jsonl')).write_text(report.read_text())
         outcomes.append(assess(video, baseline, ready, locked, phase.endswith('mutant')))
         subprocess.run(['xcrun', 'simctl', 'terminate', device, identifier], check=True)
@@ -278,11 +355,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--device', required=True)
     parser.add_argument('--artifacts', type=Path, required=True)
+    parser.add_argument('--capture-input', required=True)
     args = parser.parse_args()
     args.artifacts.mkdir(parents=True, exist_ok=True)
     if any(args.artifacts.iterdir()):
         parser.error('Use an empty frame artifact directory')
-    run_ios(args.device, args.artifacts.resolve())
+    run_ios(args.device, args.artifacts.resolve(), args.capture_input)
 
 
 if __name__ == '__main__':

@@ -2,10 +2,10 @@ import { get, writable } from 'svelte/store'
 import { alertStore } from './modalNavigationAdapters'
 export { languageKorean as language } from '../../src/lang/ko'
 
-export const DBState = { db: { didFirstSetup: true, characters: [{ name: 'Synthetic', chaId: 'character-a', chatPage: 0, chats: [{ id: 'chat-a' }] }], keepSessionAlive: false } }
+export const DBState = { db: { didFirstSetup: true, characters: [{ name: 'Synthetic', chaId: 'character-a', chatPage: 0, chats: [{ id: 'chat-a' }] }] } }
 export const DynamicGUI = writable(false), settingsOpen = writable(false), sideBarStore = writable(true), sideBarClosing = writable(false)
 export const ShowRealmFrameStore = writable(false), openPresetList = writable(false), openPersonaList = writable(false)
-export const MobileGUI = writable(false), CustomGUISettingMenuStore = writable(false), loadedStore = writable(true)
+export const MobileGUI = writable(false), CustomGUISettingMenuStore = writable(false), loadedStore = writable(!new URLSearchParams(location.search).has('loading'))
 export const bootFailure = writable<import('../../src/ts/stores.svelte').BootFailure | null>(null)
 export const recoveryStart = writable(null)
 export const serverSyncNavigation = { subscribe: (_listener: unknown) => () => {} }

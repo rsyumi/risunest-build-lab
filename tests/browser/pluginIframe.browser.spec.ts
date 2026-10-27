@@ -50,6 +50,69 @@ test('real iframe clones payloads and delivers responses asynchronously', async 
     await expect(page.locator('[data-risu-plugin-frame]')).toHaveAttribute('sandbox', 'allow-scripts allow-modals allow-downloads')
 })
 
+test('local plugin storage keeps structured clone values across the real iframe bridge', async ({ page }) => {
+    // The native device store is a process boundary; parts live in this page.
+    await page.addInitScript(() => {
+        const parts = new Map<string, Uint8Array>()
+        const uploads = new Map<string, number[]>()
+        let next = 0
+        Object.assign(window, { __TAURI_INTERNALS__: {
+            metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
+            transformCallback: () => ++next,
+            invoke: async (command: string, args: { uploadId: string; data: number[]; hash: string; offset: number }) => {
+                if (command === 'native_asset_bytes_probe') return false
+                if (command === 'pds_open_plugin_device_part') { const id = `upload-${++next}`; uploads.set(id, []); return id }
+                if (command === 'pds_append_plugin_device_part') { const bytes = uploads.get(args.uploadId)!; bytes.push(...args.data); return bytes.length }
+                if (command === 'pds_finish_plugin_device_part') {
+                    const bytes = Uint8Array.from(uploads.get(args.uploadId)!)
+                    const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(byte => byte.toString(16).padStart(2, '0')).join('')
+                    parts.set(hash, bytes)
+                    return hash
+                }
+                if (command === 'pds_read_plugin_device_part') return parts.get(args.hash)!.slice(args.offset, args.offset + 1024 * 1024).buffer
+                return null
+            },
+        } })
+    })
+    await page.goto('/')
+    await page.evaluate(() => window.boundary.loadLocal(`
+        const storage = await risuai.getLocalPluginStorage();
+        const buffer = new Uint8Array([0, 255, 128]).buffer;
+        const map = new Map([['view', new Uint8Array(buffer, 1, 2)], ['buffer', buffer]]);
+        map.set('self', map);
+        await storage.setItem('value', { map, when: new Date(7), big: 5n, nan: NaN, negativeZero: -0, holes: [1, , 3],
+            missing: undefined, set: new Set(['a']), blob: new Blob(['hi'], { type: 'text/plain' }) });
+        await storage.setItem('plain', { a: [1] });
+        const shared = new Uint8Array([1, 2, 3, 4]).buffer;
+        const graph = { views: [new Uint8Array(shared, 0, 2), new Uint8Array(shared, 2, 2)], byRoot: new Map(), nan: NaN };
+        graph.self = graph;
+        graph.list = [graph];
+        graph.byRoot.set('root', graph);
+        await storage.setItem('graph', graph);
+        const back = await storage.getItem('graph');
+        const restored = await storage.getItem('value');
+        const view = restored.map.get('view');
+        await risuai.result({
+            cycle: restored.map.get('self') === restored.map, shared: view.buffer === restored.map.get('buffer'),
+            bytes: Array.from(view), time: restored.when instanceof Date ? restored.when.getTime() : null,
+            big: restored.big === 5n, nan: Number.isNaN(restored.nan), negativeZero: Object.is(restored.negativeZero, -0),
+            hole: restored.holes.length === 3 && !(1 in restored.holes), missing: 'missing' in restored && restored.missing === undefined,
+            set: restored.set instanceof Set && restored.set.has('a'), blob: [restored.blob.type, await restored.blob.text()],
+            plain: await storage.getItem('plain'),
+            graph: [back.self === back, back.list[0] === back, back.byRoot.get('root') === back,
+                back.views[0].buffer === back.views[1].buffer, Array.from(back.views[1]), Number.isNaN(back.nan)],
+        });
+    `))
+    await expect.poll(() => page.evaluate(() => window.boundary.localResult)).toEqual({
+        cycle: true, shared: true, bytes: [255, 128], time: 7, big: true, nan: true, negativeZero: true,
+        hole: true, missing: true, set: true, blob: ['text/plain', 'hi'], plain: { a: [1] },
+        graph: [true, true, true, true, [3, 4], true],
+    })
+    const rows = await page.evaluate(() => window.boundary.localRows)
+    expect(rows.find(row => row.key === 'plain')?.value).toBe('{"a":[1]}')
+    expect(rows.find(row => row.key === 'value')?.value.startsWith('#risunest-structured:1\n')).toBe(true)
+})
+
 const callbackScript = `
 try {
     window.addEventListener('message', event => {

@@ -818,7 +818,7 @@ pub(super) fn replace_add_characters(
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     require_staging(&transaction, staging_id)?;
     let mut configured_index: i64 = transaction.query_row(
-        "SELECT COUNT(*) FROM characters WHERE generation = ?1",
+        "SELECT COALESCE(MAX(configured_index) + 1, 0) FROM characters WHERE generation = ?1",
         [staging_id],
         |row| row.get(0),
     )?;
@@ -853,7 +853,7 @@ pub(super) fn replace_put_character_detail(
         ));
     }
     let configured_index: i64 = transaction.query_row(
-        "SELECT COUNT(*) FROM characters WHERE generation = ?1",
+        "SELECT COALESCE(MAX(configured_index) + 1, 0) FROM characters WHERE generation = ?1",
         [staging_id],
         |row| row.get(0),
     )?;
@@ -861,6 +861,7 @@ pub(super) fn replace_put_character_detail(
         &transaction,
         staging_id,
         detail,
+        None,
         configured_index,
         conversation_count,
     )?;
@@ -1072,6 +1073,7 @@ pub(super) fn replace_put_asset_owner_heads(
 
 pub(super) fn replace_preserve_repositories(
     connection: &mut Connection,
+    repository_root: &std::path::Path,
     staging_id: &str,
     expected_revision: Option<i64>,
 ) -> StoreResult<i64> {
@@ -1087,8 +1089,8 @@ pub(super) fn replace_preserve_repositories(
         }
     }
     let active = active_generation(&transaction)?;
-    let source_root = super::upstream_stream::RootSpool::from_stored(&transaction, &active)?;
-    let staged_root = super::upstream_stream::RootSpool::from_stored(&transaction, staging_id)?;
+    let source_root = super::upstream_stream::RootSpool::from_stored(&transaction, repository_root, &active)?;
+    let staged_root = super::upstream_stream::RootSpool::from_stored(&transaction, repository_root, staging_id)?;
     let owner_heads = replacement_owner_heads(&transaction, &active)?;
     let retained_owner_heads = owner_heads
         .iter()
@@ -2076,6 +2078,7 @@ pub(super) fn put_character_detail(
         transaction,
         generation,
         detail,
+        None,
         configured_index,
         conversation_count,
     )
@@ -2119,11 +2122,11 @@ fn put_full_character(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let detail = without_field(character, "chats")?;
     put_character_records(
         transaction,
         generation,
-        &detail,
+        character,
+        Some("chats"),
         configured_index,
         chats.len() as i64,
     )?;
@@ -2143,6 +2146,7 @@ fn put_character_records(
     transaction: &Transaction<'_>,
     generation: &str,
     detail: &Value,
+    omitted: Option<&str>,
     configured_index: i64,
     conversation_count: i64,
 ) -> StoreResult<()> {
@@ -2189,7 +2193,7 @@ fn put_character_records(
             character_type,
             creator_notes,
             trash_time,
-            serde_json::to_string(detail)?,
+            serde_json::to_string(&WithoutField(object, omitted))?,
         ],
     )?;
     Ok(())
@@ -2786,6 +2790,15 @@ fn without_field(value: &Value, field: &str) -> StoreResult<Value> {
     Ok(Value::Object(object))
 }
 
+// Serializes the same text as `without_field` without copying the object.
+struct WithoutField<'a>(&'a Map<String, Value>, Option<&'a str>);
+
+impl Serialize for WithoutField<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(self.0.iter().filter(|(key, _)| Some(key.as_str()) != self.1))
+    }
+}
+
 #[cfg(test)]
 mod ordered_removal_tests {
     use super::*;
@@ -3192,6 +3205,7 @@ pub(crate) struct StagedPluginPreview {
 
 pub(super) fn staged_plugin_preview(
     connection: &Connection,
+    repository_root: &std::path::Path,
     staging_id: &str,
 ) -> StoreResult<StagedPluginPreview> {
     let mut statement = connection.prepare(
@@ -3212,16 +3226,16 @@ pub(super) fn staged_plugin_preview(
         .collect::<Result<Vec<_>, _>>()?;
     Ok(StagedPluginPreview {
         values,
-        plugin_names: staged_plugin_names(connection, staging_id)?,
+        plugin_names: staged_plugin_names(connection, repository_root, staging_id)?,
     })
 }
 
 /// The plugins the staged save carries. The working set still holds the
 /// database being replaced, so the names have to come from the staging.
-fn staged_plugin_names(connection: &Connection, staging_id: &str) -> StoreResult<Vec<String>> {
+fn staged_plugin_names(connection: &Connection, repository_root: &std::path::Path, staging_id: &str) -> StoreResult<Vec<String>> {
     let exists: bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM root WHERE generation=?1)",[staging_id],|r|r.get(0))?;
     if !exists { return Ok(Vec::new()); }
-    let root=super::upstream_stream::RootSpool::from_stored(connection,staging_id)?;
+    let root=super::upstream_stream::RootSpool::from_stored(connection,repository_root,staging_id)?;
     if root.kind("plugins")? != Some(super::upstream_stream::FieldKind::Array) {
         let scalar=root.scalar("plugins")?;
         if scalar.as_ref().is_some_and(|value|value.is_number() || value.is_boolean()) {

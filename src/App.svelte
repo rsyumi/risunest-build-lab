@@ -31,7 +31,6 @@
     import HypaV3Progress from './lib/Others/HypaV3Progress.svelte';
     import PopupList from './lib/UI/PopupList.svelte';
     import EasyPanel from './lib/Others/ProTools/EasyPanel.svelte';
-    import { createKeepAliveAudio } from './ts/keepAliveAudio';
     import PopupEditor from './lib/Others/PopupEditor.svelte';
     import TextEditorPopup from './lib/Others/TextEditorPopup.svelte';
     import { textEditorPopup } from './ts/gui/textEditorPopup.svelte';
@@ -75,8 +74,10 @@
     const bootFailureVisible = $derived(!$loadedStore && !$recoveryStart && !!$bootFailure)
     const appLockVisible = $derived(isTauri && !bootFailureVisible && ($loadedStore || !!$recoveryStart) && appLock.gated)
 
+    const appLockFramesHidden = $derived(isTauri && !bootFailureVisible && appLock.gated)
+
     $effect.pre(() => {
-        setAppLockInputBlocked(appLockVisible)
+        setAppLockInputBlocked(appLockVisible, appLockFramesHidden)
         return () => setAppLockInputBlocked(false)
     })
 
@@ -95,14 +96,16 @@
     $effect(() => {
         if (!isTauri) return
         const failure = bootFailureVisible
-        const ready = $loadedStore || !!$recoveryStart
+        const loading = !$loadedStore && !$recoveryStart && !$bootFailure
         const epoch = appLock.state.epoch
         const presentation = appLock.state.presentationRevision
-        if (!failure && (!appLock.state.initialized || !ready || appLock.gated)) return
+        const initialized = appLock.state.initialized
+        if (!failure && !loading && (!initialized || appLock.gated)) return
         let cancelled = false
         void tick().then(() => requestAnimationFrame(() => requestAnimationFrame(() => {
             if (cancelled || epoch !== appLock.state.epoch || presentation !== appLock.state.presentationRevision) return
             if (failure) void appLock.renderBootFailure()
+            else if (loading) void appLock.renderLoading()
             else void appLock.rendered(language.risuNest.appLock.promptUnlock)
         })))
         return () => { cancelled = true }
@@ -197,8 +200,6 @@
     let gridOpen = $state(false)
     let aprilFools = $state(new Date().getMonth() === 3 && new Date().getDate() === 1)
     let aprilFoolsPage = $state(0)
-    let keepingSessionAlive = $state(false)
-    let keepAliveAudio: HTMLAudioElement | null = null
 
     const getMainDropEffect = (e:DragEvent): DataTransfer['dropEffect'] => {
         const types = Array.from(e.dataTransfer?.types ?? [])
@@ -219,7 +220,6 @@
 
 <ChatBindingLifecycle />
 
-<!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <main inert={$persistentWorkingSetInputBlocked || appLockVisible} class="flex bg-bg w-full h-full max-w-100vw text-textcolor" use:keepFocusedInputVisible={isTauriMobile} ondragover={(e) => {
     const dropEffect = getMainDropEffect(e)
@@ -260,39 +260,6 @@
         })
         checkCharOrder()
     }
-}} onclick={() => {
-    if(keepingSessionAlive){
-        return
-    }
-
-    const aliveMode = DBState?.db?.keepSessionAlive
-    switch(aliveMode){
-        case 'pip':{
-
-            break
-        }
-        case 'sound':{
-            console.log("Starting inaudible audio to keep session alive")
-            if(!keepAliveAudio){
-                keepAliveAudio = createKeepAliveAudio()
-                // Paused by the OS or by another app taking audio focus; restart on the next click
-                keepAliveAudio.addEventListener('pause', () => {
-                    keepingSessionAlive = false
-                })
-            }
-            keepingSessionAlive = true
-            keepAliveAudio.play().catch(() => {
-                keepingSessionAlive = false
-            })
-            if('mediaSession' in navigator){
-                navigator.mediaSession.metadata = new MediaMetadata({
-                    title: 'RisuNest'
-                })
-            }
-            break
-        }
-    }
-
 }}>
     {#if !import.meta.env.VITE_RISU_LEGAL_CONFIGURED}
         <Legal />

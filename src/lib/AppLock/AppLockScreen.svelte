@@ -4,6 +4,7 @@
     import ScanFace from '@lucide/svelte/icons/scan-face'
     import FingerprintPattern from '@lucide/svelte/icons/fingerprint-pattern'
     import { language } from 'src/lang'
+    import risuNestLogo from '../../../src-tauri/icon-src/logo.svg?url'
     import SettingButton from '../Setting/RisuNest/SettingButton.svelte'
     import SettingNotice from '../Setting/RisuNest/SettingNotice.svelte'
 
@@ -99,13 +100,13 @@
     <div class="column">
         <div class="info">
             {#if mode === 'unlock'}
-                <img class="logo" src="/logo_192.png" alt="" />
+                <img class="logo" src={risuNestLogo} alt="" />
                 <div class="name">RisuNest</div>
             {:else}
                 <h2 class="title">{title}</h2>
             {/if}
             <div class="instruction" aria-live="polite">{instruction}</div>
-            <div class="dots" class:shake={issue === 'wrongPin' && count === 6}
+            <div class="dots" class:shake={issue === 'mismatch' || (issue === 'wrongPin' && count === 6)}
                 role="img" aria-label={text.progress.replace('{0}', String(count))}>
                 {#each [0, 1, 2, 3, 4, 5] as index}
                     <span class="dot" class:filled={index < count}></span>
@@ -158,7 +159,7 @@
     .instruction { margin-top: 24px; font-size: 15px; }
     .compact .instruction { margin-top: 20px; }
     .dots { display: flex; gap: 14px; margin-top: 14px; }
-    .dot { width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid color-mix(in srgb, var(--risu-theme-textcolor) 45%, transparent); transition: background-color .12s, border-color .12s; }
+    .dot { width: 12px; height: 12px; border-radius: 50%; border-width: 1.5px; border-style: solid; border-color: color-mix(in srgb, var(--risu-theme-textcolor) 45%, transparent); transition: background-color .12s, border-color .12s; }
     .dot.filled { background: var(--risu-theme-textcolor); border-color: var(--risu-theme-textcolor); }
     .dots.shake { animation: shake .36s; }
     @keyframes shake { 0%, 100% { transform: translateX(0); } 20% { transform: translateX(-8px); } 40% { transform: translateX(7px); } 60% { transform: translateX(-5px); } 80% { transform: translateX(3px); } }

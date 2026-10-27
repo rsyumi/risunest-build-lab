@@ -291,9 +291,14 @@ internal fun reconciledSafDestination(
   record: SafDestinationRecord,
   ownedByRenderer: Boolean,
   nowMillis: Long,
+  requiresPublicationProof: Boolean,
 ): SafDestinationRecord? {
   if (ownedByRenderer || record.sourceKind != SafDestinationSourceKind.RISU_SAVE || !record.isTerminal()) return null
   if (!record.exportBound || !record.copyStarted || record.publicationPrerequisitesComplete) return record
+  if (!requiresPublicationProof) return record.copy(
+    publicationPrerequisitesComplete = true,
+    updatedAtMillis = nowMillis,
+  )
   return record.copy(
     phase = SafDestinationPhase.FAILED,
     code = "destination-interrupted",
@@ -326,13 +331,13 @@ internal class SafDestinationRendererSession {
     nowMillis: Long,
     save: (SafDestinationRecord) -> Unit,
     prepare: (SafDestinationRecord) -> Boolean,
-    clear: (String) -> Boolean,
-    retainJournal: Boolean,
+    requiresPublicationProof: (SafDestinationRecord) -> Boolean,
   ): SafDestinationRecord? {
-    val terminal = reconciledSafDestination(record, owns(record.requestId), nowMillis) ?: return null
+    // The journal keeps a recovered receipt until its owner acknowledges it.
+    if (recovered.containsKey(record.requestId)) return null
+    val terminal = reconciledSafDestination(record, owns(record.requestId), nowMillis, requiresPublicationProof(record)) ?: return null
     save(terminal)
     if (!prepare(terminal)) return null
-    if (!retainJournal && !clear(terminal.requestId)) return null
     recovered[terminal.requestId] = terminal
     return terminal
   }

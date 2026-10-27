@@ -396,7 +396,9 @@ fn builder_with_main_window(
         builder = builder.on_web_content_process_terminate(|webview| {
             if webview.label() == "main" {
                 crate::nlog!("error", "WebKit web content process ended");
-                generation_diagnostics::renderer_exit(generation_diagnostics::RendererExit::Apple { reason: "unknown" });
+                generation_diagnostics::renderer_exit(generation_diagnostics::RendererExit::apple(
+                    wry::web_content_process_termination_reason(),
+                ));
                 generation_diagnostics::reload_result("requested");
                 renderer_recovery::renderer_exited(webview.app_handle());
                 // A quit that arrives before the reloaded document is ready no longer waits for it.
@@ -647,7 +649,7 @@ fn builder_with_main_window(
                             .to_owned(),
                     ))
                     .map_err(|error| format!("iOS native initialization failed: {error}"))?;
-                app_lock::setup(app.handle())?;
+            app_lock::setup(app.handle());
                 let app_data_dir = app_paths::data_root(app)?;
                 app.state::<external_storage::job_store::JobCommandState>()
                     .root
@@ -782,6 +784,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         external_storage::lww_commands::external_lww_inspect,
         external_storage::lww_commands::external_lww_stage_binding,
         external_storage::lww_commands::external_lww_publish,
+        external_storage::lww_commands::external_lww_check_format,
+        external_storage::lww_commands::external_lww_switch_format,
         external_storage::lww_commands::external_lww_receive,
         external_storage::lww_commands::external_lww_maintenance,
         external_storage::lww_commands::external_lww_fence,
@@ -850,6 +854,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         server_sync::commands::server_sync_lww_prepare_fresh_writer,
         server_sync::commands::server_sync_lww_activate_new_device,
         server_sync::commands::server_sync_lww_retry,
+        server_sync::commands::server_sync_lww_check_format,
+        server_sync::commands::server_sync_lww_switch_format,
         server_sync::commands::server_sync_lww_drain,
         server_sync::commands::server_sync_cancel,
         server_sync::commands::server_sync_claim_offline_notice,
@@ -937,6 +943,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         native_file_jobs::native_file_job_forget,
         native_file_jobs::official_assets::native_official_asset_restore_enqueue,
         native_file_jobs::official_assets::native_official_asset_restore_settled,
+        native_file_jobs::official_assets::upload::native_official_asset_publication_settled,
         native_file_jobs::native_portable_handoff_cleanup,
         native_file_jobs::native_raw_recovery_handoff_cleanup,
         native_file_jobs::native_portable_select_sections,
@@ -977,6 +984,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_query_characters,
         persistent_store::commands::pds_read_character,
         persistent_store::commands::pds_query_conversations,
+        persistent_store::commands::pds_query_author_note_preset_usage,
         persistent_store::commands::pds_read_conversation,
         persistent_store::commands::pds_read_conversation_metadata,
         persistent_store::commands::pds_read_conversation_window,
@@ -1087,6 +1095,12 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_open_plugin_device_write,
         persistent_store::commands::pds_append_plugin_device_write,
         persistent_store::commands::pds_abort_plugin_device_write,
+        persistent_store::commands::pds_open_plugin_device_part,
+        persistent_store::commands::pds_append_plugin_device_part,
+        persistent_store::commands::pds_append_plugin_device_part_raw,
+        persistent_store::commands::pds_finish_plugin_device_part,
+        persistent_store::commands::pds_abort_plugin_device_part,
+        persistent_store::commands::pds_read_plugin_device_part,
         persistent_store::commands::pds_list_plugin_device_keys,
         persistent_store::commands::pds_list_plugin_device_storage,
         persistent_store::commands::pds_write_plugin_device_values,

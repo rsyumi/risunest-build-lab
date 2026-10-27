@@ -222,8 +222,11 @@ await (async function() {
         }
     }
 
-    function collectTransferables(obj, transferables = []) {
-        if (!obj || typeof obj !== 'object') return transferables;
+    // Each object is visited once, so cycles end and a buffer reached twice is
+    // listed once.
+    function collectTransferables(obj, transferables = [], seen = new Set(transferables)) {
+        if (!obj || typeof obj !== 'object' || seen.has(obj)) return transferables;
+        seen.add(obj);
 
         if (obj instanceof ArrayBuffer ||
             obj instanceof MessagePort ||
@@ -232,13 +235,16 @@ await (async function() {
             transferables.push(obj);
         }
         else if (ArrayBuffer.isView(obj) && obj.buffer instanceof ArrayBuffer) {
-            transferables.push(obj.buffer);
+            if (!seen.has(obj.buffer)) {
+                seen.add(obj.buffer);
+                transferables.push(obj.buffer);
+            }
         }
         else if (Array.isArray(obj)) {
-            obj.forEach(item => collectTransferables(item, transferables));
+            obj.forEach(item => collectTransferables(item, transferables, seen));
         }
         else if (obj.constructor === Object) {
-            Object.values(obj).forEach(value => collectTransferables(value, transferables));
+            Object.values(obj).forEach(value => collectTransferables(value, transferables, seen));
         }
 
         return transferables;
@@ -349,8 +355,13 @@ await (async function() {
         if (obj.__type === 'STREAM_PORT') return reconstruct(obj);
         if (Object.prototype.toString.call(obj) === '[object Object]') {
             const out = {};
-            for (const k of Object.keys(obj)) out[k] = reconstruct(obj[k]);
-            return out;
+            let changed = false;
+            for (const k of Object.keys(obj)) {
+                out[k] = reconstruct(obj[k]);
+                if (!Object.is(out[k], obj[k])) changed = true;
+            }
+            // Without streams the result is kept as it is, so references back to it stay intact.
+            return changed ? out : obj;
         }
 
         return obj;
@@ -713,8 +724,11 @@ export class SandboxHost {
         });
     }
 
-    private collectTransferables(obj: any, transferables: Transferable[] = []): Transferable[] {
-        if (!obj || typeof obj !== 'object') return transferables;
+    // Each object is visited once, so cycles end and a buffer reached twice is
+    // listed once.
+    private collectTransferables(obj: any, transferables: Transferable[] = [], seen = new Set<unknown>(transferables)): Transferable[] {
+        if (!obj || typeof obj !== 'object' || seen.has(obj)) return transferables;
+        seen.add(obj);
 
         if (obj instanceof ArrayBuffer ||
             obj instanceof MessagePort ||
@@ -725,13 +739,16 @@ export class SandboxHost {
             transferables.push(obj);
         }
         else if (ArrayBuffer.isView(obj) && obj.buffer instanceof ArrayBuffer) {
-            transferables.push(obj.buffer);
+            if (!seen.has(obj.buffer)) {
+                seen.add(obj.buffer);
+                transferables.push(obj.buffer);
+            }
         }
         else if (Array.isArray(obj)) {
-            obj.forEach(item => this.collectTransferables(item, transferables));
+            obj.forEach(item => this.collectTransferables(item, transferables, seen));
         }
         else if (obj.constructor === Object) {
-            Object.values(obj).forEach(value => this.collectTransferables(value, transferables));
+            Object.values(obj).forEach(value => this.collectTransferables(value, transferables, seen));
         }
 
         return transferables;
@@ -959,7 +976,8 @@ export class SandboxHost {
         if (obj.constructor === Object) {
             const out: any = {};
             for (const k of Object.keys(obj)) out[k] = replace(obj[k]);
-            return { result: out, ports, cleanups };
+            // Without streams the object is sent as it is, so references back to it stay intact.
+            return { result: ports.length ? out : obj, ports, cleanups };
         }
 
         return { result: obj, ports, cleanups };

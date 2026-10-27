@@ -25,7 +25,8 @@ const mocks = vi.hoisted(() => {
     }
 })
 
-vi.mock('svelte/store', () => ({
+vi.mock('svelte/store', async (importOriginal) => ({
+    ...await importOriginal<typeof import('svelte/store')>(),
     get: (store: unknown) => store === mocks.emotionStore ? {} : 0,
 }))
 vi.mock('src/ts/stores.svelte', () => ({

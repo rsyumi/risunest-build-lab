@@ -142,16 +142,7 @@ export class NativeCommitTransport {
             )
         )
             return deps.invoke('pds_commit', { ...prepareNativePersistenceValue(input) })
-        let bytes: Uint8Array
-        try {
-            bytes = await deps.encode(input)
-        } catch (error) {
-            // Callable hooks cannot be structured-cloned. No native save has started yet.
-            if (error instanceof DOMException && error.name === 'DataCloneError') {
-                return deps.invoke('pds_commit', { ...prepareNativePersistenceValue(input) })
-            }
-            throw error
-        }
+        const bytes = await deps.encode(input)
         // The Android transport assembles at most this much, and every target
         // keeps the same limit so a save that works on one works on all.
         if (bytes.byteLength > this.maxRequestBytes) throw new PayloadTooLargeError('commit', bytes.byteLength)

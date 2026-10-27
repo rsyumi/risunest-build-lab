@@ -5,7 +5,11 @@ import { APP_LOCK_KEY } from './record'
 
 function markerStorage(): AppLockStorage {
     return {
-        read: () => getDeviceMarkers().getItem(APP_LOCK_KEY),
+        read: async (refresh = false) => {
+            const markers = getDeviceMarkers()
+            if (refresh) await markers.reload?.()
+            return markers.getItem(APP_LOCK_KEY)
+        },
         commit: async (serialized) => {
             const markers = getDeviceMarkers()
             if (!markers.commitItem) throw new Error('App lock requires durable device markers')
@@ -63,8 +67,15 @@ class AppLockFacade {
     setTiming(timing: Parameters<AppLockController['setTiming']>[0]) { return this.controller?.setTiming(timing) ?? Promise.resolve(false) }
     setNativeUnlock(enabled: boolean, reason: string) { return this.controller?.setNativeUnlock(enabled, reason) ?? Promise.resolve('saveFailed' as const) }
     setHideRecentsPreview(enabled: boolean) { return this.controller?.setHideRecentsPreview(enabled) ?? Promise.resolve(false) }
+    async renderLoading(): Promise<void> {
+        if (this.controller) return this.controller.renderLoading()
+        return this.renderBeforeInitialization()
+    }
     async renderBootFailure(): Promise<void> {
         if (this.controller) return this.controller.renderBootFailure()
+        return this.renderBeforeInitialization()
+    }
+    private async renderBeforeInitialization(): Promise<void> {
         if (this.failureStarting) return this.failureStarting
         const generation = this.failureGeneration
         const native = createAppLockNativeAdapter()

@@ -25,6 +25,7 @@ import { tokenize } from "../tokenizer";
 import { fetchNative, readImage } from "../globalApi.svelte";
 import { loadLoreBookV3PromptFromCompatibilitySnapshot } from './lorebook.svelte';
 import { getPersonaPrompt, getUserName, getUserIcon } from '../util';
+import { effectiveAuthorNote } from '../authorNotePresets';
 import { isTauriMobile } from '../platform';
 import { getRuntimePerformanceBudgets, subscribeRuntimePerformanceProfile } from '../runtimePerformanceProfile';
 import { createLuaFactory, runLuaSource } from './luaRuntime';
@@ -1083,7 +1084,8 @@ export async function runScripted(code:string, arg:{
             })
 
             declareAPI('getAuthorsNote', (id:string) => {
-                return readScriptingChat()?.note ?? ''
+                const chat = readScriptingChat()
+                return chat ? effectiveAuthorNote(getScriptingDatabase().authorNotePresets, chat) : ''
             })
 
             declareAPI('getBackgroundEmbedding', (id:string) => {

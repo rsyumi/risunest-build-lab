@@ -446,6 +446,28 @@ fn legacy_restore_stages_characters_while_the_source_is_still_being_read() {
         );
         assert!(read_at.windows(2).all(|pair| pair[0] < pair[1]), "{label}: {read_at:?}");
     }
+
+    // A `bin` value is charged at its converted JSON text, so the first record
+    // flushes alone and the second still shares a batch with the third.
+    let binary = |id: &str, length: usize| {
+        MessagePackValue::Map(vec![
+            entry("type", text("character")),
+            entry("chaId", text(id)),
+            entry("name", text(id)),
+            entry("chats", MessagePackValue::Array(Vec::new())),
+            entry("blob", MessagePackValue::Binary(vec![255; length])),
+        ])
+    };
+    let payload = root_bytes(vec![
+        entry(
+            "characters",
+            MessagePackValue::Array(vec![binary("binary-0", 400_000), binary("binary-1", 400_000), binary("small", 0)]),
+        ),
+        entry("botPresets", MessagePackValue::Array(Vec::new())),
+    ]);
+    let run = run_legacy(&legacy_wire(7, &payload), RestoreLimits::default(), Decoder::Streaming);
+    assert_eq!(run.outcome.unwrap(), (3, 0));
+    assert_eq!(*run.sink.batches.lock().unwrap(), [1, 2]);
 }
 
 #[test]

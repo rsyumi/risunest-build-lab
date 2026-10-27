@@ -51,14 +51,15 @@ export async function appLockFixture(platform: 'ios' | 'macos' | 'linux', phase:
     const { appLock } = await import('../../src/ts/appLock/appLock.svelte')
     const { DBState } = await import('../../src/ts/stores.svelte')
     const { changeChar } = await import('../../src/ts/characters')
-    await until(() => appLock.state.initialized && performance.getEntriesByName('boot:interactive').length > 0, 'Product bootstrap timed out')
+    await until(() => appLock.state.initialized && appLock.state.active && !appLock.gated
+        && performance.getEntriesByName('boot:interactive').length > 0, 'Product content did not become ready')
     const index = DBState.db.characters.findIndex(character => character.chaId === 'char-a')
     if (index < 0 || !await changeChar(index)) throw new Error('Synthetic character did not open')
     appLock.beginSetup()
     for (const digit of '123456123456') await appLock.digit(digit)
     if (!appLock.state.record.enabled || appLock.gated) throw new Error('Public PIN setup did not complete')
     if (!await appLock.setTiming(timed ? 'after-1m' : 'immediate')) throw new Error('Lock timing did not save')
-    if (platform === 'ios' && !await appLock.setHideRecentsPreview(timed)) throw new Error('Preview policy did not save')
+    if (platform === 'ios' && !await appLock.setHideRecentsPreview(!ui)) throw new Error('Preview policy did not save')
     const main = document.querySelector('main')!
     const retained = document.createElement('section')
     retained.style.cssText = 'position:fixed;left:24px;top:96px;z-index:500;display:grid;gap:12px;background:#202020;padding:8px'
@@ -75,7 +76,7 @@ export async function appLockFixture(platform: 'ios' | 'macos' | 'linux', phase:
     await appLock.rendered('Synthetic app lock')
     armed = true
     await report('app-lock-ready', { timed, mutant, pin: '123456', viewport: { width: innerWidth, height: innerHeight },
-        marker: marker.getBoundingClientRect().toJSON(), epoch: appLock.state.epoch })
+        marker: marker.getBoundingClientRect().toJSON(), epoch: appLock.state.epoch, hideRecentsPreview: appLock.state.record.hideRecentsPreview })
     await until(() => returned !== null && appLock.state.locked && appLock.state.flow === 'unlock'
         && !appLock.state.returnPending && !appLock.state.busy, 'Current return gate did not settle', timed ? 120_000 : 60_000)
     const away = departure as AppLockLifecycle | null

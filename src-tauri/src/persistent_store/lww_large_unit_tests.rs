@@ -3,6 +3,7 @@ use crate::persistent_store::message_pages;
 
 const LANGUAGE: [&str; 2] = ["root", "language"];
 const PLUGIN_KEY: [&str; 4] = ["plugin-local", "synthetic-owner", "string", "large"];
+const STRUCTURED_KEY: [&str; 4] = ["plugin-local", "synthetic-owner", "json", "structured"];
 
 fn store() -> (tempfile::TempDir, PersistentStore) {
     let dir = tempfile::tempdir().unwrap();
@@ -75,10 +76,20 @@ fn object_hash(value: &UnitValue) -> &str {
     }
 }
 fn plugin_value(store: &PersistentStore) -> Option<String> {
+    plugin_value_at(store, &PLUGIN_KEY)
+}
+fn plugin_value_at(store: &PersistentStore, key: &[&str; 4]) -> Option<String> {
     store.device_store().unwrap().connection().query_row(
         "SELECT value FROM plugin_device_storage WHERE owner=?1 AND space=?2 AND key=?3 AND tombstone=0",
-        [PLUGIN_KEY[1], PLUGIN_KEY[2], PLUGIN_KEY[3]], |row| row.get(0),
+        [key[1], key[2], key[3]], |row| row.get(0),
     ).optional().unwrap()
+}
+// Structure text naming `parts` for a stream of `bytes`, padded by `pad` bytes.
+fn structured_text(parts: &[String], bytes: u64, pad: usize) -> String {
+    format!(
+        "#risunest-structured:1\n{{\"parts\":[{}],\"bytes\":{bytes},\"nodes\":[{{\"type\":\"ArrayBuffer\",\"offset\":0,\"byteLength\":{bytes}}}],\"root\":{{\"ref\":0}},\"pad\":\"{}\"}}",
+        parts.iter().map(|part| format!("\"p:{part}\"")).collect::<Vec<_>>().join(","), "p".repeat(pad),
+    )
 }
 
 #[test]
@@ -397,4 +408,147 @@ fn shared_plugin_change_keys_exclude_echoes_equal_values_and_losing_changes() {
     assert!(receive(&mut store, change(inline(&serde_json::json!({ "count": 0 })).unwrap(), 1)).plugin_storage_changed_keys.is_empty());
     assert_eq!(receive(&mut store, change(UnitValue::Deleted, 4)).plugin_storage_changed_keys, vec![key.clone()]);
     assert!(receive(&mut store, change(UnitValue::Deleted, 5)).plugin_storage_changed_keys.is_empty());
+}
+
+#[test]
+fn structured_plugin_values_carry_their_parts_as_dependencies() {
+    use device_store::plugin_values::{structure, text_value, PluginDeviceMutation};
+    let (_dir, mut store) = store();
+    store.device_store_mut().unwrap().set_section_participating(device_store::Section::LocalPlugins, true).unwrap();
+    let part = vec![0u8, 255, 128];
+    let hash = structure::put_part(store.device_store().unwrap().connection(), &part).unwrap();
+    let text = structured_text(&[hash.clone()], 3, 0);
+    store.device_store_mut().unwrap().write_plugin_device_values(STRUCTURED_KEY[1], &[
+        PluginDeviceMutation::Set { space: STRUCTURED_KEY[2].into(), key: STRUCTURED_KEY[3].into(), value: text.clone() },
+    ]).unwrap();
+    // Shorter than the inline bound, the value is still an object naming its part.
+    let body = canonical(&Value::String(text.clone()));
+    assert!(body.len() <= MAX_INLINE_UNIT_BYTES);
+    let descriptor = RecordDescriptor { dependencies: vec![hash.clone()], ..RecordDescriptor::content(risunest_sync_wire::hash(&body)) };
+    let entry = outbox_value(&store, &STRUCTURED_KEY);
+    assert_eq!(entry.value, UnitValue::object(descriptor.clone()).unwrap());
+    assert_eq!(store.lww_object_body(&descriptor.object_hash).unwrap(), Some(body.clone()));
+    assert_eq!(store.lww_object_body(&hash).unwrap(), Some(part.clone()));
+
+    let (_dir, mut target) = self::store();
+    target.device_store_mut().unwrap().set_section_participating(device_store::Section::LocalPlugins, true).unwrap();
+    let change = |value: UnitValue, time: u64| Change { key: unit_key(&STRUCTURED_KEY).unwrap(), stamp: stamp(time), value };
+    published(&target, &body);
+    for dependencies in [vec![], vec![risunest_sync_wire::hash(b"other")]] {
+        let other = RecordDescriptor { dependencies, ..RecordDescriptor::content(descriptor.object_hash.clone()) };
+        assert_eq!(stage_error(&mut target, change(UnitValue::object(other).unwrap(), 1)), "invalid-large-unit");
+    }
+    // The stored size counts the parts as well as the text.
+    let count = text_value::MAX_VALUE_BYTES.div_ceil(structure::PART_BYTES) as usize;
+    let oversized = canonical(&Value::String(structured_text(&vec![hash.clone(); count], text_value::MAX_VALUE_BYTES, 0)));
+    published(&target, &oversized);
+    let oversized = RecordDescriptor { dependencies: vec![hash.clone()], ..RecordDescriptor::content(risunest_sync_wire::hash(&oversized)) };
+    assert_eq!(stage_error(&mut target, change(UnitValue::object(oversized).unwrap(), 1)), "plugin device value is too large");
+    // A value whose part the device cannot find is left out, and the rest of its page applies.
+    const PLAIN_KEY: [&str; 4] = ["plugin-local", "synthetic-owner", "json", "plain"];
+    let header = Header { binding_authority: target.lww_binding_authority().unwrap(), request_id: uuid::Uuid::new_v4().to_string() };
+    target.lww_stage_receive(&StageReceive {
+        header: header.clone(),
+        changes: vec![change(entry.value.clone(), 1),
+            Change { key: unit_key(&PLAIN_KEY).unwrap(), stamp: stamp(1), value: inline(&serde_json::json!("remote")).unwrap() }],
+        progress: Progress { kind: "server".into(), cursor: 1.into(), writer_id: None },
+        admitted_time_upper_ms: u64::MAX.into(),
+    }).unwrap();
+    target.lww_apply_receive(&ApplyReceive { header: header.clone(), generating: vec![] }).unwrap();
+    target.lww_finish_receive(&header).unwrap();
+    assert_eq!(plugin_value_at(&target, &STRUCTURED_KEY), None);
+    assert_eq!(plugin_value_at(&target, &PLAIN_KEY).as_deref(), Some("remote"));
+    target.lww_put_object(&hash, &part).unwrap();
+    receive(&mut target, change(entry.value.clone(), 1));
+    assert_eq!(plugin_value_at(&target, &STRUCTURED_KEY), Some(text));
+    assert!(message_pages::verified_object_present(target.device_store().unwrap().connection(), &hash).unwrap());
+
+    // A row never names a part the device lacks, whatever form the unit takes.
+    let (_dir, mut bare) = self::store();
+    bare.device_store_mut().unwrap().set_section_participating(device_store::Section::LocalPlugins, true).unwrap();
+    let missing = structured_text(&[risunest_sync_wire::hash(b"absent")], 6, MAX_INLINE_UNIT_BYTES);
+    let value = published(&bare, &canonical(&Value::String(missing)));
+    let header = stage(&mut bare, change(value, 1)).unwrap();
+    let failure = bare.lww_apply_receive(&ApplyReceive { header, generating: vec![] }).unwrap_err().to_string();
+    assert!(failure.contains("part is missing"), "{failure}");
+    assert_eq!(plugin_value_at(&bare, &STRUCTURED_KEY), None);
+}
+
+#[test]
+fn structured_plugin_values_received_while_disabled_keep_their_parts_until_enabled() {
+    let grace = super::super::ASSET_GC_PRODUCT_MINIMUM_GRACE_MS;
+    let limit = super::super::MESSAGE_PAGE_SWEEP_LIMIT;
+    let (_dir, mut store) = store();
+    let part = vec![7u8; 5];
+    let hash = risunest_sync_wire::hash(&part);
+    store.lww_put_object(&hash, &part).unwrap();
+    let text = structured_text(&[hash.clone()], 5, 0);
+    let UnitValue::Object { descriptor, .. } = published(&store, &canonical(&Value::String(text.clone()))) else { unreachable!() };
+    let value = UnitValue::object(RecordDescriptor { dependencies: vec![hash.clone()], ..descriptor }).unwrap();
+    receive(&mut store, Change { key: unit_key(&STRUCTURED_KEY).unwrap(), stamp: stamp(1), value });
+    assert_eq!(plugin_value_at(&store, &STRUCTURED_KEY), None);
+    let now = 1_900_000_000_000i64;
+    for step in 0..3 {
+        store.sweep_message_page_objects(super::super::MessageObjectStore::Device, now + step * grace, limit).unwrap();
+    }
+    assert!(device_object(&store, "message_page_objects", &hash), "a part the device unit names was collected");
+    store.device_store_mut().unwrap().set_section_participating(device_store::Section::LocalPlugins, true).unwrap();
+    assert_eq!(plugin_value_at(&store, &STRUCTURED_KEY), Some(text));
+}
+
+#[test]
+fn a_restored_structured_value_publishes_the_unit_its_writer_published() {
+    use device_store::plugin_values::{structure, text_value, PluginDeviceMutation};
+    const LARGE_KEY: [&str; 4] = ["plugin-local", "synthetic-owner", "json", "large-structured"];
+    let (_dir, mut store) = store();
+    store.device_store_mut().unwrap().set_section_participating(device_store::Section::LocalPlugins, true).unwrap();
+    let part = vec![0u8, 255, 128];
+    let hash = structure::put_part(store.device_store().unwrap().connection(), &part).unwrap();
+    let device = store.device_store_mut().unwrap();
+    device.write_plugin_device_values(STRUCTURED_KEY[1], &[PluginDeviceMutation::Set {
+        space: STRUCTURED_KEY[2].into(), key: STRUCTURED_KEY[3].into(), value: structured_text(&[hash.clone()], 3, 0),
+    }]).unwrap();
+    // Past one section object, the backup keeps the text as objects.
+    let large = structured_text(&[hash.clone()], 3, text_value::PART_BYTES);
+    let opened = device.open_plugin_device_write(LARGE_KEY[1], LARGE_KEY[2], LARGE_KEY[3], text_value::encoded_length(&large)).unwrap();
+    let id = serde_json::to_value(opened).unwrap()["sessionId"].as_str().unwrap().to_owned();
+    let middle = large.len() / 2;
+    for (offset, piece) in [(0, &large[..middle]), (middle, &large[middle..])] {
+        device.append_plugin_device_write(LARGE_KEY[1], &id, offset as u64, piece).unwrap();
+    }
+    device.write_plugin_device_values(LARGE_KEY[1], &[PluginDeviceMutation::Staged { session_id: id }]).unwrap();
+    let keys = [STRUCTURED_KEY, LARGE_KEY];
+    let values = keys.map(|key| outbox_value(&store, &key).value);
+    assert!(values.iter().all(|value| matches!(value, UnitValue::Object { descriptor, .. } if descriptor.dependencies == [hash.clone()])));
+
+    let (lease, sections) = store.lww_acquire_backup_capture(store.revision().unwrap()).unwrap();
+    let (_target_dir, mut target) = self::store();
+    target.device_store_mut().unwrap().set_section_participating(device_store::Section::LocalPlugins, true).unwrap();
+    let staging = target.replace_begin().unwrap().staging_id;
+    target.replace_put_root(&staging, &target.read_root(None).unwrap().value).unwrap();
+    target.replace_put_presets(&staging, &[]).unwrap();
+    let header = Header { binding_authority: target.lww_binding_authority().unwrap(), request_id: "structured-restore".into() };
+    target.lww_commit_replacement_with_device_sections(&header, &staging, None, &sections.iter().collect::<Vec<_>>()).unwrap();
+    for (key, value) in keys.iter().zip(&values) {
+        assert_eq!(outbox_value(&target, key).value, *value);
+    }
+    assert_eq!(target.lww_object_body(&hash).unwrap(), Some(part.clone()));
+    store.release_revision(&lease.lease).unwrap();
+
+    // A peer applies the large value with its part, and never without it.
+    let body = store.lww_object_body(object_hash(&values[1])).unwrap().unwrap();
+    let change = |value: UnitValue| Change { key: unit_key(&LARGE_KEY).unwrap(), stamp: stamp(1), value };
+    let (_dir, mut bare) = self::store();
+    bare.device_store_mut().unwrap().set_section_participating(device_store::Section::LocalPlugins, true).unwrap();
+    bare.lww_put_object_reader(object_hash(&values[1]), body.as_slice(), body.len() as u64).unwrap();
+    let content = UnitValue::object(RecordDescriptor::content(object_hash(&values[1]).to_owned())).unwrap();
+    let header = stage(&mut bare, change(content)).unwrap();
+    let failure = bare.lww_apply_receive(&ApplyReceive { header, generating: vec![] }).unwrap_err().to_string();
+    assert!(failure.contains("part is missing"), "{failure}");
+    let (_dir, mut peer) = self::store();
+    peer.device_store_mut().unwrap().set_section_participating(device_store::Section::LocalPlugins, true).unwrap();
+    peer.lww_put_object_reader(object_hash(&values[1]), body.as_slice(), body.len() as u64).unwrap();
+    peer.lww_put_object(&hash, &part).unwrap();
+    receive(&mut peer, change(values[1].clone()));
+    assert_eq!(plugin_value_at(&peer, &LARGE_KEY), Some(large));
 }

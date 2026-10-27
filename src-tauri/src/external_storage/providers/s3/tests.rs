@@ -1079,6 +1079,56 @@ fn a_head_survives_a_plain_replacement_and_is_readable_again() {
 }
 
 #[test]
+fn a_descriptor_replacement_puts_its_key_without_a_precondition_and_refuses_any_other() {
+    runtime().block_on(async {
+        let cancel = Cancellation::default();
+        let bytes = HeadBytes::new(b"switched-descriptor".to_vec()).unwrap();
+        let test = dependencies();
+        let server = WireServer::start(vec![
+            one_descriptor(),
+            reply(200, &[("ETag", "\"descriptor-2\"")], Vec::new()),
+        ]);
+        let (provider, handle) = opened(&test, "r2", &server).await;
+        let at = |collection: Option<&str>, object: &str| RemoteLocator {
+            connection_identity: handle.connection_identity.clone(),
+            collection: collection.map(str::to_owned),
+            object: object.to_owned(),
+        };
+        for refused in [
+            provider.head_locator(&handle).unwrap(),
+            at(None, "descriptors/descriptor-1"),
+            at(Some("descriptors"), "snapshots/snapshot-1"),
+            at(Some("descriptors"), "descriptors/nested/descriptor-1"),
+        ] {
+            let outcome = provider.replace_descriptor(&handle, &refused, &bytes, &cancel).await;
+            assert_eq!(outcome.unwrap_err().kind, ErrorKind::Corrupt, "{}", refused.object);
+        }
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
+
+        let receipt = provider
+            .replace_descriptor(&handle, &at(Some("descriptors"), "descriptors/descriptor-1"), &bytes, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(
+            receipt,
+            HeadReceipt {
+                version: Some(VersionToken("\"descriptor-2\"".into())),
+                complete: true
+            }
+        );
+        let records = server.requests.lock().unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(
+            line(&records[1]),
+            "PUT /synthetic/synthetic-bucket/risunest/descriptors/descriptor-1 HTTP/1.1"
+        );
+        assert!(header(&records[1], "if-none-match").is_none());
+        assert!(header(&records[1], "if-match").is_none());
+        assert_eq!(records[1].body, b"switched-descriptor");
+    });
+}
+
+#[test]
 fn backblaze_reports_no_conditional_head_and_refuses_a_compare_exchange() {
     runtime().block_on(async {
         let b2 = reported_capabilities(&profiles::b2::PROFILE);
@@ -1406,6 +1456,7 @@ fn a_session_opens_only_above_the_threshold_and_keeps_progress_out_of_the_vault(
             line(&records[1]),
             "POST /synthetic/synthetic-bucket/risunest/packs/pack-big?uploads= HTTP/1.1"
         );
+        assert_eq!(header(&records[1], "content-length").as_deref(), Some("0"));
     });
 }
 

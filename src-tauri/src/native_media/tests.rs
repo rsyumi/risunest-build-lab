@@ -837,6 +837,11 @@ fn configured_png_converts_jpeg_and_webp_sources() {
         assert_eq!(&result.data[..8], b"\x89PNG\r\n\x1a\n");
         assert_eq!(result.metadata.mime, "image/png");
         assert_eq!(result.metadata.ext, "png");
+        // The PNG keeps the decoded pixel layout instead of a converted RGBA copy.
+        assert_eq!(
+            image::load_from_memory_with_format(&result.data, ImageFormat::Png).unwrap().color(),
+            image::load_from_memory(&source).unwrap().color()
+        );
     }
 }
 

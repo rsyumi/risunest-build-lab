@@ -23,7 +23,7 @@ vi.mock('../bindingNative', () => ({ createNativeSyncBindingBridge: () => ({ sta
 vi.mock('../serverAssetResidency', () => ({ downloadRemoteAssets: fixture.download }))
 vi.mock('../bindingRegistry', () => ({ resumeCurrentSyncBinding: fixture.resumeCurrent, registerSyncBindingTransport(target: { connectionId: string }, transport: SyncBindingTransport) { fixture.registrations.set(target.connectionId, transport); return () => fixture.registrations.delete(target.connectionId) } }))
 import { beginDeferredMobileBackgroundTask, runWithMobileBackgroundTask, type MobileBackgroundTask } from '../../../mobileBackgroundTask'
-import { installExternalLwwAdapters, refreshExternalLwwAdapters, externalLwwExitDrain, requestExternalLwwNow, subscribeExternalLwwFailures } from './lwwProduction'
+import { installExternalLwwAdapters, refreshExternalLwwAdapters, externalLwwExitDrain, requestExternalLwwNow, subscribeExternalLwwFailures, switchExternalLwwLibraryFormat } from './lwwProduction'
 import { externalProgressFor, subscribeExternalProgress, type ExternalOperationProgress } from './progress'
 const binding = { target: { kind: 'external' as const, connectionId: 'sync' }, targetAuthority: '4', selectionEpoch: 'selection', libraryId: 'library', progress: [] }
 const context = (): BindingContext => ({ state: binding, signal: new AbortController().signal })
@@ -286,6 +286,15 @@ describe('native external LWW adapter', () => {
         expect(commands.indexOf('external_lww_resume')).toBeGreaterThanOrEqual(0)
         expect(commands.indexOf('external_lww_resume')).toBeLessThan(commands.indexOf('external_lww_publish'))
     })
+    it('resumes a stopped binding before it switches the library format', async () => {
+        dispose = await installExternalLwwAdapters(state(), false); await settle()
+        fixture.resumeCurrent.mockClear(); fixture.invoke.mockClear()
+        await switchExternalLwwLibraryFormat('sync')
+        expect(fixture.resumeCurrent).toHaveBeenCalledExactlyOnceWith(binding.target)
+        const commands = fixture.invoke.mock.calls.map(call => call[0])
+        expect(commands.indexOf('external_lww_resume')).toBeGreaterThanOrEqual(0)
+        expect(commands.indexOf('external_lww_resume')).toBeLessThan(commands.indexOf('external_lww_switch_format'))
+    })
     it('registers four eligible native providers and guards the web', async () => {
         dispose = await installExternalLwwAdapters(state(['webdav', 's3', 'google_drive', 'onedrive', 'mybox', 'github_releases', 'gitlab_packages']))
         expect([...fixture.registrations.keys()]).toEqual(['sync', 's3', 'google_drive', 'onedrive'])
@@ -305,6 +314,21 @@ describe('native external LWW adapter', () => {
         expect(fixture.apply.mock.calls).toEqual([[request], [next]])
         fixture.invoke.mockRejectedValueOnce({ kind: 'corrupt' })
         await expect(transport.receiveAvailableChanges(context())).rejects.toEqual({ kind: 'corrupt' })
+
+        // A routine receive in flight keeps it from taking the same first page.
+        let complete: (() => void) | undefined
+        fixture.invoke.mockClear()
+        fixture.invoke.mockImplementation(async command => {
+            if (command === 'external_lww_receive' && !complete) { await new Promise<void>(resolve => { complete = resolve }); return null }
+            return command === 'external_lww_receive' ? null : command === 'external_lww_publish' ? { segments: '0', more: false } : undefined
+        })
+        const receives = () => fixture.invoke.mock.calls.filter(([command]) => command === 'external_lww_receive').length
+        fixture.viewport!({}); await settle()
+        expect(receives()).toBe(1)
+        const startup = transport.receiveAvailableChanges(context()); await settle()
+        expect(receives()).toBe(1)
+        complete!(); await startup
+        expect(receives()).toBe(2)
     })
     it('shows why sync stopped when a committed switch cannot resume', async () => {
         dispose = await installExternalLwwAdapters(state()); await settle()
@@ -345,6 +369,37 @@ describe('native external LWW adapter', () => {
         expect(refused).toBeGreaterThan(0)
         await vi.advanceTimersByTimeAsync(600_000); await settle()
         expect(receives()).toBe(refused)
+    })
+    it('rechecks a library format stop natively on return to the screen and switches the library on request', async () => {
+        dispose = await installExternalLwwAdapters(state()); await settle()
+        let failures: ReadonlyMap<string, unknown> = new Map()
+        const unsubscribe = subscribeExternalLwwFailures(value => { failures = value })
+        const stop = { kind: 'libraryFormatSwitchRequired' }
+        let switched = false
+        fixture.invoke.mockImplementation(async command => {
+            if (command === 'external_lww_switch_format') { switched = true; return }
+            if (!switched && ['external_lww_receive', 'external_lww_publish', 'external_lww_check_format'].includes(command)) throw stop
+            return command === 'external_lww_receive' ? null : command === 'external_lww_publish' ? { segments: '0', more: false } : undefined
+        })
+        const checks = () => fixture.invoke.mock.calls.filter(call => call[0] === 'external_lww_check_format')
+        fixture.viewport!({}); await settle()
+        expect(failures.get('sync')).toEqual(stop)
+        await vi.advanceTimersByTimeAsync(120_000); await settle()
+        expect(checks()).toHaveLength(0)
+        // A body download that fails meanwhile does not hide the stop and its switch.
+        fixture.download.mockClear(); fixture.download.mockRejectedValueOnce({ code: 'download-unavailable' })
+        Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' }); document.dispatchEvent(new Event('visibilitychange')); await settle()
+        Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' }); document.dispatchEvent(new Event('visibilitychange')); await settle(); await settle()
+        expect(checks()).toEqual([['external_lww_check_format', { request: expect.objectContaining({ connectionId: 'sync', bindingAuthority: '4' }) }]])
+        expect(fixture.download).toHaveBeenCalledOnce()
+        expect(failures.get('sync')).toEqual(stop)
+        await switchExternalLwwLibraryFormat('sync')
+        expect(fixture.invoke).toHaveBeenCalledWith('external_lww_switch_format', { request: expect.objectContaining({ connectionId: 'sync', bindingAuthority: '4' }), progress: expect.anything() })
+        fixture.invoke.mockClear()
+        await requestExternalLwwNow('sync'); await settle()
+        expect(fixture.invoke.mock.calls.map(call => call[0])).toEqual(['external_lww_check_format', 'external_lww_publish', 'external_lww_receive'])
+        expect(failures.has('sync')).toBe(false)
+        unsubscribe()
     })
     it('publishes the actual generation-complete revision cause immediately over a pending ordinary debounce', async () => {
         dispose = await installExternalLwwAdapters(state()); await settle()

@@ -543,9 +543,10 @@ fn capture(
                 if index != position {
                     return Err(codec_error("noncontiguous conversation messages"));
                 }
-                let body: String = tx.query_row(
+                let body: String = tx.prepare_cached(
                     "SELECT value FROM messages WHERE generation=?1 AND character_id=?2
                     AND conversation_id=?3 AND message_index=?4",
+                )?.query_row(
                     params![generation, character, conversation, position as i64],
                     |r| r.get(0),
                 )?;
@@ -730,8 +731,8 @@ fn stage_pages(
             if index as i64 != position {
                 return Err(codec_error("noncontiguous conversation messages"));
             }
-            let body: String = tx.query_row("SELECT value FROM messages WHERE generation=?1 AND character_id=?2
-                AND conversation_id=?3 AND message_index=?4", params![generation, character, conversation, position],
+            let body: String = tx.prepare_cached("SELECT value FROM messages WHERE generation=?1 AND character_id=?2
+                AND conversation_id=?3 AND message_index=?4")?.query_row(params![generation, character, conversation, position],
                 |row| row.get(0))?;
             let body = payload_value::canonicalize(body.as_bytes()).map_err(codec_error)?;
             if {
@@ -825,9 +826,10 @@ fn next_hash(
         )));
     }
     // Upstream import staging may have inserted messages without a computed cache.
-    let body: String = tx.query_row(
+    let body: String = tx.prepare_cached(
         "SELECT value FROM messages WHERE generation=?1 AND character_id=?2
         AND conversation_id=?3 AND message_index=?4",
+    )?.query_row(
         params![generation, character, conversation, index],
         |r| r.get(0),
     )?;
@@ -1413,7 +1415,7 @@ fn library_object_roots(db: &Connection, objects: &Connection, roots: &mut Objec
 
 /// Collects the objects that unfinished device rows in `schema` on `db`
 /// reference: device units, staged receives, unfinished intents with their
-/// rows, and unpublished proofs.
+/// rows, unpublished proofs, and the parts of structure-form plugin values.
 fn device_object_roots(db: &Connection, schema: &str, objects: &Connection, roots: &mut ObjectRoots) -> StoreResult<()> {
     for sql in [
         format!("SELECT value FROM {schema}.lww_units WHERE json_extract(value,'$.kind')='object'"),
@@ -1423,6 +1425,7 @@ fn device_object_roots(db: &Connection, schema: &str, objects: &Connection, root
     ] {
         unit_value_roots(db, objects, &sql, roots)?;
     }
+    super::device_store::plugin_values::structure::row_parts(db, schema, |hash| roots.insert(hash))?;
     for sql in [
         format!("SELECT body FROM {schema}.lww_receive WHERE finished=0"),
         format!("SELECT body FROM {schema}.lww_intents WHERE complete=0"),

@@ -1,6 +1,6 @@
 use std::path::Path;
 use serde_json::Value;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager};
 use crate::persistent_store::{device_store::{DeviceStore, DEVICE_DATABASE_FILE}, PersistentStoreState, StoreError};
 
 const KEY: &str = "risuNestAppLock";
@@ -21,21 +21,49 @@ fn write_record(root: &Path, record: &str) -> Result<(), StoreError> {
     DeviceStore::open(&directory)?.write_setting(KEY, &Value::String(record.to_owned()))
 }
 
-#[tauri::command]
-pub(crate) fn app_lock_read_record(app: AppHandle, state: State<'_, PersistentStoreState>) -> Result<Option<String>, String> {
-    let _guard = state.admit_renderer_operation().map_err(|error| error.to_string())?;
-    read_record(&crate::app_paths::data_root(&app)?).map_err(|error| error.to_string())
+async fn record_operation<T: Send + 'static>(operation: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(operation).await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub(crate) fn app_lock_write_record(app: AppHandle, state: State<'_, PersistentStoreState>, record: String) -> Result<(), String> {
-    let _guard = state.admit_renderer_operation().map_err(|error| error.to_string())?;
-    write_record(&crate::app_paths::data_root(&app)?, &record).map_err(|error| error.to_string())
+pub(crate) async fn app_lock_read_record(app: AppHandle) -> Result<Option<String>, String> {
+    record_operation(move || {
+        let state = app.state::<PersistentStoreState>();
+        let _guard = state.admit_renderer_operation().map_err(|error| error.to_string())?;
+        read_record(&crate::app_paths::data_root(&app)?).map_err(|error| error.to_string())
+    }).await
+}
+
+#[tauri::command]
+pub(crate) async fn app_lock_write_record(app: AppHandle, record: String) -> Result<(), String> {
+    record_operation(move || {
+        let state = app.state::<PersistentStoreState>();
+        let _guard = state.admit_renderer_operation().map_err(|error| error.to_string())?;
+        write_record(&crate::app_paths::data_root(&app)?, &record).map_err(|error| error.to_string())
+    }).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_busy_device_store_yields_without_blocking_the_command_thread() {
+        use std::{future::Future, sync::Arc, task::{Context, Poll, Wake, Waker}};
+        struct Noop;
+        impl Wake for Noop { fn wake(self: Arc<Self>) {} }
+        let root = tempfile::tempdir().unwrap();
+        write_record(root.path(), "before").unwrap();
+        let connection = rusqlite::Connection::open(root.path().join("persistent").join(DEVICE_DATABASE_FILE)).unwrap();
+        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let path = root.path().to_owned();
+        let mut operation = Box::pin(record_operation(move || write_record(&path, "after").map_err(|error| error.to_string())));
+        let waker = Waker::from(Arc::new(Noop));
+        assert!(matches!(operation.as_mut().poll(&mut Context::from_waker(&waker)), Poll::Pending));
+        connection.execute_batch("ROLLBACK").unwrap();
+        tauri::async_runtime::block_on(operation).unwrap();
+        assert_eq!(read_record(root.path()).unwrap().as_deref(), Some("after"));
+    }
 
     #[test]
     fn recovery_record_survives_reopen_without_opening_a_library() {

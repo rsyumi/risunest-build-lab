@@ -1,5 +1,6 @@
 package io.github.rsyumi.risunest
 
+import android.app.Activity
 import android.app.AlertDialog
 import android.content.ComponentCallbacks2
 import android.content.Context
@@ -21,6 +22,7 @@ import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.app.ActivityCompat
 import androidx.core.content.IntentCompat
 import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
@@ -643,7 +645,6 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   private val postNotificationsPermissionLauncher = registerForActivityResult(
     ActivityResultContracts.RequestPermission(),
   ) {
-    appLock.finishOwnedActivity(Int.MAX_VALUE)
     notificationPermissionResult?.complete(CompletionNotifications.enabled(this))
     notificationPermissionResult = null
     dispatchNotificationStateRefresh()
@@ -676,7 +677,36 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   }
   private var exitFlushSequence = 0L
 
+  private companion object {
+    private var permissionDelegateInstalled = false
+
+    fun installPermissionDelegate() {
+      if (permissionDelegateInstalled) return
+      ActivityCompat.setPermissionCompatDelegate(object : ActivityCompat.PermissionCompatDelegate {
+        override fun requestPermissions(activity: Activity, permissions: Array<String>, requestCode: Int): Boolean {
+          if (activity !is MainActivity || requestCode < 0) return false
+          val permission = permissions.singleOrNull() ?: return false
+          if (permission != android.Manifest.permission.CAMERA &&
+            !(Build.VERSION.SDK_INT >= 33 && permission == android.Manifest.permission.POST_NOTIFICATIONS)) return false
+          activity.validateRequestPermissionsRequestCode(requestCode)
+          activity.appLock.beginOwnedPermission(requestCode)
+          try {
+            activity.requestPermissions(permissions, requestCode)
+          } catch (error: Exception) {
+            activity.appLock.finishOwnedPermission(requestCode)
+            throw error
+          }
+          return true
+        }
+
+        override fun onActivityResult(activity: Activity, requestCode: Int, resultCode: Int, data: Intent?): Boolean = false
+      })
+      permissionDelegateInstalled = true
+    }
+  }
+
   override fun onCreate(savedInstanceState: Bundle?) {
+    installPermissionDelegate()
     consumedOpenedFileFingerprint = savedInstanceState?.getString(OPENED_FILE_FINGERPRINT_STATE)
     savedInstanceState?.let { state ->
       state.getString(BACKUP_SOURCE_REQUEST_STATE)
@@ -896,6 +926,12 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     appLock.onWindowFocusChanged(hasFocus)
   }
 
+  @androidx.annotation.RequiresApi(29)
+  override fun onTopResumedActivityChanged(isTopResumedActivity: Boolean) {
+    super.onTopResumedActivityChanged(isTopResumedActivity)
+    appLock.onTopResumedActivityChanged(isTopResumedActivity)
+  }
+
   override fun onUserLeaveHint() {
     appLock.onUserLeaveHint()
     super.onUserLeaveHint()
@@ -920,6 +956,11 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
     appLock.finishOwnedActivity(requestCode)
     super.onActivityResult(requestCode, resultCode, data)
+  }
+
+  override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
+    appLock.finishOwnedPermission(requestCode)
+    super.onRequestPermissionsResult(requestCode, permissions, grantResults)
   }
 
   private fun dispatchNotificationStateRefresh() {
@@ -1209,10 +1250,8 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     val result = CompletableDeferred<Boolean>()
     notificationPermissionResult = result
     try {
-      appLock.beginOwnedActivity(Int.MAX_VALUE)
       postNotificationsPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
     } catch (error: Exception) {
-      appLock.finishOwnedActivity(Int.MAX_VALUE)
       result.complete(false)
       notificationPermissionResult = null
     }
@@ -1231,12 +1270,10 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
         if (notificationPermissionResult == null) {
           notificationPermissionResult = CompletableDeferred()
           runCatching {
-            appLock.beginOwnedActivity(Int.MAX_VALUE)
             postNotificationsPermissionLauncher.launch(
               android.Manifest.permission.POST_NOTIFICATIONS,
             )
           }.onFailure {
-            appLock.finishOwnedActivity(Int.MAX_VALUE)
             notificationPermissionResult?.complete(false)
             notificationPermissionResult = null
           }
@@ -1384,7 +1421,11 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
         var sourceKind = SafDestinationSourceKind.RISU_SAVE
         try {
           reconcileSafDestination()
-          if (reservationKind != null && loadSafDestinationState() != null) {
+          // Recovered receipts wait for their owner without blocking a new export.
+          val pendingState = synchronized(safDestinationStateLock) {
+            loadSafDestinationState()?.takeUnless { safDestinationRendererSession.hasRecovered(it.requestId) }
+          }
+          if (reservationKind != null && pendingState != null) {
             throw SafDestinationException("destination-busy", emptyList(), "Another Android SAF destination is pending")
           }
           val source = if (reservationKind != null) null else {
@@ -2007,8 +2048,9 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
             ::saveSafDestinationState,
             { terminal -> !terminal.exportBound || !terminal.copyStarted ||
               prepareRecoveredRisuSaveAcknowledgement(filesDir, terminal.exportId) },
-            ::clearSafDestinationState,
-            retainJournal = !frontendReady.isReady,
+            requiresPublicationProof = { terminal ->
+              requiresRisuSavePublicationProof(filesDir, terminal.exportId, terminal.sourceKind)
+            },
           )
         }.onFailure { Log.e(TAG, "Android SAF recovery failed", it) }.getOrNull()
       }

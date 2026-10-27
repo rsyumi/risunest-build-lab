@@ -115,6 +115,18 @@ impl Projector {
                     object.insert("hypaModel".to_owned(), Value::String("voyageContext3".to_owned()));
                     self.losses.add("unsupported-option-value", 1);
                 }
+                // Upstream's Separate Parameters section also renders the per-model map, so
+                // its inputs store single values there. Requests look entries up by model ID
+                // and both targets type each entry as a parameter set.
+                if let Some(overrides) = object
+                    .get_mut("seperateParameters")
+                    .and_then(|parameters| parameters.get_mut("overrides"))
+                    .and_then(Value::as_object_mut)
+                {
+                    let before = overrides.len();
+                    overrides.retain(|_, entry| entry.is_object());
+                    self.losses.add("unsupported-option-value", (before - overrides.len()) as u64);
+                }
             }
             &external
         } else { value };
@@ -816,6 +828,34 @@ mod tests {
             error.message,
             "value is not supported by target contract at DataBase.customModels[0].format"
         );
+    }
+
+    #[test]
+    fn compatible_projection_drops_parameter_overrides_that_are_not_parameter_sets() {
+        // Upstream's Separate Parameters section also renders the per-model map,
+        // so its inputs write single parameter values straight into it.
+        let parameters = json!({
+            "memory": {"thinking_type": "off"},
+            "overrides": {
+                "thinking_type": "off",
+                "temperature": -1000,
+                "top_k": null,
+                "Synthetic Model": {"temperature": 70, "thinking_type": "budget"},
+            },
+        });
+        for name in ["DataBase", "botPreset"] {
+            for target in [CompatibilityTarget::RisuAi, CompatibilityTarget::PocketRisu] {
+                let mut projector = Projector::new(target).unwrap();
+                let source = json!({"seperateParameters": parameters});
+                let projected = projector.project(name, &source).unwrap();
+                assert_eq!(projected["seperateParameters"], json!({
+                    "memory": {"thinking_type": "off"},
+                    "overrides": {"Synthetic Model": {"temperature": 70, "thinking_type": "budget"}},
+                }));
+                assert_eq!(projector.losses.0, BTreeMap::from([("unsupported-option-value".to_owned(), 3)]));
+                assert_eq!(source["seperateParameters"], parameters);
+            }
+        }
     }
 
     #[test]

@@ -39,6 +39,7 @@ async_command_arity!(A, B, C, D, E);
 async_command_arity!(A, B, C, D, E, G);
 async_command_arity!(A, B, C, D, E, G, H);
 async_command_arity!(A, B, C, D, E, G, H, I);
+async_command_arity!(A, B, C, D, E, G, H, I, J);
 
 fn future_bytes<Args>(command: impl AsyncCommand<Args>) -> usize {
     command.future_bytes()
@@ -63,6 +64,8 @@ async_commands![
     app_lock::app_lock_authenticate,
     app_lock::app_lock_set_policy,
     app_lock::app_lock_ready,
+    app_lock_record::app_lock_read_record,
+    app_lock_record::app_lock_write_record,
     app_cleanup::app_cleanup_request,
     app_cleanup::app_cleanup_resume,
     app_cleanup::app_cleanup_cancel,
@@ -79,6 +82,8 @@ async_commands![
     external_storage::lww_commands::external_lww_inspect,
     external_storage::lww_commands::external_lww_stage_binding,
     external_storage::lww_commands::external_lww_publish,
+    external_storage::lww_commands::external_lww_check_format,
+    external_storage::lww_commands::external_lww_switch_format,
     external_storage::lww_commands::external_lww_receive,
     external_storage::lww_commands::external_lww_maintenance,
     external_storage::lww_commands::external_lww_fence,
@@ -118,6 +123,8 @@ async_commands![
     server_sync::commands::server_sync_lww_prepare_fresh_writer,
     server_sync::commands::server_sync_lww_activate_new_device,
     server_sync::commands::server_sync_lww_retry,
+    server_sync::commands::server_sync_lww_check_format,
+    server_sync::commands::server_sync_lww_switch_format,
     server_sync::commands::server_sync_lww_drain,
     server_sync::commands::server_sync_cancel,
     server_sync::commands::server_sync_notify_start,
@@ -135,6 +142,7 @@ async_commands![
     native_media::native_media_encode_inlay_image,
     native_media::ipc::native_media_inlay_input_open,
     native_media::ipc::native_media_inlay_input_chunk,
+    native_media::ipc::native_media_inlay_input_chunk_raw,
     native_media::ipc::native_media_encode_inlay_finish,
     native_media::ipc::native_media_inlay_output_read,
     asset_repository::commands::asset_cas_read_bytes,
@@ -147,6 +155,7 @@ async_commands![
     asset_repository::commands::asset_cas_job_prepare,
     asset_repository::commands::asset_cas_job_upload_open,
     asset_repository::commands::asset_cas_job_upload_chunk,
+    asset_repository::commands::asset_cas_job_upload_chunk_raw,
     asset_repository::commands::asset_cas_job_upload_finish,
     asset_repository::commands::asset_cas_job_upload_cancel,
     asset_repository::commands::asset_cas_job_pin_existing,

@@ -1,7 +1,8 @@
 import { get, writable, type Writable } from 'svelte/store'
 import { isLibraryFileOperationReserved } from '../storage/libraryFileOperation'
+import { createRegexTimeoutScope, type RegexTimeoutScope } from './regexTimeoutScope'
 
-let activeReservation: symbol | null = null
+let activeReservation: { regexScope: RegexTimeoutScope, characterId?: string, conversationId?: string } | null = null
 const doingChatState = writable(false)
 const generationCancellationState = writable<(() => void) | null>(null)
 export const generationCancellation = { subscribe: generationCancellationState.subscribe }
@@ -28,12 +29,24 @@ export interface GenerationBackground {
 }
 
 export interface GenerationReservation {
+    readonly regexScope?: RegexTimeoutScope
     readonly background?: GenerationBackground
     isCurrent(): boolean
     release(options?: { preserveBusy?: boolean }): void
 }
 
 export const isGenerationReserved = () => activeReservation !== null
+
+export function bindGenerationRegexOwner(reservation: GenerationReservation, characterId: string, conversationId: string | undefined): void {
+    if (!reservation.isCurrent() || !activeReservation) return
+    activeReservation.characterId = characterId
+    activeReservation.conversationId = conversationId
+}
+
+export function getGenerationRegexScope(characterId: string, conversationId: string | undefined): RegexTimeoutScope | undefined {
+    return activeReservation?.characterId === characterId && activeReservation?.conversationId === conversationId
+        ? activeReservation.regexScope : undefined
+}
 
 let startBackground: (() => GenerationBackground) | undefined
 export function setGenerationBackground(start: (() => GenerationBackground) | undefined): void {
@@ -61,7 +74,7 @@ export function joinGenerationSignal(caller: AbortSignal | undefined, background
 
 export function reserveGeneration(cancel?: () => void): GenerationReservation | null {
     if (activeReservation || get(doingChat) || isLibraryFileOperationReserved()) return null
-    const token = Symbol('generation-reservation')
+    const token = { regexScope: createRegexTimeoutScope() }
     activeReservation = token
     // Begins while the app is still on screen, before the input phase runs.
     const background = startBackground?.()
@@ -75,6 +88,7 @@ export function reserveGeneration(cancel?: () => void): GenerationReservation | 
     doingChat.set(true)
     return {
         background,
+        regexScope: token.regexScope,
         isCurrent: () => !released && activeReservation === token,
         release(options) {
             if (released) return

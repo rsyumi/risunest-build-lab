@@ -42,6 +42,7 @@ pub(crate) fn server_bootstrap_native_raw(destination:&mut PersistentStore,
     }
     let writer_before=destination.lww_clock_state().map_err(|e|e.to_string())?.writer_id;
     io.reset();reset_work(asset_hashes);
+    crate::external_storage::worker_observation::begin();
     let started=Instant::now();
     let mut usable_database_ms=None;
     let mut activation_revision=None;
@@ -61,6 +62,14 @@ pub(crate) fn server_bootstrap_native_raw(destination:&mut PersistentStore,
         Ok(())
     })();
     let mut observation=take_work(false);
+    for worker in crate::external_storage::worker_observation::take() {
+        let mut incomplete=worker.hashes.incomplete.into_iter().map(|(domain,count)|format!("{domain}:{count}")).collect::<Vec<_>>();
+        if !worker.completed {incomplete.push("actual body worker did not complete".into());}
+        let receipt=native_observation::NativeWorkerHashReceipt {thread:worker.thread,
+            domains:worker.hashes.domains.into_iter().map(|(name,work)|(name.into(),native_observation::HashDomain {
+                calls:work.calls,bytes:work.bytes})).collect(),incomplete};
+        if let Err(reason)=observation.attach_worker_hash_receipt(receipt) {observation.incomplete.push(reason);}
+    }
     let [requests,sent,received]=io.snapshot();observation.requests=requests;
     observation.uploaded_bytes=sent;observation.downloaded_bytes=received;
     let mut record=RawServerBootstrap {status:"INVALID",scenario:measurement::Scenario::FullBootstrap,

@@ -142,11 +142,14 @@ async function absent(candidate) {
 async function sourceHashes() {
   const files = [
     "benchmarks/device-backup/main.ts",
+    "benchmarks/device-backup/android-publication-probe.ts",
     "benchmarks/device-backup/vite.config.ts",
     "benchmarks/device-backup/windows-smoke.mjs",
     "src/ts/storage/nativeFileJobs.ts",
     "src/ts/storage/deviceBackup/entry.ts",
+    "src-tauri/src/native_file_jobs/mod.rs",
     "src-tauri/src/native_file_jobs/portable.rs",
+    "src-tauri/src/native_file_jobs/portable_export_receipts.rs",
     "src-tauri/src/device_backup/mod.rs",
     "src-tauri/src/local_backup.rs",
     "src-tauri/src/native_file_jobs/legacy_backup.rs",

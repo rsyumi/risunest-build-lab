@@ -20,6 +20,7 @@ import { beginDisplayWork } from '../displayRecovery.svelte'
 import { historyLength } from './historyWindowIndex'
 import type { ConversationCommitObserver } from './conversationOperationContext'
 import type { GenerationDiagnosticTrace, GenerationDiagnosticPhase, GenerationDiagnosticOutcome } from '../generationDiagnostics'
+import { createGenerationCheckpoints, type GenerationCheckpointPersistence } from './generationCheckpoints'
 
 export interface GenerationResponseProcessingOptions {
     onConversationCommit?: ConversationCommitObserver
@@ -80,6 +81,8 @@ export interface ApplyGenerationResponseOptions {
     ttsAutoSpeech(): boolean
     operation: GenerationResponseOperationContext
     callbacks: GenerationResponseCallbacks
+    /** Saves the applied output locally before later output stages; without it nothing is checkpointed. */
+    checkpoint?: GenerationCheckpointPersistence
 }
 
 export interface GenerationResponseApplication {
@@ -120,6 +123,9 @@ export async function applyGenerationResponse(
         return message !== null && target.commitMessage(update(message))
     }
     const hasOutputOwnership = () => getOutputTarget()?.isOwned() ?? false
+    const checkpoints = options.checkpoint
+        ? createGenerationCheckpoints({ ...options.checkpoint, isOwned: hasOutputOwnership, diagnostics: options.diagnostics })
+        : null
     const onConversationCommit: ConversationCommitObserver = (commit) => {
         // The receipt proves that this callback committed from our captured version.
         // An unrelated mutation still leaves the old locator invalid.
@@ -255,6 +261,7 @@ export async function applyGenerationResponse(
                         options.callbacks.markResponseApplied()
                         emoChanged = processed.emoChanged
                         options.operation.incrementReloadKeys()
+                        checkpoints?.applied()
                     },
                     processPreview: async ({ value }, context) => {
                         if (!context.canCommit()) return
@@ -263,10 +270,13 @@ export async function applyGenerationResponse(
                         )) return
                         options.callbacks.markResponseApplied()
                         options.operation.incrementReloadKeys()
+                        checkpoints?.applied()
                     },
+                    beforeCompletion: checkpoints ? () => checkpoints.checkpoint() : undefined,
                 })
                 streamCompleted = streamResult.completed
             } finally {
+                checkpoints?.stop()
                 displayWork.release()
                 if (targetChat.id) clearStreamingConversation(targetChat.id)
                 targetChat.isStreaming = false
@@ -469,6 +479,8 @@ export async function applyGenerationResponse(
                     )
                         return null
                     options.callbacks.markResponseApplied()
+                    await checkpoints?.checkpoint()
+                    if (!outputTarget.isOwned()) return null
                     if (inlay.promise) {
                         const inlayData = await inlay.promise
                         if (!outputTarget.commitData(inlayData)) return null
@@ -499,6 +511,8 @@ export async function applyGenerationResponse(
                     generationHadOperation = true
                     if (!outputTarget.isOwned()) return null
                     options.callbacks.markResponseApplied()
+                    await checkpoints?.checkpoint()
+                    if (!outputTarget.isOwned()) return null
                     if (inlay.promise) {
                         const inlayData = await inlay.promise
                         if (!outputTarget.commitData(inlayData)) return null

@@ -67,6 +67,20 @@ test('keeps synchronous host calls inside C callbacks, metamethods and nested co
     expect(await runtime.invoke('run', [])).toBe('initialized|okok|2|1,2,3|meta|true|nested')
 })
 
+test('runs a host API that a table key calls from __tostring while another host call converts its arguments', async () => {
+    const writes: unknown[] = []
+    const runtime = await create(`
+        function run()
+            local key = setmetatable({}, {__tostring = function() write('key'); return 'k' end})
+            write('before', {[key] = 'v', nested = {[key] = 1}})
+            return 'done'
+        end
+    `, { write: (...values) => { writes.push(values) } })
+    expect(await runtime.invoke('run', [])).toBe('done')
+    expect(runtime.isTainted()).toBe(false)
+    expect(writes).toEqual([['key'], ['key'], ['key'], ['key'], ['before', { k: 'v', nested: { k: 1 } }]])
+})
+
 test('keeps globals and genuine Promise APIs, and does not replay effects after a caught failure', async () => {
     const writes: string[] = []
     const runtime = await create(`

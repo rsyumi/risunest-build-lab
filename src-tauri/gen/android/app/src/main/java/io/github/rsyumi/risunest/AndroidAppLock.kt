@@ -9,6 +9,7 @@ import android.content.IntentFilter
 import android.graphics.Color
 import android.graphics.Outline
 import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.Drawable
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -45,7 +46,12 @@ internal class AndroidAppLock(
   private var presentationRequest: Long? = null
   private val ownedResults = mutableSetOf<Int>()
   private var resumed = false
-  private var focused = false
+  private val focused get() = lifecycle.hasWindowFocus
+  private val ownedPermissions = mutableSetOf<Int>()
+  private val windowBackground = AppLockValueOverride<Drawable?>(
+    { activity.window.decorView.background }, { activity.window.setBackgroundDrawable(it) },
+  )
+  private var webAccessibility: AppLockValueOverride<Int>? = null
   private var registered = false
   private var visualSequence = 0L
   private var closed = false
@@ -69,13 +75,15 @@ internal class AndroidAppLock(
 
   fun attach(view: WebView) {
     invalidatePresentation()
+    webAccessibility?.restore()
     webView = view
+    webAccessibility = AppLockValueOverride({ view.importantForAccessibility }, { view.importantForAccessibility = it })
     if (!registered) {
       ContextCompat.registerReceiver(activity, screenReceiver,
         IntentFilter(Intent.ACTION_SCREEN_OFF), ContextCompat.RECEIVER_NOT_EXPORTED)
       registered = true
     }
-    if (lifecycle.pendingPresentation) showCover()
+    if (lifecycle.pendingPresentation || cover != null) showCover()
   }
 
   fun command(id: Long, operation: String, payload: String) {
@@ -90,14 +98,18 @@ internal class AndroidAppLock(
           "authenticate" -> authenticate(id, JSONObject(payload).getString("reason"))
           "setPolicy" -> {
             val value = JSONObject(payload)
-            lifecycle.setPolicy(AppLockPolicy(
+            val next = AppLockPolicy(
               enabled = value.getBoolean("enabled"), timing = value.getString("timing"),
               gateRequired = value.getBoolean("gateRequired"),
               hideRecentsPreview = value.getBoolean("hideRecentsPreview"),
               backgroundColor = value.getString("backgroundColor"),
-            ))
+            )
+            if (next.gateRequired != lifecycle.policy.gateRequired) invalidatePresentation()
+            lifecycle.setPolicy(next)
             if (Build.VERSION.SDK_INT >= 33) activity.setRecentsScreenshotEnabled(!lifecycle.policy.hideRecentsPreview)
-            activity.window.setBackgroundDrawable(ColorDrawable(backgroundColor()))
+            windowBackground.update(Build.VERSION.SDK_INT >= 33 && lifecycle.policy.hideRecentsPreview) {
+              ColorDrawable(backgroundColor())
+            }
             if (lifecycle.pendingPresentation) showCover()
             complete(id, snapshot())
           }
@@ -114,11 +126,13 @@ internal class AndroidAppLock(
   }
 
   private fun capabilities(): JSONObject {
-    val enrolled = activity.getSystemService(KeyguardManager::class.java).isDeviceSecure ||
-      BiometricManager.from(activity).canAuthenticate(authenticatorTypes) == BiometricManager.BIOMETRIC_SUCCESS
+    val enrolled = Build.VERSION.SDK_INT >= 29 &&
+      (activity.getSystemService(KeyguardManager::class.java).isDeviceSecure ||
+        BiometricManager.from(activity).canAuthenticate(authenticatorTypes) == BiometricManager.BIOMETRIC_SUCCESS)
+    val status = appLockAuthStatus(Build.VERSION.SDK_INT, enrolled)
     return JSONObject().put("auth", JSONObject()
-      .put("status", if (enrolled) "available" else "notEnrolled")
-      .apply { if (enrolled) put("method", "device") })
+      .put("status", status)
+      .apply { if (status == "available") put("method", "device") })
       .put("previewSupported", Build.VERSION.SDK_INT >= 33)
   }
 
@@ -130,6 +144,7 @@ internal class AndroidAppLock(
       return
     }
     authRequest = id to lifecycle.epoch
+    lifecycle.beginAuthentication(Build.VERSION.SDK_INT)
     pendingPromptReason = reason
     startPendingPrompt()
   }
@@ -162,7 +177,8 @@ internal class AndroidAppLock(
 
   private fun finishAuthentication(outcome: String) {
     val request = authRequest ?: return
-    if (outcome == "success" && lifecycle.acceptsAuthentication(request.second) && (!resumed || !focused)) {
+    if ((outcome == "success" || Build.VERSION.SDK_INT == 29) &&
+      lifecycle.acceptsAuthentication(request.second) && (!resumed || !focused)) {
       pendingAuthOutcome = outcome
       prompt = null
       return
@@ -170,6 +186,7 @@ internal class AndroidAppLock(
     pendingAuthOutcome = null
     pendingPromptReason = null
     authRequest = null
+    lifecycle.finishAuthentication()
     prompt = null
     complete(request.first, if (lifecycle.acceptsAuthentication(request.second)) outcome else "cancelled")
     if (resumed && focused) dispatch()
@@ -178,7 +195,7 @@ internal class AndroidAppLock(
   fun onPause() {
     resumed = false
     conceal()
-    if (ownedResults.isEmpty() && authRequest == null && !activity.isChangingConfigurations) depart()
+    departUnlessTransient(activity.isChangingConfigurations)
   }
 
   fun onResume() {
@@ -191,8 +208,8 @@ internal class AndroidAppLock(
   }
 
   fun onWindowFocusChanged(hasFocus: Boolean) {
-    focused = hasFocus
-    if (!hasFocus) conceal()
+    lifecycle.windowFocusChanged(hasFocus)
+    if (!hasFocus) invalidatePresentation()
     else if (resumed) {
       lifecycle.resume()
       pendingAuthOutcome?.let(::finishAuthentication)
@@ -202,11 +219,19 @@ internal class AndroidAppLock(
   }
 
   fun onUserLeaveHint() {
-    if (ownedResults.isEmpty()) depart()
+    departUnlessTransient()
   }
 
   fun onStop() {
-    if (ownedResults.isEmpty() && authRequest == null && !activity.isChangingConfigurations) depart()
+    departUnlessTransient(activity.isChangingConfigurations, stopped = true)
+  }
+
+  fun onTopResumedActivityChanged(isTop: Boolean) {
+    if (!isTop) departUnlessTransient(activity.isChangingConfigurations)
+    else if (resumed && focused) {
+      lifecycle.resume()
+      dispatch()
+    }
   }
 
   fun beginOwnedActivity(requestCode: Int) {
@@ -219,6 +244,14 @@ internal class AndroidAppLock(
   fun finishOwnedActivity(requestCode: Int) {
     ownedResults.remove(requestCode)
     if (ownedResults.isEmpty()) handler.removeCallbacks(taskVisibilityPoll)
+  }
+
+  fun beginOwnedPermission(requestCode: Int) {
+    ownedPermissions.add(requestCode)
+  }
+
+  fun finishOwnedPermission(requestCode: Int) {
+    ownedPermissions.remove(requestCode)
   }
 
   fun backgroundForBack(): Boolean {
@@ -237,6 +270,13 @@ internal class AndroidAppLock(
     return tasks.any { it.taskInfo.taskId == activity.taskId && it.taskInfo.isVisible }
   }
 
+  private fun departUnlessTransient(changingConfigurations: Boolean = false, stopped: Boolean = false) {
+    if (lifecycle.departUnlessTransient(ownedResults.isNotEmpty(), ownedPermissions.isNotEmpty(), stopped, changingConfigurations)) {
+      conceal()
+      dispatch()
+    }
+  }
+
   private fun depart() {
     conceal()
     if (lifecycle.depart()) dispatch()
@@ -252,6 +292,7 @@ internal class AndroidAppLock(
 
   private fun showCover() {
     val root = activity.findViewById<ViewGroup>(android.R.id.content) ?: return
+    webAccessibility?.update(true) { View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS }
     val existing = cover
     if (existing != null) {
       existing.setBackgroundColor(backgroundColor())
@@ -267,7 +308,7 @@ internal class AndroidAppLock(
       elevation = 100_000f
     }
     val icon = ImageView(activity).apply {
-      setImageDrawable(activity.packageManager.getApplicationIcon(activity.applicationInfo))
+      setImageResource(R.drawable.app_lock_logo)
       scaleType = ImageView.ScaleType.FIT_CENTER
       outlineProvider = object : ViewOutlineProvider() {
         override fun getOutline(view: View, outline: Outline) {
@@ -308,6 +349,7 @@ internal class AndroidAppLock(
             if (accepted) {
               cover?.let { (it.parent as? ViewGroup)?.removeView(it) }
               cover = null
+              webAccessibility?.restore()
               view.requestFocus()
             }
             finishPresentation(id, accepted)
@@ -357,6 +399,9 @@ internal class AndroidAppLock(
     prompt = null
     cover?.let { (it.parent as? ViewGroup)?.removeView(it) }
     cover = null
+    webAccessibility?.restore()
+    webAccessibility = null
+    windowBackground.restore()
     webView = null
   }
 }

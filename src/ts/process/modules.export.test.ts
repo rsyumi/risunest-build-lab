@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
     open: vi.fn(),
     readImage: vi.fn(),
     saveAsset: vi.fn(async (_data: Uint8Array) => ''),
+    exportRisum: vi.fn(),
 }))
 
 vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule(() => ({
@@ -17,6 +18,7 @@ vi.mock('../storage/iosContentPicker', () => ({ importIOSContentFromPicker: mock
 vi.mock('../storage/androidContentPicker', () => ({ importAndroidContentFromPicker: mocks.importAndroid }))
 vi.mock('../storage/nativeModuleFileRoute', () => ({ importDesktopNativeModulePath: mocks.importDesktop }))
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: mocks.open }))
+vi.mock('../storage/nativeModuleRisumExportRoute', () => ({ exportNativeModuleRisumFromPicker: mocks.exportRisum }))
 vi.mock('../mobileBackgroundTask', async () => (await import('../mobileBackgroundTask.testSupport')).mobileBackgroundTaskModule())
 
 vi.mock('../alert', () => ({
@@ -132,6 +134,18 @@ describe('legacy module export', () => {
         expect(DBState.db.modules).toEqual([])
         expect(alertConfirm).not.toHaveBeenCalled()
         expect(alertError).toHaveBeenCalledWith(expect.any(StdioModuleImportError))
+        expect(alertNormal).not.toHaveBeenCalled()
+    })
+
+    it('reports a native RISUM export refused while the library is busy, and leaves success to the export dialog', async () => {
+        mocks.platform = 'desktop'
+        const module = { id: 'source', name: 'Synthetic', description: '' }
+        mocks.exportRisum.mockRejectedValueOnce(
+            Object.assign(new Error('Another library operation is running'), { code: 'library-operation-busy' }))
+        await expect(exportModuleLegacy(module)).resolves.toEqual(new Uint8Array(0))
+        expect(alertError).toHaveBeenCalledExactlyOnceWith(language.risuNest.importDialog.reasonBusy)
+        mocks.exportRisum.mockResolvedValueOnce({ revision: 1 })
+        await exportModuleLegacy(module)
         expect(alertNormal).not.toHaveBeenCalled()
     })
 

@@ -199,3 +199,19 @@ export async function downloadIOSFile(
         await remove(folder, { recursive: true })
     }
 }
+
+/** Asks for a file the app can replace until another is picked. Resolves false when the picker is cancelled. */
+export async function pickRewritableIOSFile(suggestedName: string): Promise<boolean> {
+    return withLibraryFileSelection(async () => {
+        await ensureDataRoot()
+        const result = await invoke<{ cancelled: boolean }>(
+            'plugin:ios-native|pick_rewritable_file',
+            { suggestedName },
+        )
+        return !result.cancelled
+    })
+}
+
+/** Replaces the contents of the file `pickRewritableIOSFile` picked last. */
+export const rewriteIOSFile = (text: string) =>
+    invoke<void>('plugin:ios-native|rewrite_file', { text })

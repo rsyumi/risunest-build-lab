@@ -1,0 +1,11 @@
+[package]
+name = "risunest-cbs-experimental"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license-file = "../../LICENSE"
+
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+ryu-js = "=1.0.3"
+getrandom = "=0.3.4"

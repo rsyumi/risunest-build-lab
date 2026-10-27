@@ -123,6 +123,8 @@ const english = {
     corrupted: 'The stored data did not pass verification. Choose another backup or connect the repository again.',
     recoveryKeyMismatch: 'The recovery key does not match this repository. Check the key.',
     repositoryMismatch: 'This location holds a different repository. Check the folder, bucket and address.',
+    formatSwitchRequired: languageEnglish.lwwSync.formatSwitchRequiredHelp,
+    appUpdateRequired: languageEnglish.lwwSync.appUpdateRequiredHelp,
     unsupportedOperation: 'This repository cannot do that.',
     requestLengthRequired: 'The server rejected the request.',
     interrupted: 'This stopped before it finished. Try again.',
@@ -324,6 +326,8 @@ const korean: typeof english = {
     corrupted: '저장된 데이터가 검증을 통과하지 못했습니다. 다른 백업을 고르거나 저장소를 다시 연결하세요.',
     recoveryKeyMismatch: '복구 키가 이 저장소와 맞지 않습니다. 복구 키를 확인하세요.',
     repositoryMismatch: '이 위치에 다른 저장소가 있습니다. 폴더·버킷과 주소를 확인하세요.',
+    formatSwitchRequired: languageKorean.lwwSync.formatSwitchRequiredHelp,
+    appUpdateRequired: languageKorean.lwwSync.appUpdateRequiredHelp,
     unsupportedOperation: '이 저장소에서는 할 수 없는 작업입니다.',
     requestLengthRequired: '서버가 요청을 거부했습니다.',
     interrupted: '끝나기 전에 멈췄습니다. 다시 시도하세요.',
@@ -531,6 +535,8 @@ function externalErrorSummary(strings: ExternalStorageStrings, value: unknown): 
         case 'corrupt': return strings.corrupted
         case 'recoveryKeyMismatch': return strings.recoveryKeyMismatch
         case 'repositoryMismatch': return strings.repositoryMismatch
+        case 'libraryFormatSwitchRequired': return strings.formatSwitchRequired
+        case 'appUpdateRequired': return strings.appUpdateRequired
         case 'unsupported': return (value as { httpStatus?: unknown }).httpStatus === 411
             ? strings.requestLengthRequired : strings.unsupportedOperation
         case 'cancelled': return strings.interrupted

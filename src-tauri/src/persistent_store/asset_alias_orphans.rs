@@ -162,6 +162,8 @@ impl PersistentStore {
                 // Rows can be received without moving the revision, so the commit also requires
                 // the ones the search read.
                 gallery_pending_fence: Some(search.pending_fence),
+                // Recovery of an interrupted commit checks the plugin values against it too.
+                device_plugin_fence: search.device_fence.clone(),
                 unit_mutations: Some(unit_mutations),
                 ..Default::default()
             },

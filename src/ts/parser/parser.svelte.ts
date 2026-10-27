@@ -1,4 +1,7 @@
+import { parseArray, makeArray } from '../cbsPure';
 import DOMPurify from 'dompurify';
+import { prepareYouTubeIframe } from './youtubeEmbed';
+import { hasCbsSyntax } from './cbsSyntax';
 import { CbsHistoryAccessError, type CbsHistoryAccess } from '../cbsHistoryAccess';
 import markdownit from 'markdown-it'
 import { appVer, getCurrentCharacter, getDatabase, type Database, type character, type customscript, type loreBook, type triggerscript } from '../storage/database.svelte';
@@ -66,8 +69,7 @@ let activeSanitizeHideAllImages: boolean | undefined
 
 DOMPurify.addHook("uponSanitizeElement", (node: HTMLElement, data) => {
     if (data.tagName === "iframe") {
-       const src = node.getAttribute("src") || "";
-       if (!src.startsWith("https://www.youtube.com/embed/")) {
+       if (!prepareYouTubeIframe(node)) {
           return node.parentNode.removeChild(node);
        }
     }
@@ -871,6 +873,8 @@ async function parseMarkdownForDisplay(
 
 const trimPurifyConfig = {
     ADD_TAGS: ["iframe", "style", "risu-style", "x-em", 'annotation', 'semantics', 'mrow', 'mi', 'mo', 'mn', 'msup', 'msub', 'mfrac', 'msqrt'],
+    // Permissions Policy can contain origins but is not a navigation URL.
+    ADD_URI_SAFE_ATTR: ['allow'],
     ADD_ATTR: ["allow", "allowfullscreen", "frameborder", "scrolling", "risu-btn", "risu-ctrl", 'risu-form', 'risu-trigger', 'risu-mark', 'risu-id', 'x-hl-lang', 'x-hl-text'],
 }
 
@@ -1201,6 +1205,7 @@ let matcherInitialized = false
 let activeMatcherContext: matcherArg | null = null
 
 const matcherMap = new Map<string, RegisterCallback>()
+const directMatcherMap = new Map<string, RegisterCallback>()
 
 function readMatcherChatVar(context: matcherArg | null, key: string): string {
     noteChatVariableRead(key)
@@ -1234,6 +1239,7 @@ function initMatcher(){
             const names = [arg.name, ...arg.alias]
             for (const name of names) {
                 matcherMap.set(name, callback)
+                if (/^[a-z0-9]+$/.test(name)) directMatcherMap.set(name, callback)
             }
         },
         getDatabase: () => activeMatcherContext?.db ?? getDatabase(),
@@ -1289,17 +1295,11 @@ function matcher (p1:string,matcherArg:matcherArg,vars:{[key:string]:string}|nul
             return calcString(substring).toString()
         }
         const colonIndex = p1.indexOf(':')
-        let splited: string[]
-        if(colonIndex !== -1 && p1[colonIndex + 1] === ':'){
-            splited = p1.split('::')
-        }
-        else{
-            splited = p1.split(':')
-        }
-        const name = splited[0].toLocaleLowerCase().replace(/[\s_-]/g, '')
-        const args = splited.slice(1)
-        const callback = matcherMap.get(name)
+        const name = colonIndex === -1 ? p1 : p1.substring(0, colonIndex)
+        const callback = directMatcherMap.get(name) ?? matcherMap.get(name.toLocaleLowerCase().replace(/[\s_-]/g, ''))
         if(callback){
+            const separator = p1[colonIndex + 1] === ':' ? '::' : ':'
+            const args = colonIndex === -1 ? [] : p1.substring(colonIndex + separator.length).split(separator)
             const previousContext = activeMatcherContext
             activeMatcherContext = matcherArg
             try {
@@ -1373,33 +1373,12 @@ const legacyBlockMatcher = (p1:string,matcherArg:matcherArg) => {
 
 type blockMatch = 'ignore'|'parse'|'nothing'|'ifpure'|'pure'|'each'|'function'|'pure-display'|'normalize'|'escape'|'newif'|'newif-falsy'
 
-function parseArray(p1:string): unknown[]{
-    try {
-        const arr = JSON.parse(p1)
-        if(Array.isArray(arr)){
-            return arr
-        }
-        return p1.split('§')
-    } catch (error) {
-        return p1.split('§')
-    }
-}
-
 function parseDict(p1 :string): {[key:string]: unknown}{
     try {
         return JSON.parse(p1)
     } catch (error) {
         return {}
     }
-}
-
-function makeArray(p1: unknown[]): string{
-    return JSON.stringify(p1.map((f) => {
-        if(typeof(f) === 'string'){
-            return f.replace(/::/g, '\\u003A\\u003A')
-        }
-        return f
-    }))
 }
 
 function blockStartMatcher(p1:string,matcherArg:matcherArg):{type:blockMatch,type2?:string,funcArg?:string[],mode?:string}{
@@ -1836,6 +1815,12 @@ export function risuChatParser(da:string, arg:{
         }
     }
 
+    arg.callStack = (arg.callStack ?? 0) + 1
+    if(arg.callStack > 20){
+        return 'ERROR: Call stack limit reached'
+    }
+    if (typeof da === 'string' && !hasCbsSyntax(da)) return da
+
     let pointer = 0;
     let nested:string[] = [""]
     let stackType = new Uint8Array(512)
@@ -1856,12 +1841,6 @@ export function risuChatParser(da:string, arg:{
         data:string,
         arg:string[]
     }> = arg.functions ?? (new Map())
-
-    arg.callStack = (arg.callStack ?? 0) + 1
-
-    if(arg.callStack > 20){
-        return 'ERROR: Call stack limit reached'
-    }
 
     const matcherObj = {
         chatID: chatID,

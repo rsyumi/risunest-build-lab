@@ -28,10 +28,29 @@ const equal = (actual: unknown, expected: unknown, name: string) => {
 }
 const blockedRequests: string[] = []
 window.addEventListener('securitypolicyviolation', event => blockedRequests.push(event.violatedDirective))
-const phase = await invoke<{ runId: string; phase: string; accountOrigin?: string }>('boundary_phase')
+const phase = await invoke<{ runId: string; phase: string; accountOrigin?: string; appLockUnavailable: boolean }>('boundary_phase')
 const cases: string[] = []
 let measurements: unknown
 try {
+    await invoke('native_startup_status')
+    if (phase.appLockUnavailable) {
+        const unavailable = async (command: string, args?: Record<string, unknown>) => {
+            let error: unknown
+            try { await invoke(command, args) } catch (failure) { error = failure }
+            if (typeof error !== 'string' || !error.startsWith('app-lock cover creation failed')) throw new Error(`${command} did not report cover setup failure`)
+        }
+        await unavailable('app_lock_check')
+        await unavailable('app_lock_set_policy', { policy: { enabled: false, timing: 'launch', gateRequired: false, hideRecentsPreview: false, backgroundColor: '#21252b' } })
+        await unavailable('app_lock_ready', { epoch: 0, locked: false })
+        await unavailable('app_lock_authenticate', { reason: 'Synthetic unavailable-cover verification' })
+        equal(await invoke('boundary_cover_present'), false, 'failed setup removed its native cover')
+        const record = JSON.stringify({ schema: 'risunest.app-lock/v1', enabled: false, nativeUnlock: false, hideRecentsPreview: false, timing: 'launch', pin: null })
+        await invoke('app_lock_write_record', { record })
+        equal(await invoke('app_lock_read_record'), record, 'recovery record remains available after cover setup failure')
+    } else {
+        await invoke('app_lock_check')
+        equal(await invoke('boundary_cover_present'), true, 'native cover initialized without showing the boundary window')
+    }
     const store = new SqlitePersistentDataStore()
     await store.open()
     if (endsByNativeExit(phase.phase)) {

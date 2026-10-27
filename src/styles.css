@@ -9,6 +9,10 @@
   }
 }
 
+body > iframe[data-app-lock-covered] {
+  display: none !important;
+}
+
 .chat-message-container[data-chat-height-pending="true"] {
   visibility: hidden;
   overflow-anchor: none;

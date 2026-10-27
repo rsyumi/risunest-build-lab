@@ -1,3 +1,4 @@
+import { createDisplayCbsPlan, type DisplayCbsPlan } from './displayCbsCompiler'
 import type { customscript } from '../storage/database.svelte'
 import { getRuntimePerformanceBudgets, subscribeRuntimePerformanceProfile } from '../runtimePerformanceProfile'
 import { ByteBudgetLru } from '../util/byteBudgetLru'
@@ -27,6 +28,7 @@ export interface RegexExecutionPlan {
     mode: string
     entries: RegexExecutionPlanEntry[]
     workerEligible: boolean
+    displayCbs?: DisplayCbsPlan
     requiresHostExecution: boolean
 }
 
@@ -38,21 +40,50 @@ export interface RegexExecutionError {
 export interface RegexExecutionResult {
     data: string
     errors: RegexExecutionError[]
+    steps?: { index: number, matched: boolean }[]
+    nextIndex?: number
+    cbsReads?: string[]
+    checkpointInput?: string
+    unchangedCbsFallback?: boolean
+}
+
+function getPlanCacheByteBudget(): number {
+    return getRuntimePerformanceBudgets().regexPlanCacheEntries * 128 * 1024
 }
 
 function createPlanCache() {
     return new ByteBudgetLru<string, RegexExecutionPlan>(
-        Number.POSITIVE_INFINITY,
-        () => 0,
+        getPlanCacheByteBudget(),
+        (_key, plan) => plan.displayCbs?.estimatedBytes ?? 0,
         getRuntimePerformanceBudgets().regexPlanCacheEntries,
     )
 }
 
 let planCache = createPlanCache()
+let lastPlan: { mode: string, sources: [number, string, string, string, boolean][], plan: RegexExecutionPlan } | undefined
 subscribeRuntimePerformanceProfile(() => {
     planCache = createPlanCache()
+    lastPlan = undefined
 })
 let nextPlanRevision = 1
+
+function rememberPlan(scripts: customscript[], mode: string, plan: RegexExecutionPlan): void {
+    lastPlan = { mode, plan, sources: scripts.flatMap((script, index) => script.type === mode
+        ? [[index, script.in, script.out, script.flag ?? '', !!script.ableFlag] as [number, string, string, string, boolean]] : []) }
+}
+
+function sameLastPlan(scripts: customscript[], mode: string): boolean {
+    if (!lastPlan || lastPlan.mode !== mode) return false
+    let count = 0
+    for (let index = 0; index < scripts.length; index++) {
+        const script = scripts[index]
+        if (script.type !== mode) continue
+        const source = lastPlan.sources[count++]
+        if (!source || source[0] !== index || source[1] !== script.in || source[2] !== script.out
+            || source[3] !== (script.flag ?? '') || source[4] !== !!script.ableFlag) return false
+    }
+    return count === lastPlan.sources.length
+}
 
 function makePlanKey(scripts: customscript[], mode: string): string {
     return JSON.stringify([
@@ -138,9 +169,11 @@ function parseEntry(script: customscript, sourceIndex: number): RegexExecutionPl
 }
 
 export function getRegexExecutionPlan(scripts: customscript[], mode: string): RegexExecutionPlan {
+    if (sameLastPlan(scripts, mode)) return lastPlan!.plan
     const key = makePlanKey(scripts, mode)
     const cached = planCache.get(key)
     if (cached !== undefined) {
+        rememberPlan(scripts, mode, cached)
         return cached
     }
 
@@ -160,15 +193,20 @@ export function getRegexExecutionPlan(scripts: customscript[], mode: string): Re
         && !entry.dynamicPattern
         && !parserRiskPattern.test(entry.replacement)
     ))
+    let displayCbs = mode === 'editdisplay' ? createDisplayCbsPlan(entries.map((entry) => entry.replacement)) : undefined
+    // Keep the regex plan reusable when its optional compiled CBS exceeds the cache budget.
+    if (displayCbs && displayCbs.estimatedBytes > getPlanCacheByteBudget()) displayCbs = undefined
     const plan: RegexExecutionPlan = {
         revision: nextPlanRevision++,
         mode,
         entries,
         workerEligible,
+        ...(mode === 'editdisplay' ? { displayCbs } : {}),
         requiresHostExecution,
     }
 
     planCache.set(key, plan)
+    rememberPlan(scripts, mode, plan)
     return plan
 }
 

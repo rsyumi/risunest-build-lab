@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
-import { appTestProfile, embeddedCrateTests, hostManifests, nativeCommands, packageCrateTests, protocolManifests, sharedCargoTarget, standaloneRustCommands, standaloneRustTests } from '../scripts/testNative.mjs'
+import { appTestProfile, embeddedCrateTests, harnessManifests, hostManifests, nativeCommands, packageCrateTests, protocolManifests, sharedCargoTarget, standaloneRustCommands, standaloneRustTests } from '../scripts/testNative.mjs'
 
 test('the Sync server runs as one plain cargo test and its source observer only through --harness', () => {
   const base = ['cargo', 'test', '--manifest-path', 'server/sync/Cargo.toml', '--release', '--locked']
@@ -14,9 +14,24 @@ test('the Sync server runs as one plain cargo test and its source observer only 
       assert.deepEqual(server, group === 'host' ? [base] : [])
     }
   }
-  assert.deepEqual(nativeCommands('harness'), [
+  assert.deepEqual(nativeCommands('harness').filter(command => command.includes('server/sync/Cargo.toml')), [
     [...base, '--lib', '--features', 'source-observer', '--', '--skip', 'source_observer::small_object_store::tests'],
   ])
+})
+
+test('experimental CBS tests run only through the explicit harness lane', () => {
+  const manifests = ['crates/cbs-experimental/Cargo.toml', 'benchmarks/rust-cbs/native/Cargo.toml']
+  assert.deepEqual(harnessManifests, manifests)
+  for (const platform of ['win32', 'linux', 'darwin']) {
+    for (const manifest of manifests) {
+      assert.deepEqual(nativeCommands('harness', platform).filter(command => command.includes(manifest)), [
+        ['cargo', 'test', '--manifest-path', manifest, '--release', '--locked'],
+      ])
+      for (const group of ['protocol', 'host']) {
+        assert(!nativeCommands(group, platform).some(command => command.includes(manifest)))
+      }
+    }
+  }
 })
 
 test('host runs compile only the app crate under test unoptimized', () => {
@@ -58,7 +73,7 @@ test('main checkout and worktrees share one target and reject an unrelated cache
 })
 
 test('every local Rust crate with tests has an explicit runner', () => {
-  const selected = new Set([...protocolManifests, ...hostManifests, ...embeddedCrateTests.map(entry => entry.manifest), ...packageCrateTests.map(entry => entry.manifest)])
+  const selected = new Set([...protocolManifests, ...hostManifests, ...harnessManifests, ...embeddedCrateTests.map(entry => entry.manifest), ...packageCrateTests.map(entry => entry.manifest)])
   for (const entry of packageCrateTests) {
     assert(entry.runnerManifest === entry.manifest || hostManifests.includes(entry.runnerManifest))
     assert.deepEqual(entry.platforms, ['win32', 'linux', 'darwin'])

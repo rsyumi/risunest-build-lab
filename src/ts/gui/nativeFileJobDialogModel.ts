@@ -519,6 +519,8 @@ function buildCounters(
 
 function warningText(code: string): string {
     const copy = language.risuNest.importDialog
+    const skipped = /^plugin-values-skipped:(\d+)$/.exec(code)
+    if (skipped) return copy.warningPluginValuesSkipped.replace('{0}', skipped[1])
     switch (code) {
         case 'cleanup-failed':
             return copy.warningCleanupFailed

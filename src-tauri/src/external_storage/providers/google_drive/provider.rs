@@ -1429,6 +1429,77 @@ impl Provider for GoogleDrive {
         })
     }
 
+    /// The file is checked to be this repository's descriptor before its
+    /// content is replaced.
+    fn replace_descriptor<'a>(
+        &'a self,
+        repository: &'a RepositoryHandle,
+        locator: &'a RemoteLocator,
+        bytes: &'a HeadBytes,
+        cancel: &'a Cancellation,
+    ) -> ProviderFuture<'a, HeadReceipt> {
+        Box::pin(async move {
+            cancel.check()?;
+            let context = context(repository)?;
+            locator.validate_for(repository)?;
+            if locator.collection.as_deref() != collection_token(ObjectRole::Descriptor)
+                || !config::is_drive_id(&locator.object)
+            {
+                return Err(corrupt());
+            }
+            let file_id = &locator.object;
+            let session = context.session();
+            let metadata: DriveFile = self
+                .control(
+                    session,
+                    &with_query(
+                        context.settings.api(&format!("/files/{file_id}"))?,
+                        &[("fields", "id,parents,appProperties")],
+                    ),
+                    ProviderOperation::Metadata,
+                    cancel,
+                )
+                .await?;
+            if metadata.file_id()? != file_id
+                || !metadata.parents.as_ref().is_some_and(|parents| parents.iter().any(|id| *id == context.settings.folder_id))
+                || metadata.property(ROLE_KEY) != Some(role_token(ObjectRole::Descriptor))
+            {
+                return Err(corrupt());
+            }
+            let body = bytes.as_bytes().to_vec();
+            let length = body.len() as u64;
+            let token = self.token(session, None, cancel).await?;
+            let mut headers = authorized_headers(&token);
+            headers.insert("content-type".to_owned(), OCTET_STREAM.to_owned());
+            let request = HttpRequest {
+                method: reqwest::Method::PATCH,
+                url: with_query(
+                    context.settings.upload(&format!("/files/{file_id}"))?,
+                    &[("uploadType", "media"), ("fields", FILE_FIELDS)],
+                ),
+                headers,
+                body: Some(Box::pin(std::io::Cursor::new(body))),
+                content_length: Some(length),
+                operation: ProviderOperation::ReplaceHead,
+                account: session.account.clone(),
+                api_request: true,
+                mybox_charge: None,
+                control: true,
+            };
+            let mut response = self.dispatch(request, cancel).await?;
+            self.require_status(&mut response, &[200], session.account, cancel)
+                .await?;
+            let file: DriveFile = wire::json(&mut response, cancel).await?;
+            if file.file_id()? != file_id {
+                return Err(corrupt());
+            }
+            Ok(HeadReceipt {
+                version: file.version_token(),
+                complete: true,
+            })
+        })
+    }
+
     /// `files.delete` removes the file outright rather than trashing it, so the
     /// target is confirmed to be a removable member of this repository folder
     /// before the request goes out.

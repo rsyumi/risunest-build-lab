@@ -30,7 +30,17 @@ object WryLifecycleObserver : DefaultLifecycleObserver {
 }
 
 abstract class WryActivity : AppCompatActivity() {
-    private lateinit var mWebView: RustWebView
+    // RisuNest: the app releases a WebView whose renderer exited, and the
+    // native destroy callback still receives that WebView's id.
+    private var mWebView: RustWebView? = null
+    private var retiredWebViewId: String = ""
+
+    fun releaseFailedWebView(view: WebView) {
+        if (mWebView === view) {
+            retiredWebViewId = mWebView?.id ?: ""
+            mWebView = null
+        }
+    }
     private lateinit var permissionLauncher: ActivityResultLauncher<Array<String>>
     private lateinit var activityLauncher: ActivityResultLauncher<Intent>
     private var permissionListener: ((Boolean?) -> Unit)? = null
@@ -56,9 +66,9 @@ abstract class WryActivity : AppCompatActivity() {
         if (handleBackNavigation) {
             val callback = object : OnBackPressedCallback(true) {
                 override fun handleOnBackPressed() {
-                    if (this@WryActivity::mWebView.isInitialized) {
-                        if (this@WryActivity.mWebView.canGoBack()) {
-                            this@WryActivity.mWebView.goBack()
+                    if (this@WryActivity.mWebView != null) {
+                        if (this@WryActivity.mWebView?.canGoBack() == true) {
+                            this@WryActivity.mWebView?.goBack()
                         } else {
                             this.isEnabled = false
                             this@WryActivity.onBackPressed()
@@ -146,17 +156,13 @@ abstract class WryActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         Rust.onPause(this)
-        if (::mWebView.isInitialized) {
-            mWebView.onPause()
-        }
+        mWebView?.onPause()
     }
 
     override fun onResume() {
         super.onResume()
         Rust.onResume(this)
-        if (::mWebView.isInitialized) {
-            mWebView.onResume()
-        }
+        mWebView?.onResume()
     }
 
     override fun onStop() {
@@ -167,7 +173,7 @@ abstract class WryActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         Rust.onDestroy(this)
-        Rust.onWebviewDestroy(this, if (::mWebView.isInitialized) { mWebView.id } else { "" })
+        Rust.onWebviewDestroy(this, mWebView?.id ?: retiredWebViewId)
     }
 
     override fun onLowMemory() {

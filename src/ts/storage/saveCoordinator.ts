@@ -33,7 +33,7 @@ import {
 } from './conversationResidency'
 import { defineOwnEnumerableProperty } from './ownEnumerableProperty'
 import { isMetadataOnlySelectedConversation } from './selectedConversationLifecycle'
-import { applyConversationBindingPatch, type ConversationBindingPatch } from './conversationBinding'
+import { applyConversationBindingPatch, conversationBindingHolds, type ConversationBindingPatch } from './conversationBinding'
 import { withPersistentRevisionLease } from './persistentRecordIterator'
 import type {
     ActiveConversationMutationEvent,
@@ -264,6 +264,7 @@ interface PendingCharacterAddition {
 
 interface PendingConversationMutation {
     event: ActiveConversationMutationEvent
+    recordedAt: number
 }
 
 interface PendingWindowedActivationChange {
@@ -463,7 +464,7 @@ function messageMatchesAfterIdNormalization(
     projected: Message,
     captured: Message,
 ): boolean {
-    if (canonicalJson(projected) === canonicalJson(captured)) return true
+    if (projected === captured || canonicalJson(projected) === canonicalJson(captured)) return true
     if (projected.chatId !== undefined || typeof captured.chatId !== 'string' || !captured.chatId) {
         return false
     }
@@ -489,18 +490,47 @@ function conversationMatchesAfterIdNormalization(
     )
 }
 
-/** `canonicalJson(left) === canonicalJson(right)`, serializing only metadata when both share one message array. */
+/** `canonicalJson(left) === canonicalJson(right)`, serializing only metadata and the messages the two do not share. */
 function conversationJsonEquals(left: Chat, right: Chat): boolean {
-    if (left.message !== right.message) return canonicalJson(left) === canonicalJson(right)
-    const { message: _leftMessages, ...leftMetadata } = left
-    const { message: _rightMessages, ...rightMetadata } = right
-    return canonicalJson(leftMetadata) === canonicalJson(rightMetadata)
+    if (left.message !== right.message && !(Array.isArray(left.message) && Array.isArray(right.message)))
+        return canonicalJson(left) === canonicalJson(right)
+    const { message: leftMessages, ...leftMetadata } = left
+    const { message: rightMessages, ...rightMetadata } = right
+    if (canonicalJson(leftMetadata) !== canonicalJson(rightMetadata)) return false
+    if (leftMessages === rightMessages) return true
+    if (leftMessages.length !== rightMessages.length) return false
+    for (let index = 0; index < leftMessages.length; index++) {
+        const message = leftMessages[index]
+        if (message !== rightMessages[index] && canonicalJson([message]) !== canonicalJson([rightMessages[index]])) return false
+    }
+    return true
 }
 
 /** A copy whose metadata is owned and whose message array is shared. */
 function cloneConversationSharingMessages(conversation: Chat): Chat {
     const { message, ...metadata } = conversation
     return { ...safeStructuredClone(metadata), message } as Chat
+}
+
+/**
+ * The conversation after the given recorded events, rebuilt from the baseline for comparison.
+ * Its array is its own; its metadata is the last event's recorded value, which it only reads.
+ */
+function replayConversationPrefix(
+    baseline: Chat,
+    recorded: readonly (readonly (ConversationMutation & { type: 'replace-range' })[])[],
+    sharesMessages: boolean,
+): Chat {
+    const message = sharesMessages ? baseline.message : baseline.message.slice()
+    if (!sharesMessages) {
+        for (const mutations of recorded) {
+            for (const mutation of mutations) {
+                replaceArrayRange(message, mutation.start, mutation.deleteCount, mutation.messages)
+            }
+        }
+    }
+    const { message: _message, ...metadata } = recorded.at(-1)!.at(-1)!.conversation as Chat
+    return { ...metadata, message } as Chat
 }
 
 interface ReplacementAdmission extends PersistentMutationToken {
@@ -928,7 +958,12 @@ export class SaveCoordinator {
             (this.dependencies.captureSelectedConversationAuthority?.() ?? null) !== null
         )
             return false
-        this.materializedBaselines.set(character.chaId, captureMaterializedCharacter(character))
+        // The capture describes the resident character; adopting it for a separate copy would
+        // take in live edits the copy lacks, so a copy is still copied.
+        const captured = this.dependencies.captureCharacter(character.chaId) === character
+            ? this.dependencies.canonicalCapture?.materializedCharacters?.().get(character.chaId)
+            : undefined
+        this.materializedBaselines.set(character.chaId, captured ?? captureMaterializedCharacter(character))
         this.characterBaseline = this.dependencies.canonicalCapture?.materializedCharacters ? null : canonicalJson(character)
         this.characterBaselineId = character.chaId
         this.windowedCharacterBaseline = null
@@ -1193,7 +1228,7 @@ export class SaveCoordinator {
 
         const detached = safeStructuredClone(event)
         this.markPersistentDataDirty(estimatedBytes)
-        this.pendingConversationMutations.push({ event: detached })
+        this.pendingConversationMutations.push({ event: detached, recordedAt: this.currentTime() })
     }
 
     /**
@@ -1299,6 +1334,35 @@ export class SaveCoordinator {
             },
         )
         return promise
+    }
+
+    /**
+     * A local flush at a generation checkpoint. A rejection takes the background save path, which
+     * reports it and schedules any retry; a storage failure then resolves false and a fence rejects.
+     */
+    async flushPendingDataLocallyForCheckpoint(reason: string): Promise<boolean> {
+        try {
+            await this.flushPendingDataLocally(reason)
+            return true
+        } catch (error) {
+            this.handleBackgroundSaveFailure(error)
+            if (error instanceof PersistentMutationFencedError) throw error
+            return false
+        }
+    }
+
+    /** Whether complete conversations are saved against immutable captured values instead of being replaced whole. */
+    get capturesImmutableCharacters(): boolean {
+        return this.dependencies.canonicalCapture?.materializedCharacters !== undefined
+    }
+
+    /** Unacknowledged conversation mutation events and the age of the oldest, for diagnostics. */
+    get pendingConversationMutationDiagnostics(): { pendingEvents: number; unacknowledgedMs?: number } {
+        const oldest = this.pendingConversationMutations[0]
+        return {
+            pendingEvents: this.pendingConversationMutations.length,
+            unacknowledgedMs: oldest ? Math.max(0, this.currentTime() - oldest.recordedAt) : undefined,
+        }
     }
 
     private async runLocalFlush(reason: string): Promise<void> {
@@ -1763,33 +1827,29 @@ export class SaveCoordinator {
     /**
      * Commits persona or toggle bindings of a conversation that has no active session (a summary
      * stub or the windowed selected shell) using metadata only, then lets the caller publish the
-     * same change to the in-memory record so the shell matches its baseline.
+     * same change to the in-memory record so the shell matches its baseline. With `expected`, the
+     * patch is dropped unless the stored conversation still holds those fields when it commits.
      */
     mutateConversationBinding(
         characterId: string,
         conversationId: string,
         patch: ConversationBindingPatch,
         publish: (committedPatch: ConversationBindingPatch) => void,
+        expected?: ConversationBindingPatch,
     ): Promise<void> {
         this.assertInitialized()
         this.assertPersistentMutationAllowed()
-        const clonePatch = (): ConversationBindingPatch =>
-            Object.fromEntries(Object.entries(patch).map(([key, value]) => [
+        const cloneBinding = (binding: ConversationBindingPatch): ConversationBindingPatch =>
+            Object.fromEntries(Object.entries(binding).map(([key, value]) => [
                 key, value === undefined ? undefined : canonicalClone(value),
             ]))
+        const clonePatch = () => cloneBinding(patch)
         patch = clonePatch()
+        if (expected) expected = cloneBinding(expected)
         return this.enqueue(async () => {
             await this.flushIterations('chat-binding', true)
-            const metadata = await this.dependencies.store.readConversationMetadata(
-                characterId,
-                conversationId,
-            )
-            if (!metadata) throw new Error('Binding conversation is unavailable')
-            this.assertReadRevision(this.revision, metadata.revision)
-            const conversation = applyConversationBindingPatch({ ...metadata.value.conversation }, patch)
-            const changes = diffFields(['conversation', characterId, conversationId], metadata.value.conversation, conversation, new Set(['id']))
-            if (!changes.length) return
-            const committed = await this.commitRoutine({ expectedRevision:this.revision, unitMutations:changes })
+            const committed = await this.commitConversationBinding(characterId, conversationId, patch, expected)
+            if (!committed) return
             this.currentRevision = committed.revision
             // Advance only these fields in the baseline; concurrent unrelated edits remain dirty.
             if (this.windowedCharacterBaseline?.authority.characterId === characterId) {
@@ -1809,6 +1869,36 @@ export class SaveCoordinator {
             this.dependencies.onLocalRevision?.(committed.revision)
             await this.finishExplicitCommit(committed.revision)
         })
+    }
+
+    /**
+     * Writes the binding fields that differ from the stored conversation, or returns null when
+     * nothing is written. When another writer commits first, a binding with `expected` reads the
+     * conversation again so the condition is checked against that write instead of resending.
+     */
+    private async commitConversationBinding(
+        characterId: string,
+        conversationId: string,
+        patch: ConversationBindingPatch,
+        expected: ConversationBindingPatch | undefined,
+    ): Promise<{ revision: DataRevision } | null> {
+        while (true) {
+            const metadata = await this.dependencies.store.readConversationMetadata(characterId, conversationId)
+            if (!metadata) throw new Error('Binding conversation is unavailable')
+            this.assertReadRevision(this.revision, metadata.revision)
+            if (expected && !conversationBindingHolds(metadata.value.conversation, expected)) return null
+            const conversation = applyConversationBindingPatch({ ...metadata.value.conversation }, patch)
+            const changes = diffFields(['conversation', characterId, conversationId], metadata.value.conversation, conversation, new Set(['id']))
+            if (!changes.length) return null
+            const commit = { expectedRevision: this.revision, unitMutations: changes }
+            if (!expected) return this.commitRoutine(commit)
+            try {
+                return await this.dependencies.store.commit(canonicalClone(commit))
+            } catch (error) {
+                if (!(error instanceof RevisionConflictError) || error.actualRevision <= commit.expectedRevision) throw error
+                this.currentRevision = error.actualRevision
+            }
+        }
     }
 
     mutatePersistentCharacterDetail(
@@ -4206,21 +4296,19 @@ export class SaveCoordinator {
             )
             if (projectedMatches.length !== 1 || capturedMatches.length !== 1) continue
             const projectedIndex = projected.chats.indexOf(projectedMatches[0])
+            const baselineConversation = projectedMatches[0]
+            if (!Array.isArray(baselineConversation.message)) continue
             // Metadata-only events leave the baseline's messages as they are, so the projection
             // shares that array; when the capture holds the same array, only metadata is compared.
-            const sharesMessages =
-                Array.isArray(projectedMatches[0].message) &&
-                conversationPending.every(({ event }) => event.mutations.every((range) =>
-                    !range.completeOwner && range.deleteCount === 0 && range.messages.length === 0))
-            let conversation = sharesMessages
-                ? cloneConversationSharingMessages(projectedMatches[0])
-                : safeStructuredClone(projectedMatches[0])
-            if (!Array.isArray(conversation.message)) continue
+            const sharesMessages = conversationPending.every(({ event }) => event.mutations.every((range) =>
+                !range.completeOwner && range.deleteCount === 0 && range.messages.length === 0))
+            // The projection owns its array and metadata; unchanged messages stay the baseline's
+            // values, so comparing them with a capture that shares them is a reference check.
+            const conversation = cloneConversationSharingMessages(baselineConversation)
+            if (!sharesMessages) conversation.message = conversation.message.slice()
 
             let previousEvent: ActiveConversationMutationEvent | undefined
-            let coveredCount = 0
-            let coveredConversation: Chat | undefined
-            const conversationMutations: ConversationMutation[][] = []
+            const conversationMutations: (ConversationMutation & { type: 'replace-range' })[][] = []
             for (const pendingMutation of conversationPending) {
                 const { event } = pendingMutation
                 const previous = previousEvent
@@ -4234,7 +4322,7 @@ export class SaveCoordinator {
                     event.previousVersion === 0
                 if (previous && !continuesSession && !startsReplacementSession) break
 
-                const eventMutations: ConversationMutation[] = []
+                const eventMutations: (ConversationMutation & { type: 'replace-range' })[] = []
                 const conversationMetadata = safeStructuredClone(event.conversation) as Omit<
                     Chat,
                     'message'
@@ -4276,17 +4364,24 @@ export class SaveCoordinator {
                 }
                 conversationMutations.push(eventMutations)
                 previousEvent = event
-                if (conversationMatchesAfterIdNormalization(conversation, capturedMatches[0])) {
-                    coveredCount = conversationMutations.length
-                    coveredConversation = sharesMessages
-                        ? cloneConversationSharingMessages(conversation)
-                        : safeStructuredClone(conversation)
+            }
+            // The longest covered prefix wins. The whole recorded sequence is tested first and
+            // shorter prefixes are rebuilt from the baseline only while it does not match.
+            let coveredCount = 0
+            let coveredConversation: Chat | undefined
+            for (let count = conversationMutations.length; count > 0; count--) {
+                const candidate = count === conversationMutations.length
+                    ? conversation
+                    : replayConversationPrefix(baselineConversation, conversationMutations.slice(0, count), sharesMessages)
+                if (conversationMatchesAfterIdNormalization(candidate, capturedMatches[0])) {
+                    coveredCount = count
+                    coveredConversation = candidate
+                    break
                 }
             }
             if (coveredCount === 0 || !coveredConversation) continue
             if (!conversationJsonEquals(coveredConversation, capturedMatches[0])) exactConversationValues = false
-            conversation = coveredConversation
-            projected.chats[projectedIndex] = conversation
+            projected.chats[projectedIndex] = coveredConversation
             for (let index = 0; index < coveredCount; index++) {
                 const pendingMutation = conversationPending[index]
                 coveredSet.add(pendingMutation)

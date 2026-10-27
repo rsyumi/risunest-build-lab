@@ -45,6 +45,10 @@ function rememberTranslation(key: string, value: string): void {
     if (cache.get(key) === undefined) cache.set(key, value)
 }
 
+// Requests still in flight, so overlapping parses of one row pay for a text once.
+const pendingTranslations = new Map<string, Promise<string>>()
+const pendingLLMTranslations = new Map<string, Promise<string>>()
+
 let bergamotTranslate: (text: string, from: string, to: string, html?: boolean) => Promise<string>|null = null
 
 export const LLMCacheStorage = localforage.createInstance({
@@ -86,6 +90,14 @@ export async function translate(text:string, reverse:boolean, captureContext?: T
         if(cached !== undefined){
             return cached
         }
+        const key = translationCacheKey(db, db.translator, target, reverse, text)
+        let pending = pendingTranslations.get(key)
+        if(!pending){
+            pending = runTranslator(text, reverse, db.translator, target, undefined, captureContext, errorMode)
+                .finally(() => pendingTranslations.delete(key))
+            pendingTranslations.set(key, pending)
+        }
+        return pending
     }
 
     return runTranslator(
@@ -248,12 +260,16 @@ async function translateMain(text:string, arg:{from:string, to:string, host:stri
                         "Accept": "*/*",
                     },
                     method: "GET",
+                    // The page is HTML, which the default JSON response would fail to parse.
+                    rawResponse: true,
                 })
-                const parser = new DOMParser()
-                const dom = parser.parseFromString(d.data, 'text/html')
-                const result = dom.querySelector('.result-container')?.textContent?.trim()
-                if(result){
-                    return result
+                if(d.ok){
+                    const parser = new DOMParser()
+                    const dom = parser.parseFromString(new TextDecoder().decode(d.data), 'text/html')
+                    const result = dom.querySelector('.result-container')?.textContent?.trim()
+                    if(result){
+                        return result
+                    }
                 }
             } catch (error) {
                 
@@ -633,7 +649,21 @@ function normalizeLLMCacheKey(key:string):string{
     return key.replace(inlaySlotMarkerRegex, '')
 }
 
-async function translateLLM(text:string, arg:{to:string, from:string, regenerate?:boolean,translatorNote?:string}, captureContext?: TranslateHTMLContext, errorMode: 'alert' | 'throw' = 'alert'):Promise<string>{
+function translateLLM(text:string, arg:{to:string, from:string, regenerate?:boolean,translatorNote?:string}, captureContext?: TranslateHTMLContext, errorMode: 'alert' | 'throw' = 'alert'):Promise<string>{
+    if(arg.regenerate){
+        return requestLLMTranslation(text, arg, captureContext, errorMode)
+    }
+    const key = normalizeLLMCacheKey(text)
+    let pending = pendingLLMTranslations.get(key)
+    if(!pending){
+        pending = requestLLMTranslation(text, arg, captureContext, errorMode)
+            .finally(() => pendingLLMTranslations.delete(key))
+        pendingLLMTranslations.set(key, pending)
+    }
+    return pending
+}
+
+async function requestLLMTranslation(text:string, arg:{to:string, from:string, regenerate?:boolean,translatorNote?:string}, captureContext?: TranslateHTMLContext, errorMode: 'alert' | 'throw' = 'alert'):Promise<string>{
     if(!arg.regenerate){
         const cacheMatch = await LLMCacheStorage.getItem(normalizeLLMCacheKey(text))
         if(cacheMatch !== null){

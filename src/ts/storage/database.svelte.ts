@@ -1114,6 +1114,7 @@ export interface Database{
     disableToggleBinding?: boolean
     defaultToggleValues?: Record<string, string>
     togglePresets?: { name: string; values: Record<string, string>; promptPresetName?: string; id?: string }[]
+    authorNotePresets?: { id: string; name: string; text: string }[]
     globalChatVariables:{[key:string]:string}
     templateDefaultVariables:string
     hypaAllocatedTokens:number
@@ -1840,6 +1841,8 @@ export interface Chat{
     id?:string
     rerollRecovery?: import('../responseVariants').RerollRecovery
     savedToggleValues?: Record<string, string>
+    /** Selects an author's note preset while `note` still matches the fingerprint written with it. */
+    authorNotePreset?: { id: string; fingerprint: string }
     bindedPersona?:string
     fmIndex?:number
     hypaV3Data?:SerializableHypaV3Data

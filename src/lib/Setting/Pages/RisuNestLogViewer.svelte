@@ -2,7 +2,7 @@
     import { onDestroy, onMount } from 'svelte'
     import { language } from 'src/lang'
     import { alertMd } from 'src/ts/alertQueue'
-    import { diagnosticInfo, formatDiagnosticLog } from 'src/ts/diagnostics'
+    import { loadDiagnosticInfo, formatDiagnosticLog } from 'src/ts/diagnostics'
     import { consoleLog, type ConsoleLogEntry } from 'src/ts/consoleLog'
     import SettingGroup from '../RisuNest/SettingGroup.svelte'
     import SettingRow from '../RisuNest/SettingRow.svelte'
@@ -97,14 +97,14 @@
         const revision = consoleRevision
         pending = kind === 'console' ? 'consoleView' : 'view'
         try {
-            const freshEntries = await readLog(kind)
+            const [freshEntries, info] = await Promise.all([readLog(kind), loadDiagnosticInfo()])
             if (request !== viewRequest || (kind === 'console' && revision !== consoleRevision)) return
             if (kind === 'native') {
                 entries = freshEntries as NativeLogEntry[]
                 logLoaded = true
             }
             errorMessage = ''
-            const text = formatDiagnosticLog($diagnosticInfo, formatLog(freshEntries))
+            const text = formatDiagnosticLog(info, formatLog(freshEntries))
             alertMd(text ? fenceLog(text) : emptyLog(kind), true)
         } catch {
             if (request === viewRequest) errorMessage = language.risuNest.diag.actionFailed
@@ -118,14 +118,14 @@
         const revision = consoleRevision
         pending = kind === 'console' ? 'consoleCopy' : 'copy'
         try {
-            const freshEntries = await readLog(kind)
+            const [freshEntries, info] = await Promise.all([readLog(kind), loadDiagnosticInfo()])
             if (request !== copyRequest || (kind === 'console' && revision !== consoleRevision)) return
             if (kind === 'native') {
                 entries = freshEntries as NativeLogEntry[]
                 logLoaded = true
             }
             errorMessage = ''
-            const text = formatDiagnosticLog($diagnosticInfo, formatLog(freshEntries)) || emptyLog(kind)
+            const text = formatDiagnosticLog(info, formatLog(freshEntries)) || emptyLog(kind)
             // The button is free again once the log is read; a slow clipboard
             // write is serialized below, so a repeat request cannot reorder it.
             pending = null
