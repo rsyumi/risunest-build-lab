@@ -19,8 +19,8 @@
     import { hasLibraryCharacters } from 'src/ts/storage/libraryCharacters'
     import { createNativeSyncBindingBridge } from 'src/ts/storage/sync/bindingNative'
     import { subscribeSyncBindingChanges } from 'src/ts/storage/sync/bindingChanges'
-    import { isExternalLwwRunning, requestExternalLwwNow, subscribeExternalLwwCatchUp, subscribeExternalLwwFailures, supportsExternalLwwNewDevice } from 'src/ts/storage/sync/external/lwwProduction'
-    import { externalErrorLabel, externalSyncFailureText, externalSyncStatusView } from 'src/ts/storage/sync/syncStatusView'
+    import { isExternalLwwRunning, requestExternalLwwNow, subscribeExternalLwwCatchUp, subscribeExternalLwwFailures, supportsExternalLwwNewDevice, switchExternalLwwLibraryFormat } from 'src/ts/storage/sync/external/lwwProduction'
+    import { externalErrorLabel, externalFormatCode, externalSyncFailureText, externalSyncStatusView } from 'src/ts/storage/sync/syncStatusView'
     import BindingTargetSwitch from 'src/ts/storage/sync/BindingTargetSwitch.svelte'
     import { PREVIOUS_FILES_DOWNLOAD_FAILED } from 'src/ts/storage/sync/bindingFlow'
     import { language } from 'src/lang'
@@ -140,6 +140,23 @@
         busy = true
         try { await requestExternalLwwNow(connection.id) }
         catch (reason) { error = externalErrorMessage(strings, reason) }
+        finally {
+            await refresh(true)
+            busy = false
+        }
+    }
+    async function switchFormat(connection: ExternalConnectionSummary): Promise<void> {
+        const lww = language.lwwSync
+        const choice = await alertCheckboxConfirm({ title: lww.formatSwitchTitle, description: lww.formatSwitchDescription, checkboxLabel: lww.formatSwitchAcknowledge, actionLabel: lww.formatSwitch, cancelLabel: strings.cancel, requireChecked: true })
+        if (!choice.confirmed) return
+        busy = true
+        try {
+            // A library already above this app's level stops sync with its own guidance, which the sync attempt records.
+            try { await switchExternalLwwLibraryFormat(connection.id) } catch (reason) {
+                if (externalFormatCode(reason) !== 'app-update-required') { error = lww.formatSwitchFailed; return }
+            }
+            await requestExternalLwwNow(connection.id)
+        } catch (reason) { error = externalErrorMessage(strings, reason) }
         finally {
             await refresh(true)
             busy = false
@@ -769,7 +786,7 @@
 
     // The status button shows the same badge, so the mapping lives with the sync status view.
     function connectionBadge(connection: ExternalConnectionSummary) {
-        return externalSyncStatusView(strings, connection, activeJob(connection), externalProgressFor(progress, connection.id), syncStopped(connection), syncCatchingUp.has(connection.id))
+        return externalSyncStatusView(strings, connection, activeJob(connection), externalProgressFor(progress, connection.id), syncStopped(connection), syncCatchingUp.has(connection.id), syncFailures.get(connection.id))
     }
 
     // A backup registers each pack as it seals it, so its upload has no total until it ends.
@@ -904,6 +921,9 @@
                 {#if syncFailures.has(connection.id)}
                     {@const failure = syncFailures.get(connection.id)}
                     <SettingNotice role="status" text={externalSyncFailureText(strings, failure)} />
+                    {#if syncTarget && externalFormatCode(failure) === 'library-format-switch-required'}
+                        <div class="actions"><SettingButton disabled={busy} onclick={() => void switchFormat(connection)}>{language.lwwSync.formatSwitch}</SettingButton></div>
+                    {/if}
                     {#if ['clockSkew', 'corrupt'].includes(externalErrorKind(failure) ?? '') && supportsExternalLwwNewDevice(connection.id)}
                         <div class="actions">
                             <BindingTargetSwitch target={{kind:'external',connectionId:connection.id}} options={{mode:'new-device'}} label={language.lwwSync.newDeviceAction} onBound={() => refreshExternalStorageProductionState().then(() => refresh())} onError={reason => error = externalErrorMessage(strings, reason)} />

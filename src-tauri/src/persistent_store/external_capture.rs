@@ -241,8 +241,10 @@ pub(crate) fn published_string_asset_roots(input: &mut (impl std::io::Read + std
 }
 
 /// Content controls keep their format validation independently of metadata request bounds.
+/// A body up to one part may be raw bytes, as the parts of structured plugin values are.
 pub(crate) fn verified_oversized_control(bytes:&[u8])->StoreResult<()> {
     if bytes.starts_with(risunest_external_storage_format::message_pages::PAGE_PREFIX) && verified_large_message_page(bytes).is_ok() {return Ok(());}
+    if bytes.len() as u64 <= super::device_store::plugin_values::structure::PART_BYTES {return Ok(());}
     verified_large_unit_body(bytes)
 }
 
@@ -262,6 +264,15 @@ pub(crate) fn large_unit_body_hash(key:&risunest_sync_wire::unit::UnitKey,value:
     match value {
         risunest_sync_wire::unit::UnitValue::Object{descriptor,..} if is_large_unit(key) => Some(descriptor.object_hash.clone()),
         _ => None,
+    }
+}
+
+/// The parts a structured plugin value names: raw bytes that travel as
+/// control objects, never as assets.
+pub(crate) fn plugin_value_parts<'a>(key:&risunest_sync_wire::unit::UnitKey,value:&'a risunest_sync_wire::unit::UnitValue)->&'a [String] {
+    match value {
+        risunest_sync_wire::unit::UnitValue::Object{descriptor,..} if key.components()[0]=="plugin-local" => &descriptor.dependencies,
+        _ => &[],
     }
 }
 
@@ -1448,9 +1459,11 @@ mod hydration_tests {
         reset_hash_work();
         verified_oversized_control(&large).unwrap();
         assert_eq!(take_hash_work(),Default::default());
-        let mut damaged=page.clone();damaged[1]=b' ';
+        // A body up to one part may be raw bytes; a larger one is a page or canonical JSON.
+        let part=crate::persistent_store::device_store::plugin_values::structure::PART_BYTES as usize;
         reset_hash_work();
-        assert!(verified_oversized_control(&damaged).is_err());
+        verified_oversized_control(&vec![0xff;part]).unwrap();
+        assert!(verified_oversized_control(&vec![0xff;part+1]).is_err());
         assert_eq!(take_hash_work(),Default::default());
     }
 

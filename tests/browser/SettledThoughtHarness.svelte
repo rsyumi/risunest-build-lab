@@ -10,11 +10,12 @@
         onError: (generation: number, error: unknown) => void
     } = $props()
     let preview = $state(untrack(() => previewInitially))
+    let bodyRoot = $state<HTMLElement | null>(null)
     export function settle() { preview = false }
 </script>
 
-<span class="text chat-width chattext prose minw-0">
-    <ChatBody character={null} msgDisplay={source} role="char" translated={false}
+<span class="text chat-width chattext prose minw-0" bind:this={bodyRoot}>
+    <ChatBody {bodyRoot} character={null} msgDisplay={source} role="char" translated={false}
         translating={false} retranslate={false} modelShortName=""
         rawStreamingText={source} renderRawStreaming={preview}
         thoughtPreview={preview ? getStreamingThoughtPreview(source) : null}

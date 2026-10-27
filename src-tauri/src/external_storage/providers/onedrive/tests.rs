@@ -1427,6 +1427,63 @@ fn head_preconditions_use_create_if_absent_and_an_exact_version() {
 }
 
 #[test]
+fn a_descriptor_replacement_puts_its_content_without_a_precondition_and_refuses_any_other() {
+    runtime().block_on(async {
+        let mut replies = existing_open();
+        replies.push(json(200, &file_item("root.rnd", 19, "etag-d2")));
+        let server = WireServer::start(replies);
+        let harness = harness(NOW_MS);
+        let provider = create(harness.dependencies.clone()).unwrap();
+        let cancel = Cancellation::default();
+        let (repository, _) = open(
+            &provider,
+            &config_for(&server, "personal"),
+            OpenMode::Existing,
+            &cancel,
+        )
+        .await
+        .unwrap();
+        let bytes = HeadBytes::new(b"switched-descriptor".to_vec()).unwrap();
+        let descriptor = |object: &str| RemoteLocator {
+            collection: Some("descriptors".to_owned()),
+            ..locator_for(&repository, object)
+        };
+        for refused in [
+            provider.head_locator(&repository).unwrap(),
+            locator_for(&repository, "descriptors/root.rnd"),
+            descriptor("descriptors/"),
+            descriptor("descriptors/nested/root.rnd"),
+            descriptor("snapshots/snapshot-1"),
+        ] {
+            let outcome = provider.replace_descriptor(&repository, &refused, &bytes, &cancel).await;
+            assert_eq!(failed(outcome).kind, ErrorKind::Corrupt, "{}", refused.object);
+        }
+        assert_eq!(server.requests.lock().unwrap().len(), 2);
+
+        let receipt = provider
+            .replace_descriptor(&repository, &descriptor("descriptors/root.rnd"), &bytes, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(
+            receipt,
+            HeadReceipt {
+                version: Some(VersionToken("etag-d2".to_owned())),
+                complete: true,
+            }
+        );
+        let records = server.requests.lock().unwrap();
+        assert_eq!(records.len(), 3);
+        // The line carries no `conflictBehavior=fail` query.
+        assert_eq!(
+            line(&records[2]),
+            format!("PUT /synthetic/drives/drive-1/items/{ROOT_ITEM}:/descriptors/root.rnd:/content HTTP/1.1")
+        );
+        assert!(!head(&records[2]).contains("if-match"));
+        assert_eq!(records[2].body, b"switched-descriptor");
+    });
+}
+
+#[test]
 fn listing_pages_with_a_skip_token_and_bounds_the_limit() {
     runtime().block_on(async {
         let endpoint = "https://graph.microsoft.com/v1.0";

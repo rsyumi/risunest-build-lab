@@ -266,6 +266,7 @@ export function nativeOfficialAccountFlowModule() {
 export function nativeOfficialPublicationJobModule() {
     return {
         createNativeOfficialPublicationJobPublisher: vi.fn(() => stub<ReturnType<typeof import('./storage/sync/nativeOfficialPublicationJob')['createNativeOfficialPublicationJobPublisher']>>({})),
+        createNativeOfficialAssetPublisher: vi.fn(() => stub<ReturnType<typeof import('./storage/sync/nativeOfficialPublicationJob')['createNativeOfficialAssetPublisher']>>({})),
     } satisfies Partial<typeof import('./storage/sync/nativeOfficialPublicationJob')>
 }
 

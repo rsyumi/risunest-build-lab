@@ -674,3 +674,10 @@ let legacyMeasurement: Record<string, unknown> = { phase: 'idle' };
     }
   },
 };
+
+
+import { androidPublicationProbe } from './android-publication-probe';
+(globalThis as typeof globalThis & { __androidPublicationProbe?: ReturnType<typeof androidPublicationProbe> }).__androidPublicationProbe = androidPublicationProbe({
+  ready: () => entryCompletion,
+  runtime: syntheticRuntime,
+});

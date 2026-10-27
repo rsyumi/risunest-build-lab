@@ -218,6 +218,57 @@ pub enum PluginValue {
     Object(ObjectReference),
     #[serde(rename = "objects")]
     Objects(Vec<ObjectReference>),
+    /// A JSON-space value in structure form: its text and the byte parts the
+    /// text names, in order.
+    #[serde(rename = "structured")]
+    Structured(StructuredPluginValue),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StructuredPluginValue {
+    pub text: StructureText,
+    pub parts: Vec<ObjectReference>,
+}
+
+/// Structure text rides inline while it is small, then as one object, then as
+/// ordered parts, like string-space text.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum StructureText {
+    #[serde(rename = "value")]
+    Inline(String),
+    #[serde(rename = "object")]
+    Object(ObjectReference),
+    #[serde(rename = "objects")]
+    Objects(Vec<ObjectReference>),
+}
+
+impl StructureText {
+    pub fn references(&self) -> &[ObjectReference] {
+        match self {
+            Self::Inline(_) => &[],
+            Self::Object(reference) => std::slice::from_ref(reference),
+            Self::Objects(references) => references,
+        }
+    }
+}
+
+impl StructuredPluginValue {
+    fn validate(&self) -> Result<()> {
+        // Inline text is never larger than the limit, and an object never smaller.
+        let mut total = match &self.text {
+            StructureText::Inline(text) if text.len() <= MAX_INLINE_VALUE_BYTES => text.len() as u64,
+            StructureText::Object(reference) if reference.byte_length > MAX_INLINE_VALUE_BYTES as u64 => 0,
+            StructureText::Objects(references) if references.len() >= 2 => 0,
+            _ => return Err(FormatError("invalid-section-value")),
+        };
+        for reference in self.text.references().iter().chain(&self.parts) {
+            reference.validate()?;
+            total = total.checked_add(reference.byte_length).ok_or(FormatError("invalid-section-value"))?;
+        }
+        if total > MAX_PLUGIN_VALUE_BYTES { return Err(FormatError("invalid-section-value")); }
+        Ok(())
+    }
 }
 
 impl From<ValueOrObject> for PluginValue {
@@ -244,6 +295,7 @@ impl PluginValue {
                 if total > MAX_PLUGIN_VALUE_BYTES { return Err(FormatError("invalid-section-value")); }
                 Ok(())
             }
+            Self::Structured(value) => value.validate(),
         }
     }
 }
@@ -301,11 +353,15 @@ impl SectionValue {
             _ => None,
         }
     }
-    pub fn object_references(&self) -> &[ObjectReference] {
-        match self {
-            Self::LocalPlugin(LocalPluginValue { value: PluginValue::Objects(references), .. }) => references,
-            _ => self.object_reference().map(std::slice::from_ref).unwrap_or_default(),
-        }
+    /// Every object this value names. A structured value lists its text before
+    /// its parts.
+    pub fn object_references(&self) -> impl Iterator<Item = &ObjectReference> + '_ {
+        let (text, parts): (&[ObjectReference], &[ObjectReference]) = match self {
+            Self::LocalPlugin(LocalPluginValue { value: PluginValue::Objects(references), .. }) => (references, &[]),
+            Self::LocalPlugin(LocalPluginValue { value: PluginValue::Structured(value), .. }) => (value.text.references(), &value.parts),
+            _ => (self.object_reference().map(std::slice::from_ref).unwrap_or_default(), &[]),
+        };
+        text.iter().chain(parts)
     }
 }
 
@@ -401,8 +457,13 @@ impl SectionEntry {
                     return Err(FormatError("section-plugin-space-mismatch"));
                 }
                 value.value.validate()?;
+                // Structure form exists only in the JSON space.
                 if matches!(value.space, PluginSpace::String)
-                    && matches!(&value.value, PluginValue::Inline(inline) if !inline.is_string())
+                    && match &value.value {
+                        PluginValue::Inline(inline) => !inline.is_string(),
+                        PluginValue::Structured(_) => true,
+                        PluginValue::Object(_) | PluginValue::Objects(_) => false,
+                    }
                 {
                     return Err(FormatError("invalid-section-value"));
                 }
@@ -452,6 +513,51 @@ impl SectionEntry {
         }
         Ok(entry)
     }
+    /// `decode`, except that a local plugin entry whose value has a form this
+    /// build does not know comes back as [`UnknownPluginEntry`].
+    pub fn decode_known(bytes: &[u8]) -> Result<std::result::Result<Self, UnknownPluginEntry>> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Envelope {
+            codec: String,
+            kind: SectionKind,
+            key: String,
+            value: EnvelopeValue,
+            version: Option<SectionEntryVersion>,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        enum EnvelopeValue {
+            #[serde(rename = "localPlugin")]
+            LocalPlugin(serde_json::Map<String, serde_json::Value>),
+        }
+        let error = match Self::decode(bytes) {
+            Ok(entry) => return Ok(Ok(entry)),
+            Err(error) => error,
+        };
+        if bytes.is_empty() || bytes.len() > MAX_SECTION_ENTRY_BYTES { return Err(error); }
+        let Ok(Envelope { codec, kind, key, value: EnvelopeValue::LocalPlugin(value), version }) = serde_json::from_slice(bytes) else {
+            return Err(error);
+        };
+        let (_, space, _) = decode_local_plugin_entry_key(&key).map_err(|_| error)?;
+        let unknown = value.len() == 2
+            && value.get("space").and_then(serde_json::Value::as_str) == Some(space.as_str())
+            && value.keys().all(|name| name == "space" || !["value", "object", "objects", "structured"].contains(&name.as_str()));
+        if codec != SECTION_CODEC || kind != SectionKind::LocalPlugins || !unknown
+            || version.as_ref().is_some_and(|version| version.writer_id.is_empty() || version.writer_id.len() > 1024)
+        {
+            return Err(error);
+        }
+        Ok(Err(UnknownPluginEntry { key, version }))
+    }
+}
+
+/// A local plugin entry in a value form that a later build writes. Readers
+/// skip it instead of failing the section.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnknownPluginEntry {
+    pub key: String,
+    pub version: Option<SectionEntryVersion>,
 }
 
 #[cfg(test)]
@@ -550,10 +656,31 @@ mod tests {
             local_plugin_entry_key("owner", "string", "parts").unwrap(),
             SectionValue::LocalPlugin(LocalPluginValue { space: PluginSpace::String, value: PluginValue::Objects(parts.clone()) }), None).unwrap();
         assert_eq!(SectionEntry::decode(&multipart.encode().unwrap()).unwrap(), multipart);
-        assert_eq!(multipart.value.object_references(), parts.as_slice());
+        assert!(multipart.value.object_references().eq(&parts));
         for invalid_parts in [vec![], vec![parts[0].clone()], vec![ObjectReference { content_sha256: [1;32], byte_length: MAX_SECTION_OBJECT_BYTES as u64 + 1 }; 2]] {
             assert!(SectionEntry::new(SectionKind::LocalPlugins, multipart.key.clone(),
                 SectionValue::LocalPlugin(LocalPluginValue { space: PluginSpace::String, value: PluginValue::Objects(invalid_parts) }), None).is_err());
+        }
+        let part = ObjectReference { content_sha256: [7; 32], byte_length: MAX_SECTION_OBJECT_BYTES as u64 };
+        let text = ObjectReference { content_sha256: [8; 32], byte_length: MAX_INLINE_VALUE_BYTES as u64 + 1 };
+        let structured = |space: PluginSpace, text: StructureText, parts: Vec<ObjectReference>| SectionEntry::new(SectionKind::LocalPlugins,
+            local_plugin_entry_key("owner", if matches!(space, PluginSpace::Json) { "json" } else { "string" }, "structured").unwrap(),
+            SectionValue::LocalPlugin(LocalPluginValue { space, value: PluginValue::Structured(StructuredPluginValue { text, parts }) }), None);
+        let entry = structured(PluginSpace::Json, StructureText::Object(text.clone()), vec![part.clone(), part.clone()]).unwrap();
+        let encoded = entry.encode().unwrap();
+        assert_eq!(SectionEntry::decode(&encoded).unwrap(), entry);
+        assert!(std::str::from_utf8(&encoded).unwrap().contains(r#""localPlugin":{"space":"json","structured":{"text":{"object":"#));
+        assert!(entry.value.object_references().eq([&text, &part, &part]));
+        structured(PluginSpace::Json, StructureText::Inline("#risunest-structured:1\n{}".into()), vec![]).unwrap();
+        for (space, text, parts) in [
+            (PluginSpace::String, StructureText::Inline("text".into()), vec![]),
+            (PluginSpace::Json, StructureText::Inline("x".repeat(MAX_INLINE_VALUE_BYTES + 1)), vec![]),
+            (PluginSpace::Json, StructureText::Object(ObjectReference { byte_length: 1, ..text.clone() }), vec![]),
+            (PluginSpace::Json, StructureText::Objects(vec![text.clone()]), vec![]),
+            (PluginSpace::Json, StructureText::Object(text.clone()), vec![ObjectReference { byte_length: 0, ..part.clone() }]),
+            (PluginSpace::Json, StructureText::Object(text.clone()), vec![part.clone(); 64]),
+        ] {
+            assert!(structured(space, text, parts).is_err());
         }
         // An empty section is a real, publishable state. It differs from a
         // section that was never published, which carries no reference at all.
@@ -694,6 +821,24 @@ mod tests {
             "extra": 1,
         });
         assert!(SectionEntry::decode(&serde_json::to_vec(&smuggled).unwrap()).is_err());
+        assert!(SectionEntry::decode_known(&serde_json::to_vec(&smuggled).unwrap()).is_err());
+        // A plugin value form from a later build is skipped, never guessed at;
+        // a malformed known form is still an error.
+        let key = local_plugin_entry_key("owner", "json", "later").unwrap();
+        let plugin = |value: serde_json::Value| serde_json::to_vec(&serde_json::json!({
+            "codec": SECTION_CODEC, "kind": "local-plugins", "key": key, "value": { "localPlugin": value }, "version": null,
+        })).unwrap();
+        assert_eq!(SectionEntry::decode_known(&plugin(serde_json::json!({ "space": "json", "later": [1] }))).unwrap(),
+            Err(UnknownPluginEntry { key: key.clone(), version: None }));
+        assert!(matches!(SectionEntry::decode_known(&plugin(serde_json::json!({ "space": "json", "value": 1 }))).unwrap(), Ok(_)));
+        for invalid in [
+            serde_json::json!({ "space": "json", "structured": 1 }),
+            serde_json::json!({ "space": "string", "later": 1 }),
+            serde_json::json!({ "space": "json", "later": 1, "other": 1 }),
+            serde_json::json!({ "later": 1 }),
+        ] {
+            assert!(SectionEntry::decode_known(&plugin(invalid.clone())).is_err(), "{invalid}");
+        }
     }
 
     /// A removal always names the commit it first reached a remote in. A

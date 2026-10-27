@@ -259,6 +259,7 @@ export async function reconcileNativeFileJobsBeforeBootstrap(
             case 'prepare-content-import':
             case 'import-jpeg-asset':
             case 'restore-official-account-assets':
+            case 'publish-official-account-assets':
                 await discardContentJob(job, dependencies)
                 break
             case 'official-publication-upload':

@@ -8,7 +8,11 @@ import type {
 } from '../accountStorage'
 import {
     continueNativeOfficialPublication,
+    runNativeOfficialAssetPublication,
+    type NativeFileJobDependencies,
     type NativeFileJobOptions,
+    type NativeFileJobStatus,
+    type NativeOfficialAssetPublicationResult,
     type NativeOfficialPublicationAttemptResult,
     type NativeOfficialPublicationReceipt,
     type NativeOfficialPublicationRequest,
@@ -19,7 +23,11 @@ import {
     type NativePersistentRevisionLease,
 } from '../nativePersistentExport'
 import { createLeaseStub } from '../persistentDataStore.testSupport'
-import { createNativeOfficialPublicationJobPublisher } from './nativeOfficialPublicationJob'
+import {
+    createNativeOfficialAssetPublisher,
+    createNativeOfficialPublicationJobPublisher,
+    type NativeOfficialAssetPublisherDependencies,
+} from './nativeOfficialPublicationJob'
 
 function pinnedLease(): NativePersistentRevisionLease {
     return createLeaseStub({ revision: 7 }, { [nativePersistentRevisionLease]: 'snapshot-publication-1' })
@@ -565,4 +573,122 @@ it('holds a user-started publication immediately and a save-driven one only once
         deferredHold.mockRestore()
         immediateHold.mockRestore()
     }
+})
+
+describe('native official asset publisher', () => {
+    const assets = [
+        { key: 'assets/a.png', localKey: 'assets/a.png' },
+        { key: 'assets\\b.png', localKey: 'assets/b.png' },
+    ]
+    const published = (outcome: Partial<NativeOfficialAssetPublicationResult>): NativeOfficialAssetPublicationResult => ({
+        cancelled: false, failed: 0, session: 'session-2', warning: null, reloadSession: false, unwritten: [], ...outcome,
+    })
+
+    /** A job that settles the first entry on its first poll and the rest when it ends. */
+    function nativeJob(settled: { index: number; replacementKey: string | null }[]) {
+        let polls = 0
+        const invoke = vi.fn(async (command: string, args: Record<string, unknown> = {}) => {
+            switch (command) {
+                case 'native_file_job_start': return { jobId: 'asset-publication-1' }
+                case 'native_file_job_status': {
+                    polls += 1
+                    return {
+                        jobId: 'asset-publication-1', kind: 'publish-official-account-assets',
+                        state: polls < 2 ? 'running' : 'succeeded', phase: polls < 2 ? 'writing-export' : 'complete',
+                        progress: { completedBytes: 0, completedItems: 0 },
+                        officialAssetPublication: {
+                            written: polls < 2 ? 1 : 2, failed: 0, bytes: 0, active: 0, limit: 2,
+                            session: 'session-2', reloadSession: true,
+                        },
+                    } satisfies NativeFileJobStatus
+                }
+                case 'native_official_asset_publication_settled': {
+                    const visible = settled.slice(0, polls < 2 ? 1 : settled.length)
+                    const offset = args.offset as number
+                    return { entries: visible.slice(offset, offset + (args.limit as number)), total: visible.length }
+                }
+                case 'native_file_job_forget': return true
+            }
+            throw new Error(`Unexpected command: ${command}`)
+        })
+        const dependencies = { isTauri: () => true, invoke, wait: async () => {} } satisfies NativeFileJobDependencies
+        const run: NativeOfficialAssetPublisherDependencies['run'] = (request, options) =>
+            runNativeOfficialAssetPublication(request, options, dependencies)
+        return { invoke, run }
+    }
+
+    it('streams settled replacement keys from the native job and releases it', async () => {
+        const { invoke, run } = nativeJob([
+            { index: 1, replacementKey: 'assets/b-remote.png' }, { index: 0, replacementKey: 'assets/a.png' },
+        ])
+        const harness = accountHarness()
+        const written = vi.fn()
+        const guard = vi.fn(async () => {})
+        const publish = createNativeOfficialAssetPublisher({ ...harness, baseUrl: 'https://hub.invalid', run })
+
+        await expect(publish({ accountId: 'account-1', lease: pinnedLease(), assets, guard, written })).resolves.toBe(true)
+
+        expect(invoke).toHaveBeenCalledWith('native_file_job_start', { request: {
+            kind: 'publish-official-account-assets',
+            baseUrl: 'https://hub.invalid',
+            credential: { kind: 'risu-auth', token: 'legacy-token' },
+            accountId: 'account-1',
+            lease: 'snapshot-publication-1',
+            session: 'session-1',
+            assets,
+        } })
+        expect(written.mock.calls).toEqual([['assets\\b.png', 'assets/b-remote.png'], ['assets/a.png', 'assets/a.png']])
+        expect(guard).toHaveBeenCalled()
+        expect(invoke).toHaveBeenLastCalledWith('native_file_job_forget', { jobId: 'asset-publication-1' })
+        expect(harness.completeReload).toHaveBeenCalledOnce()
+    })
+
+    it('fails the publication when the native job settles an asset without a replacement key', async () => {
+        const { run } = nativeJob([{ index: 0, replacementKey: 'assets/a.png' }, { index: 1, replacementKey: null }])
+        const written = vi.fn()
+        const publish = createNativeOfficialAssetPublisher({ ...accountHarness(), baseUrl: 'https://hub.invalid', run })
+
+        await expect(publish({ accountId: 'account-1', lease: pinnedLease(), assets, guard: async () => {}, written }))
+            .rejects.toThrow('did not complete')
+        expect(written.mock.calls).toEqual([['assets/a.png', 'assets/a.png']])
+    })
+
+    it('reauthenticates and continues with only the assets the first job left unwritten', async () => {
+        const harness = accountHarness()
+        const run = vi.fn<NonNullable<NativeOfficialAssetPublisherDependencies['run']>>()
+            .mockResolvedValueOnce(published({ reason: 'reauthentication-needed', warning: 'synthetic-warning', unwritten: [assets[1].key] }))
+            .mockResolvedValueOnce(published({}))
+        const publish = createNativeOfficialAssetPublisher({ ...harness, baseUrl: 'https://hub.invalid', run })
+
+        await expect(publish({ accountId: 'account-1', lease: pinnedLease(), assets, guard: async () => {}, written: () => {} }))
+            .resolves.toBe(true)
+
+        expect(run.mock.calls.map(([request]) => [request.credential.token, request.session, request.assets])).toEqual([
+            ['legacy-token', 'session-1', assets],
+            ['fresh-token', 'session-2', [assets[1]]],
+        ])
+        expect(harness.warnings).toEqual(['synthetic-warning'])
+    })
+
+    it('fails when an asset stays unwritten, on an authorization warning, and on cancellation', async () => {
+        const publishWith = (outcome: NativeOfficialAssetPublicationResult) => createNativeOfficialAssetPublisher({
+            ...accountHarness(), baseUrl: 'https://hub.invalid', run: async () => outcome,
+        })({ accountId: 'account-1', lease: pinnedLease(), assets, guard: async () => {}, written: () => {} })
+
+        await expect(publishWith(published({ failed: 1, unwritten: [assets[1].key] }))).rejects.toThrow('did not complete')
+        await expect(publishWith(published({ reason: 'service', unwritten: [assets[1].key] }))).rejects.toThrow('did not complete')
+        await expect(publishWith(published({ reason: 'auth-warning', unwritten: assets.map(asset => asset.key) })))
+            .rejects.toThrow('authorization warning')
+        await expect(publishWith(published({ cancelled: true, unwritten: [assets[1].key] }))).rejects.toMatchObject({ name: 'AbortError' })
+    })
+
+    it('leaves a non-native lease to the web path without starting a job', async () => {
+        const run = vi.fn<NonNullable<NativeOfficialAssetPublisherDependencies['run']>>()
+        const publish = createNativeOfficialAssetPublisher({ ...accountHarness(), baseUrl: 'https://hub.invalid', run })
+
+        await expect(publish({
+            accountId: 'account-1', lease: createLeaseStub({ revision: 7 }), assets, guard: async () => {}, written: () => {},
+        })).resolves.toBe(false)
+        expect(run).not.toHaveBeenCalled()
+    })
 })

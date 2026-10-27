@@ -17,6 +17,8 @@
     import { gallerySize } from 'src/ts/gallery/preferences'
     import { galleryBytes, type GalleryItem } from 'src/ts/gallery/types'
     import { downloadGallery, galleryArchiveDate } from 'src/ts/gallery/galleryDownloads'
+    import { nativeFileOperation } from 'src/ts/storage/nativeFileJobManager'
+    import { contentExportBusyMessage } from 'src/ts/storage/fileOperationErrorPresentation'
     import { readGalleryOrigin, jumpToGalleryLocation, type GalleryOrigin } from 'src/ts/gallery/inlayGalleryNavigation'
     import {
         readInlayGalleryPage, readInlayGalleryKeys, inlayGalleryIndex, missingGalleryKeys, galleryRevision,
@@ -62,6 +64,7 @@
     let optimizeProgress = $state(emptyInlayOptimizationProgress())
     let resultText = $state('')
     let downloadRunning = $state(false)
+    const waitingForSync = $derived(downloadRunning && $nativeFileOperation?.waitingForSync === true)
     let downloadArchive = $state(true)
     let downloadProgress = $state({ done: 0, total: 0 })
     let downloadResult = $state('')
@@ -79,7 +82,7 @@
     const shownOptimizationProgress = $derived(optimizing && optimization.running ? { ...optimizeProgress, scanned: optimizeProgress.scanned + optimization.progress.scanned } : optimizeProgress)
     const disabled = $derived(busy || optimizing || optimization.running)
 
-    function report(cause: unknown) { alertError(cause instanceof Error ? cause : String((cause as { message?: string })?.message ?? cause)) }
+    function report(cause: unknown) { alertError(contentExportBusyMessage(cause) ?? (cause instanceof Error ? cause : String((cause as { message?: string })?.message ?? cause))) }
     const paging = new InlayGalleryPaging(readInlayGalleryPage, (page, window) => {
         if (!mounted) return
         revision = page.revision
@@ -412,7 +415,7 @@
         </div>
         {#if scanRunning && scan}<SettingProgress label={text.scanTitle} detail={fmt(text.scanDetail, scan.completedConversations, scan.totalConversations)} fraction={scan.totalItems ? scan.completedItems / scan.totalItems : null}>{#snippet actions()}<button class="g-button" onclick={() => { void cancelGalleryScan().catch(report) }}>{text.cancel}</button>{/snippet}</SettingProgress>{/if}
         {#if optimizing}<SettingProgress label={text.optimize} detail={inlayOptimizationProgressMessage(shownOptimizationProgress)} fraction={shownOptimizationProgress.total ? shownOptimizationProgress.scanned / shownOptimizationProgress.total : null}>{#snippet actions()}<button class="g-button" onclick={() => { optimizeCancel = true; optimization.cancel() }}>{text.cancel}</button>{/snippet}</SettingProgress>{/if}
-        {#if downloadRunning}<SettingProgress label={downloadArchive ? text.zipTitle : text.download} detail={fmt(text.zipProgress, downloadProgress.done, downloadProgress.total)} fraction={downloadProgress.total ? downloadProgress.done / downloadProgress.total : null}>{#snippet actions()}<button class="g-button" onclick={() => downloadAbort?.abort()}>{text.cancel}</button>{/snippet}</SettingProgress>{/if}
+        {#if downloadRunning}<SettingProgress label={downloadArchive ? text.zipTitle : text.download} detail={waitingForSync ? language.risuNest.importDialog.waitingForSync : fmt(text.zipProgress, downloadProgress.done, downloadProgress.total)} fraction={!waitingForSync && downloadProgress.total ? downloadProgress.done / downloadProgress.total : null}>{#snippet actions()}<button class="g-button" onclick={() => downloadAbort?.abort()}>{text.cancel}</button>{/snippet}</SettingProgress>{/if}
     {#if !loading && !total}<p class="p-6 text-textcolor2">{query.type !== 'all' || query.usage !== 'all' || query.characterId ? text.emptyFiltered : text.empty}</p>{/if}
     <GalleryGrid bind:this={grid} {items} {total} size={$gallerySize} {selected} {selecting} onwindow={requestWindow} onopen={openViewer} ontoggle={toggle} />
     </div>

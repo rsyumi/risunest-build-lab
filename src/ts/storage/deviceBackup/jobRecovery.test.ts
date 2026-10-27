@@ -66,6 +66,7 @@ describe("portable export bootstrap recovery", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.alertSelect.mockReset();
     (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
     intent = {
       jobId: job.jobId,
@@ -92,6 +93,95 @@ describe("portable export bootstrap recovery", () => {
     mocks.publication.acknowledgeAndroid.mockResolvedValue(true);
   });
 
+  it.each([
+    ["succeeded", true],
+    ["failed", false],
+    ["cancelled", false],
+  ] as const)("discards an unrecorded %s export without starting publication", async (state, hasHandoff) => {
+    intent = null;
+    const terminal = { ...job, state, result: hasHandoff ? job.result : undefined };
+    let listed = true;
+    let handoffExists = hasHandoff;
+    mocks.invoke.mockImplementation(async (command: string, args?: { path?: string; jobId?: string }) => {
+      if (command === "native_file_job_list") return listed ? [terminal] : [];
+      if (command === "native_portable_handoff_cleanup") {
+        expect(args?.path).toBe(job.result.handoffPath);
+        expect(handoffExists).toBe(true);
+        handoffExists = false;
+        return;
+      }
+      if (command === "native_file_job_forget") {
+        expect(args?.jobId).toBe(job.jobId);
+        expect(handoffExists).toBe(false);
+        listed = false;
+        return;
+      }
+      throw new Error('Unexpected command: ' + command);
+    });
+    mocks.alertSelect.mockResolvedValueOnce("1");
+
+    await resumePortableExportsAfterBootstrap();
+
+    const text = language.portableBackup.recovery;
+    expect(mocks.alertSelect).toHaveBeenCalledExactlyOnceWith(
+      [text.review, text.discard, text.later], text.needsReview,
+    );
+    expect(listed).toBe(false);
+    expect(handoffExists).toBe(false);
+    expect(intent).toBeNull();
+    expect(mocks.store.write).not.toHaveBeenCalled();
+    expect(mocks.remember).not.toHaveBeenCalled();
+    expect(mocks.resume).not.toHaveBeenCalled();
+    expect(mocks.alertNormal).not.toHaveBeenCalled();
+    expect(mocks.publication.acknowledgeAndroid).not.toHaveBeenCalled();
+  });
+
+  it.each(["native_portable_handoff_cleanup", "native_file_job_forget"])(
+    "keeps an unrecorded export for retry when %s fails",
+    async (failingCommand) => {
+      intent = null;
+      let listed = true;
+      let handoffExists = true;
+      let failed = false;
+      mocks.invoke.mockImplementation(async (command: string) => {
+        if (command === "native_file_job_list") return listed ? [job] : [];
+        if (command === failingCommand && !failed) {
+          failed = true;
+          throw new Error("Synthetic cleanup failure");
+        }
+        if (command === "native_portable_handoff_cleanup") {
+          handoffExists = false;
+          return;
+        }
+        if (command === "native_file_job_forget") {
+          expect(handoffExists).toBe(false);
+          listed = false;
+          return;
+        }
+        throw new Error('Unexpected command: ' + command);
+      });
+      mocks.alertSelect.mockResolvedValueOnce("1").mockResolvedValueOnce("0");
+
+      await resumePortableExportsAfterBootstrap();
+
+      const text = language.portableBackup.recovery;
+      expect(listed).toBe(true);
+      expect(intent).toBeNull();
+      expect(mocks.alertSelect).toHaveBeenLastCalledWith([text.later], text.recoveryFailed);
+      mocks.alertSelect.mockResolvedValueOnce("1");
+
+      await resumePortableExportsAfterBootstrap();
+
+      expect(listed).toBe(false);
+      expect(handoffExists).toBe(false);
+      expect(mocks.alertSelect).toHaveBeenCalledTimes(3);
+      expect(mocks.store.write).not.toHaveBeenCalled();
+      expect(mocks.remember).not.toHaveBeenCalled();
+      expect(mocks.resume).not.toHaveBeenCalled();
+      expect(mocks.alertNormal).not.toHaveBeenCalled();
+    },
+  );
+
   it("allows deferring a running unrecorded job after one minute without cancellation", async () => {
     vi.useFakeTimers();
     try {
@@ -102,6 +192,7 @@ describe("portable export bootstrap recovery", () => {
       const pending = resumePortableExportsAfterBootstrap();
       await vi.advanceTimersByTimeAsync(60_100);
       await pending;
+      expect(mocks.alertSelect).toHaveBeenNthCalledWith(1, [language.portableBackup.recovery.review, language.portableBackup.recovery.later], language.portableBackup.recovery.needsReview);
       expect(mocks.alertSelect).toHaveBeenLastCalledWith([language.portableBackup.recovery.wait, language.portableBackup.recovery.later], language.portableBackup.recovery.stillRunning);
       expect(mocks.invoke.mock.calls.some(([command]) => command === "native_file_job_cancel" || command === "native_file_job_forget")).toBe(false);
       expect(mocks.remember).not.toHaveBeenCalled();

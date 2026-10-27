@@ -1,10 +1,16 @@
 use risunest_network_log::reqwest::RequestBuilderExt;
-use super::{restore, ImportCounts, JobControl, JobDetail, JobKind, JobPhase, JobProgress, JobResultSummary, JobStage, JobState, NativeJobError, OpenedJobSource, StageUnit};
+use super::official_assets::ColdSource;
+use super::{restore, ImportCounts, IncompleteRestorePreview, JobControl, JobDetail, JobKind, JobPhase, JobProgress, JobResultSummary, JobStage, JobState, NativeJobError, OpenedJobSource, StageUnit};
+use crate::persistent_store::commit::StagedPluginPreview;
+use crate::persistent_store::upstream_stream::RootSpool;
+use crate::persistent_store::{RevisionResult, StagingResult, StoreError, StoreResult};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use serde_json::Value;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 const DATABASE_KEY: &str = "database/database.bin";
@@ -54,19 +60,129 @@ pub(crate) fn restore_official_snapshot(
     };
     require_native_prepared_format(&mut source)?;
     let downloaded_bytes = source.total_bytes;
+    let limit = restore::RestoreLimits::default().max_decoded_block_bytes;
+    let sink = OfficialSink {
+        inner: sink,
+        cold: ColdSource::new(&request.base_url, &request.credential, owned_directory, job, limit)?,
+        incomplete: Mutex::default(),
+    };
     restore::restore_started_risu_save(
         source,
         expected_revision,
         job,
-        sink,
+        &sink,
         restore::RestoreProgressScale {
             base_bytes: downloaded_bytes,
             total_bytes: Some(downloaded_bytes * 2),
             spool_directory: Some(owned_directory.to_path_buf()),
-            reject_cold_references: true,
+            cold_payloads: Some(sink.cold.items_read()),
             ..Default::default()
         },
     )
+    // A cold item read that ended staging reports why, not the staging error it caused.
+    .map_err(|error| sink.cold.fatal().unwrap_or(error))
+}
+
+/// Stages into the library like any restore, and reads the snapshot's cold
+/// references from the account while their records are staged.
+struct OfficialSink<'a> {
+    inner: &'a dyn restore::ReplacementSink,
+    cold: ColdSource<'a>,
+    incomplete: Mutex<IncompleteRestorePreview>,
+}
+
+impl restore::ReplacementSink for OfficialSink<'_> {
+    fn prepare_activation_receipt(&self, staging_id: &str, job: &JobControl, result: &JobResultSummary) -> StoreResult<Option<String>> {
+        self.inner.prepare_activation_receipt(staging_id, job, result)
+    }
+
+    fn activation_receipt(&self, staging_id: &str, authority: &str) -> StoreResult<Option<i64>> {
+        self.inner.activation_receipt(staging_id, authority)
+    }
+
+    fn begin(&self) -> StoreResult<StagingResult> {
+        self.inner.begin()
+    }
+
+    fn put_root(&self, staging_id: &str, root: &Value) -> StoreResult<()> {
+        self.inner.put_root(staging_id, root)
+    }
+
+    fn put_presets(&self, staging_id: &str, presets: &[Value]) -> StoreResult<()> {
+        self.inner.put_presets(staging_id, presets)
+    }
+
+    fn put_legacy_root(&self, staging_id: &str, root: &RootSpool) -> StoreResult<()> {
+        self.inner.put_legacy_root(staging_id, root)
+    }
+
+    fn add_characters(&self, staging_id: &str, characters: &[Value]) -> StoreResult<()> {
+        self.inner.add_characters(staging_id, characters)
+    }
+
+    fn prepare_character(&self, character: Value) -> StoreResult<Value> {
+        self.inner.prepare_character(character)
+    }
+
+    fn supports_incremental_characters(&self) -> bool {
+        self.inner.supports_incremental_characters()
+    }
+
+    fn expands_cold_payloads(&self) -> bool {
+        true
+    }
+
+    fn cold_payload_path(&self, key: &str) -> StoreResult<Option<PathBuf>> {
+        self.cold.lookup(key).map_err(|error| StoreError::Store { message: error.message })
+    }
+
+    fn unavailable_cold_payload_reason(&self, key: &str) -> Option<restore::ColdPayloadUnavailable> {
+        self.cold.unavailable(key)
+    }
+
+    fn unavailable_cold_payload(&self, key: &str, character_name: &str) -> StoreResult<()> {
+        let mut preview = self.incomplete.lock().map_err(|error| StoreError::Store { message: error.to_string() })?;
+        preview.unavailable_cold_keys.push(key.to_owned());
+        if !character_name.is_empty() { preview.character_names.push(character_name.to_owned()); }
+        Ok(())
+    }
+
+    fn put_character_detail(&self, staging_id: &str, detail: &Value, conversation_count: i64) -> StoreResult<()> {
+        self.inner.put_character_detail(staging_id, detail, conversation_count)
+    }
+
+    fn put_conversation_row(&self, staging_id: &str, character_id: &str, configured_index: i64, detail: &Value, recent_at: i64, message_count: i64) -> StoreResult<()> {
+        self.inner.put_conversation_row(staging_id, character_id, configured_index, detail, recent_at, message_count)
+    }
+
+    fn add_conversation_messages(&self, staging_id: &str, character_id: &str, conversation_id: &str, start: i64, messages: &[Value]) -> StoreResult<()> {
+        self.inner.add_conversation_messages(staging_id, character_id, conversation_id, start, messages)
+    }
+
+    fn preserve_active_repositories(&self, staging_id: &str, expected_revision: i64) -> StoreResult<()> {
+        self.inner.preserve_active_repositories(staging_id, expected_revision)
+    }
+
+    fn staged_plugin_preview(&self, staging_id: &str) -> StoreResult<StagedPluginPreview> {
+        self.inner.staged_plugin_preview(staging_id)
+    }
+
+    fn incomplete_restore_preview(&self) -> StoreResult<IncompleteRestorePreview> {
+        let mut preview = self.incomplete.lock().map_err(|error| StoreError::Store { message: error.to_string() })?.clone();
+        preview.unavailable_cold_keys.sort();
+        preview.unavailable_cold_keys.dedup();
+        preview.character_names.sort();
+        preview.character_names.dedup();
+        Ok(preview)
+    }
+
+    fn commit(&self, staging_id: &str, expected_revision: i64) -> StoreResult<RevisionResult> {
+        self.inner.commit(staging_id, expected_revision)
+    }
+
+    fn abort(&self, staging_id: &str) -> StoreResult<()> {
+        self.inner.abort(staging_id)
+    }
 }
 
 fn require_native_prepared_format(source: &mut OpenedJobSource) -> Result<(), NativeJobError> {
@@ -1054,6 +1170,146 @@ mod tests {
         assert_eq!(error.code, "reauthentication-needed");
         assert!(!directory.path().join(SNAPSHOT_FILE).exists());
         server.join().unwrap();
+    }
+
+    /// Answers each request on its own connection, by path and `x-risu-key`,
+    /// and keeps every request head it saw.
+    fn account_server(respond: impl Fn(&str, &str) -> Vec<u8> + Send + 'static) -> (String, std::sync::Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while !request.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap() == 1 {
+                    request.push(byte[0]);
+                }
+                let head = String::from_utf8_lossy(&request).into_owned();
+                let path = head.split(' ').nth(1).unwrap_or_default().to_owned();
+                let key = head.lines()
+                    .find_map(|line| line.split_once(':').filter(|(name, _)| name.eq_ignore_ascii_case("x-risu-key")))
+                    .map_or("", |(_, value)| value.trim()).to_owned();
+                seen.lock().unwrap().push(head);
+                let _ = stream.write_all(&respond(&path, &key));
+                let _ = stream.shutdown(Shutdown::Write);
+            }
+        });
+        (format!("http://{address}"), requests)
+    }
+
+    fn response(status: &str, headers: &str, body: &[u8]) -> Vec<u8> {
+        let mut bytes = format!("HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+        bytes.extend_from_slice(body);
+        bytes
+    }
+
+    /// The account compresses cold items with gzip, zlib or raw deflate.
+    fn cold_item(value: &Value, format: &str) -> Vec<u8> {
+        use flate2::{write::{DeflateEncoder, GzEncoder, ZlibEncoder}, Compression};
+        let json = serde_json::to_vec(value).unwrap();
+        match format {
+            "gzip" => { let mut encoder = GzEncoder::new(Vec::new(), Compression::default()); encoder.write_all(&json).unwrap(); encoder.finish().unwrap() }
+            "zlib" => { let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default()); encoder.write_all(&json).unwrap(); encoder.finish().unwrap() }
+            _ => { let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default()); encoder.write_all(&json).unwrap(); encoder.finish().unwrap() }
+        }
+    }
+
+    struct AccountRestore {
+        _directory: TempDir,
+        sink: restore::tests::StoreSink,
+        job: std::sync::Arc<JobControl>,
+        outcome: Result<JobResultSummary, NativeJobError>,
+        cold_reads: Vec<String>,
+    }
+
+    /// Restores `blocks` as the account snapshot while `cold` answers each cold
+    /// item read by its key.
+    fn restore_from_account(blocks: Vec<Vec<u8>>, cold: impl Fn(&str) -> Vec<u8> + Send + 'static) -> AccountRestore {
+        let snapshot = restore::tests::save_bytes(blocks);
+        let (base_url, requests) = account_server(move |path, key| {
+            if path == "/hub/account/coldstorage" { cold(key) } else { response("200 OK", "", &snapshot) }
+        });
+        let (directory, sink) = restore::tests::fixture();
+        let owned = TempDir::new().unwrap();
+        let job = JobRegistry::default().create(JobKind::RestoreOfficialAccountSnapshot).unwrap();
+        let outcome = restore_official_snapshot(request(base_url), 1, owned.path(), &job, &sink);
+        let cold_reads = requests.lock().unwrap().iter().filter(|head| head.contains(" /hub/account/coldstorage ")).cloned().collect();
+        AccountRestore { _directory: directory, sink, job, outcome, cold_reads }
+    }
+
+    #[test]
+    fn snapshot_restore_reads_cold_items_from_the_account() {
+        let mut blocks = restore::tests::valid_blocks();
+        blocks[5] = restore::tests::block(11, false, "pluginStorage", &serde_json::json!({
+            "_coldplugin": {"nullValue": "cold-null", "gone": "cold-gone", "flaky": "cold-flaky"}
+        }));
+        blocks[6] = restore::tests::block(2, true, "char-1", &serde_json::json!({
+            "chaId": "char-1", "name": "Stub", "chats": [], "coldstorage": "cold-character"
+        }));
+        let messages = serde_json::json!([{"role": "char", "data": "restored", "chatId": "message-1"}]);
+        let character = serde_json::json!({"character": {"chaId": "char-1", "name": "Expanded", "chats": [
+            {"id": "chat-1", "name": "Present", "message": [{"role": "char", "data": "\u{ef01}COLDSTORAGE\u{ef01}cold-chat"}]},
+            {"id": "chat-2", "name": "Missing", "message": [{"role": "char", "data": "\u{ef01}COLDSTORAGE\u{ef01}cold-missing"}]}
+        ]}});
+        let chat = serde_json::json!({"message": messages});
+        let block_count = blocks.len() as u64;
+        let restore = restore_from_account(blocks, move |key| match key {
+            "cold-character" => response("200 OK", "", &cold_item(&character, "gzip")),
+            "cold-chat" => response("200 OK", "", &cold_item(&chat, "zlib")),
+            "cold-null" => response("200 OK", "", &cold_item(&Value::Null, "deflate")),
+            "cold-flaky" => response("503 Service Unavailable", "Retry-After: 0\r\n", b""),
+            _ => response("404 Not Found", "", b""),
+        });
+
+        let result = restore.outcome.unwrap();
+        assert_eq!(result.warning_codes, ["unavailable-cold-payloads:1", "missing-backup-data:1", "damaged-plugin-storage:1"]);
+        // Each item read counts with the blocks: the character and chat while the
+        // blocks are read, and the plugin value once `staging-database` has begun.
+        assert_eq!(restore.job.status().progress.completed_items, block_count + 3);
+        let preview = restore.job.status().incomplete_restore_preview.unwrap();
+        assert_eq!(preview.unavailable_cold_keys, ["cold-missing"]);
+        assert_eq!(preview.character_names, ["Expanded"]);
+        let store = restore.sink.store.lock().unwrap();
+        let restored = store.materialize(None).unwrap();
+        assert_eq!(restored["characters"][0]["name"], "Expanded");
+        assert_eq!(restored["characters"][0]["chats"][0]["message"], messages);
+        assert_eq!(restored["characters"][0]["chats"][1]["message"], serde_json::json!([]));
+        let unowned = |key| store.read_plugin_storage(crate::persistent_store::plugin_owner::UNOWNED_OWNER, key, None).unwrap().map(|row| row.value);
+        // An item that holds JSON null is a stored null, not a missing item.
+        assert_eq!(unowned("nullValue"), Some(Value::Null));
+        assert_eq!(unowned("gone"), None);
+        assert_eq!(unowned("flaky"), None);
+        assert!(restore.cold_reads.iter().all(|head| head.contains("x-risu-auth: test-token\r\n")));
+        // Each item is read once, and a failing one only within its retry budget.
+        let reads = |key: &str| restore.cold_reads.iter().filter(|head| head.contains(&format!("x-risu-key: {key}\r\n"))).count();
+        for key in ["cold-character", "cold-chat", "cold-missing", "cold-null", "cold-gone"] {
+            assert_eq!(reads(key), 1, "{key}");
+        }
+        assert_eq!(reads("cold-flaky"), 3);
+    }
+
+    #[test]
+    fn snapshot_restore_stops_before_activation_when_the_account_stops_cold_reads() {
+        let storage = (0..5).map(|index| (format!("value-{index}"), Value::String(format!("cold-{index}")))).collect::<serde_json::Map<_, _>>();
+        for (status, code, reads) in [
+            ("401 Unauthorized", "reauthentication-needed", 1),
+            ("403 Forbidden", "reauthentication-needed", 1),
+            // Five items in a row that exhaust their retries mean the service is down.
+            ("503 Service Unavailable", "network-error", 15),
+        ] {
+            let mut blocks = restore::tests::valid_blocks();
+            blocks[5] = restore::tests::block(11, false, "pluginStorage", &serde_json::json!({"_coldplugin": storage}));
+            let restore = restore_from_account(blocks, move |_| response(status, "Retry-After: 0\r\n", b""));
+
+            let error = restore.outcome.unwrap_err();
+            assert_eq!(error.code, code, "{status}");
+            assert_eq!(restore.cold_reads.len(), reads, "{status}");
+            assert_eq!(restore.sink.abort_calls.load(std::sync::atomic::Ordering::Acquire), 1);
+            assert_eq!(restore.sink.store.lock().unwrap().revision().unwrap(), 1);
+        }
     }
 
     #[test]

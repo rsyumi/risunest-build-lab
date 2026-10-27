@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
+import { authorNoteFingerprint } from './authorNotePresets'
 import { get } from 'svelte/store'
 
 const mocks = vi.hoisted(() => ({
@@ -1492,10 +1493,14 @@ describe('chat list operations', () => {
         const character = buildCharacter()
         character.chats[0].message = []
         mocks.database.characters.push(character)
+        Object.assign(mocks.database, { authorNotePresets: [{ id: 'preset', name: 'Preset', text: 'Shared note' }] })
+        onTestFinished(() => { Reflect.deleteProperty(mocks.database, 'authorNotePresets') })
         selectedCharID.set(0)
         mocks.readPersistentConversation.mockResolvedValue({
             ...character.chats[0],
             message: [{ role: 'user', data: 'authoritative body' }],
+            note: 'stale copy',
+            authorNotePreset: { id: 'preset', fingerprint: authorNoteFingerprint('stale copy') },
         })
 
         await exportChat(0)
@@ -1509,6 +1514,8 @@ describe('chat list operations', () => {
         expect(exported.data.message).toEqual([
             { role: 'user', data: 'authoritative body' },
         ])
+        expect(exported.data.note).toBe('Shared note')
+        expect(exported.data).not.toHaveProperty('authorNotePreset')
     })
 
     it('filters markup added by translation from an HTML export and shows names as text', async () => {
@@ -1576,6 +1583,9 @@ describe('chat list operations', () => {
         resident.chats[0].message = []
         const complete = structuredClone(resident)
         complete.chats[0].message = [{ role: 'user', data: 'authoritative body' }]
+        Object.assign(complete.chats[0], { note: 'stale copy', authorNotePreset: { id: 'preset', fingerprint: authorNoteFingerprint('stale copy') } })
+        Object.assign(mocks.database, { authorNotePresets: [{ id: 'preset', name: 'Preset', text: 'Shared note' }] })
+        onTestFinished(() => { Reflect.deleteProperty(mocks.database, 'authorNotePresets') })
         mocks.database.characters.push(resident)
         selectedCharID.set(0)
         mocks.readPersistentCompleteCharacter.mockResolvedValue(complete)
@@ -1590,5 +1600,7 @@ describe('chat list operations', () => {
         expect(exported.data[0].message).toEqual([
             { role: 'user', data: 'authoritative body' },
         ])
+        expect(exported.data[0].note).toBe('Shared note')
+        expect(exported.data[0]).not.toHaveProperty('authorNotePreset')
     })
 })

@@ -19,6 +19,11 @@ export const hostManifests = [
   'server/manager/gui/src-tauri/Cargo.toml',
 ]
 
+export const harnessManifests = [
+  'crates/cbs-experimental/Cargo.toml',
+  'benchmarks/rust-cbs/native/Cargo.toml',
+]
+
 export const packageCrateTests = [
   {
     manifest: 'crates/tauri-plugin-window-state/Cargo.toml',
@@ -93,7 +98,9 @@ export function nativeCommands(group, platform = process.platform) {
   if (group === 'harness') {
     // The Sync server's source observer serves the LWW benchmark and compiles only into test builds
     // with this feature. Its copy of small-object-store repeats that crate's own tests, so they are skipped.
-    return [[
+    return [...harnessManifests.map(manifest => [
+      'cargo', 'test', '--manifest-path', manifest, '--release', '--locked',
+    ]), [
       'cargo', 'test', '--manifest-path', 'server/sync/Cargo.toml', '--release', '--locked', '--lib',
       '--features', 'source-observer', '--', '--skip', 'source_observer::small_object_store::tests',
     ]]

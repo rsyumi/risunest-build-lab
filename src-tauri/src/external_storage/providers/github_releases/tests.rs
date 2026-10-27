@@ -410,6 +410,66 @@ fn lease_discovery_crosses_empty_releases_and_ignores_starters() {
 }
 
 #[test]
+fn a_slow_listing_returns_a_cursor_before_the_control_deadline() {
+    use crate::external_storage::http::{HttpRequest, HttpResponse, HttpTransport};
+    use std::time::Duration;
+    // Answers by URL, so a resumed call can read a release page again.
+    struct SlowLink { empty_pages: u32, release_delay: Duration, asset_delay: Duration }
+    impl HttpTransport for SlowLink {
+        fn send<'a>(&'a self, request: HttpRequest, _: &'a Cancellation) -> ProviderFuture<'a, HttpResponse> {
+            Box::pin(async move {
+                let page = request.url.query_pairs().find(|(name, _)| name == "page").map_or(0, |(_, value)| value.parse::<u32>().unwrap());
+                let path = request.url.path().to_owned();
+                let (delay, body) = if path.ends_with("/releases/9999/assets") {
+                    (self.asset_delay, json!([asset(999, "lease-work-complete", 4, None)]))
+                } else if path.ends_with("/releases") && page <= self.empty_pages {
+                    (self.release_delay, json!((0..api::RELEASE_PAGE_SIZE).map(|id| release(u64::from(page) * 100 + id as u64 + 1, "foreign")).collect::<Vec<_>>()))
+                } else if path.ends_with("/releases") {
+                    (self.release_delay, json!([release(9999, &format!("{PREFIX}-l-0"))]))
+                } else {
+                    (Duration::ZERO, json!({ "private": true, "permissions": { "push": true } }))
+                };
+                tokio::time::sleep(delay).await;
+                Ok(HttpResponse {
+                    status: 200,
+                    headers: BTreeMap::from([("content-type".to_owned(), "application/json".to_owned())]),
+                    body: Box::pin(std::io::Cursor::new(serde_json::to_vec(&body).unwrap())),
+                })
+            })
+        }
+    }
+    // Each call runs on its own paused clock: request deadlines are std instants, which a paused
+    // clock already past them would treat as expired.
+    fn paused<T>(operation: impl std::future::Future<Output = T>) -> T {
+        runtime().block_on(async { tokio::time::pause(); operation.await })
+    }
+    let deadline = Duration::from_millis(crate::external_storage::leases::CONTROL_DEADLINE_MS);
+    // Three 20 s requests, or two 31 s release pages, already pass the deadline of one call.
+    for (empty_pages, release_delay, asset_delay) in [(4, Duration::from_secs(20), Duration::from_secs(20)), (1, Duration::from_secs(31), Duration::from_secs(1))] {
+        let server = github_server(Vec::new());
+        let transport = std::sync::Arc::new(SlowLink { empty_pages, release_delay, asset_delay });
+        let test = crate::external_storage::fake::with_transport(transport, MemoryVault::with(SECRET, TOKEN), NOW_MS);
+        let provider = adapter(test.dependencies);
+        let handle = paused(open(provider.as_ref(), &server, OpenMode::Existing)).unwrap();
+        let mut cursor: Option<String> = None;
+        let mut found = Vec::new();
+        loop {
+            let page = paused(async {
+                let started = tokio::time::Instant::now();
+                let page = provider.list_objects(&handle, Collection::Leases, cursor.as_deref(), 100, &Cancellation::default()).await.unwrap();
+                assert!(started.elapsed() < deadline);
+                page
+            });
+            found.extend(page.objects.into_iter().map(|object| object.locator.object));
+            assert_ne!(page.next_cursor, cursor, "every call advances");
+            cursor = page.next_cursor;
+            if cursor.is_none() { break; }
+        }
+        assert_eq!(found, ["9999/999"]);
+    }
+}
+
+#[test]
 fn locator_free_lookup_ignores_an_unfinished_upload() {
     runtime().block_on(async {
         let mut replies = existing_repository_replies();

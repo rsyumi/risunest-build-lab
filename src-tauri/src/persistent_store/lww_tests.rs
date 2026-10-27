@@ -19,6 +19,9 @@ pub(super) fn whole_library_changes(
     let mut after = projection::capture_all(db, staging_id, true)?;
     let mut overrides = BTreeSet::new();
     for (key, value) in source.into_iter().flatten() {
+        if risunest_sync_wire::library_format::is_key(key) {
+            continue;
+        }
         if after.get(key) != Some(value) {
             overrides.insert(key.clone());
         }

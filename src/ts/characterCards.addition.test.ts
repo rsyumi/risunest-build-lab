@@ -868,6 +868,8 @@ describe('character card additions', () => {
         expect(mocks.saveAsset).not.toHaveBeenCalled()
         expect(mocks.pngWrites).toEqual([])
         expect(mocks.downloads).toEqual([])
+        // The export dialog reports the saved file.
+        expect(mocks.alertNormal).not.toHaveBeenCalled()
     })
 
     it('shows the established export error alert when native CharX export fails', async () => {
@@ -886,6 +888,11 @@ describe('character card additions', () => {
         await expect(exportChar(0)).resolves.toBe('')
 
         expect(mocks.alertError).toHaveBeenCalledWith(error)
+
+        mocks.exportNativeCharacterCharxFromPicker.mockRejectedValue(
+            Object.assign(new Error('Another library operation is running'), { code: 'library-operation-busy' }))
+        await expect(exportChar(0)).resolves.toBe('')
+        expect(mocks.alertError).toHaveBeenLastCalledWith(language.risuNest.importDialog.reasonBusy)
     })
 
     it('keeps ordinary asset bytes exact in the JavaScript JSON export fallback', async () => {

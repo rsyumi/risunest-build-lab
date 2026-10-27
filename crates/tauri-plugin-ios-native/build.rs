@@ -12,6 +12,8 @@ fn main() {
         "discard_backup_source",
         "materialize_backup_source",
         "export_file",
+        "pick_rewritable_file",
+        "rewrite_file",
         "discard_file",
         "publication",
         "acknowledge_publication",

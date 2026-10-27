@@ -1118,6 +1118,51 @@ fn a_lost_head_response_records_exactly_one_write() {
 }
 
 #[test]
+fn a_descriptor_replacement_puts_its_member_without_a_precondition_and_refuses_any_other() {
+    runtime().block_on(async {
+        let harness = Harness::start(vec![
+            established_root(),
+            reply(204, &[("ETag", "\"descriptor-2\"")], b""),
+        ]);
+        let repository = harness.opened().await;
+        let cancel = Cancellation::default();
+        let bytes = HeadBytes::new(b"switched-descriptor".to_vec()).unwrap();
+        for refused in [
+            harness.provider.head_locator(&repository).unwrap(),
+            locator(&repository, None, "descriptors/descriptor-id"),
+            locator(&repository, Some("snapshots"), "snapshots/snap-a"),
+            locator(&repository, Some(DESCRIPTOR_FOLDER), "descriptors/nested/descriptor-id"),
+        ] {
+            let outcome = harness.provider.replace_descriptor(&repository, &refused, &bytes, &cancel).await;
+            assert_eq!(kind_of(outcome), ErrorKind::Corrupt, "{}", refused.object);
+        }
+        assert_eq!(harness.count(), 1);
+
+        let target = locator(&repository, Some(DESCRIPTOR_FOLDER), "descriptors/descriptor-id");
+        let receipt = harness
+            .provider
+            .replace_descriptor(&repository, &target, &bytes, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(
+            receipt,
+            HeadReceipt {
+                version: Some(VersionToken("\"descriptor-2\"".to_owned())),
+                complete: true,
+            }
+        );
+        assert_eq!(harness.count(), 2);
+        assert_eq!(
+            harness.line(1),
+            format!("PUT {}/descriptors/descriptor-id HTTP/1.1", encoded_root())
+        );
+        assert_eq!(harness.header(1, "if-none-match"), None);
+        assert_eq!(harness.header(1, "if-match"), None);
+        assert_eq!(harness.body(1), b"switched-descriptor");
+    });
+}
+
+#[test]
 fn listings_page_by_name_with_a_cursor_and_reject_limits_outside_the_range() {
     runtime().block_on(async {
         let folder = format!("{}/snapshots", encoded_root());

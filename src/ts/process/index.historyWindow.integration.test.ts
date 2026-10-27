@@ -366,6 +366,61 @@ describe('a windowed send through the production runtime', () => {
         expect((await reopen()).scriptstate.$counter).toBe('4')
         expect(backgroundErrors).toEqual([])
     })
+    it.each([false, true])('aborts a queued parser call promptly without letting a later write overtake its predecessor (history: %s)', async (needsHistory) => {
+        const { store, reopen, backgroundErrors } = await bootWindowedConversation(storedMessages(), (seed) => {
+            seed.characters[0].customscript = []
+            seed.characters[0].triggerscript = []
+            seed.characters[0].chats[0].scriptstate = { $counter: '0' }
+        })
+        const { parseRisuChat } = await import('../plugins/parseRisuChat')
+        let entered!: () => void
+        const reading = new Promise<void>((resolve) => { entered = resolve })
+        let release!: () => void
+        const held = new Promise<void>((resolve) => { release = resolve })
+        const acquire = store.acquireRevision.bind(store)
+        const spy = vi.spyOn(store, 'acquireRevision').mockImplementationOnce(async (revision) => {
+            const lease = await acquire(revision)
+            const read = lease.readConversationWindow.bind(lease)
+            lease.readConversationWindow = async (query) => {
+                entered()
+                await held
+                return read(query)
+            }
+            return lease
+        })
+        const increment = '{{setvar::counter::{{calc::{{getvar::counter}}+1}}}}{{getvar::counter}}'
+        if (needsHistory) spy.mockImplementationOnce(async (revision) => {
+            await held
+            return acquire(revision)
+        })
+        const first = parseRisuChat('{{previouschatlog::0}}|' + increment, { runVar: true })
+        const controller = new AbortController()
+        let queued: Promise<string> | undefined
+        let later: Promise<string> | undefined
+        let laterSettled = false
+        try {
+            await reading
+            queued = parseRisuChat((needsHistory ? '{{previouschatlog::0}}|' : '') + increment, { runVar: true }, controller.signal)
+            let rejection: unknown
+            void queued.catch((error) => { rejection = error })
+            controller.abort()
+            await vi.waitFor(() => expect(rejection).toMatchObject({ name: 'AbortError' }))
+            later = parseRisuChat(increment, { runVar: true })
+            void later.then(() => { laterSettled = true })
+            // Drain queued continuations without releasing the first read.
+            await new Promise<void>((resolve) => setImmediate(resolve))
+            expect(laterSettled).toBe(false)
+            release()
+            expect(await first).toBe('m0|1')
+            expect(await later).toBe('2')
+            expect((await reopen()).scriptstate.$counter).toBe('2')
+            expect(backgroundErrors).toEqual([])
+        } finally {
+            release()
+            await Promise.allSettled([first, ...(queued ? [queued] : []), ...(later ? [later] : [])])
+            spy.mockRestore()
+        }
+    })
     it.each(['variable', 'inject'])('persists a delayed parser %s write to the invocation conversation after navigation', async (effect) => {
         const { store, reopen, backgroundErrors } = await bootWindowedConversation(storedMessages(), (seed) => {
             seed.characters[0].customscript = effect === 'inject'
@@ -642,9 +697,13 @@ describe('a windowed send through the production runtime', () => {
         }
     })
 
-    it('stores trigger, Lua, @@inject and response writes inside the window and leaves earlier messages byte-identical', async () => {
+    it('stores trigger, Lua, @@inject, parser and response writes inside the window and leaves earlier messages byte-identical', async () => {
         const original = storedMessages()
-        const { store, backgroundErrors } = await bootWindowedConversation(structuredClone(original))
+        Object.assign(original[910], { data: '{{setvar::window_var::first}}x', extra: { nested: ['한글', '🙂'] } })
+        Object.assign(original[920], { extra: { unchanged: true } })
+        original[930].data = 'y{{getvar::window_var}}'
+        original[940].data = '{{getvar::window_var}}z'
+        const { store, backgroundErrors, reopen } = await bootWindowedConversation(structuredClone(original))
         const { sendChat } = await import('./index.svelte')
         vi.spyOn(console, 'log').mockImplementation(() => undefined)
 
@@ -654,9 +713,16 @@ describe('a windowed send through the production runtime', () => {
         expect(current.runtime.getSelectedConversationMode()).toBe('windowed')
         const persisted = (await store.readConversation('character-a', 'chat-a'))!.value.message
         expect(JSON.stringify(persisted.slice(0, WINDOW_START))).toBe(JSON.stringify(original.slice(0, WINDOW_START)))
+        expect((await reopen()).scriptstate.$window_var).toBe('first')
         const inserted = persisted[960]
         expect(persisted.slice(WINDOW_START)).toEqual([
-            ...original.slice(WINDOW_START, 950),
+            ...original.slice(WINDOW_START, 910),
+            { ...original[910], data: 'x' },
+            ...original.slice(911, 930),
+            { ...original[930], data: 'yfirst' },
+            ...original.slice(931, 940),
+            { ...original[940], data: 'firstz' },
+            ...original.slice(941, 950),
             { ...original[950], data: 'STORED:inside' },
             ...original.slice(951, 960),
             { role: 'char', data: 'lua inserted', chatId: inserted.chatId },

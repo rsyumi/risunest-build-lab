@@ -6,7 +6,6 @@ import { writeFile } from '@tauri-apps/plugin-fs'
 import { save } from '@tauri-apps/plugin-dialog'
 
 import { ActiveConversationSession } from '../../storage/activeConversationSession'
-import type { AndroidSafDestinationReservation } from '../../storage/androidSafBridge'
 import type { PlatformShape } from '../../platform.testSupport'
 import type { Chat, Database } from '../../storage/database.svelte'
 
@@ -22,8 +21,8 @@ const mocks = vi.hoisted(() => ({
     InlayInputTooLargeError: class InlayInputTooLargeError extends Error {},
     alertError: vi.fn(),
     platform: { runtime: 'web', os: 'windows' } as PlatformShape,
-    reserveAndroidSafDownload: vi.fn(),
-    publishAndroidSafDownload: vi.fn(),
+    pickRewritableIOSFile: vi.fn(async (_name: string) => false),
+    rewriteIOSFile: vi.fn(async (_text: string) => {}),
 }))
 
 vi.mock('src/ts/stores.svelte', () => ({
@@ -46,12 +45,10 @@ vi.mock('src/ts/globalApi.svelte', () => ({ downloadFile: mocks.downloadFile }))
 vi.mock('src/ts/platform', async () => (await import('src/ts/platform.testSupport')).platformModule(() => mocks.platform))
 vi.mock('@tauri-apps/plugin-fs', async () => (await import('src/ts/globalApi.testSupport')).tauriFsModule())
 vi.mock('@tauri-apps/plugin-dialog', async () => (await import('src/ts/globalApi.testSupport')).tauriDialogModule())
-vi.mock('src/ts/storage/androidSafDownload', () => ({
-    ANDROID_DOWNLOAD_PIECE_BYTES: 1,
-    downloadThroughAndroidSaf: vi.fn(),
-    reserveAndroidSafDownload: mocks.reserveAndroidSafDownload,
-    publishAndroidSafDownload: mocks.publishAndroidSafDownload,
-}) satisfies typeof import('src/ts/storage/androidSafDownload'))
+vi.mock('src/ts/storage/iosFiles', () => ({
+    pickRewritableIOSFile: mocks.pickRewritableIOSFile,
+    rewriteIOSFile: mocks.rewriteIOSFile,
+}))
 vi.mock('../memory/hypamemory', () => ({
     HypaProcesser: class {
         addText() {}
@@ -264,11 +261,6 @@ describe('postChatFile PO save destination', () => {
     const afterSecond = `${afterFirst}msgid "second"\nmsgstr ""\n"second"\n\n`
     const translated = `${afterSecond}\n`
     const decode = (data: unknown) => new TextDecoder().decode(data as Uint8Array)
-    const androidReservation = () => ({
-        requestId: 'synthetic-request',
-        bind: vi.fn(async () => {}),
-        release: vi.fn(async () => {}),
-    }) satisfies AndroidSafDestinationReservation
     let conversation: Chat
 
     beforeEach(() => {
@@ -285,8 +277,8 @@ describe('postChatFile PO save destination', () => {
         })
         mocks.sendChat.mockReset().mockImplementation(async () => undefined)
         mocks.downloadFile.mockClear()
-        mocks.reserveAndroidSafDownload.mockReset()
-        mocks.publishAndroidSafDownload.mockReset()
+        mocks.pickRewritableIOSFile.mockReset()
+        mocks.rewriteIOSFile.mockReset()
         vi.mocked(save).mockReset()
         vi.mocked(writeFile).mockReset()
         doingChat.set(false)
@@ -296,76 +288,51 @@ describe('postChatFile PO save destination', () => {
         mocks.platform = { runtime: 'web', os: 'windows' }
     })
 
-    it('asks for the desktop file once and rewrites it after every message', async () => {
-        mocks.platform = { runtime: 'tauri', os: 'windows' }
-        vi.mocked(save).mockResolvedValue('/synthetic/translated.po')
+    it.each<[string, PlatformShape, string]>([
+        ['desktop', { runtime: 'tauri', os: 'windows' }, '/synthetic/translated.po'],
+        ['Android', { runtime: 'tauri', os: 'android' }, 'content://synthetic/translated.po'],
+    ])('asks for the %s file once and rewrites it after every message', async (_name, platform, path) => {
+        mocks.platform = platform
+        vi.mocked(save).mockResolvedValue(path)
 
         await expect(postChatFile({ name: 'input.po', data: input })).resolves.toEqual([{ type: 'void' }])
 
-        expect(save).toHaveBeenCalledOnce()
-        expect(vi.mocked(writeFile).mock.calls.map(([path, data]) => [path, decode(data)])).toEqual([
-            ['/synthetic/translated.po', afterFirst],
-            ['/synthetic/translated.po', afterSecond],
-            ['/synthetic/translated.po', translated],
+        expect(vi.mocked(save).mock.calls).toEqual([[{ defaultPath: 'translated.po' }]])
+        expect(vi.mocked(writeFile).mock.calls.map(([target, data]) => [target, decode(data)])).toEqual([
+            [path, afterFirst],
+            [path, afterSecond],
+            [path, translated],
         ])
         expect(mocks.downloadFile).not.toHaveBeenCalled()
     })
 
-    it('picks the Android destination before sending and writes the finished file there', async () => {
-        mocks.platform = { runtime: 'tauri', os: 'android' }
-        const reservation = androidReservation()
-        const events: string[] = []
-        const published: unknown[] = []
-        mocks.reserveAndroidSafDownload.mockImplementation(async () => {
-            events.push('pick')
-            return reservation
-        })
-        mocks.sendChat.mockImplementation(async () => { events.push('send') })
-        mocks.publishAndroidSafDownload.mockImplementation(async (destination, name, data) => {
-            events.push('publish')
-            published.push([destination, name, decode(data)])
-            return true
-        })
+    it('asks for the iOS file once and rewrites it after every message', async () => {
+        mocks.platform = { runtime: 'tauri', os: 'ios' }
+        mocks.pickRewritableIOSFile.mockResolvedValue(true)
 
         await postChatFile({ name: 'input.po', data: input })
 
-        expect(events).toEqual(['pick', 'send', 'send', 'publish'])
-        expect(published).toEqual([[reservation, 'translated.po', translated]])
+        expect(mocks.pickRewritableIOSFile.mock.calls).toEqual([['translated.po']])
+        expect(mocks.rewriteIOSFile.mock.calls).toEqual([[afterFirst], [afterSecond], [translated]])
+        expect(save).not.toHaveBeenCalled()
+        expect(mocks.downloadFile).not.toHaveBeenCalled()
     })
 
-    it('releases the Android destination when the run stops before the file is written', async () => {
+    it('keeps the finished messages in the Android file when the run stops partway', async () => {
         mocks.platform = { runtime: 'tauri', os: 'android' }
-        const reservation = androidReservation()
-        mocks.reserveAndroidSafDownload.mockResolvedValue(reservation)
-        const failure = new Error('provider failed')
-        mocks.sendChat.mockRejectedValueOnce(failure)
-
-        await expect(postChatFile({ name: 'input.po', data: input })).rejects.toBe(failure)
-
-        expect(reservation.release).toHaveBeenCalledOnce()
-        expect(mocks.publishAndroidSafDownload).not.toHaveBeenCalled()
-    })
-
-    it('writes the last checkpoint to the Android destination when the run stops partway', async () => {
-        mocks.platform = { runtime: 'tauri', os: 'android' }
-        const reservation = androidReservation()
-        const published: unknown[] = []
-        mocks.reserveAndroidSafDownload.mockResolvedValue(reservation)
-        mocks.publishAndroidSafDownload.mockImplementation(async (destination, name, data) => {
-            published.push([destination, name, decode(data)])
-            return true
-        })
+        vi.mocked(save).mockResolvedValue('content://synthetic/translated.po')
         const failure = new Error('provider failed')
         mocks.sendChat.mockResolvedValueOnce(undefined).mockRejectedValueOnce(failure)
 
         await expect(postChatFile({ name: 'input.po', data: input })).rejects.toBe(failure)
 
-        expect(published).toEqual([[reservation, 'translated.po', afterFirst]])
+        expect(vi.mocked(writeFile).mock.calls.map(([, data]) => decode(data))).toEqual([afterFirst])
     })
 
     it.each<[string, PlatformShape, () => void]>([
         ['desktop', { runtime: 'tauri', os: 'windows' }, () => vi.mocked(save).mockResolvedValue(null)],
-        ['Android', { runtime: 'tauri', os: 'android' }, () => mocks.reserveAndroidSafDownload.mockResolvedValue(null)],
+        ['Android', { runtime: 'tauri', os: 'android' }, () => vi.mocked(save).mockResolvedValue(null)],
+        ['iOS', { runtime: 'tauri', os: 'ios' }, () => mocks.pickRewritableIOSFile.mockResolvedValue(false)],
     ])('sends nothing when the %s destination is cancelled', async (_name, platform, cancel) => {
         mocks.platform = platform
         cancel()
@@ -375,18 +342,13 @@ describe('postChatFile PO save destination', () => {
         expect(conversation.message.map((message) => message.data)).toEqual(['before'])
         expect(mocks.sendChat).not.toHaveBeenCalled()
         expect(writeFile).not.toHaveBeenCalled()
-        expect(mocks.publishAndroidSafDownload).not.toHaveBeenCalled()
+        expect(mocks.rewriteIOSFile).not.toHaveBeenCalled()
         const next = reserveGeneration()
         expect(next).not.toBeNull()
         next?.release()
     })
 
-    it.each<[string, PlatformShape]>([
-        ['iOS', { runtime: 'tauri', os: 'ios' }],
-        ['the web', { runtime: 'web', os: 'windows' }],
-    ])('saves the finished file once on %s', async (_name, platform) => {
-        mocks.platform = platform
-
+    it('saves the finished file once on the web', async () => {
         await postChatFile({ name: 'input.po', data: input })
 
         expect(mocks.downloadFile.mock.calls).toEqual([['translated.po', translated]])

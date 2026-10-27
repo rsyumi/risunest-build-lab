@@ -16,6 +16,7 @@ import { CONVERSATION_RANGE_MAX_LIMIT } from './persistentDataStore'
 import { createPersistentDataRuntime } from './persistentDataRuntime'
 import { createProductionStateAdapter } from './persistentDataRuntime.svelte'
 import { workingSetResidency } from './workingSetResidency'
+import { clearStreamingConversation, setStreamingConversation } from './streamingConversationRegistry'
 import { indexSideChatListRows } from '../../lib/SideBars/sideChatListRows'
 import { observePersistentSaveChanges } from './persistentSaveObserver.svelte'
 
@@ -579,6 +580,45 @@ describe('windowed navigation integration', () => {
         await expect(runtime.activateCharacter(database.characters[0].chaId)).rejects.toThrow('returned invalid conversation folders')
         expect(commit).not.toHaveBeenCalled()
         expect((await store.readCharacter(database.characters[0].chaId))!.value.chatFolders).toEqual(folders)
+    })
+
+    it.each([false, true])('takes the streaming state of a saved conversation from running generations only (running: %s)', async (running) => {
+        // A checkpoint saves the streaming flag, but a later document has no generation behind it.
+        const database = syntheticLibrary('character')
+        const owner = database.characters[0]
+        const conversationId = owner.chats[0].id!
+        Object.assign(owner.chats[0], { isStreaming: true, activeStreamingDisplayOptimizationMode: 'balanced' })
+        const store = new IndexedDbPersistentDataStore(`recovered-streaming-${running}`, new IDBFactory(), IDBKeyRange)
+        await store.open()
+        await store.replaceFromDatabase(database)
+        const live = structuredClone(database)
+        delete live.characters[0].chats[0].isStreaming
+        delete live.characters[0].chats[0].activeStreamingDisplayOptimizationMode
+        setDatabaseLite(live)
+        selectedCharID.set(-1)
+        workingSetResidency.setEvictionAllowed(true)
+        if (running) setStreamingConversation(conversationId, 'balanced')
+        try {
+            const runtime = createPersistentDataRuntime({store, state: createProductionStateAdapter(), prepareDatabase: async (value) => value})
+            await runtime.initializeActiveWorkingSet(getDatabase())
+            const expectStreaming = () => {
+                const chat = getDatabase().characters[0].chats[0]
+                expect(chat.isStreaming ?? false).toBe(running)
+                expect(chat.activeStreamingDisplayOptimizationMode).toBe(running ? 'balanced' : undefined)
+            }
+            expect(await runtime.activateCharacter(owner.chaId)).toBe(true)
+            expect(runtime.getSelectedConversationMode()).toBe('windowed')
+            expectStreaming()
+            const lease = await runtime.acquireCompleteConversation('recovered-streaming', runtime.captureSelectedConversationTarget())
+            try {
+                expect(runtime.getSelectedConversationMode()).toBe('complete')
+                expectStreaming()
+            } finally {
+                lease.release()
+            }
+        } finally {
+            clearStreamingConversation(conversationId)
+        }
     })
 
     it('normalizes through the production Svelte adapter and survives immediate promotion and restart', async () => {

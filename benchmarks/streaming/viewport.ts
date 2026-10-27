@@ -6,6 +6,10 @@ import { ActiveConversationSession } from "../../src/ts/storage/activeConversati
 import { SynchronousSessionConversationViewportSource } from "../../src/ts/conversationViewportSource";
 import type { LiveChatParserProjectionResolver } from "../../src/ts/selectedConversationLiveParserProjection";
 import { setRuntimePerformanceProfile } from "../../src/ts/runtimePerformanceProfile";
+import DefaultChatScreen from "../../src/lib/ChatScreens/DefaultChatScreen.svelte";
+import type { Database } from "../../src/ts/storage/database.svelte";
+import { getPersistentDataRuntime } from "../../src/ts/storage/persistentDataRuntime.svelte";
+import { clearStreamingConversation, setStreamingConversation } from "../../src/ts/storage/streamingConversationRegistry";
 
 const metrics = { active: 0, calls: [] as { index: number; durationMs: number }[] };
 type ViewportControls = { jumpTo(index: number): Promise<boolean> | undefined; setInputBlocked(value: boolean): void };
@@ -212,6 +216,79 @@ export const viewportProbe = {
     restoreScrollBy();
     return { samples, corrections, visible: visibleIndices(), maxFrameGapMs: samples.slice(1).reduce((max, sample, index) => Math.max(max, sample.at - samples[index].at), 0) };
   },
+  async displayVariableStream() {
+    // Display listener writes reach the session only through the runtime's active session,
+    // so this case replaces the synthetic store and mounts the chat screen on it.
+    if (DBState.db.characters.length !== 1 || DBState.db.characters[0].chaId !== "viewport-synthetic") throw new Error("isolated-synthetic-fixture-required");
+    if (fixture) await unmount(fixture);
+    fixture = undefined;
+    source?.dispose();
+    source = undefined;
+    const previous = DBState.db;
+    const database = JSON.parse(JSON.stringify({ ...DBState.db, characters: [{ ...DBState.db.characters[0], chats: [{ ...DBState.db.characters[0].chats[0], message: [] }] }] })) as Database;
+    const template = database.characters[0] as character;
+    database.characters = [{ ...template, chaId: "display-variable-synthetic", customscript: [],
+      triggerscript: [{ comment: "", type: "start", conditions: [], effect: [{ type: "triggerlua", code: `
+        listenEdit('editDisplay', function(id, value, meta)
+          setChatVar(id, 'displayWrites', tostring((tonumber(getChatVar(id, 'displayWrites')) or 0) + 1))
+          local chunk = value:match('chunk%-(%d+)')
+          if chunk then setChatVar(id, 'shownChunk', chunk) end
+          return value .. ' [listener]'
+        end)` }] }],
+      chats: [{ ...template.chats[0], id: "display-variable-chat", isStreaming: false, scriptstate: {}, message: Array.from({ length: 24 }, (_, index) => ({
+        role: index % 2 ? "char" : "user", chatId: `display-variable-${index}`, data: `row-${index} synthetic`,
+      })) }] } as character];
+    database.streamingDeferDisplayProcessing = false;
+    const runtime = getPersistentDataRuntime();
+    await runtime.store.open();
+    await runtime.store.replaceFromDatabase(database, (await runtime.store.readRoot()).revision);
+    DBState.db = database;
+    selectedCharID.set(0);
+    await runtime.initializeActiveWorkingSet(DBState.db);
+    host = document.createElement("section");
+    host.style.cssText = "height:100vh;width:100vw;position:relative";
+    document.body.replaceChildren(host);
+    metrics.calls = [];
+    Object.assign(globalThis, { __viewportParseMetrics: metrics });
+    const screen = mount(DefaultChatScreen, { target: host });
+    // Generation holds the complete conversation while it streams.
+    const lease = await runtime.acquireCompleteConversation("generation", runtime.captureSelectedConversationTarget()!);
+    try {
+      await ready();
+      const active = lease.session;
+      const chat = DBState.db.characters[0].chats[0];
+      const index = active.totalMessages;
+      setStreamingConversation(chat.id!, "balanced");
+      chat.isStreaming = true;
+      chat.activeStreamingDisplayOptimizationMode = "balanced";
+      active.append({ role: "char", chatId: "display-variable-stream", data: "" });
+      const started = performance.now();
+      for (let chunk = 1; chunk <= 20; chunk++) {
+        await until(() => performance.now() - started >= chunk * 50, "stream-chunk-deadline");
+        active.edit(active.locate(index), { role: "char", chatId: "display-variable-stream", data: `chunk-${chunk} shown={{getvar::shownChunk}} ` + "streamed ".repeat(chunk * 4) });
+        await tick();
+        await pause();
+      }
+      clearStreamingConversation(chat.id!);
+      chat.isStreaming = false;
+      await ready();
+      const calls = metrics.calls.length;
+      for (let frame = 0; frame < 30; frame++) await pause();
+      check(metrics.calls.length === calls, "display-write-render-loop");
+      // The tail reads the value its own listener writes, so it shows the newest chunk only after a re-parse.
+      const tail = rows().find((row) => Number(row.dataset.chatIndex) === index)?.textContent ?? "";
+      check(tail.includes("chunk-20 shown=20") && tail.includes("[listener]"), "display-write-not-rendered");
+      check(active.readChatVariable("shownChunk") === "20", "display-write-not-committed");
+      const callsAt = (at: number) => metrics.calls.filter((call) => call.index === at).length;
+      return { chunks: 20, calls, tailCalls: callsAt(index), maxSettledRowCalls: Math.max(...Array.from({ length: index }, (_, at) => callsAt(at))),
+        displayWrites: Number(active.readChatVariable("displayWrites")) };
+    } finally {
+      lease.release();
+      await unmount(screen);
+      // Later cases and the Android input steps mount the viewport fixture on the earlier synthetic data.
+      DBState.db = previous;
+    }
+  },
   async run() {
     const cases: Record<string, unknown>[] = [];
     for (const dependency of ["local", "history"] as const) {
@@ -221,6 +298,7 @@ export const viewportProbe = {
       if (dependency === "history") check(result.dependentRowsUpdated > 0, "history-dependent-render-stale");
       cases.push({ id: `complete-stream-${dependency}`, ...result });
     }
+    cases.push({ id: "display-variable-stream", ...await this.displayVariableStream() });
     await this.mount(10000);
     cases.push({ id: "distant-seek", ...await this.seekMiddle() });
     return { passed: true, cases };

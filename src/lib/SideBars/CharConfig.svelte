@@ -18,7 +18,7 @@
     import LoreBook from "./LoreBook/LoreBookSetting.svelte";
     import { alertNormal, alertRisuServiceTOS, showHypaV2Alert } from "../../ts/alert";
     import BarIcon from "./BarIcon.svelte";
-    import { getAuthorNoteDefaultText, selectMultipleFile, selectSingleFile } from "../../ts/util";
+    import { selectMultipleFile, selectSingleFile } from "../../ts/util";
     import Help from "../Others/Help.svelte";
     import { exportChar } from "src/ts/characterCards";
     import { getElevenTTSVoices, getWebSpeechTTSVoices, getVOICEVOXVoices, oaiVoices, getNovelAIVoices } from "src/ts/process/tts";
@@ -42,6 +42,8 @@
     import Toggles from "./Toggles.svelte";
     import { convertCharacterToModule } from "src/ts/interchangeability";
     import OnboardingEditor from "./OnboardingEditor.svelte";
+    import AuthorNoteInput from "./AuthorNoteInput.svelte";
+    import { effectiveAuthorNote } from "src/ts/authorNotePresets";
     import { mutatePersistentCharacterDetail } from "src/ts/storage/persistentDataRuntime.svelte";
 
     let iconRemoveMode = $state(false)
@@ -94,7 +96,7 @@
         const chara = DBState.db.characters[$selectedCharID]
         const desc = (chara as character).desc
         const firstMsg = chara.firstMessage
-        const localNote = chara.chats[chara.chatPage].note
+        const localNote = effectiveAuthorNote(DBState.db.authorNotePresets, chara.chats[chara.chatPage])
 
         untrack(() => {
             loadTokenize(desc, firstMsg, localNote)
@@ -274,13 +276,7 @@
         <span class="text-textcolor2 mb-6 text-sm">{tokens.firstMsg} {language.tokens}</span>
     {/if}
     <span class="text-textcolor">{language.authorNote} <Help key="chatNote"/></span>
-    <TextAreaInput
-        margin="both"
-        autocomplete="off"
-        bind:value={DBState.db.characters[$selectedCharID].chats[DBState.db.characters[$selectedCharID].chatPage].note}
-        highlight
-        placeholder={getAuthorNoteDefaultText()}
-    />
+    <AuthorNoteInput />
     <span class="text-textcolor2 mb-6 text-sm">{tokens.localNote} {language.tokens}</span>
 
     {#if !$MobileGUI}

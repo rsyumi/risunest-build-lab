@@ -12,6 +12,8 @@ use risunest_sync_wire::{stamp::DecimalU64, unit::UnitKey};
 use futures::FutureExt;
 use std::sync::Arc;
 
+mod format_levels;
+
 fn run<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()

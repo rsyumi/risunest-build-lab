@@ -1,4 +1,3 @@
-use crate::server_sync::residency::RemotePayloadAccess;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,6 +345,49 @@ mod tests {
             );
             assert_eq!(fs::read(destination).unwrap(), b"previous JSON");
         }
+
+        // A cancel requested while an asset only the Sync server holds downloads stops
+        // it, and an asset kept nowhere fails as missing.
+        use crate::server_sync::residency::test_remote;
+        for on_server in [true, false] {
+            let mut fixture = fixture();
+            let held = fixture.payload_hashes[0].clone();
+            let cas = PayloadCas::new(fixture.directory.path()).unwrap();
+            if on_server {
+                test_remote::keep_only_on_server(fixture.directory.path(), &held);
+            } else {
+                fs::remove_file(cas.object_path(&held).unwrap().unwrap()).unwrap();
+            }
+            let prepared = fixture
+                .store
+                .prepare_risu_save_export(fixture.revision)
+                .unwrap();
+            let owned = fixture.directory.path().join("owned");
+            fs::create_dir(&owned).unwrap();
+            let job = JobRegistry::default()
+                .create(JobKind::ExportCharacterCard)
+                .unwrap();
+            let cancelling = job.clone();
+            test_remote::on_fetch(fixture.directory.path(), move || {
+                cancelling.request_cancel().unwrap();
+            });
+            let error = export_character_json(
+                prepared,
+                "json-character",
+                fixture.metadata,
+                &owned,
+                &fixture.directory.path().join("handoffs"),
+                None,
+                &job,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, if on_server { "cancelled" } else { "asset-missing" });
+            assert_eq!(
+                test_remote::fetched(fixture.directory.path()),
+                usize::from(on_server)
+            );
+            assert!(cas.stat_object(&held).unwrap().is_none());
+        }
     }
 
     #[test]
@@ -522,8 +564,10 @@ mod tests {
     }
 }
 use super::content::JSON_CARD_MAX_METADATA_BYTES;
+use super::available_payload::{available_payload_size, open_available_payload};
 use super::error::{
-    cancelled, destination_error_with, invalid_input, io_error, job_error, store_error,
+    asset_missing, cancelled, destination_error_with, invalid_input, io_error, job_error,
+    store_error,
 };
 use super::{JobControl, JobPhase, JobProgress, JobResultSummary, NativeJobError};
 use crate::asset_repository::{owner_manifest_codec::OwnerManifestEntry, PayloadCas};
@@ -648,6 +692,7 @@ where
             &metadata,
             reader,
             &repository,
+            job,
         )?
     };
     validate_asset_source_sizes(
@@ -902,6 +947,7 @@ pub(super) fn available_portrait_key<'a>(
     character: &'a Value,
     reader: &RevisionReadLease,
     repository: &PayloadCas,
+    job: &JobControl,
 ) -> Result<Option<&'a str>, NativeJobError> {
     let Some(key) = character
         .get("image")
@@ -915,10 +961,7 @@ pub(super) fn available_portrait_key<'a>(
     let Some(hash) = alias.and_then(|alias| alias.object_hash) else {
         return Ok(None);
     };
-    Ok(repository
-        .stat_available_object(&hash)
-        .map_err(io_error)?
-        .map(|_| key))
+    Ok(available_payload_size(repository, &hash, job, io_error)?.map(|_| key))
 }
 
 pub(super) fn json_asset_sources(
@@ -927,6 +970,7 @@ pub(super) fn json_asset_sources(
     metadata: &Value,
     reader: &RevisionReadLease,
     repository: &PayloadCas,
+    job: &JobControl,
 ) -> Result<Vec<Option<JsonAssetSource>>, NativeJobError> {
     let assets = metadata
         .pointer("/data/assets")
@@ -964,8 +1008,8 @@ pub(super) fn json_asset_sources(
                 return Ok(None);
             }
             if uri == "ccdefault:" {
-                return match available_portrait_key(character, reader, repository)? {
-                    Some(key) => cas_source(key, None, reader, repository).map(Some),
+                return match available_portrait_key(character, reader, repository, job)? {
+                    Some(key) => cas_source(key, None, reader, repository, job).map(Some),
                     None => Ok(Some(JsonAssetSource::FallbackPortrait)),
                 };
             }
@@ -973,7 +1017,7 @@ pub(super) fn json_asset_sources(
                 .checked_sub(cc_asset_count)
                 .filter(|offset| *offset < additional_asset_count)
                 .and_then(|offset| additional_entries.and_then(|entries| entries.get(offset)));
-            cas_source(uri, occurrence, reader, repository).map(Some)
+            cas_source(uri, occurrence, reader, repository, job).map(Some)
         })
         .collect()
 }
@@ -983,6 +1027,7 @@ fn cas_source(
     occurrence: Option<&OwnerManifestEntry>,
     reader: &RevisionReadLease,
     repository: &PayloadCas,
+    job: &JobControl,
 ) -> Result<JsonAssetSource, NativeJobError> {
     let alias =
         export::pinned_asset_alias(&reader.connection, &reader.target, key).map_err(store_error)?;
@@ -998,11 +1043,9 @@ fn cas_source(
                     "pinned character asset has no native payload: {key}"
                 ))
             })?;
-            let size = repository
-                .stat_available_object(&hash)
-                .map_err(io_error)?
+            let size = available_payload_size(repository, &hash, job, io_error)?
                 .ok_or_else(|| {
-                    invalid_input(format!("pinned character asset is missing: {key}"))
+                    asset_missing(format!("pinned character asset is missing: {key}"))
                 })?;
             (hash, size)
         }
@@ -1127,11 +1170,9 @@ fn write_data_uri<W: Write>(
                 mime,
             } => (
                 Box::new(
-                    repository
-                        .open_available_object(hash)
-                        .map_err(io_error)?
+                    open_available_payload(repository, hash, job, io_error)?
                         .ok_or_else(|| {
-                            invalid_input(format!("pinned character asset is missing: {key}"))
+                            asset_missing(format!("pinned character asset is missing: {key}"))
                         })?,
                 ),
                 hash.clone(),

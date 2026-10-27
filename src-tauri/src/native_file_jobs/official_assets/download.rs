@@ -41,10 +41,10 @@ pub(super) enum Read {
 }
 
 pub(super) struct AccountReader {
-    client: reqwest::Client,
-    base_url: String,
-    credential: HeaderMap,
-    directory: PathBuf,
+    pub(super) client: reqwest::Client,
+    pub(super) base_url: String,
+    pub(super) credential: HeaderMap,
+    pub(super) directory: PathBuf,
 }
 
 impl AccountReader {
@@ -195,7 +195,7 @@ pub(super) fn validate_base_url(base_url: &str) -> Result<(), NativeJobError> {
     Ok(())
 }
 
-fn latin1_header(key: &str) -> Option<HeaderValue> {
+pub(super) fn latin1_header(key: &str) -> Option<HeaderValue> {
     let bytes = key.chars().map(|character| u8::try_from(u32::from(character)).ok()).collect::<Option<Vec<_>>>()?;
     HeaderValue::from_bytes(&bytes).ok()
 }

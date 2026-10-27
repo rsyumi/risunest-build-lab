@@ -1,4 +1,8 @@
 import { userScriptConsole } from '../userScriptConsole'
+import { RegexExecutor, REGEX_TEST_BATCH_SIZE } from './regexExecutor'
+import { replaceRegexMatches, type RegexOperationResults } from './regexOperations'
+import { createRegexTimeoutScope, generationRegexTimeoutScope, type RegexTimeoutScope } from './regexTimeoutScope'
+import { getDisplayRegexTimeoutScope, noticeRegexTimeout } from './scriptTimeoutNotice'
 import { parseChatML } from "../parser/chatML";
 import { v4 } from "uuid";
 import { risuChatParser as risuChatParserGlobal } from "../parser/parser.svelte";
@@ -25,6 +29,7 @@ import {
 import { createScriptConversationAccess, type ScriptConversationAccess } from './scriptConversationAccess';
 import { rebuildScriptDisplayRow, requestScriptDisplayRefresh } from './scriptDisplayRefresh';
 import { noteChatVariableRead } from './scriptVariableReads';
+import { effectiveAuthorNote } from '../authorNotePresets';
 import { peekActiveConversationSession } from "../storage/persistentDataRuntime.svelte";
 import { runSerializedUserTrigger } from './conversationUserTrigger';
 import { getHistoryMessage, historyLength, inheritHistoryWindow, sliceHistory } from './historyWindowIndex';
@@ -1118,6 +1123,8 @@ interface RunTriggerArguments {
     access?: ScriptConversationAccess
     onConversationCommit?: ConversationCommitObserver
     generation?: CommandGeneration
+    regexGeneration?: object
+    regexScope?: RegexTimeoutScope
 }
 
 export async function runTrigger(
@@ -1134,6 +1141,15 @@ export async function runTrigger(
 }
 
 async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTriggerArguments) {
+    arg.regexScope ??= arg.generation?.reservation.regexScope ?? (arg.displayMode ? getDisplayRegexTimeoutScope() : undefined)
+    const generation = arg.regexGeneration ?? arg.generation?.signal
+    arg.regexScope ??= generation ? generationRegexTimeoutScope(generation) : createRegexTimeoutScope()
+    const regexExecutor = new RegexExecutor({ scope: arg.regexScope, onTimeout: noticeRegexTimeout,
+        invocationTimeoutMs: Number.POSITIVE_INFINITY, skipTimedOutRules: arg.displayMode === true })
+    let regexRule: unknown
+    let regexTrigger: string
+    const regexOperation = <K extends keyof RegexOperationResults>(kind: K, pattern: string, flags: string, input: string) =>
+        regexExecutor.operation({ kind, pattern, flags, input }, JSON.stringify(['trigger', char.chaId, regexTrigger, kind, regexRule]))
     arg.recursiveCount ??= 0
     const moduleTriggers = getModuleTriggers()
     if (char.triggerscript.length === 0 && moduleTriggers.length === 0) {
@@ -1380,6 +1396,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
     
     
     for(const trigger of triggers){
+        regexTrigger = JSON.stringify([trigger.type, trigger.comment])
         if (arg.generation?.signal.aborted) break
         let tempVars:Record<string, number> = {}
 
@@ -1389,6 +1406,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
 
         let pass = true
         for(const condition of trigger.conditions){
+            regexRule = condition
             if(condition.type === 'var' || condition.type === 'chatindex' || condition.type === 'value'){
                 let varValue =  (condition.type === 'var') ? (getVar(condition.var) ?? 'null') :
                                 (condition.type === 'chatindex') ? (historyLength(chat).toString()) :
@@ -1457,7 +1475,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                     pass = da.toLowerCase().includes(val.toLowerCase())
                 }
                 else if(condition.type2 === 'regex'){
-                    pass = new RegExp(val).test(da)
+                    pass = await regexOperation('test', val, '', da)
                 }
             }
             if(!pass){
@@ -1471,6 +1489,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
         for(let index = 0; index < trigger.effect.length; index++){
             if (arg.generation?.signal.aborted) break
             const effect = trigger.effect[index]
+            regexRule = effect
             if(mode === 'display' && !displayAllowList.includes(effect.type)){
                 continue
             }
@@ -1555,6 +1574,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                             conversationOperation,
                             access: access ?? undefined,
                             generation: arg.generation,
+                            regexScope: arg.regexScope,
                         })
                         if(r){
                             additonalSysPrompt = r.additonalSysPrompt
@@ -1675,8 +1695,8 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                     }
 
                     const effectValue = risuChatParser(effect.value,{chara:char})
-                    const regex = new RegExp(effect.regex, effect.flags)
-                    const regexResult = regex.exec(effectValue)
+                    const regexResult = await regexOperation('exec', effect.regex, effect.flags, effectValue)
+                    if (regexExecutor.lastOperationSkipped) break
                     const result = effect.result.replace(/\$[0-9]+/g, (match) => {
                         const index = Number(match.slice(1))
                         return regexResult[index]
@@ -1966,6 +1986,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                             conversationOperation,
                             access: access ?? undefined,
                             generation: arg.generation,
+                            regexScope: arg.regexScope,
                         })
                         if(r){
                             additonalSysPrompt = r.additonalSysPrompt
@@ -2108,8 +2129,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                     let value = effect.valueType === 'value' ? risuChatParser(effect.value,{chara:char}) : getVar(risuChatParser(effect.value,{chara:char}))
                     let regexValue = effect.regexType === 'value' ? risuChatParser(effect.regex,{chara:char}) : getVar(risuChatParser(effect.regex,{chara:char}))
                     let flagsValue = effect.flagsType === 'value' ? risuChatParser(effect.flags,{chara:char}) : getVar(risuChatParser(effect.flags,{chara:char}))
-                    let regex = new RegExp(regexValue, flagsValue)
-                    let regexResult = regex.exec(value)
+                    let regexResult = await regexOperation('exec', regexValue, flagsValue, value)
                     let resultValue = effect.resultType === 'value' ? risuChatParser(effect.result,{chara:char}) : getVar(risuChatParser(effect.result,{chara:char}))
                     
                     let result = ''
@@ -2249,11 +2269,9 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                             const regexMatch = delimiter.match(/^\/(.+)\/([gimuy]*)$/)
                             if (regexMatch) {
                                 const [, pattern, flags] = regexMatch
-                                const regex = new RegExp(pattern, flags)
-                                result = source.split(regex)
+                                result = await regexOperation('split', pattern, flags, source)
                             } else {
-                                const regex = new RegExp(delimiter)
-                                result = source.split(regex)
+                                result = await regexOperation('split', delimiter, '', source)
                             }
                         } catch (error) {
                             result = [source]
@@ -2620,7 +2638,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                         pass = da.toLowerCase().includes(value.toLowerCase())
                     }
                     else if(condition === 'regex'){
-                        pass = new RegExp(value).test(da)
+                        pass = await regexOperation('test', value, '', da)
                     }
                     setVar(risuChatParser(effect.outputVar, {chara:char}), pass ? '1' : '0')
                     break
@@ -2644,13 +2662,21 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                 case 'v2GetLorebookByName':{
                     char.globalLore = char.globalLore ?? []
                     const name = effect.nameType === 'value' ? risuChatParser(effect.name,{chara:char}) : getVar(risuChatParser(effect.name,{chara:char}))
-                    const regex = new RegExp(name, 'i')
                     const matchingIndices: number[] = []
-                    for (let i = 0; i < char.globalLore.length; i++) {
-                        const lore = char.globalLore[i]
-                        if (lore && lore.comment !== undefined && regex.test(lore.comment)) {
-                            matchingIndices.push(i)
+                    const key = JSON.stringify(['trigger', char.chaId, regexTrigger, 'test', regexRule])
+                    // A batch reads the lorebook when it starts, so it sees changes made while earlier batches ran.
+                    for (let start = 0; start < char.globalLore.length; start += REGEX_TEST_BATCH_SIZE) {
+                        const indices: number[] = []
+                        const comments: string[] = []
+                        for (let i = start; i < Math.min(start + REGEX_TEST_BATCH_SIZE, char.globalLore.length); i++) {
+                            const lore = char.globalLore[i]
+                            if (lore && lore.comment !== undefined) {
+                                indices.push(i)
+                                comments.push(lore.comment)
+                            }
                         }
+                        const matches = await regexExecutor.testEach(name, 'i', comments, key)
+                        matchingIndices.push(...indices.filter((_, index) => matches[index]))
                     }
                     setVar(risuChatParser(effect.outputVar, {chara:char}), JSON.stringify(matchingIndices))
                     break
@@ -2767,8 +2793,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                         const value = effect.valueType === 'value' ? risuChatParser(effect.value,{chara:char}) : getVar(risuChatParser(effect.value,{chara:char}))
                         const regexPattern = effect.regexType === 'value' ? risuChatParser(effect.regex,{chara:char}) : getVar(risuChatParser(effect.regex,{chara:char}))
                         const flags = effect.flagsType === 'value' ? risuChatParser(effect.flags,{chara:char}) : getVar(risuChatParser(effect.flags,{chara:char}))
-                        const regex = new RegExp(regexPattern, flags)
-                        const result = regex.test(value)
+                        const result = await regexOperation('test', regexPattern, flags, value)
                         setVar(risuChatParser(effect.outputVar, {chara:char}), result ? '1' : '0')
                     } catch (error) {
                         setVar(risuChatParser(effect.outputVar, {chara:char}), '0')
@@ -2776,13 +2801,18 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                     break
                 }
                 case 'v2GetAuthorNote':{
-                    setVar(risuChatParser(effect.outputVar, {chara:char}), chat.note ?? '')
+                    setVar(risuChatParser(effect.outputVar, {chara:char}), effectiveAuthorNote(db.authorNotePresets, chat))
                     break
                 }
                 case 'v2SetAuthorNote':{
                     const value = effect.valueType === 'value' ? risuChatParser(effect.value,{chara:char}) : getVar(risuChatParser(effect.value,{chara:char}))
-                    writableChat().note = value
-                    if (!conversationOperation && !access && !arg.displayMode) arg.chat.note = value
+                    const target = writableChat()
+                    target.note = value
+                    delete target.authorNotePreset
+                    if (!conversationOperation && !access && !arg.displayMode) {
+                        arg.chat.note = value
+                        delete arg.chat.authorNotePreset
+                    }
                     break
                 }
                 case 'v2MakeDictVar':{
@@ -2920,8 +2950,8 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                         const replacement = effect.replacementType === 'value' ? risuChatParser(effect.replacement,{chara:char}) : getVar(risuChatParser(effect.replacement,{chara:char}))
                         const flags = effect.flagsType === 'value' ? risuChatParser(effect.flags,{chara:char}) : getVar(risuChatParser(effect.flags,{chara:char}))
                         
-                        const regex = new RegExp(regexPattern, flags)
-                        const result = source.replace(regex, (...args) => {
+                        const matches = await regexOperation('replacementMatches', regexPattern, flags, source)
+                        const result = replaceRegexMatches(source, matches, (...args) => {
                             const match = args[0]
                             const groups = args.slice(1, -2)
                             

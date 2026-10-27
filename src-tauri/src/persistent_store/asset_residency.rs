@@ -52,6 +52,8 @@ enum Holder {
 }
 /// Bodies classified per registry question.
 const HOLDER_PAGE: usize = 1024;
+/// Offloaded bodies unlinked under one hold of the repository mutation lock.
+const EVICTION_PAGE: usize = 64;
 /// Connection IDs per connection root, read once per status or download.
 #[derive(Default)]
 struct Connections(std::collections::BTreeMap<std::path::PathBuf, BTreeSet<String>>);
@@ -801,7 +803,7 @@ impl PersistentStore {
     ) -> Result<ResidencyStatus> {
         check()?;
         let targets = self.previous_storage_assets(target, &check)?;
-        self.hydrate_residency_targets(targets, cancellation, selected_character_id, check)
+        self.hydrate_residency_targets(targets, cancellation, selected_character_id, None, check)
     }
     /// Downloads the bodies another storage holds without changing the policy:
     /// every one, or only those `connection_id` holds and no other live
@@ -811,6 +813,17 @@ impl PersistentStore {
         connection_id: Option<&str>,
         cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
         selected_character_id: Option<&str>,
+        check: impl Fn() -> Result<()>,
+    ) -> Result<ResidencyStatus> {
+        self.asset_residency_download_remote_prioritized(connection_id, cancellation, selected_character_id, None, check)
+    }
+    /// The same download, with the representative images the renderer lists first.
+    pub(crate) fn asset_residency_download_remote_prioritized(
+        &self,
+        connection_id: Option<&str>,
+        cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        selected_character_id: Option<&str>,
+        icon_priority: Option<&RepresentativeImagePriority>,
         check: impl Fn() -> Result<()>,
     ) -> Result<ResidencyStatus> {
         check()?;
@@ -835,11 +848,11 @@ impl PersistentStore {
                 }
             }
         }
-        self.hydrate_residency_targets(targets, cancellation, selected_character_id, check)
+        self.hydrate_residency_targets(targets, cancellation, selected_character_id, icon_priority, check)
     }
     fn hydrate_residency_targets(
         &self, targets: BTreeSet<String>, cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-        selected_character_id: Option<&str>, check: impl Fn() -> Result<()>,
+        selected_character_id: Option<&str>, icon_priority: Option<&RepresentativeImagePriority>, check: impl Fn() -> Result<()>,
     ) -> Result<ResidencyStatus> {
         let mut hydration = crate::server_sync::residency::HydrationSession::new(&self.repository_root, cancellation)?;
         let progress = crate::server_sync::asset_download_progress::plan(targets.len());
@@ -852,7 +865,11 @@ impl PersistentStore {
                 return Err(SyncError::new("required-asset-unavailable", 409));
             }
         }
-        if !hydration.hydrate_many_outcomes(&targets.into_iter().collect::<Vec<_>>(), &check, &mut opened)?.is_empty() {
+        // Representative images come before the other bodies, so a received avatar shows early.
+        let mut ordered = if targets.is_empty() { Vec::new() } else { self.representative_image_plan(selected_character_id, icon_priority)?.0 };
+        ordered.retain(|hash| targets.contains(hash));
+        ordered.extend(targets);
+        if !hydration.hydrate_many_outcomes(&ordered, &check, &mut opened)?.is_empty() {
             return Err(SyncError::new("required-asset-unavailable", 409));
         }
         let status = self.asset_residency_status()?;
@@ -993,23 +1010,38 @@ impl PersistentStore {
         if !objects.is_empty() {
             check()?;
             progress.stage(Stage::Preparing, 0, None);
-            let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
-            let fresh = inventory.current(self)?;
-            progress.stage(Stage::Deleting, 0, Some(total));
-            for (hash, size) in objects {
+            // Media requests take the same lock, so it is held for one page of
+            // unlinks at a time, and directories are synced after it is released.
+            for (index, page) in objects.chunks(EVICTION_PAGE).enumerate() {
                 check()?;
-                if fresh.local.contains(&hash) {
-                    progress.completed(None);
-                    continue;
+                let mut directories = BTreeSet::new();
+                let unlinked = (|| -> Result<()> {
+                    let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
+                    let fresh = inventory.current(self)?;
+                    if index == 0 { progress.stage(Stage::Deleting, 0, Some(total)); }
+                    for (hash, size) in page {
+                        check()?;
+                        if fresh.local.contains(hash) {
+                            progress.completed(None);
+                            continue;
+                        }
+                        // Keep aliases and their object catalog row. Offloading is
+                        // neither a logical deletion nor an asset GC tombstone.
+                        let key = object_physical_key(hash);
+                        if let crate::asset_repository::ExactObjectUnlink::Removed { .. } =
+                            cas.unlink_retained_object(hash, *size, &key)?
+                        {
+                            directories.extend(cas.repository_root().join(&key).parent().map(std::path::Path::to_path_buf));
+                            evicted += size;
+                            progress.completed(Some(*size));
+                        } else { progress.completed(None); }
+                    }
+                    Ok(())
+                })();
+                for directory in directories {
+                    crate::trust_boundary::sync_directory(&directory)?;
                 }
-                // Keep aliases and their object catalog row. Offloading is
-                // neither a logical deletion nor an asset GC tombstone.
-                if let crate::asset_repository::ExactObjectUnlink::Removed { .. } =
-                    cas.unlink_retained_object(&hash, size, &object_physical_key(&hash))?
-                {
-                    evicted += size;
-                    progress.completed(Some(size));
-                } else { progress.completed(None); }
+                unlinked?;
             }
         }
         progress.stage(Stage::Finalizing, total, None);

@@ -16,6 +16,7 @@ import { requestScriptDisplayRefresh } from '../process/scriptDisplayRefresh'
 import { getPersonaPrompt, getUserName } from '../util'
 import { cloneConversationMetadata, isMetadataOnlySelectedConversation } from '../storage/selectedConversationLifecycle'
 import { assertPersistentMutationAllowed, getPersistentStorageAuthorityEpoch, getPersistentDataRuntime, peekActiveConversationSession } from '../storage/persistentDataRuntime.svelte'
+import { RevisionConflictError } from '../storage/persistentDataStore'
 import type { Chat, Message } from '../storage/database.svelte'
 
 const clone = rfdc()
@@ -162,22 +163,27 @@ export async function parseRisuChat(text: string, options?: ParseRisuChatOptions
     const prepareHistory = async (source: string, index: number) => {
         const plan = planFor(source)
         if (!windowed) return captureResidentCbsHistory(residentMessages ?? sourceChat.message, plan, index)
-        const lease = await leasePromise
-        const access = await prepareCbsHistory({ characterId, conversationId, totalMessages, chatID: index, plan, signal,
-            reader: {
-                revision: authority!.storeRevision,
-                readResidentMessage: (row) => resident.get(row),
-                readRoleWindow: lease?.messageMetadataReadMode === 'projected' && authority!.sessionVersion === authority!.persistedSessionVersion
-                    ? (query) => lease.readConversationMessageMetadataWindow!(query) : undefined,
-                readConversationWindow: async (query) => {
-                    const result = await lease!.readConversationWindow(query)
-                    return result ? { ...result, value: { ...result.value, totalMessages } } : null
+        try {
+            const lease = await leasePromise
+            const access = await prepareCbsHistory({ characterId, conversationId, totalMessages, chatID: index, plan, signal,
+                reader: {
+                    revision: authority!.storeRevision,
+                    readResidentMessage: (row) => resident.get(row),
+                    readRoleWindow: lease?.messageMetadataReadMode === 'projected' && authority!.sessionVersion === authority!.persistedSessionVersion
+                        ? (query) => lease.readConversationMessageMetadataWindow!(query) : undefined,
+                    readConversationWindow: async (query) => {
+                        const result = await lease!.readConversationWindow(query)
+                        return result ? { ...result, value: { ...result.value, totalMessages } } : null
+                    },
                 },
-            },
-        })
-        for (const [row, message] of access.preparedRows()) resident.set(row, message)
-        historyAccess = access
-        return access
+            })
+            for (const [row, message] of access.preparedRows()) resident.set(row, message)
+            historyAccess = access
+            return access
+        } catch (error) {
+            if (error instanceof RevisionConflictError) throw new PluginParserTargetChangedError()
+            throw error
+        }
     }
     // Only the first CBS pass can write variables. Release its ordering boundary
     // before invoking scripts, since a plugin hook may call this API again.
@@ -185,17 +191,29 @@ export async function parseRisuChat(text: string, options?: ParseRisuChatOptions
     const precedingVariables = variablePhases.get(variableKey)
     let releaseVariables: (() => void) | undefined
     if (windowed || precedingVariables) {
-        const phase = new Promise<void>((resolve) => { releaseVariables = resolve })
+        const ownPhase = new Promise<void>((resolve) => { releaseVariables = resolve })
+        const phase = precedingVariables ? precedingVariables.then(() => ownPhase) : ownPhase
         variablePhases.set(variableKey, phase)
-        const release = releaseVariables!
-        releaseVariables = () => {
+        void phase.then(() => {
             if (variablePhases.get(variableKey) === phase) variablePhases.delete(variableKey)
-            release()
-        }
+        })
     }
+    let waitingForVariables = !!precedingVariables
+    let failed = false
     try {
         if (precedingVariables) {
-            await precedingVariables
+            if (signal) {
+                signal.throwIfAborted()
+                let onAbort!: () => void
+                try {
+                    await new Promise<void>((resolve, reject) => {
+                        onAbort = () => reject(signal.reason)
+                        signal.addEventListener('abort', onAbort, { once: true })
+                        void precedingVariables.then(resolve, reject)
+                    })
+                } finally { signal.removeEventListener('abort', onAbort) }
+            } else await precedingVariables
+            waitingForVariables = false
             signal?.throwIfAborted()
             if (getPersistentStorageAuthorityEpoch() !== epoch) throw new PluginParserTargetChangedError()
             const current = findResidentChat()
@@ -272,8 +290,18 @@ export async function parseRisuChat(text: string, options?: ParseRisuChatOptions
             if (mutationError) throw mutationError
             return result.data
         } finally { await commitPending() }
+    } catch (error) {
+        failed = true
+        throw error
     } finally {
         releaseVariables?.()
-        if (leasePromise) await (await leasePromise).release()
+        if (leasePromise) {
+            const cleanup = leasePromise.then((lease) => lease.release())
+            // An aborted waiter must not wait for acquisition or release.
+            if (waitingForVariables) void cleanup.catch(() => {})
+            else {
+                try { await cleanup } catch (error) { if (!failed) throw error }
+            }
+        }
     }
 }

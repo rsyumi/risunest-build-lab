@@ -202,3 +202,35 @@ test('retains the last stylesheet on a failed refresh and recovers on a script v
         error.mockRestore()
     }
 })
+
+test('retries stale initial preparation during refresh while retaining the published background', async () => {
+    state.acquire.mockResolvedValue({ release: vi.fn() })
+    state.parse.mockResolvedValue('<style>.panel { color: red }</style><div>published</div>')
+    const host = document.createElement('div')
+    document.body.append(host)
+    component = mount(BackgroundDom, { target: host })
+    await vi.waitFor(() => expect(host.textContent).toContain('published'))
+    const style = host.querySelector('style')
+    const admission = deferred<void>()
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+        state.acquire.mockImplementationOnce(async ({ onStale }: { onStale(): void }) => {
+            await admission.promise
+            queueMicrotask(onStale)
+            throw new Error('Synthetic stale initial history')
+        })
+        state.parse.mockResolvedValue('<style>.panel { color: blue }</style><div>prepared again</div>')
+        ScriptDisplayRefreshPointer.update((value) => value + 1)
+        await vi.waitFor(() => expect(state.acquire).toHaveBeenCalledTimes(2))
+        expect(host.querySelector('style')).toBe(style)
+        expect(host.textContent).toContain('published')
+
+        admission.resolve()
+        await vi.waitFor(() => expect(host.textContent).toContain('prepared again'))
+        expect(host.querySelector('style')?.textContent).toContain('blue')
+        expect(host.querySelector('[role="alert"]')).toBeNull()
+        expect(error).not.toHaveBeenCalled()
+    } finally {
+        error.mockRestore()
+    }
+})

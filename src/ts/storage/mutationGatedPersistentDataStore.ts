@@ -46,6 +46,8 @@ export function createMutationGatedPersistentDataStore(
             store.readCharacter(id),
         queryConversations: (input: ConversationQuery): Promise<ConversationPage> =>
             store.queryConversations(input),
+        queryAuthorNotePresetUsage: store.queryAuthorNotePresetUsage
+            ? (presetId: string) => store.queryAuthorNotePresetUsage!(presetId) : undefined,
         readConversation: (characterId, conversationId) =>
             store.readConversation(characterId, conversationId),
         readConversationMetadata: (characterId, conversationId) =>

@@ -11,8 +11,7 @@ import {
 } from './nativeFileJobs'
 import { getPersistentDataRuntime } from './persistentDataRuntime.svelte'
 import {
-    prepareNativeContentExportFromPicker,
-    withNativeContentExportDestination,
+    runNativeContentExport,
     type NativeContentExportPickerDependencies,
 } from './nativeContentExportPicker'
 
@@ -55,14 +54,11 @@ export async function exportNativeModuleRisumFromPicker(
     dependencies: NativeModuleRisumExportRouteDependencies = productionDependencies,
 ): Promise<NativeFileJobResult | null | undefined> {
     const suggestedName = `${module.name || 'module'}.risum`
-    const flow = await prepareNativeContentExportFromPicker({
+    return runNativeContentExport({
         suggestedName,
         flushReason: 'native-risum-export',
         chooseDestination: () => dependencies.chooseDestination(suggestedName),
-    }, options, dependencies)
-    if (flow.kind === 'unsupported') return undefined
-    if (flow.kind === 'cancelled') return null
-    return withNativeContentExportDestination(flow.destination, async () => {
+    }, options, dependencies, 'dialog', async (flow, options) => {
         const moduleIndex = dependencies.modules().findIndex((candidate) => candidate === module)
         if (moduleIndex < 0) throw new Error('Native RISUM export requires the exact root module object')
         const runtime = dependencies.runtime()

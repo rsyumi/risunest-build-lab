@@ -285,6 +285,7 @@ fn sequence(value: &str) -> StoreResult<Sequence> {
 pub(crate) struct DeviceStore {
     pub(super) connection: Connection,
     pub(super) plugin_writes: plugin_values::sessions::WriteSessions,
+    pub(super) plugin_parts: plugin_values::structure::PartUploads,
     pub(super) plugin_read_epoch: String,
 }
 
@@ -311,7 +312,7 @@ impl DeviceStore {
             }
         }
         connection.execute_batch("CREATE TEMP TABLE plugin_remote_sequences(owner TEXT NOT NULL, space TEXT NOT NULL, key TEXT NOT NULL, sequence INTEGER NOT NULL, PRIMARY KEY(owner,space,key))")?;
-        Ok(Self { connection, plugin_writes: Default::default(), plugin_read_epoch: Uuid::new_v4().to_string() })
+        Ok(Self { connection, plugin_writes: Default::default(), plugin_parts: Default::default(), plugin_read_epoch: Uuid::new_v4().to_string() })
     }
 
     #[cfg_attr(not(test), allow(dead_code))]

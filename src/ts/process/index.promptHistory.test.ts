@@ -120,6 +120,7 @@ import { DBState, selectedCharID } from '../stores.svelte'
 import { doingChat } from './generationState'
 import { previewFormated, sendChat } from './index.svelte'
 import { resetScriptCache } from './scripts'
+import { authorNoteFingerprint } from '../authorNotePresets'
 
 const TAIL_TOKEN = 'TAIL_TOKEN'
 const ACTIVE_MESSAGE_COUNT = 130
@@ -293,6 +294,25 @@ describe('sendChat prompt history characterization', () => {
             role: 'system',
             content: '[Prompt Character] Synthetic reply',
         })])
+    })
+
+    it('sends the text a linked author note preset holds when the prompt is built, parsed for this character', async () => {
+        const database = makeDatabase()
+        const character = database.characters[0]
+        character.customscript = []
+        character.triggerscript = []
+        character.firstMessage = ''
+        character.chats[0].fmIndex = -1
+        character.chats[0].message = [{ role: 'user', data: 'Synthetic question', chatId: 'question' }]
+        character.chats[0].note = 'stale copy'
+        character.chats[0].authorNotePreset = { id: 'preset', fingerprint: authorNoteFingerprint('stale copy') }
+        database.authorNotePresets = [{ id: 'preset', name: 'Preset', text: 'Loaded for {{char}}' }]
+        database.promptTemplate = [{ type: 'authornote' }, { type: 'chat', rangeStart: 0, rangeEnd: 'end' }]
+        setDatabaseLite(database)
+        DBState.db.authorNotePresets![0].text = 'Edited for {{char}}'
+
+        await expect(sendChat({ preview: true })).resolves.toBe(true)
+        expect(previewFormated.map((message) => message.content)).toEqual(['Edited for Prompt Character', 'Synthetic question'])
     })
 
     it('preserves final OpenAIChat parity through trigger cloning, scripts, CBS, regex, and 128-message pages', async () => {

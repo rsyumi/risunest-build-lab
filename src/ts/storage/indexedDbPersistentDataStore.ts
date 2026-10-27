@@ -19,6 +19,7 @@ import type {
     ConversationMutation,
     ConversationMessageMetadataWindow,
     ConversationPage,
+    AuthorNotePresetUsage,
     ConversationQuery,
     ConversationSummary,
     ConversationWindow,
@@ -55,6 +56,7 @@ import {
 import type { PluginStorageMeta } from '../plugins/pluginOwner'
 import { readPluginStorageMetaOwner } from '../plugins/pluginOwner'
 import { replaceArrayRange } from '../arrayRange'
+import { matchingAuthorNotePresetId } from '../authorNotePresets'
 
 const DATABASE_VERSION = 1
 const DATABASE_SCHEMA_ID = 'risunest-persistent-data-v1'
@@ -593,6 +595,47 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         const transaction = this.requireDatabase().transaction(['meta', 'conversations'], 'readonly')
         const { revision, generation } = await this.readActive(transaction)
         return this.queryConversationsFromTransaction(transaction, revision, generation, input)
+    }
+
+    async queryAuthorNotePresetUsage(presetId: string): Promise<AuthorNotePresetUsage[]> {
+        const transaction = this.requireDatabase().transaction(['meta', 'catalog', 'conversations'], 'readonly')
+        const { generation } = await this.readActive(transaction)
+        const linked = await new Promise<ConversationSummary[]>((resolve, reject) => {
+            const found: ConversationSummary[] = []
+            const request = transaction.objectStore('conversations').index('byGeneration')
+                .openCursor(this.keyRangeFactory.only(generation))
+            request.onerror = () => reject(request.error)
+            request.onsuccess = () => {
+                try {
+                    const cursor = request.result
+                    if (!cursor) return resolve(found)
+                    const { summary, detail } = (cursor.value as StoredRecord<StoredConversation>).value
+                    if (matchingAuthorNotePresetId(detail) === presetId) found.push(summary)
+                    cursor.continue()
+                } catch (error) {
+                    reject(error)
+                }
+            }
+        })
+        const characters = new Map<string, CharacterSummary | undefined>()
+        for (const { characterId } of linked) {
+            if (characters.has(characterId)) continue
+            const record = (await requestResult(
+                transaction.objectStore('catalog').get(this.characterKey(generation, characterId)),
+            )) as StoredRecord<CharacterSummary> | undefined
+            characters.set(characterId, record?.value)
+        }
+        await transactionDone(transaction)
+        const characterIndex = (summary: ConversationSummary) =>
+            characters.get(summary.characterId)?.configuredIndex ?? Number.MAX_SAFE_INTEGER
+        return linked
+            .sort((a, b) => characterIndex(a) - characterIndex(b) || a.configuredIndex - b.configuredIndex)
+            .map((summary) => ({
+                characterId: summary.characterId,
+                characterName: characters.get(summary.characterId)?.name ?? '',
+                conversationId: summary.id,
+                conversationName: summary.name,
+            }))
     }
 
     async readConversation(

@@ -151,7 +151,10 @@ describe('bootstrap recovery exclusions', () => {
         vi.mocked(afterPluginsStarted).mockImplementation(listener => { listeners.add(listener); return () => {listeners.delete(listener)} })
         let started = 0
         const load = async () => {
-            if (!await pluginStartupGate.ensure()) return
+            const before = vi.mocked(invoke).mock.calls.length
+            const ready = await pluginStartupGate.ensure()
+            expect(vi.mocked(invoke).mock.calls.slice(before).map(([command]) => command)).not.toContain('pds_lww_binding_state')
+            if (!ready) return
             started++
             for (const listener of listeners) await listener()
         }
@@ -160,10 +163,11 @@ describe('bootstrap recovery exclusions', () => {
         await loadData()
         expect(started).toBe(pluginsExcluded ? 0 : 1)
         expect(invoke).toHaveBeenCalledWith('native_file_job_forget', {jobId:'synthetic-restored-job'})
-        expect(invoke).not.toHaveBeenCalledWith('pds_lww_binding_state', expect.anything())
         if (!pluginsExcluded) {
+            const beforeRetry = vi.mocked(invoke).mock.calls.length
             await retryPluginStartup()
             expect(started).toBe(2)
+            expect(vi.mocked(invoke).mock.calls.slice(beforeRetry).map(([command]) => command)).not.toContain('pds_lww_binding_state')
             expect(installServerSyncProduction).toHaveBeenCalledExactlyOnceWith({resumeBound:false})
         }
     })

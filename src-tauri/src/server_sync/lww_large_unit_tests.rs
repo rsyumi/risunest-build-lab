@@ -77,6 +77,7 @@ fn a_rejected_single_entry_push_reports_unit_too_large_and_keeps_the_entry() {
             },
         ))
     });
+    server.switch_format();
     for value in ["synthetic".to_owned(), random_text(32 * 1024, 7)] {
         let (_a, mut a) = local();
         let ca = server.client(&a);
@@ -197,13 +198,16 @@ fn a_receiver_whose_base_the_server_collected_downloads_the_whole_body() {
 fn a_failed_push_keeps_its_copies_for_the_retry_and_a_finished_one_removes_them() {
     let fail_push = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     let (server, _) = recording_server(fail_push.clone());
+    server.switch_format();
     let (_a, mut a) = local();
     let ca = server.client(&a);
     let value = Value::String(random_text(2 * MAX_METADATA_BYTES, 3));
     save(&mut a, &["root", "customCSS"], value.clone());
     let hash = risunest_sync_wire::hash(&risunest_sync_wire::payload_value::encode(&value).unwrap());
     let request = header(&a);
-    assert!(ca.push(&mut a, &request, &[]).is_err());
+    let error = ca.push(&mut a, &request, &[]).unwrap_err();
+    // The server never recorded the push, so it is cancelled and fails as its reply did.
+    assert_eq!((error.code.as_str(), error.status, error.retryable), ("unavailable", 503, true));
     let copies = crate::asset_repository::PayloadCas::new(&lane(&a, "send")).unwrap();
     assert!(copies.stat_object(&hash).unwrap().is_some());
     fail_push.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -275,5 +279,76 @@ fn messages_and_archive_bodies_larger_than_a_metadata_body_are_prepared_whole() 
     for hash in &hashes {
         assert!(b.lww_verified_object_present(hash).unwrap());
         assert!(b.lww_object_body(hash).unwrap().unwrap().len() > MAX_METADATA_BYTES);
+    }
+}
+
+#[test]
+fn plugin_value_parts_are_prepared_into_the_object_store() {
+    let server = LocalServerFixture::new();
+    let (_a, a) = local();
+    let (_b, mut b) = local();
+    let ca = server.client(&a);
+    let cb = server.client(&b);
+    let staging = tempfile::tempdir().unwrap();
+    let cache = super::cache::Cache::open(staging.path()).unwrap();
+    let part_hash = cache.put(&[0u8, 255, 128]).unwrap();
+    let text = format!(
+        "#risunest-structured:1\n{{\"parts\":[\"p:{part_hash}\"],\"bytes\":3,\"nodes\":[{{\"type\":\"ArrayBuffer\",\"offset\":0,\"byteLength\":3}}],\"root\":{{\"ref\":0}}}}");
+    let body_hash = cache.put(&serde_json::to_vec(&text).unwrap()).unwrap();
+    let hashes = [body_hash.clone(), part_hash.clone()];
+    super::transfer::Transfer::new(&ca.client, &cache).unwrap().upload(&hashes, &[]).unwrap();
+    let change = crate::persistent_store::lww::Change {
+        key: risunest_sync_wire::unit::UnitKey::new(&["plugin-local", "synthetic-owner", "json", "structured"]).unwrap(),
+        stamp: risunest_sync_wire::stamp::Stamp { physical_ms: 1.into(), logical: 0, writer_id: b.lww_clock_state().unwrap().writer_id },
+        value: UnitValue::object(RecordDescriptor { dependencies: vec![part_hash], ..RecordDescriptor::content(body_hash) }).unwrap(),
+    };
+    cb.prepare_bodies(&mut b, &[change], 1.into()).unwrap();
+    for hash in &hashes {
+        assert!(b.lww_verified_object_present(hash).unwrap());
+        assert!(super::residency::Residency::open(b.repository_root()).unwrap().object(hash, None).unwrap().is_none());
+    }
+}
+
+#[test]
+fn a_structured_plugin_value_moves_with_its_parts_through_the_server() {
+    use crate::persistent_store::device_store::{plugin_values::{structure, PluginDeviceMutation}, Section};
+    let server = LocalServerFixture::new();
+    let (_a, mut a) = local();
+    let (_b, mut b) = local();
+    for store in [&mut a, &mut b] {
+        store.device_store_mut().unwrap().set_section_participating(Section::LocalPlugins, true).unwrap();
+    }
+    let ca = server.client(&a);
+    let cb = server.client(&b);
+    let full = structure::PART_BYTES as usize;
+    // A small value, a value of one full part, and a value whose last part is a remainder.
+    let values = [
+        ("small", vec![vec![0u8, 255, 128]]),
+        ("full", vec![vec![1u8; full]]),
+        ("remainder", vec![vec![2u8; full], vec![3u8; 5]]),
+    ];
+    let mut texts = Vec::new();
+    for (key, parts) in &values {
+        let hashes = parts.iter()
+            .map(|part| structure::put_part(a.device_store().unwrap().connection(), part).unwrap())
+            .collect::<Vec<_>>();
+        let length = parts.iter().map(Vec::len).sum::<usize>();
+        let text = format!(
+            "#risunest-structured:1
+{{\"parts\":[{}],\"bytes\":{length},\"nodes\":[{{\"type\":\"ArrayBuffer\",\"offset\":0,\"byteLength\":{length}}}],\"root\":{{\"ref\":0}}}}",
+            hashes.iter().map(|hash| format!("\"p:{hash}\"")).collect::<Vec<_>>().join(","));
+        a.device_store_mut().unwrap().write_plugin_device_values("synthetic-owner", &[
+            PluginDeviceMutation::Set { space: "json".into(), key: (*key).into(), value: text.clone() },
+        ]).unwrap();
+        texts.push(text);
+    }
+    drain_publications(&ca, &mut a, &[]).unwrap();
+    assert_eq!((pending(&a), server.server.library_format()), (0, 2));
+    receive_available(&cb, &mut b, &[]).unwrap();
+    for ((key, parts), text) in values.iter().zip(texts) {
+        assert_eq!(b.device_store().unwrap().read_plugin_device_value("synthetic-owner", "json", key).unwrap(), Some(text));
+        for part in parts {
+            assert_eq!(b.lww_object_body(&risunest_sync_wire::hash(part)).unwrap().as_ref(), Some(part));
+        }
     }
 }

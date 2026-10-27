@@ -24,7 +24,7 @@ test('settles an aborted render while mounted without reporting a render error',
     document.body.append(target)
     const component = mount(DeferredMarkdown, {
         target,
-        props: { data: 'synthetic', signal: controller.signal },
+        props: { data: 'synthetic', root: target, signal: controller.signal },
     })
     try {
         await vi.waitFor(() => expect(state.reject).toBeTypeOf('function'))

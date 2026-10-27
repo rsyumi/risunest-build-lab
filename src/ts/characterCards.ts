@@ -33,6 +33,7 @@ import {
 } from './storage/nativePngCardAdapter'
 import { exportNativeCharacterCharxFromPicker } from './storage/nativeCharacterCharxExportRoute'
 import { exportNativeCharacterCardFromPicker } from './storage/nativeCharacterCardExportRoute'
+import { presentContentExportError } from './storage/fileOperationErrorPresentation'
 import { beginMobileBackgroundTask, type MobileBackgroundTask } from './mobileBackgroundTask'
 import { filterBlockedRealmCards, isRealmCreatorBlocked } from './realmBlocking'
 import { normalizeOnboarding } from './onboarding'
@@ -910,6 +911,7 @@ export async function exportChar(charaID:number):Promise<string> {
     const option = await alertCardExport()
     if(option.type === ''){
         if(option.type2 === 'charx' || option.type2 === 'charxJpeg'){
+            const startedAt = Date.now()
             try {
                 const appendedJpeg = option.type2 === 'charxJpeg'
                 const nativeResult = await exportNativeCharacterCharxFromPicker({
@@ -939,16 +941,16 @@ export async function exportChar(charaID:number):Promise<string> {
                     },
                 })
                 if(nativeResult !== undefined){
-                    if(nativeResult) alertNormal(language.successExport)
                     return ''
                 }
             }
             catch(error){
-                alertError(error)
+                presentContentExportError(error, startedAt)
                 return ''
             }
         }
         if(option.type2 === 'json' || option.type2 === 'png'){
+            const startedAt = Date.now()
             try {
                 const nativeResult = await exportNativeCharacterCardFromPicker({
                     characterId: char.chaId,
@@ -960,12 +962,11 @@ export async function exportChar(charaID:number):Promise<string> {
                     } as character) as unknown as Record<string, unknown>,
                 })
                 if(nativeResult !== undefined){
-                    if(nativeResult) alertNormal(language.successExport)
                     return ''
                 }
             }
             catch(error){
-                alertError(error)
+                presentContentExportError(error, startedAt)
                 return ''
             }
         }

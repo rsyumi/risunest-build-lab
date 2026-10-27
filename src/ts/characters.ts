@@ -1,6 +1,7 @@
 import { imageAliases, imageFormatFromBytes, stripImageExtension } from './media/imageFormats'
 import { offerHtmlClipboardExport } from './htmlClipboardExport'
 import { defaultChatToggleBinding } from './toggleBindings'
+import { materializeAuthorNote } from './authorNotePresets'
 import DOMPurify from 'dompurify'
 import { get, writable } from "svelte/store";
 import { saveImage, type character, type Chat, defaultSdDataFunc, type loreBook, getDatabase, getCharacterByIndex, setCharacterByIndex } from "./storage/database.svelte";
@@ -319,7 +320,7 @@ export async function exportChat(page:number){
             const stringl = Buffer.from(JSON.stringify({
                 type: 'risuChat',
                 ver: 2,
-                data: chat,
+                data: materializeAuthorNote(db.authorNotePresets, chat),
                 folders: folders
             }), 'utf-8')
     
@@ -636,7 +637,7 @@ export async function exportAllChats() {
             : null
         if (!char) throw new Error('Character was not found')
         const date = new Date().toISOString().replace(/[:.]/g, "-")
-        const allChats = char.chats
+        const allChats = char.chats.map((chat) => materializeAuthorNote(db.authorNotePresets, chat))
         const allFolders = char.chatFolders
         const stringl = Buffer.from(JSON.stringify({
             type: 'risuAllChats',

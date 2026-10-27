@@ -437,14 +437,38 @@ export class HypaProcessorV2<TMetadata> {
       }
       return suffix;
     };
-    const keys = await hypaCacheKeys(
-      ebdTexts.map((item) => ({
-        producer: "hypa-v2" as const,
-        content: item.content,
-        identity,
-        contextSuffix: contextSuffix(ctxGroups.get(item.id)),
-      }))
-    );
+    const inputs = ebdTexts.map((item) => ({
+      producer: "hypa-v2" as const,
+      content: item.content,
+      identity,
+      contextSuffix: contextSuffix(ctxGroups.get(item.id)),
+    }));
+    const keys = await hypaCacheKeys(inputs);
+
+    // Repeated text in one group gets a different vector at each position, so a
+    // group whose keys collide keys every chunk by its position.
+    const members = new Map<string[], number[]>();
+    ebdTexts.forEach((item, index) => {
+      const group = ctxGroups.get(item.id);
+      if (!group) return;
+      const indexes = members.get(group);
+      if (indexes) indexes.push(index);
+      else members.set(group, [index]);
+    });
+    const positional = [...members.values()]
+      .filter((indexes) => new Set(indexes.map((index) => keys[index])).size !== indexes.length)
+      .flatMap((indexes) => indexes.map((index, position) => ({ index, position })));
+    if (positional.length > 0) {
+      const positionalKeys = await hypaCacheKeys(
+        positional.map(({ index, position }) => ({
+          ...inputs[index],
+          contextSuffix: `${inputs[index].contextSuffix}|index:${position}`,
+        }))
+      );
+      positional.forEach(({ index }, i) => {
+        keys[index] = positionalKeys[i];
+      });
+    }
 
     return new Map(ebdTexts.map((item, index) => [item.id, keys[index]]));
   }

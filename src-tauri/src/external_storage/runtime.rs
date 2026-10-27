@@ -525,9 +525,11 @@ pub(crate) async fn external_storage_start_job(
             return Ok(job_summary(&root, store.read(&pending.id)?));
         }
         wait_for_settled_claim(&app, &request.connection_id).await?;
-        let identity = native_store(&app)?
-            .external_identity()
-            .map_err(local_error)?;
+        let pds = native_store(&app)?;
+        let identity = pds.external_identity().map_err(local_error)?;
+        if let Some(covered) = covering_backup(&store, &pds, &request, &identity)? {
+            return Ok(job_summary(&root, covered));
+        }
         let mut job = DurableJob::new(request, now_ms(), identity);
         if let Some(id) = job_id {
             job = job.with_restore_id(id)?;
@@ -644,6 +646,35 @@ fn completed_job_result(pds: &mut PersistentStore, job: &DurableJob) -> Result<O
         ));
     }
     Ok(None)
+}
+
+/// The connection's last successful backup, for an automatic backup of a revision that backup
+/// already holds. Capturing the same library again would only hold up the file operations
+/// that wait for it.
+fn covering_backup(
+    store: &JobStore,
+    pds: &PersistentStore,
+    request: &StartJobRequest,
+    current: &persistent_store::sync_selection::CaptureIdentity,
+) -> Result<Option<DurableJob>> {
+    if request.kind != JobKind::Backup || request.reason.as_deref() != Some("automatic") {
+        return Ok(None);
+    }
+    let Some(target) = request.target_revision.as_deref().and_then(|value| value.parse::<i64>().ok()) else {
+        return Ok(None);
+    };
+    let Some(last) = store.list()?.into_iter().find(|job| job.request.connection_id == request.connection_id
+        && job.request.kind == JobKind::Backup && job.summary["state"] == "succeeded") else {
+        return Ok(None);
+    };
+    let Some((_, captured)) = pds.external_backup_result(&last.id).map_err(local_error)? else {
+        return Ok(None);
+    };
+    let covered = captured.store_id == current.store_id
+        && captured.library_epoch == current.library_epoch
+        && captured.generation == current.generation
+        && captured.revision >= target;
+    Ok(covered.then_some(last))
 }
 
 pub(crate) fn require_admitted_library(
@@ -1002,6 +1033,8 @@ pub(crate) fn error_dto(error: &ProviderError) -> Value {
         ErrorKind::LocationOccupied => ("Choose an empty repository folder.", "check-endpoint", false),
         ErrorKind::RepositoryMismatch => ("This location holds a different repository.", "check-endpoint", false),
         ErrorKind::RecoveryKeyMismatch => ("The recovery key does not match this repository.", "unlock-key", false),
+        ErrorKind::LibraryFormatSwitchRequired => ("Switch the library data format to continue syncing.", "none", false),
+        ErrorKind::AppUpdateRequired => ("Update the app to continue syncing.", "none", false),
         ErrorKind::LocalStorageFull => ("This device has insufficient space.", "free-space", false),
         ErrorKind::LocalPermissionDenied => ("Allow access to the local files and retry.", "retry", false),
         ErrorKind::LocalFailure => ("This device could not complete the operation.", "retry", true),
@@ -1962,6 +1995,46 @@ mod tests {
             store_id: "store".into(), library_epoch: "library".into(), generation: "generation".into(),
             selection_epoch: "selection".into(), revision: 1,
         })
+    }
+
+    /// An automatic backup of a revision the connection's last backup already holds reports that
+    /// backup instead of capturing the library again.
+    #[test]
+    fn an_automatic_backup_of_a_backed_up_revision_reports_the_last_backup() {
+        use crate::persistent_store::{RootMutation, WorkingSetCommit};
+        let root = tempfile::tempdir().unwrap();
+        let store = JobStore::open(root.path()).unwrap();
+        let mut pds = PersistentStore::open(root.path()).unwrap();
+        let captured = pds.external_identity().unwrap();
+        let request = |reason: &str, revision: i64| -> StartJobRequest { serde_json::from_value(json!({
+            "connectionId":"connection", "kind":"backup", "reason":reason, "targetRevision":revision.to_string()
+        })).unwrap() };
+        let mut finished = DurableJob::new(request("automatic", captured.revision), 1, captured.clone());
+        finished.summary["state"] = json!("succeeded");
+        store.put(&finished).unwrap();
+        // A finished job that left no backup point holds nothing.
+        assert!(covering_backup(&store, &pds, &request("automatic", captured.revision), &captured).unwrap().is_none());
+        let mut db = rusqlite::Connection::open(root.path().join("persistent/persistent.sqlite")).unwrap();
+        let tx = db.transaction().unwrap();
+        persistent_store::external_storage_state::register_capture(
+            &tx, "capture", &captured, "scope", "logical-v1", "", &"a".repeat(64), "connection",
+        ).unwrap();
+        tx.commit().unwrap();
+        drop(db);
+        pds.external_prepare_backup(&finished.id, "connection", "format-repository", "capture", "point").unwrap();
+        pds.external_finish_backup(&finished.id, "point", "snapshot", "observation").unwrap();
+        let current = pds.external_identity().unwrap();
+        let covered = covering_backup(&store, &pds, &request("automatic", current.revision), &current).unwrap();
+        assert_eq!(covered.map(|job| job.id), Some(finished.id.clone()));
+        assert!(covering_backup(&store, &pds, &request("manual", current.revision), &current).unwrap().is_none());
+        pds.commit(&WorkingSetCommit {
+            expected_revision: pds.revision().unwrap(),
+            root_mutations: Some(vec![RootMutation::Set { key: "synthetic".into(), value: json!(1) }]),
+            ..Default::default()
+        }).unwrap();
+        let changed = pds.external_identity().unwrap();
+        assert!(changed.revision > current.revision);
+        assert!(covering_backup(&store, &pds, &request("automatic", changed.revision), &changed).unwrap().is_none());
     }
 
     /// Invariant 23. An empty journal must not overwrite what preparation

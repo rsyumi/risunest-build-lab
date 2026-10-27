@@ -401,6 +401,14 @@ export interface ConversationPage {
     nextCursor?: string
 }
 
+/** A stored conversation that currently reads its author's note from a preset. */
+export interface AuthorNotePresetUsage {
+    characterId: string
+    characterName: string
+    conversationId: string
+    conversationName: string
+}
+
 export interface ConversationWindowQuery {
     characterId: string
     conversationId: string
@@ -646,6 +654,8 @@ export interface PersistentDataStore {
     readCharacterSummary(id: string): Promise<CharacterSummary | null>
     readCharacter(id: string): Promise<Versioned<CharacterDetail> | null>
     queryConversations(input: ConversationQuery): Promise<ConversationPage>
+    /** Conversations of non-archived characters linked to the preset with a matching fingerprint. */
+    queryAuthorNotePresetUsage?(presetId: string): Promise<AuthorNotePresetUsage[]>
     readConversation(characterId: string, conversationId: string): Promise<Versioned<Chat> | null>
     readConversationMetadata(
         characterId: string,

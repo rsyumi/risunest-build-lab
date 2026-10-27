@@ -912,12 +912,19 @@ impl Provider for GithubReleases {
             let mut exhausted_releases = false;
             let mut releases: Option<Vec<ReleaseView>> = None;
             let mut requests = 0;
+            // The call also ends before a request as slow as the slowest so far would pass the
+            // control deadline, so a slow link advances the cursor instead of timing out.
+            let started = tokio::time::Instant::now();
+            let deadline = std::time::Duration::from_millis(crate::external_storage::leases::CONTROL_DEADLINE_MS);
+            let mut slowest = std::time::Duration::ZERO;
             loop {
                 cancel.check()?;
                 if releases.is_none() {
-                    if requests >= api::MAX_LIST_STEPS { break; }
+                    if requests >= api::MAX_LIST_STEPS || started.elapsed() + slowest >= deadline { break; }
                     requests += 1;
+                    let sent = tokio::time::Instant::now();
                     releases = Some(self.releases_page(context, release_page, cancel).await?);
+                    slowest = slowest.max(sent.elapsed());
                 }
                 let page_length = releases.as_ref().map_or(0, Vec::len);
                 if release_index >= page_length {
@@ -942,9 +949,13 @@ impl Provider for GithubReleases {
                     asset_index = 0;
                     continue;
                 }
-                if requests >= api::MAX_LIST_STEPS { break; }
+                // The first asset page after the call's first release page is always read, or a call
+                // resumed on that page would read only the release page again.
+                if requests >= api::MAX_LIST_STEPS || (requests > 1 && started.elapsed() + slowest >= deadline) { break; }
                 requests += 1;
+                let sent = tokio::time::Instant::now();
                 let assets = self.assets_page(context, id, asset_page, cancel).await?;
+                slowest = slowest.max(sent.elapsed());
                 let exhausted = assets.len() < api::ASSET_PAGE_SIZE;
                 let matching: Vec<&AssetView> = assets
                     .iter()

@@ -318,6 +318,16 @@ pub(crate) async fn run_lww(
     run(context,request,&view,&view,cancel).await
 }
 
+fn finish_delete<T>(owner: &LeaseOwner, result: Result<T>) -> Result<T> {
+    if result.as_ref().map_or_else(|error| {
+        error.http_status != Some(202)
+            && !matches!(error.kind, ErrorKind::Transient | ErrorKind::Cancelled)
+    }, |_| true) {
+        owner.set_delete_in_flight(false);
+    }
+    result
+}
+
 async fn run_owned(
     context: &LeaseContext<'_>, request: &CleanupRequest<'_>, time_not_before: Instant,
     owner: &LeaseOwner, started: ClockReading, view: &dyn RepositoryView, source: &dyn DocumentSource,
@@ -457,10 +467,10 @@ async fn run_owned(
             break;
         }
         owner.set_delete_in_flight(true);
-        leases::control_request(cancel, context.provider.delete_empty_container(
+        let result = leases::control_request(cancel, context.provider.delete_empty_container(
             context.repository, &locator, &protected_jobs, cancel,
-        )).await?;
-        owner.set_delete_in_flight(false);
+        )).await;
+        finish_delete(owner, result)?;
     }
     if matches!(outcome.stop_reason, StopReason::Complete | StopReason::Limit) {
         let protected = view.protected_jobs().into_iter().collect::<BTreeSet<_>>();
@@ -541,9 +551,8 @@ async fn run_owned(
             owner.set_delete_in_flight(true);
             let removed = leases::control_request(
                 cancel, view.delete_inventory_page(&stored, cancel),
-            ).await?;
-            owner.set_delete_in_flight(false);
-            match removed {
+            ).await;
+            match finish_delete(owner, removed)? {
                 control::RemoteInventoryPageDeleteOutcome::Deleted
                 | control::RemoteInventoryPageDeleteOutcome::NotFound => {
                     sent += 1;
@@ -1734,6 +1743,8 @@ pub(super) mod tests {
         protected: Mutex<Vec<String>>,
         inventory_delete_error: Mutex<Option<ErrorKind>>,
         surveys: AtomicUsize,
+        /// What a page reads when its retirement is confirmed, after the survey listed it.
+        confirmations: Mutex<Vec<InventoryPageState>>,
     }
     impl RepositoryView for View {
         fn roots<'a>(&'a self, _: &'a Cancellation) -> ProviderFuture<'a, ObservedRoots> {
@@ -1766,6 +1777,9 @@ pub(super) mod tests {
         }
         fn inventory_page<'a>(&'a self, page: &'a RemoteObject, _: &'a Cancellation) -> ProviderFuture<'a, Option<InventoryPageState>> {
             Box::pin(async move {
+                if let Some(changed) = self.confirmations.lock().unwrap().iter().find(|current| current.reference.object_id == page.object_id) {
+                    return Ok(Some(changed.clone()));
+                }
                 Ok(self.inventory.lock().unwrap().pages.iter().find(|current| current.reference.object_id == page.object_id).cloned())
             })
         }
@@ -1861,6 +1875,7 @@ pub(super) mod tests {
                     protected: Mutex::new(Vec::new()),
                     inventory_delete_error: Mutex::new(None),
                     surveys: AtomicUsize::new(0),
+                    confirmations: Mutex::new(Vec::new()),
                 },
             }
         }
@@ -1971,19 +1986,27 @@ pub(super) mod tests {
             assert_eq!(h.run().await.unwrap().deleted_objects, 0);
             h.clock.advance(leases::UNREACHABLE_GRACE_MS);
             h.view.surveys.store(0, Ordering::SeqCst);
+            // Since the survey, one page was replaced and another gained objects.
+            let mut replaced = h.view.inventory.lock().unwrap().pages[0].clone();
+            replaced.reference.ciphertext_sha256 = risunest_sync_wire::hash(b"replaced");
+            let mut filled = h.view.inventory.lock().unwrap().pages[1].clone();
+            filled.all_objects_absent = false;
+            *h.view.confirmations.lock().unwrap() = vec![replaced, filled];
             let result = h.run().await.unwrap();
             assert_eq!(result.stop_reason, StopReason::Complete);
-            let mut retired = h.view.retired_inventory.lock().unwrap().clone();
-            retired.sort();
-            assert_eq!(retired, ["inventory-page-old", "inventory-page-older", "inventory-page-oldest"]);
-            assert_eq!(result.deleted_objects, 5);
+            assert_eq!(*h.view.retired_inventory.lock().unwrap(), ["inventory-page-oldest"]);
+            assert_eq!(result.deleted_objects, 3);
             // Each aged page is confirmed by itself, not by surveying the inventory again.
             assert_eq!(h.view.surveys.load(Ordering::SeqCst), 2);
+            // The two pages that changed wait seven days again.
+            h.view.confirmations.lock().unwrap().clear();
+            assert_eq!(h.run().await.unwrap().deleted_objects, 0);
+            assert_eq!(h.view.retired_inventory.lock().unwrap().len(), 1);
         });
     }
 
     #[test]
-    fn inventory_only_response_loss_keeps_the_deletion_marker() {
+    fn inventory_delete_refusals_release_the_marker_but_response_loss_keeps_it() {
         runtime().block_on(async {
             let h = Harness::new();
             h.view.jobs.lock().unwrap().references.push(h.view.known[0].clone());
@@ -1997,11 +2020,16 @@ pub(super) mod tests {
             };
             assert_eq!(h.run().await.unwrap().deleted_objects, 0);
             h.clock.advance(leases::UNREACHABLE_GRACE_MS);
+            for kind in [ErrorKind::Unauthorized, ErrorKind::RateLimited, ErrorKind::Unsupported] {
+                *h.view.inventory_delete_error.lock().unwrap() = Some(kind);
+                assert_eq!(h.run().await.unwrap_err().kind, kind);
+                assert!(h.provider.objects_with_role(ObjectRole::Lease).is_empty());
+            }
             *h.view.inventory_delete_error.lock().unwrap() = Some(ErrorKind::Transient);
             assert_eq!(h.run().await.unwrap_err().kind, ErrorKind::Transient);
             assert!(h.payload_deletes().is_empty());
             assert_eq!(h.run().await.unwrap().stop_reason, StopReason::Lease);
-            assert_eq!(h.view.retired_inventory.lock().unwrap().len(), 1);
+            assert_eq!(h.view.retired_inventory.lock().unwrap().len(), 4);
         });
     }
 
@@ -2346,6 +2374,25 @@ pub(super) mod tests {
                 assert_eq!(result.deleted_objects, deleted);
                 assert_eq!(h.view.removed.lock().unwrap().len(), deleted as usize);
                 assert_eq!(h.provider.delete_attempts("child-pack"), if deleted == 2 { 1 } else { 0 });
+            }
+        });
+    }
+    #[test]
+    fn container_delete_refusals_release_the_marker_but_response_loss_keeps_it() {
+        runtime().block_on(async {
+            for kind in [ErrorKind::Unauthorized, ErrorKind::RateLimited, ErrorKind::Unsupported, ErrorKind::Transient] {
+                let h = Harness::new();
+                h.age().await;
+                h.provider.state.lock().unwrap().container_delete_error = Some(kind);
+                assert_eq!(h.run().await.unwrap_err().kind, kind);
+                assert_eq!(h.payload_deletes(), ["parent-catalog", "child-pack"]);
+                if kind == ErrorKind::Transient {
+                    assert!(!h.provider.objects_with_role(ObjectRole::Lease).is_empty());
+                    assert_eq!(h.run().await.unwrap().stop_reason, StopReason::Lease);
+                } else {
+                    assert!(h.provider.objects_with_role(ObjectRole::Lease).is_empty());
+                    assert_eq!(h.run().await.unwrap().stop_reason, StopReason::Complete);
+                }
             }
         });
     }

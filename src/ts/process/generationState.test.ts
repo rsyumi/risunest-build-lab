@@ -1,6 +1,23 @@
 import { expect, it, vi } from 'vitest'
 import { get } from 'svelte/store'
-import { doingChat, generationCancellation, reserveGeneration, setGenerationBackground } from './generationState'
+import { bindGenerationRegexOwner, getGenerationRegexScope, doingChat, generationCancellation, reserveGeneration, setGenerationBackground } from './generationState'
+
+it('shares regex timeouts only with the owning generation and conversation', () => {
+    const first = reserveGeneration()!
+    bindGenerationRegexOwner(first, 'char', 'chat')
+    first.regexScope!.skipped.add('rule')
+    expect(getGenerationRegexScope('char', 'chat')?.skipped.has('rule')).toBe(true)
+    expect(getGenerationRegexScope('other', 'chat')).toBeUndefined()
+    first.release()
+    expect(getGenerationRegexScope('char', 'chat')).toBeUndefined()
+    const second = reserveGeneration()!
+    try {
+        bindGenerationRegexOwner(first, 'char', 'chat')
+        expect(getGenerationRegexScope('char', 'chat')).toBeUndefined()
+        bindGenerationRegexOwner(second, 'char', 'chat')
+        expect(getGenerationRegexScope('char', 'chat')?.skipped.has('rule')).toBe(false)
+    } finally { second.release() }
+})
 
 it('keeps ownership until cleanup after an idempotent cancellation request', () => {
     const cancel = vi.fn()

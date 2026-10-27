@@ -173,21 +173,16 @@ impl Archive {
             input.read_exact(&mut buffer[..length])?;
             let data = &buffer[..length];
             let hash = Sha256::digest(data).to_vec();
-            tx.execute(
-                "INSERT OR IGNORE INTO chunks(hash,data) VALUES(?1,?2)",
-                params![hash, data],
-            )?;
-            let existing: Vec<u8> =
-                tx.query_row("SELECT data FROM chunks WHERE hash=?1", [&hash], |r| {
-                    r.get(0)
-                })?;
+            tx.prepare_cached("INSERT OR IGNORE INTO chunks(hash,data) VALUES(?1,?2)")?
+                .execute(params![hash, data])?;
+            let existing: Vec<u8> = tx
+                .prepare_cached("SELECT data FROM chunks WHERE hash=?1")?
+                .query_row([&hash], |r| r.get(0))?;
             if existing != data {
                 return Err(invalid("snapshot chunk is corrupt or has a hash collision"));
             }
-            tx.execute(
-                "INSERT INTO snapshot_pages(snapshot_id,seq,hash) VALUES(?1,?2,?3)",
-                params![metadata.id, seq, hash],
-            )?;
+            tx.prepare_cached("INSERT INTO snapshot_pages(snapshot_id,seq,hash) VALUES(?1,?2,?3)")?
+                .execute(params![metadata.id, seq, hash])?;
             hasher.update(data);
             metadata.bytes += length as u64;
             seq += 1;

@@ -15,6 +15,12 @@ import { registerActiveHistoryWindow } from './historyWindowIndex'
 import { createStoreHistoryWindow, historyMessages } from './tests/historyWindowTestUtils'
 import { createHistoryWindowController } from './historyWindowController'
 import * as polyfill from '../polyfill'
+import { InMemoryWorker, StallingWorker } from '../../../tests/support/regexWorker'
+import { RegexWorkerClient } from './regexWorkerClient'
+import { executeRegexPlanSync, getRegexExecutionPlan } from './regexExecutionPlan'
+import { language } from '../../lang'
+import { alertToast } from '../alert'
+import { bindGenerationRegexOwner, reserveGeneration } from './generationState'
 import {
     ActiveConversationSession,
     cloneConversationMetadata,
@@ -25,9 +31,11 @@ const mocks = vi.hoisted(() => {
     const state = {
         emotions: {} as Record<string, [string, string, number][]>,
         cbsPatternCalls: 0,
+        replayParser: null as null | ((source: string) => string),
         cbsFirstPattern: 'x',
         cbsFirstError: null as Error | null,
         workerFailure: null as unknown,
+        workerClient: null as RegexWorkerClient | null,
         workerFailures: [] as unknown[],
         workerCalls: 0,
         workerAvailable: false,
@@ -73,7 +81,8 @@ const scriptingsMocks = vi.hoisted(() => ({
     runLuaEditTrigger: vi.fn(async (_char: unknown, _mode: unknown, data: string) => data),
 }))
 
-vi.mock('svelte/store', () => ({
+vi.mock('svelte/store', async (importOriginal) => ({
+    ...await importOriginal<typeof import('svelte/store')>(),
     get: (store: unknown) => {
         if (store === mocks.charEmotionStore) return mocks.state.emotions
         if (store === mocks.selectedCharStore) return mocks.state.selectedCharIndex
@@ -93,10 +102,11 @@ vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({
     peekActiveConversationSession: () => mocks.state.session,
 }))
 vi.mock('src/ts/globalApi.svelte', () => ({ downloadFile: vi.fn() }))
-vi.mock('src/ts/alert', () => ({ alertError: vi.fn(), alertNormal: vi.fn() }))
+vi.mock('src/ts/alert', () => ({ alertError: vi.fn(), alertNormal: vi.fn(), alertToast: vi.fn() }))
 vi.mock('src/ts/util', () => ({ selectSingleFile: vi.fn() }))
 vi.mock('src/ts/parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule({
     risuChatParser: (data: string, options?: { setChatVar?: (key: string, value: string) => void }) => {
+        if (mocks.state.replayParser) return mocks.state.replayParser(data)
         if (data === '{{setvar::scratch::regex}}') {
             options?.setChatVar?.('scratch', 'regex')
             return 'written'
@@ -133,15 +143,17 @@ vi.mock('./regexWorkerClient', async (importOriginal) => {
     return {
         ...original,
         isRegexWorkerAvailable: () => mocks.state.workerAvailable,
-        getSharedRegexWorkerClient: () => ({
-            execute: async (_plan: unknown, input: string) => {
+        getSharedRegexWorkerClient: () => mocks.state.workerClient ?? ({
+            releaseContinuation() {},
+            execute: async (_plan: unknown, input: string, options: { continuation: { start: number } }) => {
                 mocks.state.workerCalls++
                 mocks.state.workerInput = input
                 if (mocks.state.workerFailures.length > 0) throw mocks.state.workerFailures.shift()
                 if(mocks.state.workerFailure !== null){
                     throw mocks.state.workerFailure
                 }
-                return { data: mocks.state.workerData, errors: mocks.state.workerErrors }
+                return { data: mocks.state.workerData, errors: mocks.state.workerErrors,
+                    steps: [{ index: options.continuation.start, matched: true }], nextIndex: options.continuation.start + 1 }
             },
         }),
     }
@@ -229,9 +241,11 @@ describe('processScriptFull result caching', () => {
         resetScriptCache()
         mocks.state.emotions = {}
         mocks.state.cbsPatternCalls = 0
+        mocks.state.replayParser = null
         mocks.state.cbsFirstPattern = 'x'
         mocks.state.cbsFirstError = null
         mocks.state.workerFailure = null
+        mocks.state.workerClient = null
         mocks.state.workerCalls = 0
         mocks.state.workerAvailable = false
         mocks.state.workerData = 'worker-output'
@@ -249,6 +263,79 @@ describe('processScriptFull result caching', () => {
         mocks.database.characters = [] as never[]
         scriptingsMocks.runLuaEditTrigger.mockClear()
         for (const callbacks of Object.values(mocks.pluginV2)) callbacks.clear()
+    })
+
+    it('renders queued display rows and later generation updates without waiting for a timed-out rule again', async () => {
+        vi.useFakeTimers()
+        try {
+            mocks.state.workerClient = new RegexWorkerClient(() => new StallingWorker())
+            mocks.state.workerAvailable = true
+            vi.mocked(alertToast).mockClear()
+            const char = makeCharacter([
+                { ...makeScript('SLOW-display-integration|row', 'bad'), type: 'editdisplay' },
+                { ...makeScript('row', 'rendered'), type: 'editdisplay' },
+                makeScript('SLOW-output-integration|output', 'bad'), makeScript('output', 'saved'),
+            ])
+            const rows = Promise.all(Array.from({ length: 30 }, (_, i) => processScriptFull(char, `<row ${i}>`, 'editdisplay', i, {}, { cache: 'bypass' })))
+            await vi.advanceTimersByTimeAsync(20_000)
+            expect((await rows).map((result) => result.data)).toEqual(Array.from({ length: 30 }, (_, i) => `<rendered ${i}>`))
+            expect(alertToast).toHaveBeenCalledExactlyOnceWith(language.regexScriptTimeout)
+            expect((await processScriptFull(char, '<row 0>', 'editdisplay', 0, {}, { cache: 'bypass' })).data).toBe('<rendered 0>')
+            // An edited row is a later display batch on other text.
+            expect((await processScriptFull(char, '<row 0> edited', 'editdisplay', 0, {}, { cache: 'bypass' })).data).toBe('<rendered 0> edited')
+            const generation = {}
+            const first = processScriptFull(char, '<output>', 'editoutput', 0, {}, { cache: 'bypass', regexGeneration: generation })
+            await vi.advanceTimersByTimeAsync(20_000)
+            expect((await first).data).toBe('<saved>')
+            expect((await processScriptFull(char, '<output> final', 'editoutput', 0, {}, {
+                cache: 'bypass', regexGeneration: generation, signal: new AbortController().signal,
+            })).data).toBe('<saved> final')
+            expect(alertToast).toHaveBeenCalledTimes(2)
+            // A stored message of a later generation still waits for the rule.
+            let finished = false
+            const next = processScriptFull(char, '<output> next', 'editoutput', 0, {}, { cache: 'bypass', regexGeneration: {} })
+                .finally(() => { finished = true })
+            await vi.advanceTimersByTimeAsync(9_999)
+            expect(finished).toBe(false)
+            await vi.advanceTimersByTimeAsync(1)
+            expect((await next).data).toBe('<saved> next')
+        } finally { mocks.state.workerClient = null; vi.useRealTimers() }
+    })
+
+    it('preserves dynamic patterns, move actions, and emotion changes through Worker operations', async () => {
+        const char = makeCharacter([
+            makeScript('x', 'dog', 'g<cbs>'),
+            makeScript('dog', '@@move_top moved'),
+            makeScript('moved', '@@emo happy'),
+        ])
+        const expected = await processScriptFull(char, 'x tail', 'editoutput', -1, {}, { cache: 'bypass', regexWorker: false })
+        mocks.state.workerAvailable = true
+        mocks.state.workerClient = new RegexWorkerClient(() => new InMemoryWorker())
+        try {
+            expect(await processScriptFull(char, 'x tail', 'editoutput', -1, {}, { cache: 'bypass' })).toEqual(expected)
+            expect(expected).toEqual({ data: 'moved\n tail', emoChanged: true })
+        } finally { mocks.state.workerClient = null }
+    })
+
+    it('shares display skips across changing snapshots only while their generation owns the conversation', async () => {
+        vi.useFakeTimers()
+        const reservation = reserveGeneration()!
+        try {
+            mocks.state.currentChat = { id: 'regex-generation-chat', message: [] } as unknown as Chat
+            const char = makeCharacter([{ ...makeScript('SLOW-generation-display', 'bad'), type: 'editdisplay' }])
+            bindGenerationRegexOwner(reservation, char.chaId, mocks.state.currentChat.id)
+            mocks.state.workerClient = new RegexWorkerClient(() => new StallingWorker())
+            mocks.state.workerAvailable = true
+            const run = (text: string) => processScriptFull(char, text, 'editdisplay', -1, {}, { cache: 'bypass' })
+            const first = run('SLOW-generation-display first')
+            await vi.advanceTimersByTimeAsync(20_000)
+            expect((await first).data).toBe('SLOW-generation-display first')
+            expect((await run('SLOW-generation-display second')).data).toBe('SLOW-generation-display second')
+            reservation.release()
+            const next = run('SLOW-generation-display new generation')
+            await vi.advanceTimersByTimeAsync(20_000)
+            expect((await next).data).toBe('SLOW-generation-display new generation')
+        } finally { reservation.release(); mocks.state.workerClient = null; vi.useRealTimers() }
     })
 
     it('treats a cached empty string as a hit', async () => {
@@ -327,18 +414,18 @@ describe('processScriptFull result caching', () => {
     })
 
     it('does not fall back to the UI thread when the regex Worker times out', async () => {
-        const character = makeCharacter([makeScript('cat', 'dog')])
+        const character = makeCharacter([makeScript('timeout-cat', 'dog')])
         const timeout = new RegexExecutionTimeoutError(1)
         mocks.state.workerFailure = timeout
 
         await expect(processScriptFull(
             character,
-            'a cat here',
+            'a timeout-cat here',
             'editoutput',
             -1,
             {},
             { cache: 'bypass', regexWorker: true },
-        )).rejects.toBe(timeout)
+        )).resolves.toMatchObject({ data: 'a timeout-cat here' })
     })
 
     it('offloads eligible editoutput plans without a caller flag when a Worker is available', async () => {
@@ -440,20 +527,35 @@ describe('processScriptFull result caching', () => {
         expect(result.data).toBe('a dog here')
     })
 
-    it('does not offload non-editoutput modes', async () => {
+    it.each(['editinput', 'editoutput', 'editdisplay'] as const)('keeps completed rules when a later parser checkpoint throws in %s', async (mode) => {
+        const scripts = [makeScript('a', 'b'), makeScript('b', 'c{{boom}}')].map(script => ({ ...script, type: mode }))
+        const character = makeCharacter(scripts)
+        const calls: string[] = []
+        const parse = (source: string) => {
+            calls.push(source)
+            if (source.includes('{{boom}}')) throw new RangeError('synthetic parser checkpoint failure')
+            return source
+        }
+        const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+        mocks.state.replayParser = parse
+        try {
+            const expected = executeRegexPlanSync(getRegexExecutionPlan(scripts, mode), 'a', parse)
+            expect(expected.data).toBe('b')
+            for (const regexWorker of [false, true]) {
+                calls.length = 0
+                mocks.state.workerClient = new RegexWorkerClient(() => new InMemoryWorker())
+                const result = await processScriptFull(character, 'a', mode, -1, {}, { cache: 'bypass', regexWorker })
+                expect(result.data).toBe(expected.data)
+                expect(calls.filter(source => source.includes('{{boom}}'))).toEqual(['c{{boom}}'])
+            }
+        } finally { mocks.state.replayParser = null; mocks.state.workerClient = null; error.mockRestore() }
+    })
+
+    it('preserves editinput output through the Worker', async () => {
         const character = makeCharacter([{ ...makeScript('cat', 'dog'), type: 'editinput' }])
         mocks.state.workerAvailable = true
-
-        const result = await processScriptFull(
-            character,
-            'a cat here',
-            'editinput',
-            -1,
-            {},
-            { cache: 'bypass' },
-        )
-
-        expect(mocks.state.workerCalls).toBe(0)
+        mocks.state.workerClient = new RegexWorkerClient(() => new InMemoryWorker())
+        const result = await processScriptFull(character, 'a cat here', 'editinput', -1, {}, { cache: 'bypass' })
         expect(result.data).toBe('a dog here')
     })
 
@@ -663,12 +765,19 @@ describe('history-sensitive regex conversation operations', () => {
         expect(new Set(visited)).toEqual(new Set([2]))
     })
 
-    it('applies @@inject through the active session batch instead of direct DB mutation', async () => {
+    it.each(['fallback', 'worker', 'timeout'] as const)('applies @@inject atomically through the active session (%s)', async (route) => {
         const chat = {
             id: 'regex-chat',
             message: [{ role: 'user', data: 'before', chatId: 'message-0' }],
         } as Chat
-        const char = makeCharacter([makeScript('x', '@@inject')])
+        const input = route === 'timeout' ? 'atomic-inject' : 'x'
+        const char = makeCharacter([makeScript(input, '@@inject')])
+        mocks.state.workerClient = new RegexWorkerClient(() => new class extends InMemoryWorker {
+            override postMessage(message: Parameters<InMemoryWorker['postMessage']>[0]): void {
+                if (route === 'timeout' && message.type === 'operation' && message.operation.kind === 'replace') return
+                super.postMessage(message)
+            }
+        }())
         char.chaId = 'regex-character'
         char.chats = [chat]
         char.chatPage = 0
@@ -682,15 +791,17 @@ describe('history-sensitive regex conversation operations', () => {
         mocks.state.currentChat = chat
         mocks.state.session = session
 
-        const result = await processScriptFull(char, 'x', 'editoutput', 0, {}, {
-            cache: 'bypass',
-            regexWorker: false,
-        })
-
-        expect(result.data).toBe('')
-        expect(chat.message[0].data).toBe('x')
-        expect(session.version).toBe(1)
-        expect(session.activePinReasons).toEqual([])
+        if (route === 'timeout') vi.useFakeTimers()
+        try {
+            const pending = processScriptFull(char, input, 'editoutput', 0, {}, {
+                cache: 'bypass', regexWorker: route !== 'fallback',
+            })
+            if (route === 'timeout') await vi.advanceTimersByTimeAsync(10_000)
+            expect((await pending).data).toBe(route === 'timeout' ? input : '')
+            expect(chat.message[0].data).toBe(route === 'timeout' ? 'before' : input)
+            expect(session.version).toBe(route === 'timeout' ? 0 : 1)
+            expect(session.activePinReasons).toEqual([])
+        } finally { mocks.state.workerClient = null; vi.useRealTimers() }
     })
 
     it('does not clone history for a no-script or pure-regex cache-hit path', async () => {
@@ -1599,21 +1710,24 @@ describe('regex history actions over a history window', () => {
         }
     })
 
-    it('reads @@repeat_back from the previous same-role message inside the window', async () => {
-        const { char } = windowedCharacter([makeScript('m\\w+', '@@repeat_back end')])
+    it.each([false, true])('reads @@repeat_back inside the window with Worker %s', async (regexWorker) => {
+        mocks.state.workerClient = new RegexWorkerClient(() => new InMemoryWorker())
+        try {
+            const { char } = windowedCharacter([makeScript('m\\w+', '@@repeat_back end')])
 
-        const inside = await processScriptFull(char, 'plain', 'editoutput', 951, {}, {
-            cache: 'bypass',
-            regexWorker: false,
-        })
-        // The previous character message is before the window, so the greeting is used.
-        const atStart = await processScriptFull(char, 'plain', 'editoutput', 901, {}, {
-            cache: 'bypass',
-            regexWorker: false,
-        })
+            const inside = await processScriptFull(char, 'plain', 'editoutput', 951, {}, {
+                cache: 'bypass',
+                regexWorker,
+            })
+            // The previous character message is before the window, so the greeting is used.
+            const atStart = await processScriptFull(char, 'plain', 'editoutput', 901, {}, {
+                cache: 'bypass',
+                regexWorker,
+            })
 
-        expect(inside.data).toBe('plainm949')
-        expect(atStart.data).toBe('plainmgreeting')
+            expect(inside.data).toBe('plainm949')
+            expect(atStart.data).toBe('plainmgreeting')
+        } finally { mocks.state.workerClient = null }
     })
 
     it('keeps a window scope across a promotion and writes @@inject through the window', async () => {

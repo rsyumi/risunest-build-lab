@@ -1,9 +1,15 @@
 //! Official account asset restore. The renderer hands over the keys in pages,
 //! reads follow the scheduling rules of the renderer pool this job replaces,
 //! bodies spool to the job directory, and one thread installs them in batches.
+//! The official snapshot restore reads cold items, and the asset publication
+//! writes bodies, under the same rules.
+mod cold;
 mod download;
 mod install;
 mod scheduler;
+pub(crate) mod upload;
+
+pub(crate) use cold::ColdSource;
 
 use super::error::job_error;
 use super::official_snapshot::OfficialSnapshotCredential;

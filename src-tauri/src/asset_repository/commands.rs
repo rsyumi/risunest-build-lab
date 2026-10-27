@@ -211,6 +211,15 @@ fn release_abandoned<R: tauri::Runtime>(app: &AppHandle<R>, abandoned: Abandoned
     })
 }
 
+fn release_logged<R: tauri::Runtime>(app: &AppHandle<R>, abandoned: AbandonedCasJobs) {
+    match release_abandoned(app, abandoned) {
+        // Opening the store judges these journals again (`open_for_renderer`).
+        Err(error) if error.ends_with("persistent store has not been opened") => {}
+        Err(error) => crate::nlog!("error", "failed to release abandoned CAS jobs: {error}"),
+        Ok(()) => {}
+    }
+}
+
 impl DurableCasJobState {
     pub(crate) fn close_for_cleanup(&self) -> Result<(), String> {
         self.clear_uploads()?;
@@ -240,11 +249,7 @@ impl DurableCasJobState {
     fn release_in_background<R: tauri::Runtime>(&self, app: &AppHandle<R>, abandoned: AbandonedCasJobs) {
         if abandoned.cleanup_uploads || !abandoned.journal_ids.is_empty() || abandoned.listing_failure.is_some() {
             let app = app.clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                if let Err(error) = release_abandoned(&app, abandoned) {
-                    crate::nlog!("error", "failed to release abandoned CAS jobs: {error}");
-                }
-            });
+            tauri::async_runtime::spawn_blocking(move || release_logged(&app, abandoned));
         }
     }
 
@@ -341,6 +346,8 @@ impl CasUpload {
 struct CasUploadPool {
     uploads: HashMap<String, Arc<CasUpload>>,
     reserved_bytes: u64,
+    /// Files of uploads cancelled during maintenance, kept owned until the next reset.
+    parked: Vec<OwnedPayloadUpload>,
 }
 
 impl CasUploadPool {
@@ -426,6 +433,17 @@ impl CasUploadPool {
         }
     }
 
+    /// Releases the upload's quota and Android receiver while maintenance
+    /// keeps every repository file in place.
+    fn release_during_maintenance(&mut self, upload_id: &str) {
+        if let Some(upload) = self.uploads.remove(upload_id) {
+            self.reserved_bytes -= upload.total_bytes;
+            if upload.state.compare_exchange(UPLOAD_RECEIVING, UPLOAD_CANCELLED, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                self.parked.extend(upload.file.lock().ok().and_then(|mut file| file.take()));
+            }
+        }
+    }
+
     fn cancel_session(&mut self, session_id: &str) {
         let removed = self
             .uploads
@@ -438,6 +456,7 @@ impl CasUploadPool {
 
     fn clear(&mut self) {
         for (_, upload) in self.uploads.drain() { upload.cancel(); }
+        self.parked.clear();
         self.reserved_bytes = 0;
     }
 }
@@ -626,11 +645,17 @@ fn append_upload(app: &AppHandle, upload_id: &str, offset: u64, data: &[u8]) -> 
 }
 
 #[tauri::command(async)]
-pub(crate) fn asset_cas_job_upload_chunk_raw(
+pub(crate) async fn asset_cas_job_upload_chunk_raw(
     app: AppHandle, request: tauri::ipc::Request<'_>,
 ) -> Result<u64, crate::asset_byte_transport::ByteTransferError> {
-    logged("asset_cas_job_upload_chunk_raw", crate::asset_byte_transport::raw_part(&request)
-        .and_then(|(id, offset, bytes)| append_upload(&app, &id, offset, bytes).map_err(Into::into)))
+    logged("asset_cas_job_upload_chunk_raw", async move {
+        let (id, offset, bytes) = crate::asset_byte_transport::raw_part(&request)?;
+        let bytes = bytes.to_vec();
+        tauri::async_runtime::spawn_blocking(move || append_upload(&app, &id, offset, &bytes))
+            .await
+            .map_err(|error| format!("failed to join CAS upload raw chunk operation: {error}"))?
+            .map_err(Into::into)
+    }.await)
 }
 
 #[tauri::command(async)]
@@ -672,20 +697,22 @@ pub(crate) async fn asset_cas_job_upload_cancel(
 ) -> Result<(), String> {
     logged("asset_cas_job_upload_cancel", async move {
         tauri::async_runtime::spawn_blocking(move || {
-            let _operation = app
-                .state::<PersistentStoreState>()
-                .admit_renderer_operation()
-                .map_err(|error| error.to_string())?;
-            app.state::<DurableCasJobState>()
-                .uploads
-                .lock()
-                .map_err(|error| format!("CAS upload mutex poisoned: {error}"))?
-                .cancel(&upload_id);
-            Ok(())
+            cancel_upload(&app.state::<PersistentStoreState>(), &app.state::<DurableCasJobState>(), &upload_id)
         })
         .await
         .map_err(|error| format!("failed to join CAS upload cancel operation: {error}"))?
     }.await)
+}
+
+fn cancel_upload(store: &PersistentStoreState, state: &DurableCasJobState, upload_id: &str) -> Result<(), String> {
+    let operation = store.admit_renderer_operation();
+    let mut uploads = state.uploads.lock().map_err(|error| format!("CAS upload mutex poisoned: {error}"))?;
+    match operation {
+        Ok(_operation) => uploads.cancel(upload_id),
+        Err(_) if store.maintenance_active() => uploads.release_during_maintenance(upload_id),
+        Err(error) => return Err(error.to_string()),
+    }
+    Ok(())
 }
 
 #[tauri::command(async)]
@@ -1634,7 +1661,7 @@ mod tests {
             let mut store = PersistentStore::open(root).unwrap();
             // A saved publication whose segment row is gone has ended, which only the store shows.
             let owner = CasJobOwner::from_another_process(CasJobOwnerKind::ExternalPublication, "publication");
-            drop(journal(&mut store, "publication", owner, true));
+            drop(journal(&mut store, "page-start-publication", owner, true));
         }
         let app = tauri::test::mock_builder()
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -1655,7 +1682,11 @@ mod tests {
         // A page that starts before the renderer opens the store cannot judge the journal.
         let error = release_abandoned(app.handle(), AbandonedCasJobs::snapshot(root)).unwrap_err();
         assert!(error.contains("has not been opened"), "{error}");
-        assert_eq!(journal_ids(root), ["publication".to_owned()].into());
+        assert_eq!(journal_ids(root), ["page-start-publication".to_owned()].into());
+        // That attempt is retried below, so it is not logged as a failure.
+        release_logged(app.handle(), AbandonedCasJobs::snapshot(root));
+        assert!(!crate::native_log::global_state().tail(None).iter()
+            .any(|entry| entry.message.contains("CAS jobs: page-start-publication")));
 
         persistent_store::commands::open_for_renderer(app.handle(), &app.state()).unwrap();
 
@@ -1906,6 +1937,30 @@ mod tests {
         pool.clear();
         assert!(pool.uploads.is_empty());
         assert_eq!(pool.reserved_bytes, 0);
+        assert!(!staging_path.exists());
+    }
+
+    #[test]
+    fn an_upload_cancelled_during_maintenance_releases_its_quota_and_receiver_and_keeps_its_file() {
+        use crate::asset_byte_transport::{append_android, register_android_receiver};
+        let directory = TempDir::new().unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let store = PersistentStoreState::default();
+        let state = DurableCasJobState::default();
+        let upload_id = uuid::Uuid::new_v4().to_string();
+        let receiver = register_android_receiver(&upload_id, Arc::new(|offset: u64, _: &[u8]| Ok(offset))).unwrap();
+        state.uploads.lock().unwrap().open_with_capacity(&cas, upload_id.clone(), "session-maintenance".to_owned(),
+            CasObjectRole::DirectObject, CAS_UPLOAD_CHUNK_BYTES as u64 + 1, CAS_UPLOAD_CHUNK_BYTES, Some(receiver)).unwrap();
+        let staging_path = state.uploads.lock().unwrap().uploads[&upload_id].file.lock().unwrap().as_ref().unwrap().path().to_path_buf();
+        let maintenance = store.acquire_raw_capture().unwrap();
+        cancel_upload(&store, &state, &upload_id).unwrap();
+        assert_eq!(state.uploads.lock().unwrap().reserved_bytes, 0);
+        assert!(append_android(&upload_id, 0, &[0]).is_none());
+        assert!(staging_path.is_file());
+        drop(maintenance);
+        cancel_upload(&store, &state, &upload_id).unwrap();
+        assert_eq!(state.uploads.lock().unwrap().reserved_bytes, 0);
+        state.clear_uploads().unwrap();
         assert!(!staging_path.exists());
     }
 

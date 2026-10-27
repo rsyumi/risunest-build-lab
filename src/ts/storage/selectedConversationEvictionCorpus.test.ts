@@ -636,6 +636,9 @@ describe('selected conversation eviction correctness corpus', () => {
             getActiveConversationSession: () => runtime.getActiveConversationSession(),
             getPersistentDataRuntime: () => runtime,
             invalidateActiveConversationSession: () => runtime.invalidateActiveConversationSession(),
+            flushPendingDataLocallyForCheckpoint: (reason: string) => runtime.flushPendingDataLocallyForCheckpoint(reason),
+            capturesImmutableCharacters: () => runtime.capturesImmutableCharacters(),
+            pendingConversationMutationDiagnostics: () => runtime.pendingConversationMutationDiagnostics(),
         }))
         // Later imports recognize the runtime's metadata-only shells only when they share its lifecycle module.
         vi.doMock('./selectedConversationLifecycle', () => selectedConversationLifecycle)

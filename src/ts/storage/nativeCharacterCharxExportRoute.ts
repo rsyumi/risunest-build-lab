@@ -13,8 +13,7 @@ import {
 } from './nativeFileJobs'
 import { getPersistentDataRuntime } from './persistentDataRuntime.svelte'
 import {
-    prepareNativeContentExportFromPicker,
-    withNativeContentExportDestination,
+    runNativeContentExport,
     type NativeContentExportPickerDependencies,
 } from './nativeContentExportPicker'
 
@@ -83,15 +82,12 @@ export async function exportNativeCharacterCharxFromPicker(
     options: NativeFileJobOptions = {},
     dependencies: NativeCharacterCharxExportRouteDependencies = productionDependencies,
 ): Promise<NativeFileJobResult | null | undefined> {
-    const flow = await prepareNativeContentExportFromPicker({
+    return runNativeContentExport({
         suggestedName: input.suggestedName,
         flushReason: 'native-character-charx-export',
         chooseDestination: () =>
             dependencies.chooseDestination(input.suggestedName, input.container),
-    }, options, dependencies)
-    if (flow.kind === 'unsupported') return undefined
-    if (flow.kind === 'cancelled') return null
-    return withNativeContentExportDestination(flow.destination, async () => {
+    }, options, dependencies, 'dialog', async (flow, options) => {
         const character = await dependencies.readCharacter(input.characterId, flow.expectedRevision)
         const projected = input.projectCharacter(character)
         const rendition = input.container === 'appended-charx-jpeg'

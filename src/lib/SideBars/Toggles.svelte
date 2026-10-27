@@ -303,12 +303,11 @@
 <div class="flex flex-col gap-4 w-full mt-3">
     {#if !DBState.db.customSidebarItems?.some((item) => item.type === 'model')}<ModelBind />{/if}
     {#if !DBState.db.customSidebarItems?.some((item) => item.type === 'persona')}<PersonaBind />{/if}
+    {#if DBState.db.customSidebarItems?.length}<CustomSideBar />{/if}
     <ToggleBind values={toggleEditor.values} unpinKeys={toggleEditor.unpinKeys} onApplyPreset={applyTogglePreset} bind:saving={savingToggles} />
 </div>
 {#if !noContainer && groupedToggles.length > 4}
     <div class="h-48 border-darkborderc p-2 border rounded-sm flex flex-col items-start mt-2 overflow-y-auto">
-        <CustomSideBar />
-
         {#if hasJailbreakPrompt}
             <SwitchInput className={switchRow} bind:check={DBState.db.jailbreakToggle} name={language.jailbreakToggle} />
         {/if}
@@ -330,8 +329,6 @@
         {/if}
     </div>
 {:else}
-    <CustomSideBar />
-
     {#if hasJailbreakPrompt}
         <SwitchInput className={switchRow} bind:check={DBState.db.jailbreakToggle} name={language.jailbreakToggle} />
     {/if}

@@ -7,8 +7,11 @@ vi.mock('./persistentDataRuntime.svelte', () => ({
 }))
 
 import { save } from '@tauri-apps/plugin-dialog'
+import { get } from 'svelte/store'
 
 import { exportNativeCharacterCharxFromPicker } from './nativeCharacterCharxExportRoute'
+import { registerLibraryFileOperationGate } from './libraryFileOperation'
+import { nativeFileOperation } from './nativeFileJobManager'
 
 describe('native character CharX export route', () => {
     it('projects metadata from the exact leased revision after destination selection', async () => {
@@ -106,6 +109,31 @@ describe('native character CharX export route', () => {
             readCharacter: async () => { throw new Error('must not read') },
             runExport,
         })).resolves.toBeNull()
+    })
+
+    it('waits for sync and backups to settle before opening the picker', async () => {
+        const calls: string[] = []
+        let settle!: () => void
+        const unregister = registerLibraryFileOperationGate(() => new Promise<void>(resolve => { settle = resolve }))
+        try {
+            const exporting = exportNativeCharacterCharxFromPicker({
+                characterId: 'current-character',
+                suggestedName: 'Current.charx',
+                projectCharacter: () => ({ card: {}, module: {} }),
+            }, {}, {
+                isDesktop: () => true,
+                isAndroid: () => false,
+                chooseDestination: async () => { calls.push('pick'); return 'C:\\chosen\\Current.charx' },
+                runtime: () => ({ revision: 1, flushPendingData: async () => undefined }),
+                readCharacter: async () => ({}) as never,
+                runExport: async () => { calls.push('export'); return null as never },
+            })
+            await vi.waitFor(() => expect(get(nativeFileOperation)?.waitingForSync).toBe(true))
+            expect(calls).toEqual([])
+            settle()
+            await exporting
+        } finally { unregister() }
+        expect(calls).toEqual(['pick', 'export'])
     })
 
     it('pins the Android export to the revision after the save picker returns', async () => {
