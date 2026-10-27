@@ -479,6 +479,7 @@ export async function requestExternalStorageRestore(
             let adoptionSelected = false
             let pluginsAdopted = false
             let adoptionComplete = false
+            let unchangedReleased = false
             const operation = runExternalApplication({
                 jobId,
                 fence,
@@ -556,12 +557,17 @@ export async function requestExternalStorageRestore(
                 },
                 settled: async () => {
                     if (committed) await pause!.finish()
-                    else {
+                    // A retry after a failed plugin restart finds the unchanged library already released.
+                    else if (!unchangedReleased) {
                         await pause!.abortUnchanged(replacement!.assertAuthority)
-                        await (await import('../../../plugins/apiV3/v3.svelte')).restartPluginsAfterAuthorityReplacement()
+                        unchangedReleased = true
                     }
-                    await replacement!.resume()
-                    current.scheduler.resume()
+                    // A failed plugin restart is still reported, after sync resumes.
+                    try { if (!committed) await (await import('../../../plugins/apiV3/v3.svelte')).restartPluginsAfterAuthorityReplacement() }
+                    finally {
+                        await replacement!.resume()
+                        current.scheduler.resume()
+                    }
                 },
             })
             handedOff = true
@@ -573,10 +579,9 @@ export async function requestExternalStorageRestore(
                     if (replacementFenced && replacement) {
                         if (pause) await pause.abortUnchanged(replacement.assertAuthority)
                         else await replacement.assertAuthority()
-                        if (pluginsFenced) {
-                            await (await import('../../../plugins/apiV3/v3.svelte')).restartPluginsAfterAuthorityReplacement()
-                        }
-                        await replacement.resume()
+                        try {
+                            if (pluginsFenced) await (await import('../../../plugins/apiV3/v3.svelte')).restartPluginsAfterAuthorityReplacement()
+                        } finally { await replacement.resume() }
                     } else fence?.release()
                 } finally {
                     replacement?.release()

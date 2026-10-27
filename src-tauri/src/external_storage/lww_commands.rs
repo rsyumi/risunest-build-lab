@@ -126,6 +126,22 @@ fn context(id: &str) -> Result<Arc<Context>> {
         })
         .clone())
 }
+/// Sync runs only while the repository is at this app's format level.
+fn require_format(engine: &ExternalLwwEngine) -> Result<()> {
+    let store = super::connection_store::ConnectionStore::open(&engine.connection_root)?;
+    format_outcome(store.format_level(&engine.connection_id)?)
+}
+fn format_outcome(level: u64) -> Result<()> {
+    match level.cmp(&crate::server_sync::library_format::LEVEL) {
+        std::cmp::Ordering::Equal => Ok(()),
+        std::cmp::Ordering::Greater => Err(ProviderError::new(ErrorKind::AppUpdateRequired)),
+        std::cmp::Ordering::Less => Err(ProviderError::new(ErrorKind::LibraryFormatSwitchRequired)),
+    }
+}
+/// Whether a repository on `provider` can be used for sync.
+pub(crate) fn syncs_through(provider: &str) -> bool {
+    matches!(provider, "webdav" | "s3" | "google_drive" | "onedrive")
+}
 async fn connect(app: &AppHandle, id: &str, session: &mut Session) -> Result<()> {
     let root = runtime::root(app)?;
     let stored = super::connection_store::ConnectionStore::open(&root)?.read(id)?;
@@ -151,7 +167,7 @@ async fn connect_with(
     if session_identity(&connected.stored, &stored.capabilities)? != identity {
         return Err(ProviderError::new(ErrorKind::PreconditionFailed));
     }
-    if !matches!(connected.stored.config.provider.as_str(), "webdav" | "s3" | "google_drive" | "onedrive")
+    if !syncs_through(&connected.stored.config.provider)
         || connected.stored.descriptor.publication_strategy.is_none()
     {
         return Err(ProviderError::new(ErrorKind::Unsupported));
@@ -440,6 +456,7 @@ pub(crate) async fn external_lww_publish(
         let mut session = context.session.lock().await;
         let _progress = session.progress.begin(progress.map(|channel| channel.channel_on(webview)));
         open(&app, &request.connection_id, &mut session).await?;
+        require_format(session.engine.as_ref().ok_or_else(lww_segment::corrupt)?)?;
         let mut store = state.open_admitted_native_job_store(&_operation).map_err(runtime::local_error)?;
         check_store(&store, &request, true)?;
         if let Some(target) = &request.exit_target {
@@ -495,6 +512,7 @@ pub(crate) async fn external_lww_receive(
         let mut session = context.session.lock().await;
         let _progress = session.progress.begin(progress.map(|channel| channel.channel_on(webview)));
         open(&app, &request.connection_id, &mut session).await?;
+        require_format(session.engine.as_ref().ok_or_else(lww_segment::corrupt)?)?;
         let mut store = check(&app, &request, true)?;
         let (page, _) = receive_page(
             &mut store,
@@ -509,6 +527,70 @@ pub(crate) async fn external_lww_receive(
             context.turn.lock().map_err(runtime::local_error)?.observed_foreign(Instant::now());
         }
         Ok(page)
+    }).await)
+}
+
+/// Reads the repository descriptor again and succeeds once the repository is
+/// at this app's format level, as after another device switched it.
+#[tauri::command]
+pub(crate) async fn external_lww_check_format(app: AppHandle, request: Request) -> Result<()> {
+    logged("external_lww_check_format", Box::pin(async move {
+        let context = context(&request.connection_id)?;
+        let session = context.session.lock().await;
+        check(&app, &request, true)?;
+        connection_commands::open_connected_with_cancel(&app, &request.connection_id, &session.cancel).await?;
+        let store = super::connection_store::ConnectionStore::open(&runtime::root(&app)?)?;
+        format_outcome(store.format_level(&request.connection_id)?)
+    }).await)
+}
+/// Raises the repository to this app's format level: the descriptor is
+/// replaced and read back, then a segment that holds only the level unit is
+/// published. A repository already at the level is left as it is, and the
+/// segment is published again.
+#[tauri::command]
+pub(crate) async fn external_lww_switch_format(
+    app: AppHandle,
+    request: Request,
+    webview: tauri::Webview, progress: Option<tauri::ipc::JavaScriptChannelId>,
+) -> Result<()> {
+    logged("external_lww_switch_format", Box::pin(async move {
+        let state = app.state::<crate::persistent_store::PersistentStoreState>();
+        let _operation = state.admit_renderer_operation().map_err(runtime::local_error)?;
+        let context = context(&request.connection_id)?;
+        let mut session = context.session.lock().await;
+        let _progress = session.progress.begin(progress.map(|channel| channel.channel_on(webview)));
+        open(&app, &request.connection_id, &mut session).await?;
+        let mut store = state.open_admitted_native_job_store(&_operation).map_err(runtime::local_error)?;
+        check_store(&store, &request, true)?;
+        let root = runtime::root(&app)?;
+        let level = crate::server_sync::library_format::LEVEL;
+        let connected = connection_commands::open_connected_with_cancel(&app, &request.connection_id, &session.cancel).await?;
+        let recorded = super::connection_store::ConnectionStore::open(&root)?.format_level(&request.connection_id)?;
+        if recorded > level {
+            return Err(ProviderError::new(ErrorKind::AppUpdateRequired));
+        }
+        let stored = &connected.stored;
+        let switched = stored.descriptor.clone().with_format_level(level)
+            .map_err(|_| ProviderError::new(ErrorKind::Unsupported))?;
+        super::descriptor::replace(connected.provider.as_ref(), &connected.handle, &stored.descriptor_locator,
+            &switched, &connected.root_key, &session.cancel).await?;
+        // Only the level read back confirms the switch.
+        let current = super::descriptor::read(&root, connected.provider.as_ref(), &connected.handle,
+            &stored.descriptor_locator, &stored.descriptor, &connected.root_key, &session.cancel).await?;
+        let store_levels = super::connection_store::ConnectionStore::open(&root)?;
+        store_levels.record_format_level(&request.connection_id, current.level())?;
+        if current.level() < level {
+            return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+        }
+        format_outcome(store_levels.format_level(&request.connection_id)?)?;
+        let session = &mut *session;
+        loop {
+            let engine = session.engine.as_mut().ok_or_else(lww_segment::corrupt)?;
+            match engine.publish_format_level(&mut store, request.header.binding_authority, &session.cancel).await {
+                Ok(_) => return Ok(()),
+                Err(error) => retry_clock_failure(session, error).await?,
+            }
+        }
     }).await)
 }
 
@@ -621,6 +703,7 @@ pub(crate) async fn external_lww_maintenance(app:AppHandle,request:Request)->Res
 async fn maintain(app:&AppHandle,request:&Request,context:&Context,session:&mut Session,cancel:&Cancellation)->Result<Option<serde_json::Value>> {
     session.use_cancellation(cancel);
     open(app,&request.connection_id,session).await?;
+    require_format(session.engine.as_ref().ok_or_else(lww_segment::corrupt)?)?;
     loop {
         match maintain_round(app,request,context,session,cancel).await {
             Ok(result)=>return Ok(result),

@@ -6,7 +6,7 @@
     import { isTauri } from 'src/ts/platform'
     import { serverSyncErrorMessage, writerRecoveryCodes, usedRegistrationCodes } from 'src/ts/storage/sync/serverSyncErrorMessage'
     import { serverSyncStatusView } from 'src/ts/storage/sync/syncStatusView'
-    import { completeServerSyncBinding, connectServerSync, disconnectServerSync, dismissServerSyncConnectionFailure, holdServerSync, retryServerSync, getServerSyncController, getServerSyncCacheUsage, cleanupServerSyncCache, type ServerSyncCacheUsage } from 'src/ts/storage/sync/serverSyncProduction'
+    import { completeServerSyncBinding, connectServerSync, disconnectServerSync, dismissServerSyncConnectionFailure, holdServerSync, retryServerSync, switchServerSyncLibraryFormat, getServerSyncController, getServerSyncCacheUsage, cleanupServerSyncCache, type ServerSyncCacheUsage } from 'src/ts/storage/sync/serverSyncProduction'
     import { parseServerRegistration } from 'src/ts/storage/sync/serverSyncRegistration'
     import { serverRegistrationInbox } from 'src/ts/storage/sync/serverSyncRegistrationInbox'
     import { canScanServerRegistration, createServerQrScanner } from 'src/ts/storage/sync/serverSyncQr'
@@ -178,6 +178,18 @@
             await disconnectServerSync()
         } finally { await release() }
     }
+    async function switchFormat() {
+        const lww = language.lwwSync
+        const choice = await alertCheckboxConfirm({ title: lww.formatSwitchTitle, description: lww.formatSwitchDescription, checkboxLabel: lww.formatSwitchAcknowledge, actionLabel: lww.formatSwitch, cancelLabel: language.cancel, requireChecked: true })
+        if (!choice.confirmed) return
+        await run(async () => {
+            // A library already above this app's level, or a server without levels, stops sync with its own guidance.
+            try { await switchServerSyncLibraryFormat() } catch (error) {
+                if (!['app-update-required', 'sync-server-update-required'].includes(errorCode(error))) { failure = lww.formatSwitchFailed; throw error }
+            }
+            await retryServerSync()
+        })
+    }
     async function cleanCache() { if (await alertConfirm(copy.management.cleanConfirm)) await cleanupServerSyncCache() }
     // A refused change puts the control back on the stored policy.
     function choosePolicy(next: AssetResidencyPolicy) { void run(() => next === 'full' ? downloadAll() : setAssetResidencyPolicy(next)).finally(() => { if (storedPolicy) policy = storedPolicy }) }
@@ -240,6 +252,7 @@
             {/if}
             {#if progressPlace === 'bound'}{@render progressPanel()}{/if}
             <div class="actions">
+                {#if view.paused && view.error === 'library-format-switch-required'}<SettingButton onclick={() => void switchFormat()} disabled={busy}>{language.lwwSync.formatSwitch}</SettingButton>{/if}
                 {#if !view.bindingIncomplete}<SettingButton onclick={() => void run(retryServerSync)} disabled={busy}>{copy.syncNow}</SettingButton>{/if}
                 <SettingButton variant="danger" class="ml-auto" onclick={() => void run(disconnect)} busy={checkingFiles} disabled={busy}>{copy.disconnect}</SettingButton>
             </div>
@@ -498,7 +511,10 @@
     }
     .kv.review {
         padding: 0.75rem 0.875rem;
-        border: 1px solid color-mix(in srgb, var(--risu-theme-primary-500) 35%, transparent);
+        /* Android WebView 113 computes a color-mix() border shorthand to currentColor. */
+        border-width: 1px;
+        border-style: solid;
+        border-color: color-mix(in srgb, var(--risu-theme-primary-500) 35%, transparent);
         border-radius: 0.5rem;
         background: color-mix(in srgb, var(--risu-theme-primary-500) 8%, transparent);
     }

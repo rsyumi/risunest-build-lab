@@ -444,7 +444,7 @@ describe('persistent save mutation observation', () => {
         expect(markDirty).toHaveBeenCalledOnce()
     })
 
-    it('saves variable-only conversation changes without reading message bodies and writes what a whole-conversation projection writes', async () => {
+    it.each(['metadata', 'message'] as const)('saves %s changes after complete promotion without reading unchanged message bodies and writes what a copied baseline writes', async (kind) => {
         const body = 'synthetic message body'
         const flush = async (capture: 'reactive' | 'plain') => {
             const initial = {
@@ -462,6 +462,7 @@ describe('persistent save mutation observation', () => {
                         message: [
                             { role: 'user', data: `first: ${body}` },
                             { role: 'char', data: `second: ${body}` },
+                            { role: 'char', data: 'synthetic response draft', chatId: 'response-id' },
                         ],
                     }],
                 }],
@@ -471,17 +472,16 @@ describe('persistent save mutation observation', () => {
             let revision = 1
             const commit = vi.fn(async (_request: Parameters<PersistentDataStore['commit']>[0]) => ({ revision: ++revision }))
             const onPersisted = vi.fn()
+            const canonicalCapture = state ? createPersistenceCanonicalCapture({
+                root: () => state.database,
+                presets: () => [],
+                pluginStorage: () => null,
+                character: () => state.database.characters[0],
+                characters: () => state.database.characters,
+            }) : undefined
             const coordinator = new SaveCoordinator({
                 store: createStoreStub({ commit, replaceFromDatabase: vi.fn() }),
-                ...(state ? {
-                    canonicalCapture: createPersistenceCanonicalCapture({
-                        root: () => state.database,
-                        presets: () => [],
-                        pluginStorage: () => null,
-                        character: () => state.database.characters[0],
-                        characters: () => state.database.characters,
-                    }),
-                } : {}),
+                canonicalCapture,
                 captureRoot: () => {
                     const { characters: _characters, ...root } = database
                     return root
@@ -500,10 +500,19 @@ describe('persistent save mutation observation', () => {
                 storeRevision: revision,
                 onMutation: (event) => coordinator.recordActiveConversationMutation(event),
             })
-            session.updateChatVariables(new Map([['hp', '9']]))
-            session.updateChatVariables(new Map([['mood', 'calm']]))
+            // Promotion adopts the resident character as the baseline.
+            expect(coordinator.adoptHydratedCharacter(revision, coordinator.mutationGeneration, database.characters[0])).toBe(true)
+            const baseline = canonicalCapture?.materializedCharacters?.().get('synthetic-character') ?? null
+            const baselineJson = JSON.stringify(baseline)
+            if (kind === 'metadata') {
+                session.updateChatVariables(new Map([['hp', '9']]))
+                session.updateChatVariables(new Map([['mood', 'calm']]))
+            } else {
+                session.edit(session.locate(2), { role: 'char', data: 'updated response', chatId: 'response-id', custom: { nested: ['한글', '🙂'] } } as Chat['message'][number])
+                session.edit(session.locate(2), { role: 'char', data: 'final response', chatId: 'response-id' })
+            }
 
-            // Whether the flush serializes or copies a message body.
+            // Whether the flush serializes or copies an unchanged message body.
             const readsMessages: string[] = []
             const stringify = JSON.stringify
             const clone = globalThis.structuredClone
@@ -528,6 +537,7 @@ describe('persistent save mutation observation', () => {
             }
             expect(onPersisted).toHaveBeenCalledTimes(2)
             expect(coordinator.hasPendingPersistenceWork).toBe(false)
+            expect(JSON.stringify(baseline)).toBe(baselineJson)
             return { request: commit.mock.calls[0][0], readsMessages }
         }
 
@@ -537,8 +547,17 @@ describe('persistent save mutation observation', () => {
         expect(reactive.readsMessages).toEqual([])
         expect(plain.readsMessages).not.toEqual([])
         expect(reactive.request).toEqual(plain.request)
-        expect(reactive.request.conversations?.map((mutation) =>
-            'conversation' in mutation ? (mutation.conversation as Chat).scriptstate : null,
-        )).toEqual([{ $hp: '9' }, { $hp: '9', $mood: 'calm' }])
+        if (kind === 'metadata') {
+            expect(reactive.request.conversations?.map((mutation) =>
+                'conversation' in mutation ? (mutation.conversation as Chat).scriptstate : null,
+            )).toEqual([{ $hp: '9' }, { $hp: '9', $mood: 'calm' }])
+        } else {
+            expect(reactive.request.conversations?.map((mutation) =>
+                mutation.type === 'replace-range' ? [mutation.start, mutation.deleteCount, mutation.messages] : null,
+            )).toEqual([
+                [2, 1, [{ role: 'char', data: 'updated response', chatId: 'response-id', custom: { nested: ['한글', '🙂'] } }]],
+                [2, 1, [{ role: 'char', data: 'final response', chatId: 'response-id' }]],
+            ])
+        }
     })
 })

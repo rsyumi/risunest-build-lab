@@ -4,6 +4,8 @@ LangString SyncPrepare 1033 "Stopping RisuNest Sync and preparing the installati
 LangString SyncPrepare 1042 "RisuNest Sync를 중지하고 설치를 준비합니다..."
 LangString SyncPrepareFailed 1033 "RisuNest Sync could not be prepared for installation. Check the server status in RisuNest Sync and try again."
 LangString SyncPrepareFailed 1042 "RisuNest Sync 설치를 준비할 수 없습니다. 서버 상태를 확인한 후 다시 시도하세요."
+LangString SyncRemovalPending 1033 "A previous RisuNest Sync removal is incomplete. Run the removal again, then install."
+LangString SyncRemovalPending 1042 "이전 RisuNest Sync 제거가 완료되지 않았습니다. 제거를 다시 실행한 후 설치해주세요."
 LangString SyncSchedule 1033 "Applying scheduled update settings..."
 LangString SyncSchedule 1042 "예약 업데이트 설정을 적용합니다..."
 LangString SyncScheduleFailed 1033 "Scheduled update settings could not be applied. RisuNest Sync setup did not finish."
@@ -28,6 +30,8 @@ LangString SyncUpdate 1033 "Stopping RisuNest Sync for the update..."
 LangString SyncUpdate 1042 "업데이트를 위해 RisuNest Sync를 중지합니다..."
 LangString SyncRemovePrepareFailed 1033 "RisuNest Sync removal could not be prepared. Program files were preserved."
 LangString SyncRemovePrepareFailed 1042 "RisuNest Sync 제거를 준비할 수 없습니다."
+LangString SyncResumeFailed 1033 "RisuNest Sync removal could not be completed. Retry removal to finish."
+LangString SyncResumeFailed 1042 "RisuNest Sync 제거를 완료하지 못했습니다. 다시 시도해주세요."
 LangString SyncCheckFailed 1033 "RisuNest Sync removal checks did not pass. Program files were preserved."
 LangString SyncCheckFailed 1042 "RisuNest Sync 제거 조건을 충족하지 못했습니다."
 LangString SyncCheck 1033 "Checking whether RisuNest Sync can be removed..."
@@ -68,8 +72,8 @@ LangString SyncObsoleteFailed 1033 "Obsolete RisuNest Sync program files could n
 LangString SyncObsoleteFailed 1042 "이전 RisuNest Sync 프로그램 파일을 제거할 수 없습니다."
 LangString SyncDataKept 1033 "Server data was kept because the installation registration could not be confirmed."
 LangString SyncDataKept 1042 "설치 등록을 확인할 수 없어 서버 데이터를 유지했습니다."
-LangString SyncResumeDataKept 1033 "Server data could not be deleted. Data folder: $R9"
-LangString SyncResumeDataKept 1042 "서버 데이터를 삭제하지 못했습니다. 데이터 폴더: $R9"
+LangString SyncResumeDataKept 1033 "Server data could not be deleted. Data folder: $SyncDisplayDataPath"
+LangString SyncResumeDataKept 1042 "서버 데이터를 삭제하지 못했습니다. 데이터 폴더: $SyncDisplayDataPath"
 LangString SyncFiles 1033 "Removing RisuNest Sync program files..."
 LangString SyncFiles 1042 "RisuNest Sync 프로그램 파일을 제거합니다..."
 LangString SyncFilesFailed 1033 "RisuNest Sync removal is incomplete. Program files could not all be removed."
@@ -91,6 +95,7 @@ Var SyncForceOption
 Var SyncDeleteMode
 Var SyncDiagnostic
 Var SyncRemovalResumed
+Var SyncDisplayDataPath
 Var SyncPreviousInstall
 
 !macro SyncSkipMarkerBlanks
@@ -281,7 +286,8 @@ Var SyncPreviousInstall
   sync_install_retry_pending:
   StrCpy $0 "retry-pending"
   StrCpy $1 "removal-finalization-pending"
-  Goto sync_prepare_failed
+  StrCpy $SyncFailureMessage "$(SyncRemovalPending)"
+  Goto sync_prepare_report
   sync_install_retry_ready:
   !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
   StrCpy $R7 ""
@@ -319,6 +325,7 @@ Var SyncPreviousInstall
   Goto sync_prepare_done
   sync_prepare_failed:
   StrCpy $SyncFailureMessage "$(SyncPrepareFailed)"
+  sync_prepare_report:
   Call SyncCommandError
   IfSilent sync_prepare_quiet sync_prepare_interactive
   sync_prepare_interactive:
@@ -470,6 +477,7 @@ Var SyncPreviousInstall
   ClearErrors
   CopyFiles /SILENT "$INSTDIR\.risunest-sync-removal\manager.exe" "$PLUGINSDIR\risunest-sync-remove.exe"
   IfErrors sync_retry_invalid
+  StrCpy $SyncFailureMessage "$(SyncResumeFailed)"
   nsExec::ExecToStack '"$PLUGINSDIR\risunest-sync-remove.exe" --data-dir "$R9" --server "$INSTDIR\risunest-sync-server.exe" installer resume-removal $SyncDeleteMode'
   Pop $0
   Pop $1
@@ -487,6 +495,17 @@ Var SyncPreviousInstall
         Goto sync_uninstall_done
       ${EndIf}
       Goto sync_retry_invalid
+    ${EndIf}
+    StrCpy $SyncDisplayDataPath $R9
+    StrCpy $2 $R9 8
+    ${If} $2 == "\\?\UNC\"
+      StrCpy $SyncDisplayDataPath $R9 "" 8
+      StrCpy $SyncDisplayDataPath "\\$SyncDisplayDataPath"
+    ${Else}
+      StrCpy $2 $R9 4
+      ${If} $2 == "\\?\"
+        StrCpy $SyncDisplayDataPath $R9 "" 4
+      ${EndIf}
     ${EndIf}
     DetailPrint "$(SyncResumeDataKept)"
     IfSilent +2

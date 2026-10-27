@@ -22,6 +22,7 @@ import type {
     PluginStorageValue,
     ConversationMutation,
 } from '../storage/persistentDataStore'
+import { readCurrentRevision } from '../storage/persistentDataStore'
 import {
     acquireCurrentRevisionWithRetry,
     assertPinnedRevision,
@@ -753,7 +754,7 @@ export function createPluginDatabaseAccess(
     const acquireCurrentRevisionReader = (): Promise<PersistentRevisionLease> =>
         acquireCurrentRevisionWithRetry(
             (revision) => dependencies.store.acquireRevision(revision),
-            async () => (await dependencies.store.readRoot()).revision,
+            () => readCurrentRevision(dependencies.store),
         )
     const prepareQuery = async (signal?: AbortSignal) => {
         throwIfQueryAborted(signal)
@@ -1462,7 +1463,7 @@ export function createProductionPluginChatOutputProjector(
         }))
         const lease = await acquireCurrentRevisionWithRetry(
             (revision) => persistentStore.acquireRevision(revision),
-            async () => (await persistentStore.readRoot()).revision,
+            () => readCurrentRevision(persistentStore),
         )
         return withPersistentRevisionLease(lease, async (reader) => {
             const detail = await reader.readCharacter(input.characterId)

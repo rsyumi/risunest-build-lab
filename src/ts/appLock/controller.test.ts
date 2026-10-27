@@ -106,15 +106,19 @@ describe('app lock record and timing', () => {
 })
 
 describe('app lock controller', () => {
-    it.each([false, true])('keeps an unlocked launch-only return interactive (enabled=%s)', async (enabled) => {
+    it.each([[false, false], [true, false], [false, true], [true, true]])('keeps an unlocked return interactive (enabled=%s, preview=%s)', async (enabled, hideRecentsPreview) => {
         const f = fixture(enabled ? {} : { record: null })
+        f.capabilities.previewSupported = hideRecentsPreview
         await f.controller.initialize()
         if (enabled) await enter(f.controller)
+        if (hideRecentsPreview) await f.controller.setHideRecentsPreview(true)
         f.emit(false, 100)
         f.emit(true, 100_000)
         expect(f.controller.gated).toBe(false)
         expect(f.controller.state.returnPending).toBe(false)
         expect(f.controller.state.locked).toBe(false)
+        await f.controller.rendered('unlock')
+        expect(f.presented()).toBe(false)
     })
 
     it.each(['listen', 'setPolicy'] as const)('does not gate a disabled record after a native %s failure', async (method) => {

@@ -454,17 +454,43 @@ pub(crate) mod test_remote {
             .unwrap();
     }
 
+    /// Leaves a body only on the Sync server: its local file is removed, and the
+    /// server holds and serves it.
+    pub(crate) fn keep_only_on_server(root: &Path, digest: &str) {
+        let cas = crate::asset_repository::PayloadCas::new(root).unwrap();
+        let path = cas.object_path(digest).unwrap().unwrap();
+        let body = std::fs::read(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        hold(root, &[(digest, body.len() as u64)]);
+        serve(root, digest, body);
+    }
+
     /// How many bodies this repository fetched.
     pub(crate) fn fetched(root: &Path) -> usize {
         let root = std::fs::canonicalize(root).unwrap();
         SERVED.lock().unwrap().get(&root).map_or(0, |(_, fetched)| *fetched)
     }
 
+    static FETCH_HOOKS: Mutex<BTreeMap<PathBuf, Box<dyn Fn() + Send>>> =
+        Mutex::new(BTreeMap::new());
+
+    /// Runs `hook` each time this repository starts fetching a body.
+    pub(crate) fn on_fetch(root: &Path, hook: impl Fn() + Send + 'static) {
+        let root = std::fs::canonicalize(root).unwrap();
+        FETCH_HOOKS.lock().unwrap().insert(root, Box::new(hook));
+    }
+
     pub(super) fn body(root: &Path, digest: &str) -> Option<Vec<u8>> {
-        let mut served = SERVED.lock().unwrap();
-        let (bodies, fetched) = served.get_mut(root)?;
-        let body = bodies.get(digest)?.clone();
-        *fetched += 1;
+        let body = {
+            let mut served = SERVED.lock().unwrap();
+            let (bodies, fetched) = served.get_mut(root)?;
+            let body = bodies.get(digest)?.clone();
+            *fetched += 1;
+            body
+        };
+        if let Some(hook) = FETCH_HOOKS.lock().unwrap().get(root) {
+            hook();
+        }
         Some(body)
     }
 }
@@ -906,22 +932,5 @@ fn lock_with_check<'a>(
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
         }
-    }
-}
-
-/// Explicit byte-consumer adapter. Ordinary PayloadCas::stat_object continues
-/// to describe physical storage and never performs a network request.
-pub(crate) trait RemotePayloadAccess {
-    fn open_available_object(&self, hash: &str) -> std::io::Result<Option<std::fs::File>>;
-    fn stat_available_object(&self, hash: &str) -> std::io::Result<Option<u64>> {
-        self.open_available_object(hash)?
-            .map(|file| file.metadata().map(|metadata| metadata.len()))
-            .transpose()
-    }
-}
-impl RemotePayloadAccess for crate::asset_repository::PayloadCas {
-    fn open_available_object(&self, hash: &str) -> std::io::Result<Option<std::fs::File>> {
-        open_or_hydrate(self.repository_root(), hash)
-            .map_err(|error| std::io::Error::other(error.code))
     }
 }

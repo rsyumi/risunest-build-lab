@@ -1,6 +1,7 @@
 import type { Database, botPreset } from './database.svelte'
 import type { PreparedBootstrapDatabase } from './databasePreparation'
 import {
+    readCurrentRevision,
     RevisionConflictError,
     type CharacterSummary,
     type DataRevision,
@@ -83,7 +84,7 @@ export async function bootstrapPersistentDatabase(
         await dependencies.onPhase?.('compatibility', active.value.language)
         const persistent = await dependencies.store.materializeDatabase(active.revision)
         const { database } = await dependencies.prepareDatabase(persistent)
-        assertRevision(active.revision, (await dependencies.store.readRoot()).revision)
+        assertRevision(active.revision, await readCurrentRevision(dependencies.store))
         return { database, revision: active.revision }
     }
 

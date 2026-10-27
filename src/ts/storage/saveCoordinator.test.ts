@@ -5,7 +5,8 @@ import type { Chat, Database, character } from './database.svelte'
 import { RevisionConflictError } from './persistentDataStore'
 import { PayloadTooLargeError, UnsaveableValueError } from './nativePersistenceValue'
 import { createLeaseStub, createStoreStub } from './persistentDataStore.testSupport'
-import { canonicalJson } from './saveCoordinator'
+import { canonicalJson, PersistentMutationFencedError } from './saveCoordinator'
+import { createPersistenceCanonicalCapture } from './reactivePersistenceCapture.svelte'
 import {
     ActiveConversationSession,
     cloneConversationMetadata,
@@ -768,11 +769,13 @@ describe('SaveCoordinator', () => {
             .mockRejectedValueOnce(new Error('range write failed'))
             .mockImplementation(async ({ expectedRevision }) => ({ revision: expectedRevision + 1 }))
         let session!: ActiveConversationSession
+        let now = 1_000
         const coordinator = new SaveCoordinator({
             store: makeStore(commit),
             captureRoot: () => captureRoot(database),
             captureSelectedCharacter: () => database.characters[0],
             replaceDatabase: () => undefined,
+            now: () => now,
             onConversationMutationPersistenceStarted: (event) =>
                 session.beginPersistence(event.sessionVersion),
             onConversationMutationPersisted: (event) => {
@@ -802,6 +805,8 @@ describe('SaveCoordinator', () => {
         expect(session.pinCount('dirty')).toBe(1)
         expect(session.residentBytes).toBe(1)
         expect(coordinator.pendingBytes).toBeGreaterThanOrEqual(0)
+        now = 3_500
+        expect(coordinator.pendingConversationMutationDiagnostics).toEqual({ pendingEvents: 1, unacknowledgedMs: 2_500 })
 
         await coordinator.flushPendingData('retry-attempt')
 
@@ -814,6 +819,42 @@ describe('SaveCoordinator', () => {
         expect(session.pinCount('pending-save')).toBe(0)
         expect(session.pinCount('dirty')).toBe(0)
         expect(session.residentBytes).toBe(0)
+        expect(coordinator.pendingConversationMutationDiagnostics).toEqual({ pendingEvents: 0, unacknowledgedMs: undefined })
+    })
+
+    it('reports pending conversation events with the age of the oldest until they are acknowledged', async () => {
+        const database = makeChattyDatabase()
+        let session!: ActiveConversationSession
+        let now = 1_000
+        const coordinator = new SaveCoordinator({
+            store: makeStore(vi.fn(async ({ expectedRevision }) => ({ revision: expectedRevision + 1 }))),
+            captureRoot: () => captureRoot(database),
+            captureSelectedCharacter: () => database.characters[0],
+            replaceDatabase: () => undefined,
+            now: () => now,
+            onConversationMutationPersistenceStarted: (event) =>
+                session.beginPersistence(event.sessionVersion),
+            onConversationMutationPersisted: (event) => {
+                session.acknowledgePersisted(event.sessionToken, event.sessionVersion, event.revision)
+            },
+        })
+        coordinator.initialize(2)
+        session = new ActiveConversationSession({
+            characterId: 'char-a',
+            conversationId: 'two',
+            conversation: database.characters[0].chats[1],
+            storeRevision: 2,
+            onMutation: (event) => coordinator.recordActiveConversationMutation(event),
+        })
+
+        session.append({ role: 'user', data: 'first unsaved' })
+        now = 1_400
+        session.append({ role: 'char', data: 'second unsaved' })
+        now = 2_000
+        expect(coordinator.pendingConversationMutationDiagnostics).toEqual({ pendingEvents: 2, unacknowledgedMs: 1_000 })
+
+        await coordinator.flushPendingData('diagnostic-ages')
+        expect(coordinator.pendingConversationMutationDiagnostics).toEqual({ pendingEvents: 0, unacknowledgedMs: undefined })
     })
 
     it('pins only covered session commands while their store commit is in flight', async () => {
@@ -3110,6 +3151,42 @@ describe('SaveCoordinator', () => {
         }
     })
 
+    it('takes the background save path for a failed generation checkpoint and rejects one during a fence', async () => {
+        vi.useFakeTimers()
+        try {
+            const database = makeDatabase()
+            const commit = vi.fn(async ({ expectedRevision }) => ({ revision: expectedRevision + 1 }))
+                .mockRejectedValueOnce(new Error('synthetic I/O failure'))
+            const onBackgroundError = vi.fn()
+            const coordinator = new SaveCoordinator({
+                store: makeStore(commit),
+                captureRoot: () => captureRoot(database),
+                captureSelectedCharacter: () => database.characters[0],
+                replaceDatabase: () => undefined,
+                onBackgroundError,
+            })
+            coordinator.initialize(1)
+            database.username = 'Checkpointed edit'
+            coordinator.markPersistentDataDirty(1)
+
+            await expect(coordinator.flushPendingDataLocallyForCheckpoint('generation-checkpoint')).resolves.toBe(false)
+            expect(onBackgroundError).toHaveBeenCalledOnce()
+            expect(commit).toHaveBeenCalledOnce()
+            await vi.advanceTimersByTimeAsync(2_000)
+            expect(commit).toHaveBeenCalledTimes(2)
+            expect(coordinator.hasPendingPersistenceWork).toBe(false)
+
+            const fence = await coordinator.acquireCommittedWorkingSetRefreshFence()
+            await expect(coordinator.flushPendingDataLocallyForCheckpoint('generation-checkpoint'))
+                .rejects.toBeInstanceOf(PersistentMutationFencedError)
+            coordinator.releaseDestructiveReplacementFence(fence)
+            expect(onBackgroundError).toHaveBeenCalledOnce()
+            expect(commit).toHaveBeenCalledTimes(2)
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
     it('retries pinning the committed revision before creating a newer local revision', async () => {
         const database = makeDatabase()
         const handle = {
@@ -3749,6 +3826,34 @@ describe('SaveCoordinator', () => {
             mutationGeneration,
             database.characters[0],
         )).toBe(false)
+    })
+
+    it('saves a live edit made before a separate hydrated copy is adopted', async () => {
+        const database = makeChattyDatabase()
+        const storage = await createPersistentStoreHarness(structuredClone(database))
+        const hydrated = structuredClone(database.characters[0])
+        const coordinator = new SaveCoordinator({
+            store: storage.store,
+            canonicalCapture: createPersistenceCanonicalCapture({
+                root: () => captureRoot(database),
+                presets: () => null,
+                pluginStorage: () => null,
+                character: () => database.characters[0],
+                characters: () => database.characters,
+            }),
+            captureRoot: () => captureRoot(database),
+            captureCharacters: () => database.characters,
+            captureSelectedCharacter: () => database.characters[0],
+            replaceDatabase: () => undefined,
+        })
+        coordinator.initialize(storage.revision)
+
+        database.characters[0].chats[1].message[0].data = 'live edit before adoption'
+        expect(coordinator.adoptHydratedCharacter(storage.revision, coordinator.mutationGeneration, hydrated)).toBe(true)
+        await coordinator.flushPendingDataLocally('adoption-live-edit')
+
+        expect((await storage.store.readConversation('char-a', 'two'))?.value.message[0].data)
+            .toBe('live edit before adoption')
     })
 
     it('commits the newly selected character after the selection changes', async () => {

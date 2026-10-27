@@ -267,6 +267,7 @@ pub(crate) async fn asset_residency_download_remote(
     target: Option<crate::persistent_store::asset_residency::PreviousStorageTarget>,
     webview: tauri::Webview, progress: Option<tauri::ipc::JavaScriptChannelId>,
     transfer_progress: Option<tauri::ipc::JavaScriptChannelId>,
+    icon_priority: Option<crate::persistent_store::asset_residency::RepresentativeImagePriority>,
 ) -> Result<crate::persistent_store::asset_residency::ResidencyStatus> {
     let operation = recorded("asset-download", app.state::<ServerSyncCommandState>().claim_asset_operation(operation_id))?;
     logged_blocking("asset-download", move || within(&LANES.assets, || {
@@ -289,7 +290,7 @@ pub(crate) async fn asset_residency_download_remote(
         observer.within(|| super::asset_download_progress::within(progress.map(|channel| channel.channel_on(webview)), || match target {
             Some(target) if connection_id.is_none() => store.asset_residency_download_previous(&target, Some(cancelled.clone()), selected_character_id.as_deref(), check),
             Some(_) => Err(SyncError::new("invalid-asset-download-scope", 400)),
-            None => store.asset_residency_download_remote(connection_id.as_deref(), Some(cancelled.clone()), selected_character_id.as_deref(), check),
+            None => store.asset_residency_download_remote_prioritized(connection_id.as_deref(), Some(cancelled.clone()), selected_character_id.as_deref(), icon_priority.as_ref(), check),
         }))
     })).await
 }
@@ -410,7 +411,19 @@ pub(crate) async fn server_sync_lww_prepare_fresh_writer(app:AppHandle,request:c
 #[tauri::command]
 pub(crate) async fn server_sync_lww_activate_new_device(app:AppHandle,request:crate::persistent_store::lww::Header,authorization_id:String,writer_id:String)->Result<()> {logged_blocking("activate-new-device",move||within(&LANES.binding,|| {super::binding::activate(&mut job_store(&app)?,&request,Some((&authorization_id,&writer_id)))})).await}
 #[tauri::command]
-pub(crate) async fn server_sync_lww_retry(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<crate::persistent_store::lww::ApplyResult> {logged_blocking("retry",move||within(&LANES.send,|| {let _permit=claim_library(&app)?;let mut store=job_store(&app)?;with_lww_client(&mut store,None,|core,store|core.retry_unpublished(store,&request))})).await}
+pub(crate) async fn server_sync_lww_retry(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<crate::persistent_store::lww::ApplyResult> {logged_blocking("retry",move||retry_unpublished(&app,request)).await}
+fn retry_unpublished<R: tauri::Runtime>(app:&AppHandle<R>,request:crate::persistent_store::lww::Header)->Result<crate::persistent_store::lww::ApplyResult> {
+    // A manual sync waits on this check, so a stopped server fails it at once instead of after the retry budget.
+    within(&LANES.send,|| {let _permit=claim_library(app)?;let mut store=job_store(app)?;with_lww_client(&mut store,None,|core,store|{core.client.retry_transient=false;core.retry_unpublished(store,&request)})})
+}
+#[tauri::command]
+pub(crate) async fn server_sync_lww_check_format(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<()> {
+    logged_blocking("check-format",move|| within(&LANES.send,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"send")?;let mut store=job_store(&app)?;with_lww_client(&mut store,Some(cancelled),|core,store|core.check_library_format(store,&request,false))})).await
+}
+#[tauri::command]
+pub(crate) async fn server_sync_lww_switch_format(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<()> {
+    logged_blocking("switch-format",move|| within(&LANES.send,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"send")?;let mut store=job_store(&app)?;with_lww_client(&mut store,Some(cancelled),|core,store|core.check_library_format(store,&request,true))})).await
+}
 #[tauri::command]
 pub(crate) async fn server_sync_lww_drain(app:AppHandle,request:crate::persistent_store::lww::Header,generating:Vec<crate::persistent_store::lww::MessageLocator>)->Result<()> {
     logged_blocking("drain",move||within(&LANES.send,|| {let state=app.state::<ServerSyncCommandState>();let (_job,cancelled)=state.claim_transport(&app.state::<crate::native_file_jobs::NativeFileJobState>().admission,"send")?;let mut store=job_store(&app)?;with_lww_client(&mut store,Some(cancelled),|core,store| {let mut next=request;while core.push(store,&next,&generating)?.is_some(){next.request_id=uuid::Uuid::new_v4().to_string();}if !store.lww_read_outbox(next.binding_authority,1)?.entries.is_empty(){return Err(SyncError::new("generation-active",409));}Ok(())})})).await
@@ -790,6 +803,32 @@ mod tests {
         assert!(after.0 > before.0, "{} after {}", after.0, before.0);
         tauri::async_runtime::block_on(stop_notification_job(app.handle())).unwrap();
         assert!(app.state::<ServerSyncCommandState>().cleanup_drained().unwrap());
+    }
+    #[test]
+    fn a_clock_retry_reports_a_stopped_server_at_once() {
+        use super::super::lww_tests::{header, local, LocalServerFixture};
+        let stopped = Arc::new(AtomicBool::new(true));
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (down, seen) = (stopped.clone(), requests.clone());
+        let server = LocalServerFixture::with_router(move |router| router.layer(axum::middleware::from_fn(move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let (down, seen) = (down.clone(), seen.clone());
+            async move {
+                if request.uri().path() == "/time" {
+                    seen.fetch_add(1, Ordering::AcqRel);
+                    // A gateway in front of a stopped server answers until the server returns.
+                    if down.swap(false, Ordering::AcqRel) { return axum::response::IntoResponse::into_response(axum::http::StatusCode::SERVICE_UNAVAILABLE); }
+                }
+                next.run(request).await
+            }
+        })));
+        let (_root, store) = local();
+        server.client(&store);
+        let request = header(&store);
+        let app = mock_app(store);
+        let error = retry_unpublished(app.handle(), request).err().expect("a clock retry against a stopped server must fail");
+        assert_eq!((error.code.as_str(), error.status, error.retryable), ("server-response-error", 503, true));
+        assert_eq!(requests.load(Ordering::Acquire), 1);
+        assert_released(&app);
     }
 }
 

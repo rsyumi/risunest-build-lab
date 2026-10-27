@@ -58,8 +58,9 @@ impl RootSpool {
         Ok(())
     }
 
-    pub(super) fn from_stored(connection: &Connection, generation: &str) -> StoreResult<Self> {
-        let root=Self::new(Arc::new(AtomicBool::new(false)))?;
+    pub(super) fn from_stored(connection: &Connection, repository_root: &Path, generation: &str) -> StoreResult<Self> {
+        let scratch=crate::external_storage::leftovers::scratch_directory(repository_root)?;
+        let root=Self::new_in(Some(&scratch),Arc::new(AtomicBool::new(false)))?;
         let rowid=connection.query_row("SELECT rowid FROM root WHERE generation=?1",[generation],|r|r.get(0))?;
         let blob=connection.blob_open(MAIN_DB,"root","value",rowid,true)?;
         let mut decoder=serde_json::Deserializer::from_reader(BufReader::with_capacity(64*1024,blob));
@@ -480,8 +481,12 @@ mod tests {
         assert_eq!(kind,"text"); assert!(valid);
         assert_eq!(streamed.read_root(None).unwrap().value,before);
         assert_eq!(streamed.revision().unwrap(),0);
-        let replay=RootSpool::from_stored(&streamed.connection,&b).unwrap();
+        let replay=RootSpool::from_stored(&streamed.connection,second.path(),&b).unwrap();
         assert_eq!(replay.record_by_id("personas","persona-two").unwrap().unwrap()["name"],"edited");
+        let scratch=replay._file.as_ref().unwrap().path().to_path_buf();
+        assert!(scratch.starts_with(second.path().join("external-storage").join("scratch")),"{scratch:?}");
+        drop(replay);
+        assert!(!scratch.exists());
         streamed.replace_commit(&b,Some(0)).unwrap();
         assert_eq!(streamed.revision().unwrap(),1);
         assert_eq!(streamed.materialize(None).unwrap()["temperature"],0.8);
@@ -560,8 +565,16 @@ mod tests {
             root.put_member("botPresets",&index.to_string(),Some(&json!({"id":format!("preset-{index}"),"body":body}))).unwrap();
         }
         store.replace_put_upstream_stream(&stage,&root).unwrap();
+        let scratch=directory.path().join("external-storage").join("scratch");
+        std::fs::create_dir_all(scratch.parent().unwrap()).unwrap();
+        if scratch.is_dir() { std::fs::remove_dir(&scratch).unwrap(); }
+        std::fs::write(&scratch,b"synthetic unavailable scratch").unwrap();
+        assert!(store.replace_preserve_repositories(&stage,Some(0)).is_err());
+        assert!(commit::staged_plugin_preview(&store.connection,directory.path(),&stage).is_err());
+        std::fs::remove_file(&scratch).unwrap();
         store.replace_preserve_repositories(&stage,Some(0)).unwrap();
-        let preview=commit::staged_plugin_preview(&store.connection,&stage).unwrap();
+        let preview=commit::staged_plugin_preview(&store.connection,directory.path(),&stage).unwrap();
+        assert_eq!(std::fs::read_dir(&scratch).unwrap().count(),0);
         assert_eq!(preview.plugin_names,(0..128).map(|index|format!("plugin-{index}")).collect::<Vec<_>>());
         assert!(preview.values.is_empty());
         let root_bytes:i64=store.connection.query_row("SELECT length(CAST(value AS BLOB)) FROM root WHERE generation=?1",[&stage],|r|r.get(0)).unwrap();
@@ -582,11 +595,11 @@ mod tests {
             (json!("[{\"name\":\"Synthetic\"},{\"name\":\"\"},{\"name\":\"Synthetic\"}]"),vec!["Synthetic","Synthetic"]),
         ] {
             store.replace_put_root(&stage,&json!({"plugins":value})).unwrap();
-            assert_eq!(commit::staged_plugin_preview(&store.connection,&stage).unwrap().plugin_names,names);
+            assert_eq!(commit::staged_plugin_preview(&store.connection,directory.path(),&stage).unwrap().plugin_names,names);
         }
         for value in [json!(true),json!(7)] {
             store.replace_put_root(&stage,&json!({"plugins":value})).unwrap();
-            assert!(commit::staged_plugin_preview(&store.connection,&stage).is_err());
+            assert!(commit::staged_plugin_preview(&store.connection,directory.path(),&stage).is_err());
         }
     }
 }

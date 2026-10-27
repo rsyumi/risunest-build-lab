@@ -35,6 +35,23 @@ internal class AppLockLifecycle(private val now: () -> Long) {
   var pendingPresentation = false
     private set
 
+  private var authenticationKeepsActive = false
+
+  fun beginAuthentication(apiLevel: Int) {
+    authenticationKeepsActive = apiLevel == 29
+  }
+
+  fun finishAuthentication() {
+    authenticationKeepsActive = false
+  }
+
+  var hasWindowFocus = false
+    private set
+
+  fun windowFocusChanged(hasFocus: Boolean) {
+    hasWindowFocus = hasFocus
+  }
+
   val blocksBack get() = policy.gateRequired || pendingPresentation
 
   fun setPolicy(next: AppLockPolicy) {
@@ -49,14 +66,16 @@ internal class AppLockLifecycle(private val now: () -> Long) {
 
   fun departUnlessTransient(
     ownedActivity: Boolean,
-    authenticating: Boolean = false,
+    permissionPrompt: Boolean = false,
+    stopped: Boolean = false,
     changingConfigurations: Boolean = false,
   ): Boolean {
-    if (ownedActivity || authenticating || changingConfigurations) return false
+    if (ownedActivity || (permissionPrompt && !stopped) || changingConfigurations) return false
     return depart()
   }
 
   fun depart(): Boolean {
+    if (authenticationKeepsActive) return false
     concealTransition()
     if (!active) return false
     active = false
@@ -77,6 +96,7 @@ internal class AppLockLifecycle(private val now: () -> Long) {
 
   fun presented(expectedEpoch: Long, locked: Boolean): Boolean {
     if (!acceptsPresentation(expectedEpoch, locked)) return false
+    policy = policy.copy(gateRequired = locked)
     pendingPresentation = false
     return true
   }
@@ -84,4 +104,22 @@ internal class AppLockLifecycle(private val now: () -> Long) {
   fun acceptsAuthentication(expectedEpoch: Long): Boolean = active && epoch == expectedEpoch
 
   fun snapshot() = AppLockSnapshot(active, epoch, now(), departedAtMs)
+}
+
+internal class AppLockValueOverride<T>(private val read: () -> T, private val write: (T) -> Unit) {
+  private var restoreValue: (() -> Unit)? = null
+
+  fun update(enabled: Boolean, value: () -> T) {
+    if (!enabled) { restore(); return }
+    if (restoreValue == null) {
+      val previous = read()
+      restoreValue = { write(previous) }
+    }
+    write(value())
+  }
+
+  fun restore() {
+    restoreValue?.invoke()
+    restoreValue = null
+  }
 }

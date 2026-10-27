@@ -408,3 +408,35 @@ test('keeps global variable dependencies when regex output is cached', async () 
     expect((await renderRow(char, chat, 0)).data).toBe('turn 0 <b>Global 7</b>\n')
     expect(await refreshedRows({ all: true })).toEqual([0])
 })
+
+test('compiled display reads preserve defaults, context updates and conditional dependencies', async () => {
+    const { InMemoryWorker } = await import('../../../tests/support/regexWorker')
+    const workerModule = await import('./regexWorkerClient')
+    const worker = new InMemoryWorker()
+    const client = new workerModule.RegexWorkerClient(() => worker)
+    const factory = vi.spyOn(workerModule, 'getSharedRegexWorkerClient').mockReturnValue(client)
+    try {
+        const panel = { ...statusPanel,
+            out: '{{#if {{equal::{{getvar::show}}::1}}}}<b>{{getvar::hp}}/{{getvar::fallback}}</b>{{/if}}',
+        }
+        const { char, chat } = installConversation([panel])
+        char.defaultVariables = 'fallback=character\nshow=1'
+        live.database.templateDefaultVariables = 'fallback=template'
+        const firstReads = new DisplayReadRecord()
+        const run = (variableReads: InstanceType<typeof DisplayReadRecord>) => processScriptFull(
+            char, '[상태창]', 'editdisplay', 0, {}, { cache: 'bypass', regexWorker: true, variableReads },
+        )
+        expect((await run(firstReads)).data).toBe('<b>10/character</b>')
+        expect([...firstReads.keys]).toEqual(['show', 'hp', 'fallback'])
+        chat.scriptstate.$hp = '21'
+        expect((await run(new DisplayReadRecord())).data).toBe('<b>21/character</b>')
+        chat.scriptstate.$show = '0'
+        const hiddenReads = new DisplayReadRecord()
+        expect((await run(hiddenReads)).data).toBe('')
+        expect([...hiddenReads.keys]).toEqual(['show'])
+        // A revision replaces both the syntax and its declared variables.
+        char.customscript[0].out = '{{getvar::mood}}'
+        expect((await run(new DisplayReadRecord())).data).toBe('calm')
+        expect(worker.requests.some((request) => request.type === 'execute' && request.cbsContext)).toBe(true)
+    } finally { factory.mockRestore() }
+})

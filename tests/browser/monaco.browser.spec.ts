@@ -48,6 +48,12 @@ test('real markdown and Lua editors retain editing, find, undo and save with a r
         await expect(input).toBeFocused()
         await page.keyboard.press(keys.save)
         await expect.poll(() => page.evaluate(() => window.monacoDriver.state().saved)).toEqual([`${original} edited`])
+        // Only a scrollable document lets Find scroll past the view zone it adds above the first line and scroll back on closing.
+        await page.evaluate(text => window.monacoDriver.place(text, 1, 1), Array.from({ length: 200 }, (_, index) => `line ${index + 1}`).join('\n'))
+        await page.keyboard.press(keys.find)
+        await expect(find).toBeFocused()
+        await page.keyboard.press('Escape')
+        await expect(find).toBeHidden()
     }
     expect(await page.evaluate(() => window.monacoDriver.diff())).toEqual([{ original: 2, modified: 2 }])
     const evidence = await page.evaluate(() => (window as unknown as { monacoWorkerEvidence: { urls: string[]; replies: number } }).monacoWorkerEvidence)

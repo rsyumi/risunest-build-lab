@@ -80,13 +80,8 @@ impl Store {
             if claims.library_id != head.library_id || claims.epoch != head.epoch {
                 return Err(Error::new("media-identity-mismatch", 403));
             }
-            Self::require_device(
-                &db,
-                &Device {
-                    id: claims.device_id.clone(),
-                },
-            )
-            .map_err(|_| Error::new("media-device-revoked", 403))?;
+            Self::require_device(&db, &Device::resumed(claims.device_id.clone()))
+                .map_err(|_| Error::new("media-device-revoked", 403))?;
         }
         let now = super::uploads::now()? as u64;
         let expires = claims

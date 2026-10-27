@@ -15,7 +15,7 @@ import { registerSyncBindingTransport, resumeCurrentSyncBinding } from '../bindi
 import { SERVER_SYNC_DEVICE_CHANGED_EVENT } from '../serverSyncNativeSignals'
 import { downloadRemoteAssets } from '../serverAssetResidency'
 import { isLibraryFileOperationReserved, registerLibraryFileOperationGate, subscribeLibraryFileOperationReleased } from '../../libraryFileOperation'
-import { createLwwScheduler, type LwwCall, type LwwOperation, type LwwTurn } from './lwwScheduler'
+import { createLwwScheduler, failureKind, formatKinds, type LwwCall, type LwwOperation, type LwwTurn } from './lwwScheduler'
 import type { ExternalStorageState } from './types'
 import { beginExternalProgress, clearExternalProgress, clearExternalSyncProgress, externalProgressFailure, type ExternalProgressRun } from './progress'
 
@@ -80,7 +80,9 @@ function createAdapter(connectionId: string): Adapter {
     const reportOperation = (operation: LwwOperation | 'assets', error?: unknown) => {
         if (error === undefined) operationFailures.delete(operation)
         else operationFailures.set(operation, error)
-        reportFailure(connectionId, [...operationFailures.values()].at(-1))
+        const values = [...operationFailures.values()]
+        // A format level stop stays reported with its switch while another operation fails.
+        reportFailure(connectionId, values.find(value => formatKinds.includes(failureKind(value))) ?? values.at(-1))
     }
     /** `continuation` lets hydration that received pages or a manual sync requested start or continue while hidden. */
     const continueHydration = (continuation = false) => {
@@ -156,7 +158,7 @@ function createAdapter(connectionId: string): Adapter {
     }
     // Native code returns one bounded page per call and lists the next batch at once while segments remain;
     // with `completeAvailable` it also lists again after a finished listing, so later arrivals are received too.
-    const receive = async (binding: BindingContext, turnLimit?: number, completeAvailable = false): Promise<LwwTurn> => {
+    const receivePages = async (binding: BindingContext, turnLimit?: number, completeAvailable = false): Promise<LwwTurn> => {
         const progress = beginExternalProgress(connectionId, 'sync')
         let received = 0
         try {
@@ -174,6 +176,13 @@ function createAdapter(connectionId: string): Adapter {
                 if (turnLimit !== undefined && received >= turnLimit) { progress.finish('complete', true); return { count: received, more: true } }
             }
         } catch (error) { progress.finish(externalProgressFailure(error)); throw error }
+    }
+    // The plugin startup receive runs beside the scheduler, and native code hands every receive the first unfinished page.
+    let receiving: Promise<unknown> = Promise.resolve()
+    const receive = (binding: BindingContext, turnLimit?: number, completeAvailable = false): Promise<LwwTurn> => {
+        const turn = receiving.then(() => receivePages(binding, turnLimit, completeAvailable))
+        receiving = turn.catch(() => {})
+        return turn
     }
     const publishTurn = async (current: BindingContext, bound: boolean, flush: boolean, call?: LwwCall): Promise<LwwTurn> => {
         current.signal.throwIfAborted()
@@ -212,6 +221,7 @@ function createAdapter(connectionId: string): Adapter {
         publish: call => publish(undefined, true, call),
         receive: call => withContext(call.signal, binding => receive(binding, call.turnLimit)),
         maintain: call => withContext(call.signal, async current => { current.signal.throwIfAborted(); await invoke('external_lww_maintenance', { request: header(connectionId, current) }); current.signal.throwIfAborted() }),
+        checkFormat: call => withContext(call.signal, async current => { await invoke('external_lww_check_format', { request: header(connectionId, current) }); current.signal.throwIfAborted() }),
         succeeded: operation => { reportOperation(operation); if (operation === 'receive') continueHydration(true) },
         failed: (error, operation) => {
             reportOperation(operation, error)
@@ -420,6 +430,21 @@ export async function requestExternalLwwNow(connectionId: string): Promise<void>
         await adapter.scheduler.manualNow(task.signal)
         adapter.resumeHydration(true, true)
     }, undefined, true)
+}
+
+/** Raises the library to this app's data format. Sync resumes on the next sync request. */
+export async function switchExternalLwwLibraryFormat(connectionId: string): Promise<void> {
+    const adapter = adapters.get(connectionId)
+    if (!adapter) throw new Error('Sync binding transport is unavailable')
+    // A connection whose first publication stopped at the format level resumes before it switches.
+    if (!adapter.state) await resumeCurrentSyncBinding({ kind: 'external', connectionId })
+    const state = adapter.state
+    if (adapters.get(connectionId) !== adapter || !state) throw new DOMException('Binding changed', 'AbortError')
+    const progress = beginExternalProgress(connectionId, 'sync')
+    try {
+        await progress.invoke('external_lww_switch_format', { request: header(connectionId, { state, signal: new AbortController().signal }) }, state.targetAuthority)
+        progress.finish('complete', true)
+    } catch (error) { progress.finish(externalProgressFailure(error)); throw error }
 }
 
 export function externalLwwExitDrain(connectionId: string, selectionEpoch: string, fenced = false): SyncExitDrainAdapter | null {

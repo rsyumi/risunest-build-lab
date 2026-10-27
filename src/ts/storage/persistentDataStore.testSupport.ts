@@ -54,6 +54,7 @@ const storeMembers = {
     readCharacterSummary: 'method',
     readCharacter: 'method',
     queryConversations: 'method',
+    queryAuthorNotePresetUsage: 'optional',
     readConversation: 'method',
     readConversationMetadata: 'method',
     readConversationWindow: 'method',

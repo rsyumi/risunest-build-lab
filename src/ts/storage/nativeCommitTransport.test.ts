@@ -176,7 +176,7 @@ describe('native commit transport', () => {
     )
 
     it.each(['linux', 'ios', 'macos'] as const)(
-        'keeps small %s saves on JSON and only falls back before raw submission',
+        'keeps small %s saves on JSON',
         async (os) => {
             const h = harness({ windows: false, [os]: true })
             await h.transport.commit(fixture(false))
@@ -184,15 +184,6 @@ describe('native commit transport', () => {
             expect(h.invoke).toHaveBeenCalledExactlyOnceWith(
                 'pds_commit',
                 fixture(false),
-            )
-            h.invoke.mockClear()
-            h.encode.mockRejectedValueOnce(
-                new DOMException('Cannot clone', 'DataCloneError'),
-            )
-            await h.transport.commit(fixture())
-            expect(h.invoke).toHaveBeenCalledExactlyOnceWith(
-                'pds_commit',
-                fixture(),
             )
         },
     )
@@ -240,12 +231,8 @@ describe('native commit transport', () => {
         expect(h.invoke.mock.calls[0][1]).toBe(bytes)
     })
 
-    it('falls back before submission for non-cloneable values, but propagates encoding failures', async () => {
+    it('propagates encoding failures without sending anything', async () => {
         const h = harness()
-        h.encode.mockRejectedValueOnce(new DOMException('Cannot clone', 'DataCloneError'))
-        await h.transport.commit(fixture())
-        expect(h.invoke).toHaveBeenCalledExactlyOnceWith('pds_commit', fixture())
-        h.invoke.mockClear()
         h.encode.mockRejectedValueOnce(new Error('Invalid JSON value'))
         await expect(h.transport.commit(fixture())).rejects.toThrow('Invalid JSON value')
         expect(h.invoke).not.toHaveBeenCalled()
@@ -302,18 +289,16 @@ describe('native commit transport', () => {
         ])
         expect(h.webview.addEventListener).not.toHaveBeenCalled()
     })
-    it('preserves Android clone fallback, errors and queue recovery', async () => {
+    it('preserves Android errors and queue recovery', async () => {
         const h = harness({
             windows: false,
             android: true,
             fail: 'pds_commit_android_finish',
         })
-        h.encode.mockRejectedValueOnce(new DOMException('Cannot clone', 'DataCloneError'))
-        await h.transport.commit(fixture())
         h.encode.mockResolvedValueOnce(new TextEncoder().encode('{}'))
         await expect(h.transport.commit(fixture())).rejects.toThrow('native failed')
         await h.transport.commit(fixture(false))
-        expect(h.invoke.mock.calls.filter(([cmd]) => cmd === 'pds_commit')).toHaveLength(2)
+        expect(h.invoke.mock.calls.filter(([cmd]) => cmd === 'pds_commit')).toHaveLength(1)
     })
     it('copies every byte once in ordered acknowledged chunks and releases both sides', async () => {
         const h = harness()

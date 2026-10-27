@@ -20,10 +20,6 @@ pub(super) fn references(pointer: Option<&Value>, legacy: Option<&Value>) -> boo
         || legacy.and_then(Value::as_object).is_some_and(|map| map.values().any(Value::is_string))
 }
 
-pub(super) fn storage_references(storage: &Map<String, Value>) -> bool {
-    references(storage.get(INDEX_KEY), storage.get(LEGACY_MAP_KEY))
-}
-
 /// The plugin values staged so far, which inline values occupy before the import.
 pub(super) trait Target {
     fn contains(&self, key: &str) -> Result<bool, NativeJobError>;
@@ -202,7 +198,7 @@ fn read(sink: &dyn ReplacementSink, key: &str, limits: RestoreLimits, job: &dyn 
     if job.is_cancel_requested() {
         return Err(cancelled("restore cancelled while staging plugin storage"));
     }
-    let Some(path) = sink.cold_payload_path(key) else {
+    let Some(path) = sink.cold_payload_path(key).map_err(super::store_error)? else {
         return Ok(sink.unavailable_cold_payload_reason(key).map_or(Item::Missing, Item::Unavailable));
     };
     let read_error = |error: std::io::Error| NativeJobError::new("store-error", format!("staged cold payload cannot be read: {error}"));

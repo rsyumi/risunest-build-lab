@@ -253,12 +253,17 @@ describe('nativeFileJobDialogModel', () => {
         'converted-inlay-provenance', 'inlay-ids-remapped', 'asset-paths-remapped',
         'opaque-plugin-inlay-references-unverified', 'opaque-plugin-asset-references-unverified',
         'inlay-codec-playback-unverified', 'asset-playback-unverified',
-        'android-saf-unavailable', 'post-refresh-followup-failed', 'unknown-future-code'])
+        'android-saf-unavailable', 'post-refresh-followup-failed', 'plugin-values-skipped:2', 'unknown-future-code'])
     ('never uses a warning identifier as primary text: %s', code => {
         const model = buildNativeFileJobDialogModel(null, outcome({ warningCodes: [code] }), 0)
         expect(model.warnings[0]).not.toContain(code)
         expect(model.terminal?.details).toContain(`[${code}]`)
         if (code !== 'unknown-future-code') expect(model.warnings[0]).not.toBe(copy.warningUnknown)
+    })
+
+    it('names how many plugin values a restore skipped', () => {
+        const model = buildNativeFileJobDialogModel(null, outcome({ warningCodes: ['plugin-values-skipped:2'] }), 0)
+        expect(model.warnings).toEqual([copy.warningPluginValuesSkipped.replace('{0}', '2')])
     })
 
     it('shows the non-atomic save warning only while an Android save runs', () => {

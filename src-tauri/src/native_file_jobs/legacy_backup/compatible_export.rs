@@ -4,6 +4,7 @@ use super::compatible_projection::{
     pocket_swipes, rewrite_assets, rewrite_plugin, Projector,
 };
 use super::*;
+use crate::persistent_store::author_note;
 use crate::persistent_store::owner_projection::OwnerManifestProjector;
 use crate::persistent_store::{ReadTarget, StoreError};
 use rusqlite::{params, Connection};
@@ -439,6 +440,7 @@ fn write_database(
             )
             .map_err(sql)?,
     )?;
+    let author_notes = author_note::preset_texts(&root);
     export::derive_identity_root(connection, generation, object(&mut root)?)
         .map_err(store_job_error)?;
     owner
@@ -500,6 +502,7 @@ fn write_database(
             let before = projector.losses.0.clone();
             let chat_id: String = row.get(0).map_err(sql)?;
             let mut chat = parse(row.get(1).map_err(sql)?)?;
+            author_note::materialize(&mut chat, &author_notes);
             let recovery = object(&mut chat)?.remove("rerollRecovery");
             object(&mut chat)?.remove("message");
             rewrite_references(&mut chat, inlays, false);
@@ -1028,7 +1031,7 @@ mod tests {
                     ],
                 )
                 .unwrap();
-            let mut root = json!({"account":{"token":"synthetic-token"},"characterOrder":[{"name":"Empty","data":[],"id":"empty-folder"},{"name":"Folder","data":["synthetic","second"],"id":"folder","color":"red","img":"assets/nested/icon.webp"},"second"],"plugins":[],"modules":[],"personas":[{"id":"persona-first","name":"First persona"},{"id":"persona-selected","name":"Stale persona"}],"selectedPersona":1,"username":"Current persona","mainPrompt":"Current preset prompt","loadouts":[],"disableToggleBinding":true,"defaultToggleValues":{"test":"1"},"risunestInlayMode":"unsupported","streamingThoughtMode":"unsupported","unknownRoot":true});
+            let mut root = json!({"account":{"token":"synthetic-token"},"characterOrder":[{"name":"Empty","data":[],"id":"empty-folder"},{"name":"Folder","data":["synthetic","second"],"id":"folder","color":"red","img":"assets/nested/icon.webp"},"second"],"plugins":[],"modules":[],"personas":[{"id":"persona-first","name":"First persona"},{"id":"persona-selected","name":"Stale persona"}],"selectedPersona":1,"username":"Current persona","mainPrompt":"Current preset prompt","loadouts":[],"disableToggleBinding":true,"defaultToggleValues":{"test":"1"},"authorNotePresets":[{"id":"note-preset","name":"Shared","text":"Shared note"}],"risunestInlayMode":"unsupported","streamingThoughtMode":"unsupported","unknownRoot":true});
             root["hypaModel"] = json!("voyageContext4");
             root["pluginCustomStorage"] = json!({"10":null,"2":true,"01":"leading zero","z":{"exact":"assets/nested/icon.webp","opaque":"prefix assets/nested/icon.webp suffix","large":"큰".repeat(65536)},"4294967295":9007199254740991u64});
             store.replace_put_upstream_root(&staging, &root).unwrap();
@@ -1039,7 +1042,8 @@ mod tests {
                 )
                 .unwrap();
             let message = json!({"role":"char","data":"현재 한국어 {{inlay::synthetic}}","chatId":"message","unknownMessage":true,"responseVariants":{"groupId":"message","selectedId":"selected","candidates":[{"id":"other","messages":[{"role":"char","data":"alternative"}]},{"id":"complex","messages":[{"role":"char","data":"one"},{"role":"char","data":"two"}]},{"id":"selected","messages":[{"role":"char","data":"stale selected"}]}]}});
-            store.replace_add_characters(&staging,&[json!({"chaId":"synthetic","type":"character","name":"Synthetic","additionalAssets":[["Synthetic owner image","assets/prior-owner.png","png"]],"chats":[{"id":"chat","name":"Chat","message":[message,{"role":"user","data":"followup"}],"savedToggleValues":{"test":"1"},"unknownChat":true}]}),json!({"chaId":"second","type":"character","name":"Synthetic Second","chats":[]})]).unwrap();
+            let note_link = json!({"id":"note-preset","fingerprint":author_note::fingerprint("stale copy")});
+            store.replace_add_characters(&staging,&[json!({"chaId":"synthetic","type":"character","name":"Synthetic","additionalAssets":[["Synthetic owner image","assets/prior-owner.png","png"]],"chats":[{"id":"chat","name":"Chat","message":[message,{"role":"user","data":"followup"}],"savedToggleValues":{"test":"1"},"note":"stale copy","authorNotePreset":note_link,"unknownChat":true}]}),json!({"chaId":"second","type":"character","name":"Synthetic Second","chats":[]})]).unwrap();
             store.replace_add_characters(&staging, &[
                 json!({"chaId":"archived-one","type":"character","name":"Archived","chats":[]}),
                 json!({"chaId":"archived-two","type":"character","name":"Archived second","chats":[]}),
@@ -1216,6 +1220,8 @@ mod tests {
             assert_eq!(chat["id"], "chat");
             assert_eq!(chat["message"].as_array().unwrap().len(), 2);
             assert!(chat.get("unknownChat").is_none());
+            assert_eq!(chat["note"], "Shared note");
+            assert!(chat.get("authorNotePreset").is_none());
             let message = &chat["message"][0];
             assert_eq!(message["data"], "현재 한국어 {{inlay::synthetic}}");
             assert!(message.get("responseVariants").is_none());

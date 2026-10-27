@@ -102,6 +102,7 @@ pub(super) struct FakeState {
     pub(super) listing_delay: Option<std::time::Duration>,
     pub(super) incomplete_cleanup_delay: Option<std::time::Duration>,
     pub(super) incomplete_cleanup_empty_pages: usize,
+    pub(super) container_delete_error: Option<ErrorKind>,
     scripted_pages: Vec<(Collection, Result<ObjectPage>)>,
     inventory_upload_failure: Option<ErrorKind>,
     upload_failure: Option<(usize, ErrorKind)>,
@@ -578,6 +579,23 @@ impl Provider for FakeProvider {
             self.write(l, None, h.as_bytes())
         })
     }
+    fn replace_descriptor<'a>(
+        &'a self,
+        r: &'a RepositoryHandle,
+        l: &'a RemoteLocator,
+        b: &'a HeadBytes,
+        c: &'a Cancellation,
+    ) -> ProviderFuture<'a, HeadReceipt> {
+        Box::pin(async move {
+            self.requested();
+            c.check()?;
+            l.validate_for(r)?;
+            if self.state.lock().unwrap().roles.get(&l.object) != Some(&ObjectRole::Descriptor) {
+                return Err(ProviderError::new(ErrorKind::Corrupt));
+            }
+            self.write(l, None, b.as_bytes())
+        })
+    }
     fn supports_incomplete_cleanup(&self) -> bool { true }
     fn cleanup_incomplete_objects<'a>(&'a self, r: &'a RepositoryHandle, _protected: &'a [String], cursor: Option<&'a str>, limit: usize, deleting: &'a (dyn Fn(bool) + Send + Sync), cancel: &'a Cancellation) -> ProviderFuture<'a,IncompleteCleanupPage> {
         Box::pin(async move {
@@ -598,6 +616,17 @@ impl Provider for FakeProvider {
                 deleting(false);
             }
             Ok(IncompleteCleanupPage { removed: unfinished.len() as u64, next_cursor: None })
+        })
+    }
+    fn delete_empty_container<'a>(
+        &'a self, _: &'a RepositoryHandle, _: &'a RemoteLocator,
+        _: &'a [String], _: &'a Cancellation,
+    ) -> ProviderFuture<'a, ()> {
+        Box::pin(async move {
+            match self.state.lock().unwrap().container_delete_error.take() {
+                Some(kind) => Err(ProviderError::new(kind)),
+                None => Ok(()),
+            }
         })
     }
     fn delete_object<'a>(

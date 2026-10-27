@@ -1,4 +1,5 @@
 import type { Database, character, Chat } from './storage/database.svelte'
+import { effectiveAuthorNote } from './authorNotePresets'
 
 export type ChatParserUnsafeHistoryDependency =
     | 'lua'
@@ -204,8 +205,13 @@ function extractCbsExpressions(text: string): string[] {
     const expressions: string[] = []
     let pureDepth = 0
     for (let index = 0; index < text.length - 1; index += 1) {
-        if (text[index] === '{' && text[index + 1] === '{') {
+        if (text[index] === '{' && (text[index + 1] === '{' || text[index + 1] === '#')) {
             starts.push(index + 2)
+            index += 1
+            continue
+        }
+        if (text[index] === '#' && text[index + 1] === '}' && starts.length > 0) {
+            starts.pop()
             index += 1
             continue
         }
@@ -298,7 +304,7 @@ export function createLiveChatParserIndirections(
     personaPrompt: string,
 ): Readonly<Record<string, unknown>> {
     const character = selectedCharacter
-    let authorNote = conversation.note ?? ''
+    let authorNote = effectiveAuthorNote(database.authorNotePresets, conversation)
     if (!authorNote) {
         for (const item of database.promptTemplate ?? []) {
             if (item.type !== 'authornote' || !item.defaultText) continue

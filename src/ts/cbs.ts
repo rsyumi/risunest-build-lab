@@ -1,3 +1,5 @@
+import { createPureCbsCallbacks } from './cbsPure';
+import { effectiveAuthorNote } from './authorNotePresets';
 import type { Chat, Database, Message, character, loreBook } from './storage/database.svelte';
 import type { CbsHistoryAccess } from './cbsHistoryAccess';
 import type { CbsConditions } from './parser/parser.svelte';
@@ -156,6 +158,8 @@ export function registerCBS(arg:CBSRegisterArg) {
         getModelInfo,
         callInternalFunction
     } = arg;
+
+    const pureCallbacks = createPureCbsCallbacks({ parseArray, makeArray, calcString })
 
     let currentMatcher: matcherArg | null = null
     const getDatabase = (): Database => currentMatcher?.db ?? getDefaultDatabase()
@@ -457,8 +461,9 @@ export function registerCBS(arg:CBSRegisterArg) {
             const db = getDatabase()
             const selchar = db.characters?.[getSelectedCharID()]
             const chat = selchar?.chats?.[selchar.chatPage]
-            if(chat?.note){
-                return risuChatParser(chat.note, matcherArg)
+            const note = chat ? effectiveAuthorNote(db.authorNotePresets, chat) : ''
+            if(note){
+                return risuChatParser(note, matcherArg)
             }
             const template = db.promptTemplate
             if(template){
@@ -846,9 +851,7 @@ export function registerCBS(arg:CBSRegisterArg) {
 
     registerFunction({
         name: 'calc',
-        callback: (str, matcherArg, args, vars) => {
-            return calcString(args[0]).toString()
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.calc(args),
         alias: [],
         description: 'Evaluates a mathematical expression and returns the result as a string. Supports basic arithmetic operations (+, -, *, /, parentheses).\n\nUsage:: {{calc::2+2*3}}',
     });
@@ -915,9 +918,7 @@ export function registerCBS(arg:CBSRegisterArg) {
 
     registerFunction({
         name: 'button',
-        callback: (str, matcherArg, args, vars) => {
-            return `<button class="button-default" risu-trigger="${args[1]}">${args[0]}</button>`
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.button(args),
         alias: [],
         description: 'Creates an HTML button element with specified text and trigger action. When clicked, executes the trigger command. Returns HTML button markup.\n\nUsage:: {{button::Click Me::trigger_command}}',
     });
@@ -1029,81 +1030,63 @@ export function registerCBS(arg:CBSRegisterArg) {
     // String manipulation functions
     registerFunction({
         name: 'startswith',
-        callback: (str, matcherArg, args, vars) => {
-            return args[0].startsWith(args[1]) ? '1' : '0'
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.startswith(args),
         alias: [],
         description: 'Checks if a string starts with a specific substring. Returns "1" if the string begins with the substring, "0" otherwise. Case-sensitive.\n\nUsage:: {{startswith::Hello World::Hello}}',
     });
 
     registerFunction({
         name: 'endswith',
-        callback: (str, matcherArg, args, vars) => {
-            return args[0].endsWith(args[1]) ? '1' : '0'
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.endswith(args),
         alias: [],
         description: 'Checks if a string ends with a specific substring. Returns "1" if the string ends with the substring, "0" otherwise. Case-sensitive.\n\nUsage:: {{endswith::Hello World::World}}',
     });
 
     registerFunction({
         name: 'contains',
-        callback: (str, matcherArg, args, vars) => {
-            return args[0].includes(args[1]) ? '1' : '0'
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.contains(args),
         alias: [],
         description: 'Checks if a string contains a specific substring anywhere within it. Returns "1" if found, "0" otherwise. Case-sensitive.\n\nUsage:: {{contains::Hello World::lo Wo}}',
     });
 
     registerFunction({
         name: 'replace',
-        callback: (str, matcherArg, args, vars) => {
-            return args[0].replaceAll(args[1], args[2])
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.replace(args),
         alias: [],
         description: 'Replaces all occurrences of a substring with a new string. Global replacement - changes every instance found. Case-sensitive.\n\nUsage:: {{replace::Hello World::o::0}} → Hell0 W0rld',
     });
 
     registerFunction({
         name: 'split',
-        callback: (str, matcherArg, args, vars) => {
-            return makeArray(args[0].split(args[1]))
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.split(args),
         alias: [],
         description: 'Splits a string into an array using the specified delimiter. Returns a JSON array of string parts.\n\nUsage:: {{split::apple,banana,cherry::,}} → ["apple","banana","cherry"]',
     });
 
     registerFunction({
         name: 'join',
-        callback: (str, matcherArg, args, vars) => {
-            return (parseArray(args[0])).join(args[1])
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.join(args),
         alias: [],
         description: 'Joins array elements into a single string using the specified separator. Takes a JSON array and delimiter.\n\nUsage:: {{join::["apple","banana"]::, }} → apple, banana',
     });
 
     registerFunction({
         name: 'spread',
-        callback: (str, matcherArg, args, vars) => {
-            return (parseArray(args[0])).join('::')
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.spread(args),
         alias: [],
         description: 'Joins array elements into a single string using "::" as separator. Specialized version of join for CBS array spreading.\n\nUsage:: {{spread::["a","b","c"]}} → a::b::c',
     });
 
     registerFunction({
         name: 'trim',
-        callback: (str, matcherArg, args, vars) => {
-            return args[0].trim()
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.trim(args),
         alias: [],
         description: 'Removes leading and trailing whitespace from a string. Does not affect whitespace in the middle of the string.\n\nUsage:: {{trim::  hello world  }} → hello world',
     });
 
     registerFunction({
         name: 'length',
-        callback: (str, matcherArg, args, vars) => {
-            return args[0].length.toString()
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.length(args),
         alias: [],
         description: 'Returns the character length of a string as a number. Counts all characters including spaces and special characters.\n\nUsage:: {{length::Hello}} → 5',
     });
@@ -1111,81 +1094,63 @@ export function registerCBS(arg:CBSRegisterArg) {
     // Array/Object manipulation functions
     registerFunction({
         name: 'arraylength',
-        callback: (str, matcherArg, args, vars) => {
-            return parseArray(args[0]).length.toString()
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.arraylength(args),
         alias: ['arraylength'],
         description: 'Returns the number of elements in a JSON array as a string. Parses the array and counts elements.\n\nUsage:: {{arraylength::["a","b","c"]}} → 3',
     });
 
     registerFunction({
         name: 'lower',
-        callback: (str, matcherArg, args, vars) => {
-            return args[0].toLocaleLowerCase()
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.lower(args),
         alias: [],
         description: 'Converts all characters in a string to lowercase using locale-aware conversion. Handles international characters properly.\n\nUsage:: {{lower::Hello WORLD}} → hello world',
     });
 
     registerFunction({
         name: 'upper',
-        callback: (str, matcherArg, args, vars) => {
-            return args[0].toLocaleUpperCase()
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.upper(args),
         alias: [],
         description: 'Converts all characters in a string to uppercase using locale-aware conversion. Handles international characters properly.\n\nUsage:: {{upper::Hello world}} → HELLO WORLD',
     });
 
     registerFunction({
         name: 'capitalize',
-        callback: (str, matcherArg, args, vars) => {
-            return args[0].charAt(0).toUpperCase() + args[0].slice(1)
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.capitalize(args),
         alias: [],
         description: 'Capitalizes only the first character of a string, leaving the rest unchanged. Useful for sentence-case formatting.\n\nUsage:: {{capitalize::hello world}} → Hello world',
     });
 
     registerFunction({
         name: 'round',
-        callback: (str, matcherArg, args, vars) => {
-            return Math.round(Number(args[0])).toString()
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.round(args),
         alias: [],
         description: 'Rounds a decimal number to the nearest integer using standard rounding rules (0.5 rounds up). Returns result as string.\n\nUsage:: {{round::3.7}} → 4',
     });
 
     registerFunction({
         name: 'floor',
-        callback: (str, matcherArg, args, vars) => {
-            return Math.floor(Number(args[0])).toString()
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.floor(args),
         alias: [],
         description: 'Rounds a decimal number down to the nearest integer (floor function). Always rounds towards negative infinity.\n\nUsage:: {{floor::3.9}} → 3',
     });
 
     registerFunction({
         name: 'ceil',
-        callback: (str, matcherArg, args, vars) => {
-            return Math.ceil(Number(args[0])).toString()
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.ceil(args),
         alias: [],
         description: 'Rounds a decimal number up to the nearest integer (ceiling function). Always rounds towards positive infinity.\n\nUsage:: {{ceil::3.1}} → 4',
     });
 
     registerFunction({
         name: 'abs',
-        callback: (str, matcherArg, args, vars) => {
-            return Math.abs(Number(args[0])).toString()
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.abs(args),
         alias: [],
         description: 'Returns the absolute value of a number (removes negative sign). Converts to positive value regardless of input sign.\n\nUsage:: {{abs::-5}} → 5',
     });
 
     registerFunction({
         name: 'remaind',
-        callback: (str, matcherArg, args, vars) => {
-            return (Number(args[0]) % Number(args[1])).toString()
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.remaind(args),
         alias: [],
         description: 'Returns the remainder after dividing first number by second (modulo operation). Useful for cycles and ranges.\n\nUsage:: {{remaind::10::3}} → 1',
     });
@@ -1204,30 +1169,21 @@ export function registerCBS(arg:CBSRegisterArg) {
 
     registerFunction({
         name: 'tonumber',
-        callback: (str, matcherArg, args, vars) => {
-            return ([...args[0]].filter((v) => {
-                return !isNaN(Number(v)) || v === '.'
-            })).join('')
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.tonumber(args),
         alias: [],
         description: 'Extracts only numeric characters (0-9) and decimal points from a string, removing all other characters.\n\nUsage:: {{tonumber::abc123.45def}} → 123.45',
     });
 
     registerFunction({
         name: 'pow',
-        callback: (str, matcherArg, args, vars) => {
-            return Math.pow(Number(args[0]), Number(args[1])).toString()
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.pow(args),
         alias: [],
         description: 'Calculates the power of a number (base raised to exponent). Performs mathematical exponentiation.\n\nUsage:: {{pow::2::3}} → 8 (2³)',
     });
 
     registerFunction({
         name: 'arrayelement',
-        callback: (str, matcherArg, args, vars) => {
-            const element = parseArray(args[0]).at(Number(args[1])) ?? 'null'
-            return typeof element === 'object' ? JSON.stringify(element) : String(element)
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.arrayelement(args),
         alias: ['arrayelement'],
         description: 'Retrieves the element at the specified index from a JSON array. Uses 0-based indexing. Returns "null" if index is out of bounds.\n\nUsage:: {{arrayelement::["a","b","c"]::1}} → b',
     });
@@ -1282,44 +1238,28 @@ export function registerCBS(arg:CBSRegisterArg) {
 
     registerFunction({
         name: 'arrayshift',
-        callback: (str, matcherArg, args, vars) => {
-            const arr = parseArray(args[0])
-            arr.shift()
-            return makeArray(arr)
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.arrayshift(args),
         alias: ['arrayshift'],
         description: 'Removes and discards the first element from a JSON array. Returns the modified array without the first element.\n\nUsage:: {{arrayshift::["a","b","c"]}} → ["b","c"]',
     });
 
     registerFunction({
         name: 'arraypop',
-        callback: (str, matcherArg, args, vars) => {
-            const arr = parseArray(args[0])
-            arr.pop()
-            return makeArray(arr)
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.arraypop(args),
         alias: ['arraypop'],
         description: 'Removes and discards the last element from a JSON array. Returns the modified array without the last element.\n\nUsage:: {{arraypop::["a","b","c"]}} → ["a","b"]',
     });
 
     registerFunction({
         name: 'arraypush',
-        callback: (str, matcherArg, args, vars) => {
-            const arr = parseArray(args[0])
-            arr.push(args[1])
-            return makeArray(arr)
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.arraypush(args),
         alias: ['arraypush'],
         description: 'Adds a new element to the end of a JSON array. Returns the modified array with the new element appended.\n\nUsage:: {{arraypush::["a","b"]::c}} → ["a","b","c"]',
     });
 
     registerFunction({
         name: 'arraysplice',
-        callback: (str, matcherArg, args, vars) => {
-            const arr = parseArray(args[0])
-            arr.splice(Number(args[1]), Number(args[2]), args[3])
-            return makeArray(arr)
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.arraysplice(args),
         alias: ['arraysplice'],
         description: 'Modifies an array by removing elements and optionally inserting new ones at a specific index. Parameters: array, startIndex, deleteCount, newElement.\n\nUsage:: {{arraysplice::["a","b","c"]::1::1::x}} → ["a","x","c"]',
     });
@@ -1340,9 +1280,7 @@ export function registerCBS(arg:CBSRegisterArg) {
 
     registerFunction({
         name: 'makearray',
-        callback: (str, matcherArg, args, vars) => {
-            return makeArray(args)
-        },
+        callback: (_str, _matcherArg, args) => pureCallbacks.makearray(args),
         alias: ['array', 'a', 'makearray'],
         description: 'Creates a JSON array from the provided arguments. Each argument becomes an array element. Variable number of arguments supported.\n\nUsage:: {{makearray::a::b::c}} → ["a","b","c"]',
     });

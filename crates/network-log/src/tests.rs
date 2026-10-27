@@ -116,17 +116,11 @@ fn finite_auth_masking_preserves_duplicates_and_does_not_scrub_other_content() {
     );
     headers.insert("x-unknown-key", "unchanged-unknown-secret".parse().unwrap());
     headers.insert("cookie", "session=synthetic".parse().unwrap());
-    let c = f
-        .recorder
-        .begin(
-            "test",
-            "POST",
-            "https://synthetic.example/?token=visible",
-            &headers,
-        )
-        .guard();
+    let query_key = "AIzaSy_synthetic_only_query_key_7vQ9m2";
+    let url = format!("https://synthetic.example/?token=visible&key={query_key}#part");
+    let c = f.recorder.begin("test", "POST", &url, &headers).guard();
     c.append(Side::Request, b"body-secret-remains");
-    c.response(401, "https://synthetic.example/?token=visible", &headers);
+    c.response(401, &url, &headers);
     c.append(Side::Response, b"error-body-remains");
     c.finish("complete");
     let record = f.detail(&c);
@@ -149,28 +143,30 @@ fn finite_auth_masking_preserves_duplicates_and_does_not_scrub_other_content() {
         .headers
         .iter()
         .any(|h| h.value == "Basic [REDACTED]"));
+    let masked_url = "https://synthetic.example/?token=visible&key=AI••••••7vQ9m2#part";
+    assert_eq!(record.request.url, masked_url);
+    assert_eq!(record.response.url, masked_url);
     let mut output = Vec::new();
     f.snapshot(&c).export_json(&mut output).unwrap();
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["request"]["body"]["data"], "body-secret-remains");
     assert_eq!(json["response"]["body"]["data"], "error-body-remains");
-    assert!(!String::from_utf8(output).unwrap().contains(secret));
+    let output = String::from_utf8(output).unwrap();
+    assert!(!output.contains(secret) && !output.contains(query_key));
     f.enable(false, false);
     assert_eq!(
         f.detail(&c).request.headers[0].value,
         record.request.headers[0].value
     );
-    let unhidden = f
-        .recorder
-        .begin("test", "GET", "https://synthetic.example", &headers)
-        .guard();
+    let unhidden = f.recorder.begin("test", "GET", &url, &headers).guard();
     unhidden.finish("complete");
-    assert!(f
-        .detail(&unhidden)
+    let unhidden = f.detail(&unhidden);
+    assert!(unhidden
         .request
         .headers
         .iter()
         .any(|h| h.value == format!("Bearer {secret}")));
+    assert_eq!(unhidden.request.url, url);
 }
 #[test]
 fn known_header_rules_are_deterministic_and_short_or_structured_tokens_are_hidden() {
@@ -208,6 +204,10 @@ fn known_header_rules_are_deterministic_and_short_or_structured_tokens_are_hidde
         Some("Digest [REDACTED]".into())
     );
     assert_eq!(masking::mask("x-unknown", b"visible"), None);
+    assert_eq!(
+        masking::url("https://synthetic.example/?API_KEY=short&apikey=abcdefghijklmnop&keys=v", true),
+        "https://synthetic.example/?API_KEY=[REDACTED]&apikey=••••••mnop&keys=v"
+    );
 }
 #[test]
 fn sse_raw_bytes_split_unicode_and_partial_tail_round_trip_through_json() {

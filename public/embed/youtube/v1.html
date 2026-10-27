@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; frame-src https://www.youtube.com https://www.youtube-nocookie.com; style-src 'sha256-6MHUsfSg+iyOnll+B8tJ4qasZqeQnsfm4bwp9e/5aN0='; script-src 'sha256-ddG0QVWfmt9s14H8DiS1Je1FChom4DF/gTSScVyvR14='">
+  <title>YouTube</title>
+  <style>
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+    iframe { display: block; width: 100%; height: 100%; border: 0; }
+    body { background: #000; color: #fff; font: 14px system-ui, sans-serif; }
+    p { margin: 16px; }
+  </style>
+</head>
+<body>
+  <p id="error" hidden>Check the YouTube URL.</p>
+  <script>
+    function render() {
+      document.querySelector('iframe')?.remove();
+      const error = document.getElementById('error');
+      error.hidden = true;
+      try {
+        const params = new URLSearchParams(window.location.hash.slice(1));
+        if ([...params.keys()].length !== 1 || !params.has('src')) throw new Error('Invalid input');
+        const source = new URL(params.get('src'));
+        if (source.protocol !== 'https:' || source.username || source.password || source.port
+          || !['www.youtube.com', 'www.youtube-nocookie.com'].includes(source.hostname)
+          || !source.pathname.startsWith('/embed/')) throw new Error('Invalid embed');
+        if (source.searchParams.has('origin') || source.searchParams.get('enablejsapi') === '1') {
+          source.searchParams.set('origin', window.location.origin);
+        }
+        const frame = document.createElement('iframe');
+        frame.title = 'YouTube';
+        frame.setAttribute('allow', 'accelerometer; autoplay; clipboard-write; encrypted-media; fullscreen; gyroscope; picture-in-picture; web-share');
+        frame.setAttribute('allowfullscreen', '');
+        frame.setAttribute('referrerpolicy', 'strict-origin-when-cross-origin');
+        frame.src = source.href;
+        document.body.append(frame);
+      } catch {
+        if (navigator.language.toLowerCase().startsWith('ko')) {
+          document.documentElement.lang = 'ko';
+          error.textContent = 'YouTube 주소를 확인해주세요.';
+        }
+        error.hidden = false;
+      }
+    }
+    window.addEventListener('hashchange', render);
+    render();
+  </script>
+</body>
+</html>

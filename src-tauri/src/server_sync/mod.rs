@@ -16,6 +16,7 @@ pub(crate) mod progress;
 mod tests;
 pub(crate) mod transfer;
 pub(crate) mod lww_client;
+pub(crate) mod library_format;
 #[cfg(test)]
 pub(crate) mod hash_metrics;
 mod binding;

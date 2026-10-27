@@ -6,6 +6,8 @@ import { processMultiCommand } from './command'
 import { createConversationOperationContext } from './conversationOperationContext'
 import { createChatParserDependencyStamp } from '../chatRenderIdentity'
 import { DisplayReadRecord, recordAmbientChatVariableReads, registerDisplayRow } from './scriptVariableReads'
+import { StallingWorker } from '../../../tests/support/regexWorker'
+import { authorNoteFingerprint, effectiveAuthorNote } from '../authorNotePresets'
 
 const runtime = vi.hoisted(() => ({
     unexpectedNativeRuntimeAccess: () => {
@@ -79,6 +81,110 @@ function fixture() {
 beforeEach(() => {
     runtime.session = null
     selectedCharID.set(0)
+})
+
+test('skips a stalled regex condition and replacement and continues the trigger', async () => {
+    vi.useFakeTimers()
+    const originalWorker = globalThis.Worker
+    vi.stubGlobal('Worker', StallingWorker)
+    try {
+        const { chat, char } = fixture()
+        char.triggerscript = [{
+            comment: 'condition', type: 'start',
+            conditions: [{ type: 'exists', type2: 'regex', value: 'SLOW-condition|zero', depth: 2 }],
+            effect: [{ type: 'modifychat', index: '0', value: 'must not run' }],
+        }, {
+            comment: 'replacement', type: 'start', conditions: [], effect: [{
+                type: 'v2ReplaceString', source: 'source', sourceType: 'var',
+                regex: 'pattern', regexType: 'var', flags: 'gs', flagsType: 'value',
+                result: '$0', resultType: 'value', replacement: 'bad', replacementType: 'value',
+                outputVar: 'replacement', indent: 0,
+            }, {
+                type: 'v2RegexTest', value: 'finished', valueType: 'value', regex: '^finished$', regexType: 'value',
+                flags: '', flagsType: 'value', outputVar: 'continued', indent: 0,
+            }],
+        }] as character['triggerscript']
+        DBState.db = { characters: [char], templateDefaultVariables: '' } as never
+        chat.scriptstate = { $source: '<unchanged>', $pattern: 'SLOW-replacement|unchanged' }
+        const regexGeneration = {}
+        const result = runTrigger(char, 'start', { chat, regexGeneration })
+        await vi.advanceTimersByTimeAsync(20_000)
+        expect((await result)?.chat.scriptstate).toMatchObject({ $replacement: '<unchanged>', $continued: '1' })
+        expect((await result)?.chat.message[0].data).toBe('zero')
+        const nextChat = (await result)!.chat
+        nextChat.scriptstate.$source = '<updated>'
+        nextChat.scriptstate.$pattern = 'updated'
+        const repeated = await runTrigger(char, 'start', { chat: nextChat, regexGeneration })
+        expect(repeated?.chat.scriptstate.$replacement).toBe('<updated>')
+        nextChat.scriptstate.$source = '<next>'
+        nextChat.scriptstate.$pattern = 'next'
+        const nextGeneration = await runTrigger(char, 'start', { chat: nextChat, regexGeneration: {} })
+        expect(nextGeneration?.chat.scriptstate.$replacement).toBe('<bad>')
+    } finally { vi.stubGlobal('Worker', originalWorker); vi.useRealTimers() }
+})
+
+test('skips a display trigger regex that timed out on other text in a later display run', async () => {
+    vi.useFakeTimers()
+    const originalWorker = globalThis.Worker
+    vi.stubGlobal('Worker', StallingWorker)
+    try {
+        const { chat, char, session } = fixture()
+        char.triggerscript = [{
+            comment: 'display test', type: 'display', conditions: [], effect: [{
+                type: 'v2RegexTest', value: 'source', valueType: 'var', regex: 'SLOW-display-trigger|text', regexType: 'value',
+                flags: '', flagsType: 'value', outputVar: 'matched', indent: 0,
+            }],
+        }] as character['triggerscript']
+        runtime.session = session
+        DBState.db = { characters: [char], templateDefaultVariables: '' } as never
+        chat.scriptstate = { $source: '<text>' }
+        const first = runTrigger(char, 'display', { chat, displayMode: true, displayData: 'row' })
+        await vi.advanceTimersByTimeAsync(10_000)
+        await first
+        chat.scriptstate.$source = '<edited text>'
+        let finished = false
+        const edited = runTrigger(char, 'display', { chat, displayMode: true, displayData: 'row' })
+            .finally(() => { finished = true })
+        await vi.advanceTimersByTimeAsync(1)
+        expect(finished).toBe(true)
+        await edited
+    } finally { vi.stubGlobal('Worker', originalWorker); vi.useRealTimers() }
+})
+
+test('keeps lorebook name matches before a stalled comment, skips the rest, and later skips only that comment', async () => {
+    vi.useFakeTimers()
+    const originalWorker = globalThis.Worker
+    vi.stubGlobal('Worker', StallingWorker)
+    const posted = vi.spyOn(StallingWorker.prototype, 'postMessage')
+    try {
+        const { chat, char } = fixture()
+        const lookup = (name: string) => [{ comment: 'lookup', type: 'start', conditions: [], effect: [{
+            type: 'v2GetLorebookByName', name, nameType: 'value', outputVar: 'found', indent: 0,
+        }] }] as character['triggerscript']
+        const late = Array.from({ length: 70 }, (_, index) => ({ comment: `alpha ${index}` }))
+        char.globalLore = [{ comment: 'Alpha' }, { comment: 'SLOW beta' }, {}, ...late] as character['globalLore']
+        char.triggerscript = lookup('alpha')
+        DBState.db = { characters: [char], templateDefaultVariables: '' } as never
+        const requests = () => {
+            const count = posted.mock.calls.filter(([message]) => message.type === 'testEach').length
+            posted.mockClear()
+            return count
+        }
+        const first = runTrigger(char, 'start', { chat, regexGeneration: {} })
+        await vi.advanceTimersByTimeAsync(10_000)
+        expect((await first)?.chat.scriptstate.$found).toBe('[0]')
+        expect(requests()).toBe(1)
+        const second = await runTrigger(char, 'start', { chat, regexGeneration: {} })
+        expect(second?.chat.scriptstate.$found).toBe(JSON.stringify([0, ...late.map((_, index) => index + 3)]))
+        expect(requests()).toBe(2)
+
+        char.triggerscript = lookup('(')
+        await expect(runTrigger(char, 'start', { chat, regexGeneration: {} })).rejects.toThrow(/Invalid regular expression/)
+        char.globalLore = [{}] as character['globalLore']
+        posted.mockClear()
+        expect((await runTrigger(char, 'start', { chat, regexGeneration: {} }))?.chat.scriptstate.$found).toBe('[]')
+        expect(requests()).toBe(0)
+    } finally { posted.mockRestore(); vi.stubGlobal('Worker', originalWorker); vi.useRealTimers() }
 })
 
 test('keeps stored trigger permissions and parser identity stable during display', async () => {
@@ -258,11 +364,17 @@ test('CAS-applies Trigger chat variables and note metadata', async () => {
     const { chat, char, session } = fixture()
     char.triggerscript[0].effect = [
         { type: 'setvar', var: 'state', value: '', operator: '=' },
+        { type: 'v2GetAuthorNote', outputVar: 'before' },
         { type: 'v2SetAuthorNote', value: 'operation note', valueType: 'value' },
     ] as never
     runtime.session = session
+    // The stored copy already equals the written value, so only the dropped link shows the write.
+    chat.note = 'operation note'
+    chat.authorNotePreset = { id: 'preset', fingerprint: authorNoteFingerprint('operation note') }
+    const presets = [{ id: 'preset', name: 'Preset', text: 'Preset note' }]
     DBState.db = {
         characters: [char],
+        authorNotePresets: presets,
         templateDefaultVariables: '',
     } as never
 
@@ -271,8 +383,9 @@ test('CAS-applies Trigger chat variables and note metadata', async () => {
         manualName: 'ordered',
     })
 
-    expect(chat.scriptstate).toEqual({ '$state': '' })
-    expect(chat.note).toBe('operation note')
+    expect(chat.scriptstate).toEqual({ '$state': '', '$before': 'Preset note' })
+    expect(effectiveAuthorNote(presets, chat)).toBe('operation note')
+    expect(chat.authorNotePreset).toBeUndefined()
     expect(session.version).toBe(1)
 })
 

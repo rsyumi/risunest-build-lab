@@ -150,7 +150,7 @@ async function main() {
   assert.ok(adb, "--adb path required");
   const profile = options.profile ?? "smoke";
   assert.ok(
-    ["smoke", "stress", "persistence-spike", "persistence", "viewport", "hypa-summary", "lease-release", "parser-context", "asset-bytes", "asset-bytes-legacy"].includes(profile),
+    ["smoke", "stress", "persistence-spike", "persistence", "viewport", "hypa-summary", "lease-release", "parser-context", "asset-bytes", "asset-bytes-legacy", "regex-time-limit", "regex-cbs"].includes(profile),
     "Unknown profile",
   );
   const parserAssets = Number(options.assets ?? 1000);
@@ -228,7 +228,7 @@ async function main() {
         profile === "parser-context"
           ? `window.__streamingSmoke.parserScreen(${parserAssets}, ${options.baseline === "true"}).then(value => ({ passed: value.selected && value.rows > 0, cases: [{ id: 'parser-context-switch', ...value }] }))`
           : `window.__streamingSmoke.run(${JSON.stringify(profile)})`,
-        ["persistence", "hypa-summary", "lease-release", "parser-context", "asset-bytes", "asset-bytes-legacy"].includes(profile) ? 300000 : 60000,
+        ["persistence", "hypa-summary", "lease-release", "parser-context", "asset-bytes", "asset-bytes-legacy", "regex-time-limit", "regex-cbs"].includes(profile) ? 300000 : 60000,
       )
       .catch(() => ({
         passed: false,
@@ -327,7 +327,12 @@ async function main() {
         result.assertion = "reload-or-restart-failed";
       }
     }
-    if (profile === "parser-context" || profile.startsWith('asset-bytes')) {
+    if ((profile === "regex-time-limit" || profile === "regex-cbs") && options.timeout === "true" && result.passed) {
+      result.timeout = await client.evaluate("window.__streamingSmoke.regexTimeout()", 30000);
+      const timeout = result.timeout;
+      result.passed = timeout.unchanged && timeout.firstMs < 25000 && timeout.repeatMs < 1000 && timeout.timerMs < 500;
+    }
+    if (profile === "parser-context" || profile.startsWith('asset-bytes') || profile === "regex-time-limit" || profile === "regex-cbs") {
       result.pageErrors = client.errorCounts();
       if (result.pageErrors.runtimeExceptions > 0) {
         result.passed = false;

@@ -395,6 +395,18 @@ describe('encodeWithTokenizer', () => {
             expected.free()
         }
     })
+
+    it('encodes with the loaded tokenizer while another one loads', async () => {
+        const text = '합성 테스트 문장입니다. Synthetic sentence.'
+        const cl100k = [...await encodeWithTokenizer(text, 'tik')]
+        const o200k = [...await encodeWithTokenizer(text, 'o200k_base')]
+        await encodeWithTokenizer(text, 'tik')
+        const [loading, loaded] = await Promise.all([
+            encodeWithTokenizer(text, 'o200k_base'),
+            encodeWithTokenizer(text, 'tik'),
+        ])
+        expect([[...loading], [...loaded]]).toEqual([o200k, cl100k])
+    })
 })
 
 describe('Gemma and Llama tokenizers', () => {

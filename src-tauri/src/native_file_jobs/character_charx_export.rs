@@ -1,6 +1,8 @@
 use super::charx::CharXLimits;
+use super::available_payload::{available_payload_size, open_available_payload};
 use super::error::{
-    cancelled, destination_error_with, invalid_input, io_error, job_error, store_error,
+    asset_missing, cancelled, destination_error_with, invalid_input, io_error, job_error,
+    store_error,
 };
 use super::{
     CharacterCharxContainer, JobControl, JobPhase, JobProgress, JobResultSummary, NativeJobError,
@@ -8,7 +10,6 @@ use super::{
 use crate::asset_repository::{owner_manifest_codec::OwnerManifestEntry, PayloadCas};
 use crate::persistent_store::export::{self, destination};
 use crate::persistent_store::{PreparedRisuSaveExport, RevisionReadLease, StoreResult};
-use crate::server_sync::residency::RemotePayloadAccess;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
@@ -212,7 +213,7 @@ where
     let mut completed_items = 0_u64;
     let mut decoded_bytes = 0_u64;
     let portrait_key =
-        super::character_json_export::available_portrait_key(&character, &reader, &repository)?;
+        super::character_json_export::available_portrait_key(&character, &reader, &repository, job)?;
     let cc_asset_count = character
         .get("ccAssets")
         .and_then(Value::as_array)
@@ -269,11 +270,9 @@ where
                 (Some(hash), size, key.as_str())
             }
             EmbeddedAssetSource::ManifestOccurrence { key, hash } => {
-                let size = repository
-                    .stat_available_object(hash)
-                    .map_err(io_error)?
+                let size = available_payload_size(&repository, hash, job, io_error)?
                     .ok_or_else(|| {
-                        invalid_input(format!("pinned character asset is missing: {key}"))
+                        asset_missing(format!("pinned character asset is missing: {key}"))
                     })?;
                 (Some(hash.clone()), size, key.as_str())
             }
@@ -311,11 +310,9 @@ where
             )
             .map_err(zip_error)?;
         let copied = if let Some(hash) = hash {
-            let source_file = repository
-                .open_available_object(&hash)
-                .map_err(io_error)?
+            let source_file = open_available_payload(&repository, &hash, job, io_error)?
                 .ok_or_else(|| {
-                    invalid_input(format!("pinned character asset is missing: {key}"))
+                    asset_missing(format!("pinned character asset is missing: {key}"))
                 })?;
             copy_verified_object(&mut archive, source_file, &hash, size, job)?
         } else {
@@ -470,7 +467,7 @@ fn create_appended_jpeg_source(
             "appended CharX JPEG export cancelled before portrait encoding",
         ));
     }
-    let portrait = match super::character_json_export::available_portrait_key(character, reader, repository)? {
+    let portrait = match super::character_json_export::available_portrait_key(character, reader, repository, job)? {
         Some(key) => {
             let alias = export::pinned_asset_alias(&reader.connection, &reader.target, key)
                 .map_err(store_error)?;
@@ -487,11 +484,9 @@ fn create_appended_jpeg_source(
                     limits.max_entry_decoded_bytes
                 )));
             }
-            let source = repository
-                .open_available_object(&hash)
-                .map_err(io_error)?
+            let source = open_available_payload(repository, &hash, job, io_error)?
                 .ok_or_else(|| {
-                    invalid_input(format!("pinned character portrait is missing: {key}"))
+                    asset_missing(format!("pinned character portrait is missing: {key}"))
                 })?;
             read_verified_bytes(source, &hash, size, job)?
         }
@@ -1507,6 +1502,50 @@ mod tests {
 
         assert_eq!(error.code, "cancelled");
         assert_eq!(fs::read(destination).unwrap(), b"previous CharX");
+
+        // A cancel requested while an asset only the Sync server holds downloads stops
+        // it, and an asset kept nowhere fails as missing.
+        use crate::server_sync::residency::test_remote;
+        for on_server in [true, false] {
+            let mut fixture = self::fixture();
+            let held = fixture.payload_hashes[0].clone();
+            let cas = PayloadCas::new(fixture.directory.path()).unwrap();
+            if on_server {
+                test_remote::keep_only_on_server(fixture.directory.path(), &held);
+            } else {
+                fs::remove_file(cas.object_path(&held).unwrap().unwrap()).unwrap();
+            }
+            let prepared = fixture
+                .store
+                .prepare_risu_save_export(fixture.revision)
+                .unwrap();
+            let owned = fixture.directory.path().join("owned");
+            fs::create_dir(&owned).unwrap();
+            let job = JobRegistry::default()
+                .create(JobKind::ExportCharacterCharx)
+                .unwrap();
+            let cancelling = job.clone();
+            test_remote::on_fetch(fixture.directory.path(), move || {
+                cancelling.request_cancel().unwrap();
+            });
+            let error = export_character_charx(
+                prepared,
+                "current-character",
+                fixture.card,
+                fixture.module,
+                &owned,
+                &fixture.directory.path().join("handoffs"),
+                None,
+                &job,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, if on_server { "cancelled" } else { "asset-missing" });
+            assert_eq!(
+                test_remote::fetched(fixture.directory.path()),
+                usize::from(on_server)
+            );
+            assert!(cas.stat_object(&held).unwrap().is_none());
+        }
     }
 
     #[test]

@@ -159,7 +159,7 @@
     .instruction { margin-top: 24px; font-size: 15px; }
     .compact .instruction { margin-top: 20px; }
     .dots { display: flex; gap: 14px; margin-top: 14px; }
-    .dot { width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid color-mix(in srgb, var(--risu-theme-textcolor) 45%, transparent); transition: background-color .12s, border-color .12s; }
+    .dot { width: 12px; height: 12px; border-radius: 50%; border-width: 1.5px; border-style: solid; border-color: color-mix(in srgb, var(--risu-theme-textcolor) 45%, transparent); transition: background-color .12s, border-color .12s; }
     .dot.filled { background: var(--risu-theme-textcolor); border-color: var(--risu-theme-textcolor); }
     .dots.shake { animation: shake .36s; }
     @keyframes shake { 0%, 100% { transform: translateX(0); } 20% { transform: translateX(-8px); } 40% { transform: translateX(7px); } 60% { transform: translateX(-5px); } 80% { transform: translateX(3px); } }

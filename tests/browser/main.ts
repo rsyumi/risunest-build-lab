@@ -4,6 +4,8 @@ import { fixtureState } from './hostAdapters'
 import { loadV3Plugins, getV3PluginInstance } from '../../src/ts/plugins/apiV3/v3.svelte'
 import { thoughtDriver } from './thoughtDriver'
 import { SandboxHost } from '../../src/ts/plugins/apiV3/factory'
+import { SafeLocalPluginStorage } from '../../src/ts/plugins/pluginSafeClass'
+import { PluginDeviceKeyspace, type PluginDeviceBackend } from '../../src/ts/plugins/pluginDeviceKeyspace'
 import { createPluginDownloadHandler } from '../../src/ts/plugins/apiV3/pluginDownload'
 import { installWebviewBridge, installMainFrameLinkBridge } from '../../src/ts/webviewDownload'
 
@@ -17,6 +19,10 @@ window.addEventListener('message', event => {
 let callbackResult: unknown = null
 let oldHost: ReturnType<typeof getV3PluginInstance>
 let downloadHost: SandboxHost | undefined
+let localHost: SandboxHost | undefined
+let localKeyspace: PluginDeviceKeyspace | undefined
+let localResult: unknown = null
+const localRows = new Map<string, string>()
 const downloads = {
     files: [] as { name: string; bytes: number[] }[],
     errors: [] as string[],
@@ -25,6 +31,39 @@ const downloads = {
 }
 const driver = {
     state: fixtureState, events, bridgeMessages,
+    get localResult() { return localResult },
+    get localRows() { return [...localRows].map(([key, value]) => ({ key, value })) },
+    /** Runs a plugin whose getLocalPluginStorage() is the real host class over an in-memory device keyspace. */
+    loadLocal(script: string) {
+        localHost?.terminate()
+        localKeyspace?.dispose()
+        localRows.clear()
+        localResult = null
+        const backend: PluginDeviceBackend = {
+            async hydrate() { return { complete: true, byteSize: 0, entries: [...localRows].map(([key, value]) => ({ space: 'json' as const, key, value })) } },
+            async read(_owner, _space, key) { return localRows.get(key) ?? null },
+            async keys() { return [...localRows.keys()] },
+            async write(_owner, mutations) {
+                for (const mutation of mutations) {
+                    if (mutation.type === 'set') localRows.set(mutation.key, mutation.value)
+                    else if (mutation.type === 'delete') localRows.delete(mutation.key)
+                    else localRows.clear()
+                }
+            },
+        }
+        localKeyspace = new PluginDeviceKeyspace('browser-local', backend)
+        const storage = new SafeLocalPluginStorage('browser-local', localKeyspace)
+        localHost = new SandboxHost({
+            _getPropertiesForInitialization: () => ({ apiVersion: '3.0', list: ['apiVersion'] }),
+            _getAliases: () => ({}),
+            getLocalPluginStorage: () => storage,
+            result: (value: unknown) => { localResult = value },
+        })
+        const frame = document.createElement('iframe')
+        frame.sandbox.add('allow-scripts')
+        document.body.append(frame)
+        localHost.run(frame, script, 'browser-local-storage')
+    },
     downloads,
     loadDownload(script: string, native = true) {
         downloadHost?.terminate()

@@ -145,7 +145,7 @@ import {
     NativeFileJobError,
     runNativeOfficialAccountSnapshotRestore,
 } from "./storage/nativeFileJobs";
-import { createNativeOfficialPublicationJobPublisher } from "./storage/sync/nativeOfficialPublicationJob";
+import { createNativeOfficialAssetPublisher, createNativeOfficialPublicationJobPublisher } from "./storage/sync/nativeOfficialPublicationJob";
 import {
     createNativeOfficialPublicationRecovery,
     type NativeOfficialPublicationRecovery,
@@ -463,6 +463,9 @@ export async function loadData() {
             ledger: officialAssetLedger,
             association: createOfficialAssociationMarkers(associationStorage),
             nativeDatabasePublisher,
+            nativeAssetPublisher: isTauri
+                ? createNativeOfficialAssetPublisher({ account: accountStorage, baseUrl: hubURL })
+                : undefined,
             getAccountId: isTauri ? getNativeAccountId : undefined,
             flushPublicationMetadata: nativeDatabasePublisher
                 ? flushNativeOfficialMetadata

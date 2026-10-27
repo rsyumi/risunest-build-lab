@@ -657,11 +657,11 @@ const unloadV3Plugin = async (pluginName: string) => {
     }
 }
 
-type PluginPermission = 'fetchLogs' | 'db' | 'mainDom' | 'replacer' | 'provider' | 'sendChat' | 'inlay'
+type PluginPermission = 'fetchLogs' | 'db' | 'mainDom' | 'replacer' | 'provider' | 'sendChat' | 'inlay' | 'hostTools'
 
 const permissionWrites = new Mutex()
 let permissionEpoch = 0
-const periodicPermissions = new Set<PluginPermission>(['db', 'replacer', 'provider', 'inlay'])
+const periodicPermissions = new Set<PluginPermission>(['db', 'replacer', 'provider', 'inlay', 'hostTools'])
 const permissionReconfirmInterval = 7 * 24 * 60 * 60 * 1000
 interface PluginPermissionContext {
     name: string
@@ -716,6 +716,7 @@ const getPluginPermission = async (context: PluginPermissionContext, permissionD
         : permissionDesc === 'provider' ? language.providerPermissionConsent.replace("{}", pluginName)
         : permissionDesc === 'sendChat' ? language.sendChatConsent.replace("{}", pluginName)
         : permissionDesc === 'inlay' ? language.inlayPermissionConsent.replace("{}", pluginName)
+        : permissionDesc === 'hostTools' ? language.hostToolPermissionConsent.replace("{}", pluginName)
         : null
     if (!alertTitle || context.signal.aborted || epoch !== permissionEpoch) return false
     const granted = await alertConfirm(alertTitle)
@@ -789,6 +790,7 @@ const makeRisuaiAPIV3 = (
         chatView: chatViewEvents.forOwner(plugin.name),
         generationEnd: generationEndEvents.forOwner(plugin.name),
         hasDatabasePermission: () => getPluginPermission(permissionContext, 'db', 'periodically'),
+        hasHostToolPermission: () => getPluginPermission(permissionContext, 'hostTools', 'periodically'),
         lifetimeSignal: pluginLifetime.signal,
     })
     const fullObjectContext = (): PluginFullObjectCallContext => ({
@@ -926,13 +928,13 @@ const makeRisuaiAPIV3 = (
         setDatabase: (database: Record<string, unknown>) =>
             databaseAccess.setDatabase(database, allowedDbKeys),
         loadPlugins: oldApis.loadPlugins,
-        readImage: oldApis.readImage,
+        readImage: (path: string) => oldApis.readImage(path, { background: true }),
         readInlay: async (id: string) => {
             const conf = await getPluginPermission(permissionContext, 'inlay', 'periodically');
             if(!conf){
                 return null;
             }
-            return await getInlayAsset(id);
+            return await getInlayAsset(id, { background: true });
         },
         saveAsset: oldApis.saveAsset,
         //Same functionality, but new implementation
@@ -1458,6 +1460,7 @@ const makeRisuaiAPIV3 = (
                     isTauri ? 'tauri' :
                     forageStorage.isAccount ? 'account' :
                     'local',
+                structuredLocalPluginStorage: isTauri,
             }
         },
         getLocalPluginStorage: () => {
@@ -1861,7 +1864,7 @@ export async function executePluginV3(plugin:RisuPlugin, isCurrent: () => boolea
     const api = makeRisuaiAPIV3(iframe, plugin, claimSession);
     const host = new SandboxHost(api, isTauri ? createPluginDownloadHandler({
         fetch: api.nativeFetch,
-        save: (name, bytes) => downloadFile(name, bytes, { saveDialog: true }),
+        save: (name, bytes) => downloadFile(name, bytes),
         reportError: error => alertError(String(error)),
     }) : undefined);
     host.onActivityChanged?.(notifyPluginActivity);

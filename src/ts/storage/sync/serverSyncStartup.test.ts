@@ -97,6 +97,51 @@ async function offlineStartup() {
 async function settings() { const Settings = (await import('src/lib/Setting/Pages/ServerSyncSettings.svelte')).default; component = ui.mount(Settings, { target: document.body }); await settle() }
 
 describe('persisted server offline startup', () => {
+    it.each([
+        { code: 'unauthorized', status: 401, retryable: false },
+        { code: 'invalid-device-token', status: 401, retryable: false },
+        { code: 'rate-limited', status: 429, retryable: true },
+    ])('reports the launch failure to the plugin receive and clears it after retry ($code)', async failure => {
+        f.activationError = failure
+        await production.installServerSyncProduction()
+        const { getSyncBindingTransport } = await import('./bindingRegistry')
+        const transport = getSyncBindingTransport({ kind: 'server', connectionId: 'server' })!
+        const context = { state: structuredClone(f.binding), signal: new AbortController().signal }
+        await expect(transport.receiveAvailableChanges!(context)).rejects.toThrow(failure.code)
+        expect(production.getServerSyncController().snapshot().error).toBe(failure.code)
+
+        const { configurePluginStartup, pluginStartupGate, retryPluginStartup } = await import('../../plugins/pluginStartupGate')
+        const { get } = await import('svelte/store')
+        let started = false
+        configurePluginStartup(() => true, async () => { if (await pluginStartupGate.ensure()) started = true })
+        try {
+            await pluginStartupGate.ensure()
+            await vi.waitFor(() => expect(get(pluginStartupGate.state)).toMatchObject({ phase: 'failed', target: 'server' }))
+            expect(started).toBe(false)
+            f.activationError = undefined; f.offline = false
+            await retryPluginStartup()
+            await vi.waitFor(() => expect(started).toBe(true))
+            expect(get(pluginStartupGate.state).phase).toBe('released')
+            expect(production.getServerSyncController().snapshot().error).toBe('')
+            await expect(transport.receiveAvailableChanges!(context)).resolves.toBeUndefined()
+        } finally {
+            configurePluginStartup(() => false, async () => {})
+            pluginStartupGate.invalidate(); pluginStartupGate.state.set({ phase: 'released', since: 0 })
+        }
+    })
+    it('reports an unavailable receive before resume and retains real authority and selection changes', async () => {
+        await production.installServerSyncProduction({ resumeBound: false })
+        const { getSyncBindingTransport } = await import('./bindingRegistry')
+        const transport = getSyncBindingTransport({ kind: 'server', connectionId: 'server' })!
+        const context = { state: structuredClone(f.binding), signal: new AbortController().signal }
+        await expect(transport.receiveAvailableChanges!(context)).rejects.toThrow('Sync binding is unavailable')
+        f.offline = false
+        await production.retryServerSync()
+        for (const field of ['targetAuthority', 'selectionEpoch'] as const) {
+            await expect(transport.receiveAvailableChanges!({ ...context, state: { ...context.state, [field]: 'changed' } })).rejects.toThrow('Sync binding changed')
+        }
+    })
+
     it('keeps real retry and disconnect settings actions while the installer waits to activate offline', async () => {
         await offlineStartup(); await settings()
         expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: false, error: 'server-unreachable' })
@@ -147,7 +192,10 @@ describe('persisted server offline startup', () => {
         { code: 'directory-unreachable', status: 503, retryable: true },
         { code: 'server-response-error', status: 502, retryable: true },
         { code: 'sync-retry-budget-exhausted', status: 503, retryable: true },
-    ])('automatically activates the persisted binding after transient $code recovers', async failure => {
+        // The activation's server check answered with a rate limit or a coded server failure.
+        { code: 'server-response-error', status: 429, retryable: true, startupLocalReady: true },
+        { code: 'worker-unavailable', status: 503, retryable: true, startupLocalReady: false },
+    ])('automatically activates the persisted binding after transient $code ($status) recovers', async failure => {
         vi.useFakeTimers()
         try {
             f.activationError = failure
@@ -156,6 +204,7 @@ describe('persisted server offline startup', () => {
             const transfers = () => commands().filter(command => ['server_sync_lww_push', 'server_sync_lww_pull', 'server_sync_lww_hydrate', 'server_sync_notify_start'].includes(command))
             expect(transfers()).toEqual([])
             expect(commands()).not.toContain('pds_lww_switch_target')
+            expect(commands()).toContain('server_sync_claim_offline_notice')
             expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, running: false, paused: false, error: failure.code })
             await vi.advanceTimersByTimeAsync(5000)
             expect(transfers()).toEqual([])
@@ -166,6 +215,27 @@ describe('persisted server offline startup', () => {
             expect(transfers()).toContain('server_sync_lww_pull')
             expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: false, error: '' })
         } finally { vi.useRealTimers() }
+    })
+    it.each([
+        { code: 'library-operation-busy', status: 409, retryable: true },
+        { code: 'server-sync-busy', status: 409, retryable: true },
+        { code: 'asset-jobs-busy', status: 409, retryable: true },
+        { code: 'local-store-unavailable', status: 503, retryable: true },
+    ])('activates the persisted binding again once the local store recovers from $code, without the offline notice', async failure => {
+        f.offline = false
+        const base = f.invoke.getMockImplementation()!
+        let busy = true
+        f.invoke.mockImplementation(async (command, args) => {
+            if (command === 'server_sync_lww_activate' && busy) { busy = false; throw failure }
+            return base(command, args)
+        })
+        Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+        await expect(production.installServerSyncProduction()).resolves.toBeUndefined(); await settle()
+        expect(commands()).not.toContain('server_sync_lww_fence')
+        expect(commands().filter(command => command === 'server_sync_lww_activate')).toHaveLength(2)
+        expect(commands()).toContain('server_sync_lww_pull')
+        expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: false, error: '' })
+        expect(commands()).not.toContain('server_sync_claim_offline_notice')
     })
     it('preserves the selected binding when disconnect fencing fails after an offline startup', async () => {
         await offlineStartup()

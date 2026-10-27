@@ -1002,7 +1002,9 @@
         gap: 0.4rem;
         margin: 0 1rem 1rem;
         padding: 0.85rem 1rem;
-        border: 1px solid color-mix(in srgb, var(--risu-theme-danger-400) 45%, transparent);
+        border-width: 1px;
+        border-style: solid;
+        border-color: color-mix(in srgb, var(--risu-theme-danger-400) 45%, transparent);
         border-left-width: 3px;
         border-radius: 0.5rem;
         background: color-mix(in srgb, var(--risu-theme-danger-400) 6%, transparent);
@@ -1023,7 +1025,9 @@
         gap: 0.15rem 1.1rem;
         margin: 0;
         padding: 0.85rem 1rem;
-        border: 1px solid color-mix(in srgb, var(--risu-theme-primary-500) 35%, transparent);
+        border-width: 1px;
+        border-style: solid;
+        border-color: color-mix(in srgb, var(--risu-theme-primary-500) 35%, transparent);
         border-radius: 0.5rem;
         background: color-mix(in srgb, var(--risu-theme-primary-500) 8%, transparent);
         font-size: 0.85rem;

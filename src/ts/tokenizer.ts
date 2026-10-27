@@ -267,10 +267,11 @@ async function tokenizeGoogleCloud(text:string) {
 
 async function tikJS(text:string, model='cl100k_base') {
     if(!tikParser || lastTikModel !== model){
-        tikParser?.free()
+        // The old parser is freed only after the imports, since calls made meanwhile still encode with it.
         if(model === 'cl100k_base'){
             const {Tiktoken} = await import('@dqbd/tiktoken')
             const cl100k_base = await import("@dqbd/tiktoken/encoders/cl100k_base.json");
+            tikParser?.free()
             lastTikModel = model   
         
             tikParser = new Tiktoken(
@@ -282,6 +283,7 @@ async function tikJS(text:string, model='cl100k_base') {
         if(model === 'o200k_base'){
             const {Tiktoken} = await import('@dqbd/tiktoken')
             const o200k_base = await import("src/etc/o200k_base.json");
+            tikParser?.free()
             lastTikModel = model
             tikParser = new Tiktoken(
                 o200k_base.bpe_ranks,

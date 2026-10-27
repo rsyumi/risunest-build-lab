@@ -14,7 +14,7 @@ use crate::persistent_store::{
     PersistentStore,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use risunest_sync_wire::{stamp::DecimalU64, unit::UnitValue};
+use risunest_sync_wire::{library_format, stamp::{DecimalU64, Stamp}, unit::UnitValue};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -743,6 +743,64 @@ impl ExternalLwwEngine {
         cancel: &Cancellation,
         result: &mut PublicationResult,
     ) -> Result<()> {
+        self.publish_segments(store, authority, generating, turn_limit, false, cancel, result).await
+    }
+    /// Publishes a segment that holds only the format level unit, after any
+    /// segment already captured.
+    pub(crate) async fn publish_format_level(
+        &mut self,
+        store: &mut PersistentStore,
+        authority: DecimalU64,
+        cancel: &Cancellation,
+    ) -> Result<PublicationResult> {
+        let mut result = PublicationResult::default();
+        self.publish_segments(store, authority, &[], None, true, cancel, &mut result).await?;
+        Ok(result)
+    }
+    /// The format level unit every segment carries, so a segment declares the
+    /// level its content needs. Its stamp stays within the bound receivers
+    /// admit, as the stamps of the entries beside it do.
+    fn format_level_change(store: &mut PersistentStore, upper: u64) -> Result<Change> {
+        let mut stamp = store.lww_reserve_stamp().map_err(store_error)?;
+        if stamp.physical_ms.0 > upper {
+            stamp = Stamp { physical_ms: DecimalU64(upper), logical: 0, writer_id: stamp.writer_id };
+        }
+        Ok(Change {
+            key: library_format::key(),
+            stamp,
+            value: library_format::value(crate::server_sync::library_format::LEVEL).map_err(|_| segment::corrupt())?,
+        })
+    }
+    /// Stops before anything in `changes` is used when they declare a format
+    /// level above this app's, and records that level so sync stays stopped
+    /// until the app is updated.
+    pub(crate) fn require_readable_format(&self, changes: &[Change]) -> Result<()> {
+        let level = changes
+            .iter()
+            .filter(|change| library_format::is_key(&change.key))
+            .filter_map(|change| library_format::level(&change.value))
+            .max();
+        match level {
+            Some(level) if level > crate::server_sync::library_format::LEVEL => {
+                super::connection_store::ConnectionStore::open(&self.connection_root)?
+                    .record_format_level(&self.connection_id, level)?;
+                Err(ProviderError::new(ErrorKind::AppUpdateRequired))
+            }
+            _ => Ok(()),
+        }
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn publish_segments(
+        &mut self,
+        store: &mut PersistentStore,
+        authority: DecimalU64,
+        generating: &[MessageLocator],
+        turn_limit: Option<u32>,
+        level_only: bool,
+        cancel: &Cancellation,
+        result: &mut PublicationResult,
+    ) -> Result<()> {
+        let mut level_built = false;
         if turn_limit == Some(0) {
             return Err(ProviderError::new(ErrorKind::PreconditionFailed));
         }
@@ -761,11 +819,18 @@ impl ExternalLwwEngine {
             let (publication, sealed) = match pending {
                 Some(value) => value,
                 None => {
-                    let entries = store
-                        .lww_read_outbox_generating(authority, 4096, generating)
-                        .map_err(store_error)?
-                        .entries;
-                    if entries.is_empty() {
+                    let entries = if level_only {
+                        if std::mem::replace(&mut level_built, true) {
+                            break;
+                        }
+                        Vec::new()
+                    } else {
+                        store
+                            .lww_read_outbox_generating(authority, 4096, generating)
+                            .map_err(store_error)?
+                            .entries
+                    };
+                    if entries.is_empty() && !level_only {
                         break;
                     }
                     if entries.iter().any(|e| e.stamp.physical_ms.0 > upper) {
@@ -777,12 +842,13 @@ impl ExternalLwwEngine {
                         .map_err(store_error)?;
                     let mut payload = Segment::new(&self.library, &writer, seq);
                     let empty = payload.encode_capture()?.len();
+                    payload.changes.push(Self::format_level_change(store, upper)?);
                     let reserve = Self::locator_reserve(&self.repository)?;
                     let job_id = uuid::Uuid::new_v4().to_string();
                     let mut staged = StagedControls::new(
                         store.repository_root().join("external-storage").join("lww-publications").join(&job_id),
                     );
-                    let mut length = AssemblyLength { fixed: empty, ..Default::default() };
+                    let mut length = AssemblyLength { fixed: payload.encode_capture()?.len(), ..Default::default() };
                     let mut selected = Vec::new();
                     let mut bodies = Vec::new();
                     let mut assets = BTreeMap::new();
@@ -793,6 +859,11 @@ impl ExternalLwwEngine {
                     let mut remote_bodies = super::lww_residency::RemoteBodies::deferred(store.repository_root());
                     let mut server_bodies = None;
                     for entry in entries {
+                        // The level unit the segment carries stands for a queued one.
+                        if library_format::is_key(&entry.key) {
+                            selected.push(entry);
+                            continue;
+                        }
                         let before = length;
                         let marks = (
                             payload.changes.len(), payload.message_pages.len(), payload.data_catalogs.len(),
@@ -800,6 +871,7 @@ impl ExternalLwwEngine {
                         );
                         let fresh = self.include_objects(
                             store,
+                            &entry.key,
                             &entry.value,
                             &mut payload,
                             &mut bodies,
@@ -1429,7 +1501,8 @@ impl ExternalLwwEngine {
         #[cfg(test)]
         cycle_keys::observe(|work| {
             work.accepted_publications += 1;
-            work.emitted_keys.extend(payload.changes.iter().map(|change| change.key.clone()));
+            // Cycle keys follow library content, not the format level every segment declares.
+            work.emitted_keys.extend(payload.changes.iter().map(|change| change.key.clone()).filter(|key| !library_format::is_key(key)));
         });
         result.segments.0 += 1;
         result.units.0 += publication.entries.len() as u64;
@@ -1817,6 +1890,7 @@ impl ExternalLwwEngine {
     fn include_objects(
         &self,
         store: &mut PersistentStore,
+        key: &risunest_sync_wire::unit::UnitKey,
         value: &UnitValue,
         payload: &mut Segment,
         bodies: &mut Vec<SealedBody>,
@@ -1830,6 +1904,9 @@ impl ExternalLwwEngine {
     ) -> Result<Vec<String>> {
         let mut fresh = Vec::new();
         let mut hashes = BTreeSet::new();
+        // The parts of a structured plugin value travel as raw bytes in a
+        // control catalog, whatever their size.
+        let parts = crate::persistent_store::external_capture::plugin_value_parts(key, value);
         if let UnitValue::Object { descriptor, .. } = value {
             hashes.insert(descriptor.object_hash.clone());
             hashes.extend(descriptor.dependencies.iter().cloned());
@@ -1884,7 +1961,9 @@ impl ExternalLwwEngine {
                         continue;
                     }
                 }
-                if store.lww_native_object(&hash).map_err(store_error)?.is_some_and(|body| body.len() as usize > 8 * 1024 * 1024) {
+                if parts.contains(&hash)
+                    || store.lww_native_object(&hash).map_err(store_error)?.is_some_and(|body| body.len() as usize > 8 * 1024 * 1024)
+                {
                     // An empty entry asks the accepted publication to freeze the native body directly.
                     controls.insert(hash, String::new());
                     continue;
@@ -2220,6 +2299,7 @@ impl ExternalLwwEngine {
                 return Err(segment::corrupt());
             }
             let payload = segment::open(&bytes, &self.library, &writer, seq, &self.root_key)?;
+            self.require_readable_format(&payload.changes)?;
             store.external_lww_verify_seen(&target, &writer, seq, &hash).map_err(store_error)?;
             if let Some(change) = payload.changes.iter().find(|change| change.stamp.physical_ms.0 > upper.0) {
                 future_error = Some(super::clock::future_change("receive", change.stamp.physical_ms.0, upper.0));
@@ -2367,7 +2447,7 @@ impl ExternalLwwEngine {
                 .map_err(store_error)?;
             cycle_keys::observe(|work| {
                 work.receive_applies += 1;
-                work.affected_keys.extend(applied.affected_keys);
+                work.affected_keys.extend(applied.affected_keys.into_iter().filter(|key| !library_format::is_key(key)));
                 work.held_keys.extend(applied.held_keys);
                 work.deferred_keys.extend(applied.deferred_keys);
             });

@@ -6,6 +6,8 @@ import { selectedCharID } from "src/ts/stores.svelte";
 import { getDatabase } from "../database.svelte";
 import { registerLibraryFileOperationGate } from '../libraryFileOperation';
 import { assetCleanupProgress, validAssetCleanupSnapshot, type AssetCleanupSnapshot } from './serverAssetCleanupProgress';
+import { announceAssetBodyArrivals } from '../assetBodyArrival.svelte';
+import { readRepresentativeImagePriority } from '../../ui/representativeImagePriority';
 
 const operations = new Set<Promise<unknown>>();
 registerLibraryFileOperationGate(async () => {
@@ -132,10 +134,14 @@ export const downloadRemoteAssets = async (connectionId?: string, options?: { si
   const externalId = connectionId ?? (options?.target?.kind === 'external' ? options.target.connectionId : options?.progressConnectionId);
   const run = externalId ? beginExternalProgress(externalId, 'download', options?.showEmpty ?? true) : undefined;
   let hasItems = false;
+  let announced = 0;
+  const iconPriority = readRepresentativeImagePriority();
   const progress = run ? new Channel<{ completedItems: number; totalItems: number }>() : undefined;
   if (progress) progress.onmessage = value => {
     if (count(value.completedItems) && count(value.totalItems) && value.completedItems <= value.totalItems) {
       hasItems ||= value.totalItems > 0;
+      // Bodies that landed since the last report show without waiting for the rest.
+      if (value.completedItems > announced) { announced = value.completedItems; announceAssetBodyArrivals(); }
       if (value.totalItems > 0 || options?.showEmpty !== false) run?.items(value.completedItems, value.totalItems);
       task?.progress(measuredTaskPercent(value.completedItems, value.totalItems));
     }
@@ -145,12 +151,15 @@ export const downloadRemoteAssets = async (connectionId?: string, options?: { si
       connectionId: connectionId ?? null,
       selectedCharacterId: selectedCharacterId(),
       operationId,
+      ...(iconPriority ? { iconPriority } : {}),
       ...(options?.target ? { target: options.target } : {}),
       ...(progress ? { progress, transferProgress: run!.networkChannel() } : {}),
     }, options?.signal, operationId, { kind: "sync", routine: options?.routine, attach: value => { task = value } });
     run?.finish('complete', hasItems || options?.showEmpty !== false);
     return result;
   } catch (error) { run?.finish(externalProgressFailure(error)); throw error; }
+  // A failed or cancelled download can still have stored some bodies.
+  finally { announceAssetBodyArrivals(); }
 };
 let cleanup: { operationId: string; controller: AbortController } | undefined;
 export async function evictLocalAssets(): Promise<AssetResidencyStatus> {

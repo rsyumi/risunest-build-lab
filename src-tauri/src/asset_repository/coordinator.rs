@@ -3,7 +3,15 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 static REPOSITORY_MUTATION: OnceLock<Mutex<()>> = OnceLock::new();
 
+#[cfg(test)]
+thread_local! {
+    /// Repository mutation lock acquisitions on this thread.
+    pub(crate) static REPOSITORY_MUTATION_ACQUISITIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) fn lock_repository_mutation() -> io::Result<MutexGuard<'static, ()>> {
+    #[cfg(test)]
+    REPOSITORY_MUTATION_ACQUISITIONS.with(|count| count.set(count.get() + 1));
     REPOSITORY_MUTATION
         .get_or_init(|| Mutex::new(()))
         .lock()

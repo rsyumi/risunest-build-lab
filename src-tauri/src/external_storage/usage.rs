@@ -195,6 +195,13 @@ impl Provider for ObservedProvider {
             Ok(receipt)
         })
     }
+    fn replace_descriptor<'a>(&'a self, r: &'a RepositoryHandle, l: &'a RemoteLocator, b: &'a HeadBytes, x: &'a Cancellation) -> ProviderFuture<'a, HeadReceipt> {
+        Box::pin(async move {
+            let receipt = self.provider.replace_descriptor(r,l,b,x).await?;
+            self.head(r,l,b,&receipt);
+            Ok(receipt)
+        })
+    }
     fn list_objects<'a>(&'a self, r: &'a RepositoryHandle, c: Collection, cursor: Option<&'a str>, limit: u16, x: &'a Cancellation) -> ProviderFuture<'a, ObjectPage> {
         Box::pin(async move {
             let page = self.provider.list_objects(r,c,cursor,limit,x).await?;

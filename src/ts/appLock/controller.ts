@@ -217,7 +217,6 @@ export class AppLockController {
             const departed = snapshot.departedAtMs ?? this.departedAtMs
             const returnPending = this.gated
                 || (this.state.record.enabled && this.departureTiming !== 'launch')
-                || (this.state.record.hideRecentsPreview && this.state.previewSupported)
             this.update({ active: true, epoch: snapshot.epoch, returnPending, busy: this.savingPin })
             if (this.state.record.enabled && departed !== null
                 && lockRequiredAfterDeparture(this.departureTiming, departed, snapshot.atMs)) this.requireLock()

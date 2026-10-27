@@ -390,6 +390,44 @@ fn characters_staged_in_pieces_match_characters_staged_whole() {
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(recency, [("conv-long".to_owned(), 1_700_000_000_129), ("conv-short".to_owned(), 0)]);
+
+    // A whole character stores the exact text of its object without `chats`,
+    // wherever `chats` sits and whether or not it is present.
+    let ordered = store.replace_begin().unwrap().staging_id;
+    let extra = [
+        json!({ "type": "character", "chaId": "chats-last", "name": "Last", "desc": "", "chats": [] }),
+        json!({ "type": "character", "chaId": "no-chats", "name": "None", "desc": "" }),
+    ];
+    store.replace_add_characters(&ordered, &extra).unwrap();
+    let staged = characters.iter().map(|character| (&whole, character));
+    for (generation, character) in staged.chain(extra.iter().map(|character| (&ordered, character))) {
+        let mut detail = character.as_object().unwrap().clone();
+        detail.shift_remove("chats");
+        let stored: String = store
+            .connection
+            .query_row(
+                "SELECT detail FROM characters WHERE generation = ?1 AND character_id = ?2",
+                params![generation, character["chaId"].as_str().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, serde_json::to_string(&detail).unwrap(), "{}", character["chaId"]);
+    }
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let many = store.replace_begin().unwrap().staging_id;
+    let mut steps = Vec::new();
+    for index in 0..256 {
+        let counted = Arc::new(AtomicUsize::new(0));
+        let counter = counted.clone();
+        store.connection.progress_handler(1, Some(move || { counter.fetch_add(1, Ordering::Relaxed); false })).unwrap();
+        store
+            .replace_put_character_detail(&many, &json!({ "chaId": format!("many-{index}"), "name": "Many", "type": "character" }), 0)
+            .unwrap();
+        store.connection.progress_handler(1, None::<fn() -> bool>).unwrap();
+        steps.push(counted.load(Ordering::Relaxed));
+    }
+    assert!(steps[255] <= steps[0] * 2, "{steps:?}");
 }
 
 #[test]

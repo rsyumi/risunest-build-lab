@@ -53,6 +53,25 @@ describe('staged Linux update exit', () => {
         target.querySelector<HTMLButtonElement>(`button[aria-label="${languageEnglish.copy}"]`)!.click()
         await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith(report))
     })
+    it('shows a failed copy of the device information', async () => {
+        Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: vi.fn(async () => { throw new Error('synthetic denial') }) } })
+        Object.defineProperty(document, 'execCommand', { configurable: true, value: vi.fn(() => false) })
+        try {
+            appUpdateState.set({ ...initialAppUpdateState, phase: 'error', popupVisible: true, error: 'synthetic update failure' })
+            target = document.createElement('div')
+            document.body.append(target)
+            component = mount(UpdatePopup, { target })
+            await tick()
+            target.querySelector('summary')!.click()
+            await tick()
+            const copy = target.querySelector<HTMLButtonElement>(`button[aria-label="${languageEnglish.copy}"]`)!
+            expect(copy.title).toBe(languageEnglish.copy)
+            copy.click()
+            await vi.waitFor(() => expect(copy.title).toBe(languageEnglish.risuNest.networkLog.clipboardDenied))
+        } finally {
+            Reflect.deleteProperty(document, 'execCommand')
+        }
+    })
     it('uses the close coordinator and preserves a cancelled decision', async () => {
         let closeHandler!: (event: { preventDefault(): void }) => void | Promise<void>
         const destroy = vi.fn(async () => {})

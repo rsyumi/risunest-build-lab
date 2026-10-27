@@ -30,7 +30,7 @@ codes!(SkipReason { Ineligible, Compatibility, MissingCapture, CompleteGate, Sto
 codes!(ResultKind { Buffered, Streaming, Multiline, Failed });
 codes!(SavePath { Windowed, Complete, Fallback, Unknown });
 codes!(Boundary { Checkpoint, Final });
-codes!(Lifecycle { Background, Stop, Exit, Expiry, MemoryWarning, TrimMemory });
+codes!(Lifecycle { Active, Background, Stop, Exit, Expiry, MemoryWarning, TrimMemory });
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", rename_all_fields = "camelCase", deny_unknown_fields)]
@@ -350,6 +350,20 @@ pub(crate) enum RendererExit {
     #[cfg(any(target_os = "android", test))]
     Android { did_crash: bool },
 }
+#[cfg(any(target_os = "macos", target_os = "ios", test))]
+impl RendererExit {
+    /// Names WebKit's private `_WKProcessTerminationReason` value.
+    pub(crate) fn apple(reason: Option<isize>) -> Self {
+        RendererExit::Apple { reason: match reason {
+            Some(0) => "memory-limit",
+            Some(1) => "cpu-limit",
+            Some(2) => "client-request",
+            Some(3) => "crash",
+            Some(4) => "shared-process-crash-limit",
+            _ => "unknown",
+        } }
+    }
+}
 pub(crate) fn document_started() { with_context(|state, sink| state.document_started(sink)); }
 pub(crate) fn commit_document() -> u64 { with_context(|state, _| state.document.load(Ordering::SeqCst)) }
 pub(crate) fn commit_finished(document: u64, expected: i64, result: &Result<RevisionResult, StoreError>, committed_revision: Option<i64>) {
@@ -402,8 +416,9 @@ mod tests {
             "generationSequence":1, "boundary":"final", "savePath":"complete"})).unwrap(), &sink).unwrap();
         state.record(serde_json::from_value(serde_json::json!({"kind":"phase", "documentSequence":1, "eventSequence":3,
             "generationSequence":1, "phase":"final-acknowledgement", "edge":"enter"})).unwrap(), &sink).unwrap();
-        state.renderer_exit(RendererExit::Apple { reason: "unknown" }, &sink);
+        state.renderer_exit(RendererExit::apple(Some(0)), &sink);
         let value = tail(&sink);
+        assert_eq!(value["reason"]["reason"], "memory-limit");
         assert_eq!(value["phase"]["savePath"], "complete");
         assert_eq!(value["phase"]["edge"], "enter");
         assert_eq!(value["commit"]["revision"], 8);
@@ -419,7 +434,8 @@ mod tests {
         let before = sink.tail(None).len();
         state.record(old_path, &sink).unwrap();
         assert_eq!(sink.tail(None).len(), before);
-        state.renderer_exit(RendererExit::Apple { reason: "unknown" }, &sink);
+        state.renderer_exit(RendererExit::apple(None), &sink);
+        assert_eq!(tail(&sink)["reason"]["reason"], "unknown");
         assert_eq!(tail(&sink)["phase"]["phase"], "final-acknowledgement");
         assert_eq!(tail(&sink)["phase"]["phaseEventSequence"], 3);
         assert_eq!(tail(&sink)["phase"]["savePath"], "complete");
@@ -597,7 +613,7 @@ mod tests {
         let state = Diagnostics::default();
         let sink = crate::native_log::NativeLogState::for_tests();
         state.document_started(&sink);
-        for event in ["stop", "exit"] {
+        for event in ["stop", "exit", "active"] {
             state.record(serde_json::from_value(serde_json::json!({"kind":"lifecycle", "documentSequence":1,
                 "eventSequence":1, "event":event})).unwrap(), &sink).unwrap();
             assert_eq!(tail(&sink)["event"], event);

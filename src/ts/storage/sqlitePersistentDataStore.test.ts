@@ -189,6 +189,7 @@ describe('SqlitePersistentDataStore', () => {
         await store.readConversation('char-a', 'conv-long')
         await store.readConversationMetadata('char-a', 'conv-long')
         await store.readConversationWindow(windowQuery)
+        await store.queryAuthorNotePresetUsage('preset')
         await store.queryPluginStorage()
         await store.queryPluginStorage('test-plugin')
         await store.readPluginStorage('test-plugin', 'memory')
@@ -218,6 +219,7 @@ describe('SqlitePersistentDataStore', () => {
                 { characterId: 'char-a', conversationId: 'conv-long' },
             ],
             ['pds_read_conversation_window', { query: windowQuery }],
+            ['pds_query_author_note_preset_usage', { presetId: 'preset' }],
             ['pds_query_plugin_storage', {}],
             ['pds_query_plugin_storage', { owner: 'test-plugin' }],
             ['pds_read_plugin_storage', { owner: 'test-plugin', key: 'memory' }],

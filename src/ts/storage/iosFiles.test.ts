@@ -250,6 +250,7 @@ const stagedCalls: [string, string, (files: IOSFiles, signal?: AbortSignal) => P
     ['pickIOSFile', 'pick_file', (files, signal) => files.pickIOSFile(signal), { cancelled: true }],
     ['exportIOSFile', 'export_file', (files, signal) => files.exportIOSFile({ sourcePath: '/owned/file', suggestedName: 'backup.risunest', requestId: 'caller-owned', signal }), { cancelled: false, bytes: 42 }],
     ['materializeIOSBackupSource', 'materialize_backup_source', (files, signal) => files.materializeIOSBackupSource('source', { signal }), { path: '/owned/copied.risudat', name: 'copied.risudat', bytes: 42 }],
+    ['pickRewritableIOSFile', 'pick_rewritable_file', files => files.pickRewritableIOSFile('translated.po'), { cancelled: true }],
     ['getIOSPublication', 'publication', files => files.getIOSPublication('receipt'), { state: 'unknown' }],
     ['acknowledgeIOSPublication', 'acknowledge_publication', files => files.acknowledgeIOSPublication('receipt'), undefined],
 ]

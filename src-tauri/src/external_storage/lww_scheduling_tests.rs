@@ -167,7 +167,8 @@ fn a_bounded_segment_keeps_page_group_progress_until_its_last_page_is_durable() 
         let cancel = Cancellation::default();
         let cache = Default::default();
         let pages = f.receiver.receive_requests_limited(&mut f.b, 0.into(), &cache, 1, &cancel).await.unwrap().pages;
-        assert_eq!(pages.len(), 2);
+        // The two units and the library format unit the segment carries.
+        assert_eq!(pages.len(), 3);
         apply(&mut f.b, &pages[..1]);
         assert!(f.b.lww_receive_progress(0.into()).unwrap().is_empty());
         f.b = PersistentStore::open(f.directory_b.path()).unwrap();

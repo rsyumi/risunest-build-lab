@@ -87,6 +87,23 @@ describe('live chat rows', () => {
         await expect(translate(text, false, liveRowContext())).resolves.toBe('Live translated')
         expect(f.fetch).toHaveBeenCalledOnce()
     })
+    it('sends one request for overlapping translations of the same live row text', async () => {
+        f.fetch.mockResolvedValue({ ok: true, data: { translations: [{ text: 'Shared translated' }] } })
+        const text = 'live row text parsed twice at once'
+        await expect(Promise.all([translate(text, false, liveRowContext()), translate(text, false, liveRowContext())]))
+            .resolves.toEqual(['Shared translated', 'Shared translated'])
+        expect(f.fetch).toHaveBeenCalledOnce()
+    })
+    it('sends one LLM request for overlapping translations of the same live row', async () => {
+        f.translatorType = 'llm'
+        f.request.mockResolvedValue({ type: 'success', result: '<p>LLM shared</p>' })
+        const html = '<p>live LLM row parsed twice at once</p>'
+        await expect(Promise.all([
+            translateHTML(html, false, '', 0, false, liveRowContext()),
+            translateHTML(html, false, '', 0, false, liveRowContext()),
+        ])).resolves.toEqual(['<p>LLM shared</p>', '<p>LLM shared</p>'])
+        expect(f.request).toHaveBeenCalledOnce()
+    })
     it('leaves a live row untranslated while a reply is generated', async () => {
         f.fetch.mockResolvedValue({ ok: true, data: { translations: [{ text: 'Streaming translated' }] } })
         doingChat.set(true)
@@ -128,7 +145,7 @@ describe('live chat rows', () => {
         f.translatorType = 'google'
         vi.stubGlobal('userScriptFetch', true)
         vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify([[['standard Google']]]))))
-        f.fetch.mockResolvedValue({ ok: true, data: '<div class="result-container">experimental Google</div>' })
+        f.fetch.mockResolvedValue({ ok: true, data: new TextEncoder().encode('<div class="result-container">experimental Google</div>') })
         const html = '<p>Google setting cache fixture</p>'
         await expect(translateHTML(html, false, '', 0, false, liveRowContext())).resolves.toBe('<p>standard Google</p>')
         f.experimentalGoogle = true
@@ -179,6 +196,13 @@ describe('Google Translate', () => {
         const text = `paragraph the WebView cannot get translated after ${failure}`
         await expect(translate(text, false)).resolves.toBe('KO paragraph')
         expect(sent().native).toEqual([{ url: endpoint, method: 'POST', q: text }])
+    })
+    it('translates through the experimental Google page on Tauri', async () => {
+        const page = '<html><body><div class="result-container">KO experimental</div></body></html>'
+        googleRequest('tauri', translated, () => new Response(page, { headers: { 'Content-Type': 'text/html' } }))
+        f.experimentalGoogle = true
+        f.fetch.mockImplementation((await vi.importActual<typeof import('../globalApi.svelte')>('../globalApi.svelte')).globalFetch)
+        await expect(translate('paragraph for the experimental Google page', false)).resolves.toBe('KO experimental')
     })
     it('passes on the native error when neither client reaches Google on Tauri', async () => {
         googleRequest('tauri', unreachable, () => { throw new TypeError('synthetic native transport failure') })

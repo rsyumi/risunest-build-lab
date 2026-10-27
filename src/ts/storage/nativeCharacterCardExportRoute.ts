@@ -13,8 +13,7 @@ import {
 } from './nativeFileJobs'
 import { getPersistentDataRuntime } from './persistentDataRuntime.svelte'
 import {
-    prepareNativeContentExportFromPicker,
-    withNativeContentExportDestination,
+    runNativeContentExport,
     type NativeContentExportPickerDependencies,
 } from './nativeContentExportPicker'
 
@@ -84,15 +83,12 @@ export async function exportNativeCharacterCardFromPicker(
     options: NativeFileJobOptions = {},
     dependencies: NativeCharacterCardExportRouteDependencies = productionDependencies,
 ): Promise<NativeFileJobResult | null | undefined> {
-    const flow = await prepareNativeContentExportFromPicker({
+    return runNativeContentExport({
         suggestedName: input.suggestedName,
         flushReason: 'native-character-card-export',
         chooseDestination: () =>
             dependencies.chooseDestination(input.suggestedName, input.format),
-    }, options, dependencies)
-    if (flow.kind === 'unsupported') return undefined
-    if (flow.kind === 'cancelled') return null
-    return withNativeContentExportDestination(flow.destination, async () => {
+    }, options, dependencies, 'dialog', async (flow, options) => {
         const character = await dependencies.readCharacter(input.characterId, flow.expectedRevision)
         const metadata = input.projectCharacter(character)
         const rendition = input.format === 'png-card'

@@ -1,3 +1,5 @@
+use std::cell::Cell;
+
 use objc2::DeclaredClass;
 use objc2_foundation::{NSObjectProtocol, NSString};
 use objc2_web_kit::{
@@ -115,4 +117,26 @@ pub(crate) fn web_content_process_did_terminate(
   {
     on_web_content_process_terminate();
   }
+}
+
+// RisuNest: WebKit calls only the private reason callback when a delegate
+// implements it, so it runs the same handler with the reason readable.
+thread_local! {
+  static TERMINATION_REASON: Cell<Option<isize>> = const { Cell::new(None) };
+}
+
+/// The raw `_WKProcessTerminationReason` of the web content process
+/// termination whose handler is running on this thread.
+pub fn web_content_process_termination_reason() -> Option<isize> {
+  TERMINATION_REASON.with(Cell::get)
+}
+
+pub(crate) fn web_content_process_did_terminate_with_reason(
+  this: &WryNavigationDelegate,
+  webview: &WKWebView,
+  reason: isize,
+) {
+  TERMINATION_REASON.with(|value| value.set(Some(reason)));
+  web_content_process_did_terminate(this, webview);
+  TERMINATION_REASON.with(|value| value.set(None));
 }

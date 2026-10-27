@@ -402,6 +402,12 @@ export interface PersistentDataRuntime {
     markPersistentDataDirty(estimatedBytes: number): void
     flushPendingData(reason: string): Promise<void>
     flushPendingDataLocally(reason: string): Promise<void>
+    /** A local flush at a generation checkpoint; false when a storage failure took the background save path. */
+    flushPendingDataLocallyForCheckpoint(reason: string): Promise<boolean>
+    /** Whether complete conversations are saved against immutable captured values. */
+    capturesImmutableCharacters(): boolean
+    /** Unacknowledged conversation mutation events and the age of the oldest, for diagnostics. */
+    pendingConversationMutationDiagnostics(): { pendingEvents: number; unacknowledgedMs?: number }
     acknowledgeGenerationCompletion(expectedAuthorityEpoch?: number): Promise<void>
     commitCharacterAddition(
         request: CharacterAdditionRequest,
@@ -475,6 +481,7 @@ export interface PersistentDataRuntime {
         conversationId: string,
         patch: import('./conversationBinding').ConversationBindingPatch,
         publish: (committedPatch: import('./conversationBinding').ConversationBindingPatch) => void,
+        expected?: import('./conversationBinding').ConversationBindingPatch,
     ): Promise<void>
     mutatePersistentCharacterDetail(
         characterId: string,
@@ -1425,6 +1432,10 @@ export function createPersistentDataRuntime(
         flushPendingData: (reason) => coordinator.flushPendingData(reason),
         flushPendingDataLocally: (reason) =>
             coordinator.flushPendingDataLocally(reason),
+        flushPendingDataLocallyForCheckpoint: (reason) =>
+            coordinator.flushPendingDataLocallyForCheckpoint(reason),
+        capturesImmutableCharacters: () => coordinator.capturesImmutableCharacters,
+        pendingConversationMutationDiagnostics: () => coordinator.pendingConversationMutationDiagnostics,
         async acknowledgeGenerationCompletion(expectedAuthorityEpoch = coordinator.storageAuthorityEpoch) {
             coordinator.assertPersistentMutationAllowed(expectedAuthorityEpoch)
             await coordinator.flushPendingDataLocally('generation-completion')
@@ -1585,12 +1596,14 @@ export function createPersistentDataRuntime(
             conversationId,
             patch,
             publish,
+            expected,
         ) =>
             coordinator.mutateConversationBinding(
                 characterId,
                 conversationId,
                 patch,
                 publish,
+                expected,
             ),
         expirePersistentTrash: (now) => coordinator.expirePersistentTrash(now),
         mutatePersistentCharacterDetail: (characterId, reason, mutate) =>

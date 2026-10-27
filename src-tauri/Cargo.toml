@@ -141,6 +141,8 @@ libc = "0.2"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 security-framework = "3.7.0"
+# Reads the WebKit termination reason inside the web content process handler.
+wry = "=0.57.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
@@ -195,8 +197,9 @@ tauri = { version = "2.12.1", features = ["test"] }
 regex = "1.13.1"
 
 [patch.crates-io]
-# On Android, run main-frame-only scripts in the top frame and stream large
-# custom-protocol responses instead of copying them into one Java array.
+# On Android, run main-frame-only scripts in the top frame, stream large
+# custom-protocol responses instead of copying them into one Java array, and
+# hand a WebView whose renderer exited to the app's recovery.
 wry = { path = "../crates/wry" }
 # Keep failed desktop updates from closing or discarding the installed app.
 tauri-plugin-updater = { path = "../crates/tauri-plugin-updater" }

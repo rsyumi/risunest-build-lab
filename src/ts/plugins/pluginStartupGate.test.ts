@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { get } from 'svelte/store'
 import { configurePluginStartup, createPluginStartupGate, delayPluginLoadingUntilSync, PLUGIN_SYNC_SETTING,
     pluginStartupGate, retryPluginStartup } from './pluginStartupGate'
-import { notifySyncBindingChanged } from '../storage/sync/bindingChanges'
+import { notifySyncBindingChanged, notifySyncReceiveCompleted } from '../storage/sync/bindingChanges'
 import { prepareBoundLibraryReplacement, registerSyncBindingTransport } from '../storage/sync/bindingRegistry'
 import type { SyncBindingState } from '../storage/sync/bindingFlow'
 
@@ -62,6 +62,39 @@ describe('plugin initial receive gate', () => {
             pluginStartupGate.invalidate(); pluginStartupGate.state.set({phase: 'released', since: 0})
         }
     })
+
+    it.each(['receive completed', 'binding changed', 'binding changed during receive'] as const)('releases the production gate after %s', async notification => {
+        native.state.target = { kind: 'server', connectionId: 'synthetic-startup' }
+        const changedDuringReceive = notification === 'binding changed during receive'
+        let failure: Error | undefined = new Error(changedDuringReceive ? 'Sync binding changed' : 'unauthorized'), started = false
+        const unsupported = async (): Promise<never> => { throw new Error('Unexpected binding switch') }
+        const unregister = registerSyncBindingTransport(native.state.target, {
+            inspectTarget: unsupported, pullAvailableState: unsupported, replaceFromTarget: unsupported,
+            publishInitialSharedState: unsupported, fenceOldJobs: unsupported, resumeBinding: unsupported,
+            receiveAvailableChanges: async () => { if (failure) throw failure },
+        })
+        configurePluginStartup(() => true, async () => { if (await pluginStartupGate.ensure()) started = true })
+        try {
+            await pluginStartupGate.ensure()
+            await vi.waitFor(() => expect(get(pluginStartupGate.state)).toMatchObject({ phase: changedDuringReceive ? 'waiting' : 'failed', error: changedDuringReceive ? undefined : failure }))
+            expect(started).toBe(false)
+            failure = undefined
+            if (changedDuringReceive) {
+                notifySyncReceiveCompleted()
+                expect(await pluginStartupGate.ensure()).toBe(false)
+                expect(started).toBe(false)
+            }
+            if (notification === 'receive completed') notifySyncReceiveCompleted()
+            else notifySyncBindingChanged()
+            await vi.waitFor(() => expect(started).toBe(true))
+            expect(get(pluginStartupGate.state).phase).toBe('released')
+        } finally {
+            unregister(); native.state.target = { kind: 'none' }
+            configurePluginStartup(() => false, async () => {})
+            pluginStartupGate.invalidate(); pluginStartupGate.state.set({ phase: 'released', since: 0 })
+        }
+    })
+
     it.each([false,true])('uses the real replacement resume notification to release the production gate after a server hold (delay disabled=%s)', async disabled => {
         native.state.target = {kind:'server',connectionId:'synthetic-startup'}
         let active = true, held = false, starts = 0

@@ -40,6 +40,7 @@ import { capturePersistentRoot, createPersistentDataRuntime } from './persistent
 import { IndexedDbPersistentDataStore } from './indexedDbPersistentDataStore'
 import { observePersistentSaveChanges } from './persistentSaveObserver.svelte'
 import { appendCharacterIdToOrder, removeCharacterIdFromOrder } from './characterOrderMutation'
+import { clearStreamingConversation, setStreamingConversation } from './streamingConversationRegistry'
 
 afterEach(() => {
     configurePersistentDataRuntime({ projectWorkingSet: undefined })
@@ -1058,6 +1059,26 @@ describe('production persistent working-set publication', () => {
         expect(workingSetResidency.isCharacterReleased('inactive')).toBe(true)
         expect(getDatabase().characters[0].personality).toBe('resident detail')
         expect(isCatalogCharacterStub(getDatabase().characters[2])).toBe(true)
+    })
+
+    it.each([false, true])('takes streaming state across a whole replacement from running generations only (running: %s)', (running) => {
+        const chat = (id: string) => ({ id, name: 'Synthetic chat', message: [] })
+        setDatabaseLite({ botPresetsId: 0, botPresets: [{ name: 'Active' }], characters: [] } as unknown as Database)
+        selectedCharID.set(-1)
+        // The replacement carries a saved flag and mode; only a running generation decides either.
+        const replacement = { botPresetsId: 0, botPresets: [{ name: 'Active' }], characters: [{
+            type: 'character', chaId: 'streaming-owner', name: 'Owner',
+            chats: [{ ...chat('streaming-chat'), isStreaming: true, activeStreamingDisplayOptimizationMode: 'strong' }, chat('idle-chat')],
+        }] } as unknown as Database
+        if (running) setStreamingConversation('streaming-chat', 'balanced')
+        try {
+            createProductionStateAdapter().replaceDatabase(replacement, new Set(['streaming-owner']), false)
+            const [streamed, idle] = getDatabase().characters[0].chats
+            expect([streamed.isStreaming, streamed.activeStreamingDisplayOptimizationMode]).toEqual(running ? [true, 'balanced'] : [false, undefined])
+            expect([idle.isStreaming, idle.activeStreamingDisplayOptimizationMode]).toEqual([false, undefined])
+        } finally {
+            clearStreamingConversation('streaming-chat')
+        }
     })
 
     it('preloads nested maximum plugin values from the installed plain database', async () => {

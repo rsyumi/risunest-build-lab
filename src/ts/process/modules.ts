@@ -115,10 +115,14 @@ export async function exportModuleLegacy(module:RisuModule, arg:{
     const alertEnd = arg.alertEnd ?? true
     const saveData = arg.saveData ?? true
     if(saveData && isTauri){
-        const { exportNativeModuleRisumFromPicker } = await import('../storage/nativeModuleRisumExportRoute')
-        const result = await exportNativeModuleRisumFromPicker(module)
-        if(result !== undefined){
-            if(result && alertEnd) alertNormal(language.successExport)
+        const startedAt = Date.now()
+        try {
+            const { exportNativeModuleRisumFromPicker } = await import('../storage/nativeModuleRisumExportRoute')
+            // The export dialog reports how a native export ended.
+            if(await exportNativeModuleRisumFromPicker(module) !== undefined) return new Uint8Array(0)
+        } catch (error) {
+            const { presentContentExportError } = await import('../storage/fileOperationErrorPresentation')
+            presentContentExportError(error, startedAt)
             return new Uint8Array(0)
         }
     }

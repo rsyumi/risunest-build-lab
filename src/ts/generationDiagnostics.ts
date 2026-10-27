@@ -162,7 +162,7 @@ export function createGenerationDiagnostics(options: { enabled: boolean; invoke:
                 }),
             }
         },
-        lifecycle(event: 'background' | 'stop' | 'exit' | 'expiry' | 'memory-warning' | 'trim-memory', trimLevel?: number): void {
+        lifecycle(event: 'active' | 'background' | 'stop' | 'exit' | 'expiry' | 'memory-warning' | 'trim-memory', trimLevel?: number): void {
             send({ kind: 'lifecycle', event, ...(trimLevel === undefined ? {} : { trimLevel }) })
         },
     }

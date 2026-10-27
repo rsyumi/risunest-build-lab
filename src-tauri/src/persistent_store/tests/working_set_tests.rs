@@ -808,6 +808,60 @@ fn conversation_catalog_includes_chat_list_metadata() {
 }
 
 #[test]
+fn author_note_preset_usage_lists_only_conversations_still_reading_the_preset() {
+    let directory = tempfile::tempdir().expect("create temporary directory");
+    let mut store = PersistentStore::open(directory.path()).expect("open persistent store");
+    let link = |id: &str, note: &str| {
+        json!({"id": id, "fingerprint": crate::persistent_store::author_note::fingerprint(note)})
+    };
+    let chat = |id: &str, note: Option<&str>, link: Value| {
+        let mut chat = json!({"id": id, "name": format!("Chat {id}"), "message": [], "authorNotePreset": link});
+        if let Some(note) = note {
+            chat["note"] = json!(note);
+        }
+        chat
+    };
+    let revision = store
+        .commit(&WorkingSetCommit {
+            add_character: Some(json!({
+                "type": "character",
+                "chaId": "first",
+                "name": "First",
+                "chats": [
+                    chat("linked", Some("copy"), link("preset", "copy")),
+                    chat("edited", Some("changed"), link("preset", "copy")),
+                    chat("other", Some("copy"), link("other", "copy")),
+                ]
+            })),
+            ..empty_working_set_commit(0)
+        })
+        .expect("add first character")
+        .revision;
+    store
+        .commit(&WorkingSetCommit {
+            add_character: Some(json!({
+                "type": "character",
+                "chaId": "second",
+                "name": "Second",
+                "chats": [chat("empty", None, link("preset", ""))]
+            })),
+            ..empty_working_set_commit(revision)
+        })
+        .expect("add second character");
+
+    let usage = store
+        .query_author_note_preset_usage("preset")
+        .expect("query author's note preset usage");
+    assert_eq!(
+        serde_json::to_value(usage).expect("serialize usage"),
+        json!([
+            {"characterId": "first", "characterName": "First", "conversationId": "linked", "conversationName": "Chat linked"},
+            {"characterId": "second", "characterName": "Second", "conversationId": "empty", "conversationName": "Chat empty"},
+        ])
+    );
+}
+
+#[test]
 fn conversation_windows_cover_latest_and_anchor_boundaries() {
     let (_directory, store, _) = open_fixture();
     let window = |anchor: Option<&str>, before, after| ConversationWindowQuery {

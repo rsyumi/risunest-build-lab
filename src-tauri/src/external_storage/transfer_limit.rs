@@ -119,6 +119,7 @@ impl Provider for LimitedProvider {
     }
     fn compare_exchange_head<'a>(&'a self, r: &'a RepositoryHandle, l: &'a RemoteLocator, e: &'a ExpectedHead, h: &'a HeadBytes, x: &'a Cancellation) -> ProviderFuture<'a, HeadReceipt> { self.provider.compare_exchange_head(r,l,e,h,x) }
     fn replace_head<'a>(&'a self, r: &'a RepositoryHandle, l: &'a RemoteLocator, h: &'a HeadBytes, x: &'a Cancellation) -> ProviderFuture<'a, HeadReceipt> { self.provider.replace_head(r,l,h,x) }
+    fn replace_descriptor<'a>(&'a self, r: &'a RepositoryHandle, l: &'a RemoteLocator, b: &'a HeadBytes, x: &'a Cancellation) -> ProviderFuture<'a, HeadReceipt> { self.provider.replace_descriptor(r,l,b,x) }
     fn list_objects<'a>(&'a self, r: &'a RepositoryHandle, c: Collection, cursor: Option<&'a str>, limit: u16, x: &'a Cancellation) -> ProviderFuture<'a, ObjectPage> { self.provider.list_objects(r,c,cursor,limit,x) }
     fn delete_object<'a>(&'a self, r: &'a RepositoryHandle, l: &'a RemoteLocator, x: &'a Cancellation) -> ProviderFuture<'a, ()> { self.provider.delete_object(r,l,x) }
     fn supports_incomplete_cleanup(&self) -> bool { self.provider.supports_incomplete_cleanup() }

@@ -7,7 +7,7 @@ export function galleryText() {
         selectAll: language.risuNest.dataHealth.selectAll, clear: language.playground.inlayDeselectAll,
         download: language.download, optimize: language.risuNest.inlay.optimizeSelected,
         remove: language.remove, cancel: language.cancel, add: language.add,
-        rename: language.renameTogglePreset, close: language.close,
+        rename: language.renamePreset, close: language.close,
         icons: language.charIcon, emotions: language.emotionImage, assets: language.additionalAssets,
         empty: language.risuNest.inlay.inventoryEmpty, loadFailed: language.risuNest.inlay.inventoryLoadFailed,
         refresh: language.risuNest.inlay.inventoryRefresh,

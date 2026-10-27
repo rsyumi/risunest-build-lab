@@ -180,6 +180,8 @@ fn source_units() -> BTreeMap<risunest_sync_wire::unit::UnitKey, UnitValue> {
         (unit_key(&["root", "username"]).unwrap(), inline(&json!("Source username")).unwrap()),
         (unit_key(&["character", "char-c", "name"]).unwrap(), inline(&json!("Source C")).unwrap()),
         (unit_key(&["future-unit", "backup"]).unwrap(), inline(&json!({ "opaque": 3 })).unwrap()),
+        // A backup's format level leaves the golden state unchanged.
+        (risunest_sync_wire::library_format::key(), risunest_sync_wire::library_format::value(2).unwrap()),
     ])
 }
 
@@ -774,7 +776,8 @@ fn a_replacement_intent_body_carries_row_digests_instead_of_units() {
     let body: Value = serde_json::from_str(&body).unwrap();
     assert!(body["changes"]["rows"].as_u64().unwrap() > 0, "{body}");
     assert_eq!(body["changes"]["digest"].as_str().unwrap().len(), 64);
-    assert_eq!(body["source_units"]["rows"], 3);
+    // Every source unit is staged, the format level among them.
+    assert_eq!(body["source_units"]["rows"], 4);
     assert_eq!(body["device_changes"], json!([]));
     assert_eq!(intent_rows(&store, &header.request_id), 0);
     assert_eq!(golden(&store, "source-units-rows"), SOURCE_UNITS);

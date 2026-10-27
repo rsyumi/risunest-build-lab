@@ -12,6 +12,7 @@ use risunest_sync_wire::{
 };
 use std::sync::Arc;
 
+mod format_levels;
 mod metadata_restore;
 
 pub(crate) struct LocalServerFixture {
@@ -54,6 +55,18 @@ impl LocalServerFixture {
     }
     pub(crate) fn root(&self) -> &std::path::Path {
         self._root.path()
+    }
+    /// A device as a request of this client's format level presents it.
+    pub(crate) fn device(&self, library_id: &str, token: &str) -> risunest_sync_server::store::Device {
+        let mut device = self.server.authenticate(library_id, token).unwrap();
+        device.format_level = Some(super::library_format::LEVEL);
+        device
+    }
+    /// Raises the library to this client's format level, as another device does.
+    pub(crate) fn switch_format(&self) {
+        let credential = self.server.add_device().unwrap();
+        let device = self.device(&credential.library_id, &credential.token);
+        ServerWriter::level(&self.server, &device, &credential.library_id, &uuid::Uuid::new_v4().to_string());
     }
     pub(crate) fn client(&self, store: &PersistentStore) -> LwwClient {
         let (config, stored) = self.candidate(store);
@@ -371,6 +384,7 @@ fn equal_stamp_different_value_stops_sync_after_original_is_superseded() {
 #[test]
 fn lost_accepted_response_is_recovered_after_reopen_and_keeps_a_later_edit_pending() {
     let server = LocalServerFixture::new();
+    server.switch_format();
     let (root, mut store) = local();
     let core = server.client(&store);
     save(&mut store, &["root", "language"], serde_json::json!("ja"));
@@ -791,6 +805,7 @@ fn publication(client: &LwwClient, store: &PersistentStore) -> Publication {
 #[test]
 fn initial_state_retry_settles_original_acceptance_without_republishing_acked_units() {
     let server = LocalServerFixture::new();
+    server.switch_format();
     let (root, mut store) = local();
     let client = server.client(&store);
     save(&mut store, &["root", "language"], serde_json::json!("ja"));
@@ -1447,15 +1462,28 @@ struct ServerWriter {
 }
 impl ServerWriter {
     const WRITER: &'static str = "00000000-0000-4000-8000-0000000000aa";
+    /// A writer at this client's format level, which has switched the library.
     fn new(server: &Arc<Store>) -> Self {
         let credential = server.add_device().unwrap();
-        Self {
-            server: server.clone(),
-            device: server
-                .authenticate(&credential.library_id, &credential.token)
-                .unwrap(),
-            library_id: credential.library_id,
-        }
+        let mut device = server.authenticate(&credential.library_id, &credential.token).unwrap();
+        device.format_level = Some(super::library_format::LEVEL);
+        Self::level(server, &device, &credential.library_id, Self::WRITER);
+        Self { server: server.clone(), device, library_id: credential.library_id }
+    }
+    fn level(server: &Store, device: &risunest_sync_server::store::Device, library_id: &str, writer: &str) {
+        let level = risunest_sync_wire::library_format::value(super::library_format::LEVEL).unwrap();
+        let change = UnitChange {
+            key: risunest_sync_wire::library_format::key(),
+            stamp: Stamp { physical_ms: 1.into(), logical: 0, writer_id: writer.into() },
+            value: level,
+        };
+        let request = PushRequest {
+            library_id: library_id.into(),
+            writer_id: writer.into(),
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            changes: vec![change],
+        };
+        server.push(device, &request).unwrap();
     }
     fn push(&self, operation: &str, key: &UnitKey, physical: u64, value: UnitValue) {
         self.server
@@ -1553,15 +1581,16 @@ fn a_state_read_plans_its_listing_from_the_units_its_pin_holds() {
         let upper = client.admission().unwrap();
         client.state(&mut store, upper).unwrap().1
     });
-    assert_eq!(changes.len(), 2050);
+    // The pushed units and the library format unit.
+    assert_eq!(changes.len(), 2051);
     let read = lane.snapshot("binding");
-    assert_eq!(read.listed, 2050);
+    assert_eq!(read.listed, 2051);
     let listing = read.listing.unwrap();
-    assert_eq!((listing.done, listing.total), (2050, 2050));
+    assert_eq!((listing.done, listing.total), (2051, 2051));
     // Every state page was requested with the whole total already planned.
     let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), 3);
-    assert!(seen.iter().all(|total| *total == 2050));
+    assert!(seen.iter().all(|total| *total == 2051));
 }
 
 #[test]
@@ -1599,13 +1628,14 @@ fn a_restarted_state_read_does_not_double_its_listing_total() {
         let upper = client.admission().unwrap();
         client.state(&mut store, upper).unwrap().1
     });
-    assert_eq!(changes.len(), 1026);
+    // The pushed units and the library format unit.
+    assert_eq!(changes.len(), 1027);
     let read = lane.snapshot("binding");
-    assert!(read.listed > 1026);
+    assert!(read.listed > 1027);
     assert!(read.received_bytes > 0);
     let listing = read.listing.unwrap();
-    assert_eq!((listing.done, listing.total), (1026, 1026));
-    assert_eq!(*seen.lock().unwrap(), [(0, 1026), (1024, 1026), (0, 1026), (1024, 1026)]);
+    assert_eq!((listing.done, listing.total), (1027, 1027));
+    assert_eq!(*seen.lock().unwrap(), [(0, 1027), (1024, 1027), (0, 1027), (1024, 1027)]);
 }
 
 fn publication_ids(client: &LwwClient) -> Vec<String> {

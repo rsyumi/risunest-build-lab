@@ -1,5 +1,7 @@
+use super::available_payload::{available_payload_size, open_available_payload};
 use super::error::{
-    cancelled, destination_error_with, invalid_input, io_error, job_error, store_error,
+    asset_missing, cancelled, destination_error_with, invalid_input, io_error, job_error,
+    store_error,
 };
 use super::{JobControl, JobPhase, JobProgress, JobResultSummary, NativeJobError};
 use crate::asset_repository::owner_manifest_codec::OwnerManifestEntry;
@@ -8,7 +10,6 @@ use crate::persistent_store::{
     export::{self, destination},
     PreparedRisuSaveExport, RevisionReadLease, StoreResult,
 };
-use crate::server_sync::residency::RemotePayloadAccess;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
@@ -325,10 +326,8 @@ fn write_projected_risum(
                         .payload_hash
                         .map(hex::encode)
                         .ok_or_else(|| invalid_input("RISUM occurrence has no native payload"))?;
-                    let size = repository
-                        .stat_available_object(&hash)
-                        .map_err(io_error)?
-                        .ok_or_else(|| invalid_input("RISUM occurrence payload is missing"))?;
+                    let size = available_payload_size(repository, &hash, job, io_error)?
+                        .ok_or_else(|| asset_missing("RISUM occurrence payload is missing"))?;
                     (hash, size)
                 } else {
                     let hash = alias
@@ -387,10 +386,8 @@ fn write_verified_rpack_object(
     size: u64,
     job: &JobControl,
 ) -> Result<(), NativeJobError> {
-    let mut input = repository
-        .open_available_object(hash)
-        .map_err(io_error)?
-        .ok_or_else(|| invalid_input("RISUM payload is missing"))?;
+    let mut input = open_available_payload(repository, hash, job, io_error)?
+        .ok_or_else(|| asset_missing("RISUM payload is missing"))?;
     let mut copied = 0_u64;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
@@ -511,25 +508,32 @@ mod tests {
         }
     }
 
-    fn publication_fixture() -> (TempDir, PersistentStore, i64) {
+    /// A module with one asset; the last value is that asset's payload hash.
+    fn publication_fixture() -> (TempDir, PersistentStore, i64, String) {
         let directory = TempDir::new().unwrap();
         let mut store = PersistentStore::open(directory.path()).unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let asset = alias("assets/module.bin", b"module asset", &cas);
+        let hash = asset.object_hash.clone().unwrap();
         let staging = store.replace_begin().unwrap().staging_id;
         store
             .replace_put_root(
                 &staging,
-                &json!({"modules": [{"name": "Module", "id": "module-0"}]}),
+                &json!({"modules": [{"name": "Module", "id": "module-0", "assets": [
+                    ["asset", asset.key, "bin"]
+                ]}]}),
             )
             .unwrap();
         store.replace_put_presets(&staging, &[]).unwrap();
+        store.replace_put_asset_aliases(&staging, &[asset]).unwrap();
         let revision = store.replace_commit(&staging, Some(0)).unwrap().revision;
-        (directory, store, revision)
+        (directory, store, revision, hash)
     }
 
     #[test]
     fn risum_release_failure_prevents_desktop_and_handoff_publication_exactly_once() {
         for portable in [false, true] {
-            let (directory, mut store, revision) = publication_fixture();
+            let (directory, mut store, revision, _) = publication_fixture();
             let prepared = store.prepare_risu_save_export(revision).unwrap();
             let owned = directory.path().join("owned");
             let chosen = directory.path().join("chosen");
@@ -569,7 +573,7 @@ mod tests {
 
     #[test]
     fn risum_cancellation_and_stale_revision_do_not_publish() {
-        let (directory, mut store, revision) = publication_fixture();
+        let (directory, mut store, revision, _) = publication_fixture();
         assert!(matches!(
             store.prepare_risu_save_export(revision + 1).err().unwrap(),
             StoreError::RevisionConflict { .. }
@@ -597,6 +601,41 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code, "cancelled");
         assert_eq!(fs::read(destination).unwrap(), b"previous RISUM");
+
+        // A cancel requested while an asset only the Sync server holds downloads stops
+        // it, and an asset kept nowhere fails as missing.
+        use crate::server_sync::residency::test_remote;
+        for on_server in [true, false] {
+            let (directory, mut store, revision, held) = publication_fixture();
+            let cas = PayloadCas::new(directory.path()).unwrap();
+            if on_server {
+                test_remote::keep_only_on_server(directory.path(), &held);
+            } else {
+                fs::remove_file(cas.object_path(&held).unwrap().unwrap()).unwrap();
+            }
+            let prepared = store.prepare_risu_save_export(revision).unwrap();
+            let owned = directory.path().join("owned");
+            fs::create_dir(&owned).unwrap();
+            let job = JobRegistry::default()
+                .create(JobKind::ExportRisuModule)
+                .unwrap();
+            let cancelling = job.clone();
+            test_remote::on_fetch(directory.path(), move || {
+                cancelling.request_cancel().unwrap();
+            });
+            let error = export_risu_module(
+                prepared,
+                0,
+                &owned,
+                &directory.path().join("handoffs"),
+                None,
+                &job,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, if on_server { "cancelled" } else { "asset-missing" });
+            assert_eq!(test_remote::fetched(directory.path()), usize::from(on_server));
+            assert!(cas.stat_object(&held).unwrap().is_none());
+        }
     }
 
     #[test]

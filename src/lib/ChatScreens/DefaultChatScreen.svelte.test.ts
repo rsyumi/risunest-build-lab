@@ -535,19 +535,55 @@ it('does not start generation when input processing finishes after Stop', async 
     expect(mocks.generate).not.toHaveBeenCalled()
 })
 
-it('keeps drafts editable and reports an input translation outage once until a successful translation', async () => {
+it.each([false, true])('uses the current raw input on translation failure (reverse: %s) and alerts once per streak', async (reverse) => {
     DBState.db.useAutoTranslateInput = true
+    mocks.bounded = true
     mocks.translate.mockRejectedValue(new TypeError('Load failed'))
     await tick()
-    type('First draft'); await tick(); await tick()
-    type('Second draft'); await tick(); await tick()
+    const source = document.querySelector<HTMLTextAreaElement>(reverse ? '#messageInputTranslate' : 'textarea.input-text')!
+    const target = document.querySelector<HTMLTextAreaElement>(reverse ? 'textarea.input-text' : '#messageInputTranslate')!
+    async function enter(value: string) {
+        source.value = value
+        source.dispatchEvent(new Event('input', { bubbles: true }))
+        await tick(); await tick()
+    }
+    mocks.translate.mockResolvedValueOnce('Earlier translation')
+    await enter('Earlier draft')
+    expect(target.value).toBe('Earlier translation')
+    await enter('First failed draft')
+    expect(target.value).toBe('First failed draft')
+    await enter('Second failed draft')
+    expect(target.value).toBe('Second failed draft')
     expect(mocks.error).toHaveBeenCalledOnce()
-    expect(document.querySelector<HTMLTextAreaElement>('textarea.input-text')!.value).toBe('Second draft')
     mocks.translate.mockResolvedValueOnce('Translated draft')
-    type('Third draft'); await tick(); await tick()
-    expect(document.querySelector<HTMLTextAreaElement>('#messageInputTranslate')!.value).toBe('Translated draft')
-    type('Fourth draft'); await tick(); await tick()
+    await enter('Third draft')
+    expect(target.value).toBe('Translated draft')
+    await enter('Fourth draft')
+    expect(target.value).toBe('Fourth draft')
     expect(mocks.error).toHaveBeenCalledTimes(2)
+    source.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await vi.waitFor(() => expect(mocks.appended).toEqual([expect.objectContaining({ role: 'user', data: 'Fourth draft' })]))
+})
+
+it.each([false, true])('ignores a stale translation failure (reverse: %s)', async (reverse) => {
+    DBState.db.useAutoTranslateInput = true
+    let rejectTranslation: (error: Error) => void = () => {}
+    mocks.translate.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectTranslation = reject }))
+    await tick()
+    const source = document.querySelector<HTMLTextAreaElement>(reverse ? '#messageInputTranslate' : 'textarea.input-text')!
+    const target = document.querySelector<HTMLTextAreaElement>(reverse ? 'textarea.input-text' : '#messageInputTranslate')!
+    source.value = 'Old input'
+    source.dispatchEvent(new Event('input', { bubbles: true }))
+    await tick()
+    mocks.translate.mockResolvedValueOnce('Current translation')
+    source.value = 'Current input'
+    source.dispatchEvent(new Event('input', { bubbles: true }))
+    await tick(); await tick()
+    expect(target.value).toBe('Current translation')
+    rejectTranslation(new TypeError('Load failed'))
+    await tick(); await tick()
+    expect(target.value).toBe('Current translation')
+    expect(mocks.error).not.toHaveBeenCalled()
 })
 
 it('ordinary typing does not invoke translation when input translation is disabled', async () => {

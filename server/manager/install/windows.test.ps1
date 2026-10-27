@@ -593,7 +593,7 @@ FunctionEnd
                         $detail = if (Test-Path $detailLog) { Get-Content -LiteralPath $detailLog -Raw -Encoding Unicode } else { '' }
                         if (($detail -match 'Server data could not be deleted|서버 데이터를 삭제하지 못했습니다') -ne $kept) { throw 'Resumed removal reported the wrong data deletion outcome.' }
                         if ($kept) {
-                            if (!$detail.Contains($resumeData) -or ($detail -notmatch 'Server data could not be deleted|서버 데이터를 삭제하지 못했습니다')) { throw 'Resumed removal did not report kept custom data and its path.' }
+                            if (!$detail.Contains($resumeData) -or $detail.Contains('\\?\') -or ($detail -notmatch 'Server data could not be deleted|서버 데이터를 삭제하지 못했습니다')) { throw 'Resumed removal did not report kept custom data and its path.' }
                         }
                     }
                 }

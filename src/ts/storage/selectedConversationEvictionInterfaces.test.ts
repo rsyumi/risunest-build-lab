@@ -85,6 +85,9 @@ function mockPublicGeneration(
         captureWindowedConversationMutationController: (target: never, chat: Chat, start: number) =>
             runtime.captureWindowedConversationMutationController(target, chat, start),
         flushPendingData: (reason: string) => runtime.flushPendingData(reason),
+        flushPendingDataLocallyForCheckpoint: (reason: string) => runtime.flushPendingDataLocallyForCheckpoint(reason),
+        capturesImmutableCharacters: () => runtime.capturesImmutableCharacters(),
+        pendingConversationMutationDiagnostics: () => runtime.pendingConversationMutationDiagnostics(),
         drainDeferredLwwReceives: vi.fn(async () => undefined),
     }))
     vi.doMock('./persistentDataStoreFactory', () => ({ getPersistentDataStore: () => fixture.store }))

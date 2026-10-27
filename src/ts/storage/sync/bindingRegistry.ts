@@ -85,7 +85,10 @@ export function registerSyncBindingTransport(target: Exclude<BindingTarget, { ki
     return () => {
         if (transports.get(id) !== transport) return
         transports.delete(id)
-        for (const state of pendingReplacements) if (state.target.kind !== 'none' && key(state.target) === id) pendingReplacements.delete(state)
+        const dropped = [...pendingReplacements].filter(state => state.target.kind !== 'none' && key(state.target) === id)
+        for (const state of dropped) pendingReplacements.delete(state)
+        // Plugin startup waiting on a dropped replacement checks again, as it does when a replacement is released.
+        if (dropped.length) notifySyncBindingChanged()
     }
 }
 

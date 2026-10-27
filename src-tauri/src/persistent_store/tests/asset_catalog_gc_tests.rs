@@ -1806,6 +1806,31 @@ fn unused_alias_cleanup_keeps_device_plugin_writers_out_until_it_commits() {
     let deleted = store.delete_orphaned_asset_aliases(&OrphanAliasScope::Cleanup { now_ms: now }).unwrap();
     assert_eq!(deleted.iter().map(|alias| alias.key.as_str()).collect::<Vec<_>>(), ["assets/orphan.png"]);
     assert!(writer_locked_out.get());
+
+    // An app that ends after the commit intent is reserved leaves the delete to recovery at the
+    // next start, which applies it only while the plugin values it was checked against stand.
+    let interrupt = |store: &mut PersistentStore| {
+        super::super::lww::BEFORE_HELD_COMMIT.with(|hook| *hook.borrow_mut() = Some(Box::new(|| panic!("synthetic app end"))));
+        let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.delete_orphaned_asset_aliases(&OrphanAliasScope::Cleanup { now_ms: now })
+        }));
+        assert!(ended.is_err());
+    };
+    put_asset(&mut store, "assets/recovered.png", b"synthetic recovered body");
+    backdate_alias(&store, "assets/recovered.png", 1_000);
+    interrupt(&mut store);
+    store.lww_recover_intents().unwrap();
+    assert!(alias_object(&store, "assets/recovered.png").is_none());
+
+    put_asset(&mut store, "assets/named-later.png", b"synthetic named later body");
+    backdate_alias(&store, "assets/named-later.png", 1_000);
+    interrupt(&mut store);
+    let value = serde_json::to_string("named-later.png").unwrap();
+    store.device_store().unwrap().connection().execute(
+        "INSERT INTO plugin_device_storage(owner,space,key,value,byte_size,tombstone,write_clock,writer_id) VALUES('synthetic','string','portrait',?1,?2,0,'0','')",
+        rusqlite::params![value, value.len() as i64]).unwrap();
+    store.lww_recover_intents().unwrap();
+    assert!(alias_object(&store, "assets/named-later.png").is_some());
 }
 
 #[test]
