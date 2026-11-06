@@ -861,15 +861,15 @@ export interface Database{
     globalNote:string
     temperature: number
     askRemoval:boolean
-    maxContext: number
-    maxResponse: number
+    maxContext: number|null
+    maxResponse: number|null
     frequencyPenalty: number
     PresensePenalty: number
     formatingOrder: FormatingOrderItem[]
     aiModel: string
     jailbreakToggle:boolean
-    loreBookDepth: number
-    loreBookToken: number,
+    loreBookDepth: number|null
+    loreBookToken: number|null,
     cipherChat: boolean,
     loreBook: {
         name:string
@@ -929,9 +929,9 @@ export interface Database{
         FontColorQuote1 : string,
         FontColorQuote2 : string
     }
-    requestRetrys:number
+    requestRetrys:number|null
     localNetworkMode:boolean
-    localNetworkTimeoutSec:number
+    localNetworkTimeoutSec:number|null
     emotionPrompt2:string
     useSayNothing:boolean
     didFirstSetup: boolean
@@ -1009,7 +1009,7 @@ export interface Database{
     personaNote:boolean
     assetWidth:number
     animationSpeed:number
-    botSettingAtStart:false
+    botSettingAtStart:boolean
     NAIsettings:NAISettings
     hideRealm:boolean
     blockedRealmCreators:BlockedRealmCreator[]
@@ -1039,7 +1039,7 @@ export interface Database{
     localStopStrings?:string[]
     autofillRequestUrl:boolean
     customProxyRequestModel:string
-    generationSeed:number
+    generationSeed:number|null
     newOAIHandle:boolean
     gptVisionQuality:string
     reverseProxyOobaMode:boolean
@@ -1058,7 +1058,7 @@ export interface Database{
     }
     mistralKey?:string
     chainOfThought?:boolean
-    genTime:number
+    genTime:number|null
     promptSettings: PromptSettings
     keiServerURL:string
     top_k:number
@@ -1090,7 +1090,7 @@ export interface Database{
     ollamaCloudModelName:string
     ollamaThinkingMode:'auto'|'off'|'on'|'low'|'medium'|'high'
     autoContinueChat:boolean
-    autoContinueMinTokens:number
+    autoContinueMinTokens:number|null
     removeIncompleteResponse:boolean
     customTokenizer:string
     instructChatTemplate:string
@@ -1185,7 +1185,7 @@ export interface Database{
     presetChain: string
     legacyMediaFindings?:boolean
     geminiStream?:boolean
-    assetMaxDifference:number
+    assetMaxDifference:number|null
     auxModelUnderModelSettings:boolean
     menuSideBar:boolean
     pluginV2: RisuPlugin[]
@@ -1218,7 +1218,7 @@ export interface Database{
     checkCorruption?: boolean
     toggleConfirmRecommendedPreset?: boolean
     useExperimentalGoogleTranslator:boolean
-    thinkingTokens: number
+    thinkingTokens: number|null
     thinkingType: 'off' | 'budget' | 'adaptive'
     deepseekThinkingType: 'off' | 'enabled'
     adaptiveThinkingEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
@@ -1448,7 +1448,7 @@ export interface character{
     removedQuotes?:boolean
     creatorNotes:string
     systemPrompt:string
-    postHistoryInstructions:string
+    postHistoryInstructions:string|null
     alternateGreetings:string[]
     tags:string[]
     creator:string
@@ -1599,8 +1599,8 @@ export interface botPreset{
     jailbreak: string
     globalNote:string
     temperature: number
-    maxContext: number
-    maxResponse: number
+    maxContext: number|null
+    maxResponse: number|null
     frequencyPenalty: number
     PresensePenalty: number
     formatingOrder: FormatingOrderItem[]

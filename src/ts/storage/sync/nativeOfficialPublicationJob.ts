@@ -1,4 +1,4 @@
-import { runWithDeferredMobileBackgroundTask, runWithMobileBackgroundTask, measuredTaskPercent, type MobileBackgroundTask } from '../../mobileBackgroundTask'
+import { measuredTaskPercent } from '../../mobileBackgroundTask'
 import type { AccountStorage } from '../accountStorage'
 import {
     cancelNativeOfficialPublication,
@@ -54,20 +54,14 @@ function hasDrainedNativeOfficialPublicationCancellation(error: unknown): boolea
         && error.nativeOfficialPublicationCancellationDrained === true
 }
 
-/** A save starts an automatic publication, so it is protected only if the app leaves the screen while it runs. */
-function runPublication<T>(userInitiated: boolean | undefined, operation: (task: MobileBackgroundTask) => Promise<T>, signal?: AbortSignal): Promise<T> {
-    return userInitiated
-        ? runWithMobileBackgroundTask('sync', operation, signal, true)
-        : runWithDeferredMobileBackgroundTask('sync', operation, signal)
-}
-
 export function createNativeOfficialPublicationJobPublisher(
     dependencies: NativeOfficialPublicationJobDependencies,
 ): OfficialNativeDatabasePublisher {
     const runAttempt = dependencies.runAttempt ?? runNativeOfficialPublicationAttempt
     const continueAttempt = dependencies.continueAttempt ?? continueNativeOfficialPublication
     const cancelAttempt = dependencies.cancelAttempt ?? cancelNativeOfficialPublication
-    return async (input) => runPublication(input.userInitiated, async (background) => {
+    return async (input) => {
+        const { background } = input
         const recovered = await dependencies.reconcilePendingPublications?.({
             accountId: input.accountId,
             revision: input.revision,
@@ -182,7 +176,7 @@ export function createNativeOfficialPublicationJobPublisher(
             acknowledge: result.receipt.acknowledge,
             completeReload: result.completeReload,
         }
-    }, input.signal)
+    }
 }
 
 export interface NativeOfficialAssetPublisherDependencies {
@@ -226,7 +220,7 @@ export function createNativeOfficialAssetPublisher(
                 reloadSession: outcome.reloadSession,
                 receipt: outcome,
             }
-        }, { signal: input.signal })
+        }, { signal: input.background.signal })
         if (result === null) return false
         if (result.kind === 'auth-warning') {
             throw new Error('Official account authorization warning while writing assets')

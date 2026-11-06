@@ -870,6 +870,14 @@ export const languageKorean = {
     "SpacedView": "멀티플",
     "emphasizedView": "더블",
     "pluginWarn": "악성 플러그인 설치 시 문제가 생길 수 있습니다.",
+    "fetchLogConsent": "'{}' 플러그인이 로그를 가져오려고 합니다. 로그에 민감한 정보가 포함될 수 있습니다. 허용하시겠습니까?",
+    "getFullDatabaseConsent": "'{}' 플러그인이 전체 데이터베이스에 접근하려고 합니다. 민감한 정보가 노출될 수 있습니다. 허용하시겠습니까?",
+    "mainDomAccessConsent": "'{}' 플러그인이 앱 화면의 DOM에 접근하려고 합니다. 민감한 정보가 노출될 수 있습니다. 허용하시겠습니까?",
+    "replacerPermissionConsent": "'{}' 플러그인이 채팅 내용을 바꾸는 권한을 요청합니다. 대화 내용이 조작될 수 있습니다. 허용하시겠습니까?",
+    "providerPermissionConsent": "'{}' 플러그인이 모델 사용 권한을 요청합니다. 사용자가 요청하지 않은 API 호출이 일어날 수 있습니다. 허용하시겠습니까?",
+    "inlayPermissionConsent": "'{}' 플러그인이 인레이 접근 권한을 요청합니다. 플러그인이 인레이를 읽고 쓰고 수정할 수 있습니다. 허용하시겠습니까?",
+    "sendChatConsent": "'{}' 플러그인이 사용자 대신 채팅 메시지를 보내는 권한을 요청합니다. 보낸 메시지에 AI가 응답합니다. 허용하시겠습니까?",
+    "hostToolPermissionConsent": "'{}' 플러그인이 MCP를 포함한 도구 호출 권한을 요청합니다. 플러그인이 데이터를 읽거나 바꿀 수 있습니다. 허용하시겠습니까?",
     "resetAllPluginPermissions": "플러그인 권한 초기화",
     "resetAllPluginPermissionsConfirm": "모든 플러그인의 저장된 권한을 초기화하시겠습니까?\n\n다음에 플러그인이 권한을 요청할 때 다시 묻게 됩니다.",
     "resetAllPluginPermissionsDone": "플러그인 권한을 초기화했습니다",
@@ -1790,6 +1798,13 @@ export const languageKorean = {
     nanoGPTManualInput: "수동 입력",
     nanoGPTManualModelSelect: "수동 모델 선택",
     risuNest: {
+        moduleScope: {
+            info: '글로벌은 모든 채팅, 캐릭터는 이 캐릭터의 모든 채팅, 채팅은 현재 채팅에 모듈을 적용합니다.',
+            global: '글로벌',
+            character: '캐릭터',
+            chat: '채팅',
+            noMatch: '검색 결과가 없습니다.',
+        },
         appLock: {
             title: '앱 잠금',
             enable: '앱 잠금 사용',
@@ -2122,6 +2137,10 @@ export const languageKorean = {
             unsupportedApiVersionLoad:
                 '다음 플러그인은 지원하지 않는 플러그인 API 버전을 사용하므로 실행되지 않았습니다. API 3.0으로 업데이트된 버전을 설치하세요.\n\n{plugins}',
 
+            installViaPlugin: "'{source}' 플러그인이 '{plugin}' 플러그인을 설치하려고 합니다. 설치하시겠습니까?",
+            replaceViaPlugin: "'{source}' 플러그인이 '{plugin}' 플러그인의 코드를 교체하려고 합니다. 교체할 경우 '{plugin}' 플러그인에 저장된 데이터를 새 코드가 사용합니다. 교체하시겠습니까?",
+            replaceSelfViaPlugin: "'{plugin}' 플러그인이 자신의 코드를 교체하려고 합니다. 교체하시겠습니까?",
+
             "removeTitle": "플러그인을 삭제하시겠습니까?",
             "removeDescription": "플러그인 데이터를 함께 삭제할 경우 플러그인을 다시 설치해도 설정과 저장된 내용이 복원되지 않습니다. 플러그인 데이터를 유지하면 다시 설치했을 때 기존 내용을 그대로 사용할 수 있습니다.",
             "removeDataOption": "플러그인 데이터도 삭제",
@@ -2205,6 +2224,7 @@ export const languageKorean = {
         },
         startup: {
             storage: '저장소 여는 중',
+            compacting: '데이터베이스 압축 중 {0}%',
             data: '대화 데이터 준비 중',
             compatibility: '플러그인 호환 데이터 준비 중',
             plugins: '플러그인 준비 중',
@@ -2602,6 +2622,20 @@ export const languageKorean = {
             gcDeletedResult: '삭제됨: {0}개 ({1})',
             gcConfirm:
                 '어디에서도 사용하지 않는 파일 {0}개({1})를 삭제합니다. 계속하시겠습니까?',
+            compactTitle: '데이터베이스 압축',
+            compactHelp: '데이터베이스에서 사용하지 않는 공간을 정리해 파일 크기를 줄이며, 앱이 다시 시작됩니다.',
+            compactReclaimable: '확보 가능 {0}',
+            compact: '압축',
+            compactConfirm:
+                '앱을 다시 시작해 데이터베이스를 압축하며, 시작이 평소보다 오래 걸릴 수 있습니다. 계속하시겠습니까?',
+            compactNoSpace: '저장 공간이 부족해 압축할 수 없습니다. {0} 이상 확보한 뒤 다시 시도하세요.',
+            compactRestartFailed: '앱을 다시 시작하지 못했습니다. 앱을 다시 시작하면 데이터베이스를 압축합니다.',
+            compactOffer:
+                '데이터베이스를 압축하면 {0}의 공간을 확보할 수 있습니다. 압축하면 앱이 다시 시작되며, 시작이 평소보다 오래 걸릴 수 있습니다. 지금 압축하시겠습니까?',
+            compacted: '데이터베이스를 압축해 {0}를 확보했습니다.',
+            compactStartNoSpace:
+                '저장 공간이 부족해 데이터베이스를 압축하지 못했습니다. {0} 이상 확보한 뒤 다시 시도하세요.',
+            compactFailed: '데이터베이스를 압축하지 못했습니다. 다시 시도하세요.',
             deleteSnapshotConfirm:
                 '이 스냅샷을 삭제하시겠습니까? 삭제하면 이 시점으로 되돌릴 수 없습니다.',
             deleteConflictBackupConfirm:
@@ -2686,6 +2720,9 @@ export const languageKorean = {
             actionAdoptStoredPayload: '지금 파일 그대로 쓰기',
             actionNormalizeRecords: '값 다시 계산',
             actionSelectFirstConversation: '첫 채팅 선택',
+            actionSelectFirstPreset: '첫 프리셋 선택',
+            actionSelectFirstPersona: '첫 페르소나 선택',
+            actionAssignEmbeddedModuleId: '모듈에 새 ID 부여',
             actionKeepSingleRecord: '하나만 남기고 정리',
             actionRecoverOrphans: '주인 아래로 되돌리기',
             actionDiscards: '값이 삭제됨',
@@ -3023,6 +3060,13 @@ export const languageKorean = {
             fileLog: '오류 로그를 파일로 저장',
             fileLogHelp: 'API 키 같은 비밀 정보는 가려서 기록합니다.',
             logEmpty: '기록된 오류가 없습니다.',
+            savedLogTitle: '저장된 오류 로그',
+            savedLogHelp: '앱을 다시 시작하기 전의 기록을 포함해 파일에 저장된 오류 로그를 볼 수 있습니다.',
+            savedLogEmpty: '저장된 오류가 없습니다.',
+            savedLogList: '저장된 오류 로그 항목',
+            appStarted: '앱 시작',
+            newerPage: '이전 페이지',
+            olderPage: '다음 페이지',
             actionFailed:
                 '지금은 진단 기능을 사용할 수 없습니다. 앱을 다시 시작한 뒤 다시 시도하세요.',
         },

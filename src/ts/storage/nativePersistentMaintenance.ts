@@ -22,7 +22,6 @@ export type NativeCheckpointMode = 'passive' | 'truncate'
 export interface NativeSnapshotInfo {
     id: string
     reason: string
-    reclaimableBytes: number
     bytes: number
     modifiedAt: number
 }
@@ -43,6 +42,8 @@ export interface NativePersistentStorageStats {
     snapshotBytes: number
     /** Database, WAL and SHM file lengths, including reusable pages. */
     databaseBytes: number
+    /** Free pages of the database files, which compaction returns. */
+    databaseReclaimableBytes: number
     /** Every catalogued file, including those not stored on this device. */
     assetObjects: NativeStorageBytes
     /** The asset files this device stores. */

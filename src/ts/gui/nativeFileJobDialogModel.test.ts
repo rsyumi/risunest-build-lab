@@ -30,6 +30,12 @@ it('orders account asset download after refresh and plugins and exposes separate
         officialAssets: { phase: 'downloading', state: 'running', counts: { required: 10, alreadyPresent: 2, installed: 3, missing: 1, failed: 1, notAttempted: 3 } },
     })
     const history: NativeFileJobStage[] = ['downloading-account-backup', 'reading-database', 'activating', 'cleaning-up', 'refreshing-app', 'reloading-plugins', 'checking-account-assets', 'downloading-account-assets']
+    // Once the database read meets cold items its total is unknown, and the bytes read still show.
+    const reading = buildNativeFileJobDialogModel(running({ format: 'library-backup', observedStages: history.slice(0, 2), status: status({
+        kind: 'restore-official-account-snapshot', detail: detail('reading-database', { stageCompleted: 3 * 1024 * 1024, stageTotal: undefined, stageUnit: 'bytes' }),
+    }) }), null, 2000)
+    expect([reading.overallPercent, reading.indeterminate, reading.overallText]).toEqual([null, true, '3.0 MiB'])
+    expect(reading.stages.find(row => row.stage === 'reading-database')).toMatchObject({ state: 'active', detail: '3.0 MiB' })
     const model = buildNativeFileJobDialogModel(running({ format: 'library-backup', status: current, observedStages: history }), null, 2000)
     expect(model.cancelEnabled).toBe(true)
     expect(model.cancelLabel).toBe(copy.stopAccountAssets)

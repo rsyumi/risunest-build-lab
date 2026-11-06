@@ -1,5 +1,7 @@
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
 import { describe, expect, it, vi } from 'vitest'
+import * as mobileTasks from '../../mobileBackgroundTask'
+import { unprotectedMobileTask } from '../../mobileBackgroundTask.testSupport'
 import {
     coldStorageHeader,
     listCharacterResources,
@@ -439,6 +441,62 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
         await publication.dispose()
     })
 
+    it('holds one background task for the assets and the database, at once when the user starts it and otherwise once the app leaves the screen', async () => {
+        const deferredHold = vi.spyOn(mobileTasks, 'runWithDeferredMobileBackgroundTask')
+        const immediateHold = vi.spyOn(mobileTasks, 'runWithMobileBackgroundTask')
+        const publishers = () => ({
+            nativeDatabasePublisher: vi.fn<OfficialNativeDatabasePublisher>(async () => ({
+                databaseFingerprint: 'f'.repeat(64), acknowledge: vi.fn(async () => {}), completeReload: vi.fn(async () => {}),
+            })),
+            nativeAssetPublisher: vi.fn<OfficialNativeAssetPublisher>(async (input) => {
+                for (const asset of input.assets) input.written(asset.key, `native/${asset.key}`)
+                return true
+            }),
+        })
+        const progress = vi.fn()
+        try {
+            deferredHold.mockImplementationOnce(async (_kind, operation, signal) => operation({ ...unprotectedMobileTask(signal), progress }))
+            for (const userInitiated of [false, true]) {
+                deferredHold.mockClear()
+                immediateHold.mockClear()
+                const { nativeDatabasePublisher, nativeAssetPublisher } = publishers()
+                const harness = await makeHarness({
+                    accountId: 'account-1', nativeDatabasePublisher, nativeAssetPublisher,
+                    flushPublicationMetadata: vi.fn(async () => {}),
+                })
+                await (await harness.adapter.pin(harness.imported.revision, { userInitiated })).publish()
+
+                if (userInitiated) expect(immediateHold).toHaveBeenCalledExactlyOnceWith('sync', expect.any(Function), expect.any(AbortSignal), true)
+                else expect(deferredHold).toHaveBeenCalledExactlyOnceWith('sync', expect.any(Function), expect.any(AbortSignal))
+                expect(deferredHold.mock.calls.length + immediateHold.mock.calls.length).toBe(1)
+                expect(nativeDatabasePublisher.mock.calls[0][0].background).toBe(nativeAssetPublisher.mock.calls[0][0].background)
+                if (!userInitiated) {
+                    const { length } = nativeAssetPublisher.mock.calls[0][0].assets
+                    expect(progress.mock.calls).toEqual(Array.from({ length }, (_, index) => [Math.round((index + 1) * 100 / length)]))
+                }
+            }
+
+            // The platform ending the task stops the publication before the database write.
+            const expiry = new AbortController()
+            deferredHold.mockImplementationOnce(async (_kind, operation) => operation(unprotectedMobileTask(expiry.signal)))
+            const { nativeDatabasePublisher, nativeAssetPublisher } = publishers()
+            nativeAssetPublisher.mockImplementationOnce(async () => {
+                expiry.abort()
+                return false
+            })
+            const harness = await makeHarness({
+                accountId: 'account-1', nativeDatabasePublisher, nativeAssetPublisher,
+                flushPublicationMetadata: vi.fn(async () => {}),
+            })
+            await expect((await harness.adapter.pin(harness.imported.revision)).publish()).rejects.toMatchObject({ name: 'AbortError' })
+            expect(harness.writeItem).not.toHaveBeenCalled()
+            expect(nativeDatabasePublisher).not.toHaveBeenCalled()
+        } finally {
+            deferredHold.mockRestore()
+            immediateHold.mockRestore()
+        }
+    })
+
     it('records no native asset write that settles after the signed-in account changes', async () => {
         let accountId = 'account-1'
         const nativeAssetPublisher = vi.fn<OfficialNativeAssetPublisher>(async (input) => {
@@ -599,7 +657,7 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
             finishCancellation = resolve
         })
         const aborted = new DOMException('native job cancelled', 'AbortError')
-        const nativeDatabasePublisher = vi.fn<OfficialNativeDatabasePublisher>(async ({ signal }) => {
+        const nativeDatabasePublisher = vi.fn<OfficialNativeDatabasePublisher>(async ({ background: { signal } }) => {
             await new Promise<void>((resolve) => {
                 if (signal?.aborted) return resolve()
                 signal?.addEventListener('abort', () => resolve(), { once: true })
@@ -621,7 +679,7 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
         await vi.waitFor(() => expect(nativeDatabasePublisher).toHaveBeenCalledOnce())
         const disposing = publication.dispose()
         await vi.waitFor(() => expect(
-            nativeDatabasePublisher.mock.calls[0][0].signal?.aborted,
+            nativeDatabasePublisher.mock.calls[0][0].background.signal?.aborted,
         ).toBe(true))
         expect(release).not.toHaveBeenCalled()
 

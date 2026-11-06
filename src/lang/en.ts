@@ -1909,7 +1909,8 @@ export const languageEnglish = {
     enableRemoteSaving: "Enable Remote Saving",
     blockquoteStyling: "Blockquote Styling",
     dynamicModelRegistry: "Dynamic Model Registry",
-    confirmInstallPluginViaPlugin: "You are trying to install a plugin via another plugin. This can be dangerous if the source plugin is not trustworthy. Do you want to continue?",
+    confirmInstallPluginViaPlugin: "You are trying to install the plugin \"{plugin}\" via another plugin. This can be dangerous if the source plugin is not trustworthy. Do you want to continue?",
+    confirmReplacePluginViaPlugin: "Another plugin is trying to replace the installed plugin \"{plugin}\" with a different script. This can be dangerous if the source plugin is not trustworthy. Do you want to continue?",
     risuaiProTools: "RisuNest Pro Tools",
     enableRisuaiProTools: "Enable RisuNest Pro Tools",
     easyPanel: "Easy Panel",
@@ -1975,6 +1976,13 @@ export const languageEnglish = {
     skipSavingAssetsOnWebSync: "Skip Saving Assets on Web Sync",
     applyAdditionalParamsToAll: "Apply Additional Parameters to All Models",
     risuNest: {
+        moduleScope: {
+            info: 'Global applies a module to every chat, Character to every chat with this character, and Chat to this chat only.',
+            global: 'Global',
+            character: 'Character',
+            chat: 'Chat',
+            noMatch: 'No modules match the search.',
+        },
         appLock: {
             title: 'App lock',
             enable: 'Use app lock',
@@ -2307,6 +2315,10 @@ export const languageEnglish = {
             unsupportedApiVersionLoad:
                 'These plugins use an unsupported Plugin API version and did not run. Install versions updated to API 3.0.\n\n{plugins}',
 
+            installViaPlugin: 'The plugin "{source}" is trying to install the plugin "{plugin}". Do you want to install it?',
+            replaceViaPlugin: 'The plugin "{source}" is trying to replace the code of the plugin "{plugin}". If you replace it, the new code uses the data saved by "{plugin}". Do you want to replace it?',
+            replaceSelfViaPlugin: 'The plugin "{plugin}" is trying to replace its own code. Do you want to replace it?',
+
             "removeTitle": "Remove this plugin?",
             "removeDescription": "Deleting plugin data also removes its settings and saved content, even if you reinstall the plugin. Keeping plugin data lets you use it again after reinstalling.",
             "removeDataOption": "Also delete plugin data",
@@ -2390,6 +2402,7 @@ export const languageEnglish = {
         },
         startup: {
             storage: 'Opening storage',
+            compacting: 'Compacting database {0}%',
             data: 'Preparing chat data',
             compatibility: 'Preparing plugin compatibility data',
             plugins: 'Preparing plugins',
@@ -2787,6 +2800,20 @@ export const languageEnglish = {
             gcResult: 'Removable: {0} items ({1})',
             gcDeletedResult: 'Deleted: {0} items ({1})',
             gcConfirm: 'This will delete {0} unused files ({1}). Continue?',
+            compactTitle: 'Database compaction',
+            compactHelp: 'Clears unused space in the database to make its files smaller, and restarts the app.',
+            compactReclaimable: '{0} reclaimable',
+            compact: 'Compact',
+            compactConfirm:
+                'The app restarts to compact the database, and the start may take longer than usual. Continue?',
+            compactNoSpace: 'Not enough storage space to compact. Free up at least {0} and try again.',
+            compactRestartFailed: "Couldn't restart the app. The database is compacted the next time the app starts.",
+            compactOffer:
+                'Compacting the database frees {0}. Compacting restarts the app, and the start may take longer than usual. Compact now?',
+            compacted: 'Compacted the database and freed {0}.',
+            compactStartNoSpace:
+                "Not enough storage space to compact the database. Free up at least {0} and try again.",
+            compactFailed: "Couldn't compact the database. Try again.",
             deleteSnapshotConfirm:
                 "Delete this snapshot? You won't be able to restore to this point.",
             deleteConflictBackupConfirm:
@@ -2872,6 +2899,9 @@ export const languageEnglish = {
             actionAdoptStoredPayload: 'Use the file as it is now',
             actionNormalizeRecords: 'Recalculate the values',
             actionSelectFirstConversation: 'Select the first chat',
+            actionSelectFirstPreset: 'Select the first preset',
+            actionSelectFirstPersona: 'Select the first persona',
+            actionAssignEmbeddedModuleId: 'Give the module a new ID',
             actionKeepSingleRecord: 'Keep one and drop the rest',
             actionRecoverOrphans: 'Put them back under an owner',
             actionDiscards: 'deletes the value',
@@ -3209,6 +3239,13 @@ export const languageEnglish = {
             fileLogHelp:
                 'Secrets such as API keys are masked before being written.',
             logEmpty: 'No errors recorded.',
+            savedLogTitle: 'Saved error log',
+            savedLogHelp: 'View the error log saved to the file, including entries from before the app restarted.',
+            savedLogEmpty: 'No errors saved.',
+            savedLogList: 'Saved error log entries',
+            appStarted: 'App started',
+            newerPage: 'Previous page',
+            olderPage: 'Next page',
             actionFailed:
                 'Diagnostics are unavailable right now. Restart the app and try again.',
         },

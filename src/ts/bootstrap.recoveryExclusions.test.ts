@@ -43,6 +43,7 @@ vi.mock('./platform', async () => (await import('./platform.testSupport')).platf
     startup.native ? { runtime: 'tauri', os: 'ios' } : { runtime: 'web', os: 'windows' })))
 vi.mock('./storage/deviceSettings', async () => (await import('./bootstrap.testSupport')).deviceSettingsModule(startup))
 vi.mock('./storage/persistentStorageRuntime', async () => (await import('./bootstrap.testSupport')).persistentStorageRuntimeModule())
+vi.mock('./storage/storeCompaction', async () => (await import('./bootstrap.testSupport')).storeCompactionModule())
 vi.mock('./storage/nativeFileJobRecovery', async original => ({
     ...(await import('./bootstrap.testSupport')).nativeFileJobRecoveryModule(),
     acknowledgeRecoveredNativeRestores: (await original<typeof import('./storage/nativeFileJobRecovery')>()).acknowledgeRecoveredNativeRestores,
@@ -101,14 +102,19 @@ vi.mock('./process/transformers', async () => (await import('./bootstrap.testSup
 vi.mock('./process/files/inlayProviderImage', async () => (await import('./bootstrap.testSupport')).inlayProviderImageModule())
 
 import { loadData } from './bootstrap'
-import { language } from 'src/lang'
+import { changeLanguage, language } from 'src/lang'
+import { languageEnglish } from 'src/lang/en'
+import { languageKorean } from 'src/lang/ko'
+import { bootstrapPersistentDatabase } from './storage/persistentBootstrap'
+import { safeStructuredClone } from './safeStructuredClone'
 import { afterPluginsStarted, keepPluginsOffForThisStart, loadPlugins } from './plugins/plugins.svelte'
 import { pluginStartupGate, configurePluginStartup, setPluginStartupSyncExcluded, retryPluginStartup } from './plugins/pluginStartupGate'
 import { shouldReconcileNativeFileJobs, reconcileNativeFileJobsBeforeBootstrap } from './storage/nativeFileJobRecovery'
 import { alertError, alertNormal, alertToast, alertTOS, waitAlert } from './alert'
 import { invoke } from '@tauri-apps/api/core'
 import { initializePersistentStorage } from './storage/persistentStorageRuntime'
-import { bootFailure } from './stores.svelte'
+import { compactRequestedStoreAtStart, showStoreCompactionNotice } from './storage/storeCompaction'
+import { bootFailure, LoadingStatusState } from './stores.svelte'
 import { loadRisuAccountData } from './drive/accounter'
 import { initializeOfficialAccountBootstrap } from './storage/sync/officialAccountBootstrap'
 import { initializeNativeSyncBindings, installServerSyncProduction } from './storage/sync/serverSyncProduction'
@@ -401,6 +407,35 @@ describe('renderer recovery notice', () => {
     })
 })
 
+describe('store compaction at start', () => {
+    beforeEach(() => {
+        startup.native = true
+        startup.exclusions = []
+        startup.reachUi = true
+        startup.reconcile.mockResolvedValue(undefined)
+    })
+
+    it('compacts before the store opens and reports the result after the terms', async () => {
+        const result = { kind: 'compacted', reclaimedBytes: 4096 } as const
+        vi.mocked(compactRequestedStoreAtStart).mockImplementationOnce(async (show) => {
+            show('synthetic compaction progress')
+            expect(LoadingStatusState.text).toBe('synthetic compaction progress')
+            return result
+        })
+        vi.mocked(initializePersistentStorage).mockImplementationOnce(async () => {
+            expect(LoadingStatusState.text).toBe(language.risuNest.startup.storage)
+        })
+        let answerTerms!: (accepted: boolean) => void
+        vi.mocked(alertTOS).mockReturnValueOnce(new Promise((resolve) => { answerTerms = resolve }))
+        await loadData()
+        expect(vi.mocked(compactRequestedStoreAtStart).mock.invocationCallOrder[0])
+            .toBeLessThan(vi.mocked(initializePersistentStorage).mock.invocationCallOrder[0])
+        expect(showStoreCompactionNotice).not.toHaveBeenCalled()
+        answerTerms(true)
+        await vi.waitFor(() => expect(showStoreCompactionNotice).toHaveBeenCalledExactlyOnceWith(result))
+    })
+})
+
 describe('display recovery record', () => {
     beforeEach(() => {
         startup.native = true
@@ -466,5 +501,35 @@ describe('native setup failure', () => {
             stage: 'native-setup',
         })
         expect(alertError).not.toHaveBeenCalled()
+    })
+})
+
+describe('startup language', () => {
+    // The suite unstubs every global after each test, the setup's clone that changeLanguage uses included.
+    beforeEach(() => vi.stubGlobal('safeStructuredClone', safeStructuredClone))
+    afterEach(() => changeLanguage('en'))
+
+    // The entry applies the device language before the app mounts; Korean stands in for it here.
+    it.each([
+        ['en', languageEnglish.risuNest.startup.data],
+        [undefined, languageKorean.risuNest.startup.data],
+    ])('keeps the start language until the library language (%s) is read', async (libraryLanguage, dataText) => {
+        startup.native = true
+        startup.exclusions = []
+        const shown: string[] = []
+        vi.mocked(initializePersistentStorage).mockImplementationOnce(async () => { shown.push(LoadingStatusState.text) })
+        vi.mocked(bootstrapPersistentDatabase).mockImplementationOnce(async ({ onPhase }) => {
+            await onPhase?.('storage')
+            shown.push(LoadingStatusState.text)
+            await onPhase?.('data', libraryLanguage)
+            shown.push(LoadingStatusState.text)
+            return { database: startup.database, revision: 1 }
+        })
+        changeLanguage('ko')
+
+        await loadData()
+
+        const opening = languageKorean.risuNest.startup.storage
+        expect(shown).toEqual([opening, opening, dataText])
     })
 })
