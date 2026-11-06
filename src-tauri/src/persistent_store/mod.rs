@@ -1,4 +1,5 @@
 pub(crate) mod archive;
+mod archive_asset_names;
 pub(crate) mod author_note;
 mod asset_alias_orphans;
 pub(crate) mod gallery;
@@ -2852,8 +2853,17 @@ impl PersistentStore {
         }
     }
 
+    pub(crate) fn snapshot_create_keeping(
+        &mut self,
+        reason: &str,
+        keep: snapshot::KeepCount,
+    ) -> StoreResult<SnapshotCreated> {
+        snapshot::create(self, reason, keep)
+    }
+
+    #[cfg(test)]
     pub(crate) fn snapshot_create(&mut self, reason: &str) -> StoreResult<SnapshotCreated> {
-        snapshot::create(self, reason)
+        self.snapshot_create_keeping(reason, snapshot::KeepCount::MAX)
     }
 
     pub(crate) fn snapshot_list(&self) -> StoreResult<Vec<SnapshotInfo>> {
