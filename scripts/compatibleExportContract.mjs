@@ -5,6 +5,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import { execFileSync } from "node:child_process";
 
 const require = createRequire(import.meta.url);
@@ -19,7 +20,7 @@ export const references = {
   risuai: {
     directory:
       process.env.RISUAI_REFERENCE ?? fileURLToPath(new URL("../.tmp/test-references/risuai/", import.meta.url)),
-    revision: "02a83695d81eb4e083453c4524b8c7d463df95aa",
+    revision: "ea61945f9038e0189807d075f55f4e66ab7e98bf",
   },
   pocket: {
     directory:
@@ -79,10 +80,71 @@ export function verifyReferenceRevision(target) {
   return rootPath;
 }
 
+// Reference declarations that the reference's own code contradicts, as
+// `Type.field` to the node the reference actually writes and reads, or
+// "nullable" for a required field it also stores null in.
+const referenceCorrections = {
+  // Its settings checkbox writes true, and bootstrap reads the field as truthy.
+  "Database.botSettingAtStart": { kind: "scalar", type: "boolean" },
+  // Applying a preset without thinking tokens stores null.
+  "Database.thinkingTokens": "nullable",
+  // The character format update moves the instructions to the chat note and stores null.
+  "character.postHistoryInstructions": "nullable",
+  // A cleared number setting stores null, which the loader replaces with the default.
+  ...Object.fromEntries(
+    [
+      "loreBookDepth",
+      "loreBookToken",
+      "autoContinueMinTokens",
+      "requestRetrys",
+      "genTime",
+      "assetMaxDifference",
+      "localNetworkTimeoutSec",
+      "maxContext",
+      "maxResponse",
+      "generationSeed",
+    ].map((field) => [`Database.${field}`, "nullable"]),
+  ),
+  // Saving the preset copies a cleared maxContext or maxResponse into it.
+  "botPreset.maxContext": "nullable",
+  "botPreset.maxResponse": "nullable",
+};
+
 export function generateContract(target) {
   const reference = references[target];
   const rootPath = verifyReferenceRevision(target);
   const { root, types, nodes, files } = sourceContract(rootPath);
+  const intern = (node) => {
+    const id =
+      Object.keys(nodes).find((id) => isDeepStrictEqual(nodes[id], node)) ??
+      `n${Object.keys(nodes).length}`;
+    nodes[id] = node;
+    return id;
+  };
+  const nullable = (id) =>
+    nodes[id].kind === "never" || acceptsContract({ nodes }, id, null)
+      ? id
+      : intern({
+          kind: "union",
+          variants: [
+            intern({ kind: "scalar", type: "null" }),
+            ...(nodes[id].kind === "union" ? nodes[id].variants : [id]),
+          ],
+        });
+  // The references compile without strictNullChecks and their loaders treat
+  // null like a missing value, so they store null in optional fields too.
+  for (const node of Object.values(nodes))
+    for (const field of node.kind === "object" ? Object.values(node.fields) : [])
+      if (field.optional) field.node = nullable(field.node);
+  for (const [name, correction] of Object.entries(referenceCorrections)) {
+    const [type, field] = name.split(".");
+    const declared = nodes[types[type]]?.fields[field];
+    if (!declared) throw new Error(`${target} reference no longer declares ${name}`);
+    const corrected = correction === "nullable" ? nullable(declared.node) : intern(correction);
+    if (isDeepStrictEqual(nodes[corrected], nodes[declared.node]))
+      throw new Error(`${target} reference already declares ${name} as corrected`);
+    declared.node = corrected;
+  }
   for (const name of [
     "src/ts/storage/risuSave.ts",
     "src/ts/bootstrap.ts",

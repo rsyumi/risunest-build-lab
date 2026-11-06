@@ -699,7 +699,9 @@ function overallOf(
                 indeterminate: false,
             }
         }
-        return { overallPercent: null, overallText: exporting && detail ? progressText(detail.stageCompleted, detail.stageTotal, detail.stageUnit) : '', indeterminate: terminalState === null }
+        // A restore stage that reads bytes of unknown total still shows how much it has read.
+        const measured = detail && (exporting || detail.stageUnit === 'bytes')
+        return { overallPercent: null, overallText: measured ? progressText(detail.stageCompleted, detail.stageTotal, detail.stageUnit) : '', indeterminate: terminalState === null }
     }
     if (total && total > 0) {
         return {

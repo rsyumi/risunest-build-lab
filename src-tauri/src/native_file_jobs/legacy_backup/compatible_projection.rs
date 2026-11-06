@@ -789,6 +789,8 @@ mod tests {
     fn compatible_projection_replaces_values_pocket_lacks_with_the_closest_supported_value() {
         let database = json!({
             "adaptiveThinkingEffort": "xhigh",
+            // Both references declare this as false but write and read true.
+            "botSettingAtStart": true,
             "customFlags": [21, 23, 26],
             "customModels": [
                 {"name": "Synthetic V4", "tokenizer": 14, "flags": [0, 24]},
@@ -806,6 +808,7 @@ mod tests {
         let mut projector = Projector::new(CompatibilityTarget::PocketRisu).unwrap();
         assert_eq!(projector.project("DataBase", &database).unwrap(), json!({
             "adaptiveThinkingEffort": "high",
+            "botSettingAtStart": true,
             "customFlags": [21],
             "customModels": [
                 {"name": "Synthetic V4", "tokenizer": 13, "flags": [0]},
@@ -828,6 +831,32 @@ mod tests {
             error.message,
             "value is not supported by target contract at DataBase.customModels[0].format"
         );
+    }
+
+    #[test]
+    fn compatible_projection_keeps_null_where_the_references_store_it() {
+        // Both references store these nulls; thinkingTokens,
+        // postHistoryInstructions and the cleared number settings are
+        // required fields.
+        let records = [
+            ("DataBase", json!({"thinkingTokens": null, "textScreenColor": null, "textScreenBorder": null, "promptTemplate": null})),
+            ("DataBase", json!({
+                "loreBookDepth": null, "loreBookToken": null, "autoContinueMinTokens": null, "requestRetrys": null,
+                "genTime": null, "assetMaxDifference": null, "localNetworkTimeoutSec": null, "maxContext": null,
+                "maxResponse": null, "generationSeed": null,
+            })),
+            ("botPreset", json!({"maxContext": null, "maxResponse": null})),
+            ("character", json!({"postHistoryInstructions": null})),
+            ("Chat", json!({"folderId": null})),
+            ("Message", json!({"role": "user", "data": "synthetic", "name": null})),
+        ];
+        for target in [CompatibilityTarget::RisuAi, CompatibilityTarget::PocketRisu] {
+            let mut projector = Projector::new(target).unwrap();
+            for (name, value) in &records {
+                assert_eq!(projector.project(name, value).map_err(|error| error.message), Ok(value.clone()));
+            }
+            assert!(projector.losses.0.is_empty());
+        }
     }
 
     #[test]

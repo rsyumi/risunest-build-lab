@@ -71,6 +71,7 @@ mod regex_shadow;
 #[cfg(not(target_os = "android"))]
 mod renderer_recovery;
 mod server_sync;
+mod slow_log;
 mod sqlite_open;
 mod trust_boundary;
 #[cfg(test)]
@@ -602,6 +603,7 @@ fn builder_with_main_window(
             );
             setup_native_log_state.configure_file_path(&app_data_dir);
             app.manage(setup_native_log_state.clone());
+            slow_log::start_stall_watch();
             app.manage(app_cleanup::CleanupState::initialize(app.handle())?);
             app.manage(native_file_jobs::NativeFileJobState::initialize(
                 app_data_dir.join("native-file-jobs"),
@@ -878,6 +880,9 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         #[cfg(desktop)]
         appimage_integration::appimage_integration_register,
         persistent_store::commands::pds_storage_stats,
+        persistent_store::commands::pds_store_compaction_at_start,
+        persistent_store::commands::pds_store_compaction_request,
+        persistent_store::commands::pds_store_compaction_offer,
         persistent_store::commands::pds_snapshot_delete,
         persistent_store::commands::pds_asset_gc_preview,
         persistent_store::commands::pds_asset_gc_execute,
@@ -903,6 +908,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         native_log::native_log_set_file_enabled,
         native_tokenizer::tokenize_batch,
         native_media::native_media_encode_inlay_image,
+        native_media::ipc::native_media_encode_canvas_webp,
+        native_media::ipc::native_media_encode_canvas_webp_finish,
         native_media::ipc::native_media_inlay_input_open,
         native_media::ipc::native_media_inlay_input_chunk,
         native_media::ipc::native_media_inlay_input_chunk_raw,

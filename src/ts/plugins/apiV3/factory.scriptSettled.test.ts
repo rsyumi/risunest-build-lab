@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SandboxHost, UNREAD_PLUGIN_STREAM_TIMEOUT_MS } from './factory'
 import { invoke } from '@tauri-apps/api/core'
 import { consoleLog } from '../../consoleLog'
+import { readFileSync } from 'node:fs'
+import { encodeNativeCanvasWebp } from './nativeCanvasWebp'
 const platform = vi.hoisted(() => ({ native: false }))
 vi.mock('../../platform', async () => (await import('../../platform.testSupport')).platformModule(() => ({ runtime: platform.native ? 'tauri' : 'web', os: 'windows' })))
 vi.mock('@tauri-apps/api/core', async importOriginal => ({
@@ -28,8 +30,9 @@ async function runGuest(host: SandboxHost, code: string, prepare?: (child: Windo
     vi.spyOn(window, 'postMessage').mockImplementation((data: unknown) => {
         window.dispatchEvent(new MessageEvent('message', { data, source: child }))
     })
-    vi.spyOn(child.parent, 'postMessage').mockImplementation((data: unknown) => {
-        window.dispatchEvent(new MessageEvent('message', { data, source: child }))
+    vi.spyOn(child.parent, 'postMessage').mockImplementation(function (data: unknown) {
+        const transfer = (arguments[2] as Transferable[] | undefined) ?? []
+        window.dispatchEvent(new MessageEvent('message', { data, source: child, ports: transfer as MessagePort[] }))
     })
     vi.spyOn(child, 'postMessage').mockImplementation(function (
         data: unknown,
@@ -292,6 +295,43 @@ describe('sandbox script completion', () => {
         }
     })
 
+    // plugin-http fails a response body with plain strings, such as 'Request cancelled'.
+    it.each([
+        ['host', 'Request cancelled'],
+        ['host', undefined],
+        ['plugin', 'Request cancelled'],
+        ['plugin', undefined],
+    ] as const)('delivers a %s stream that fails with %s as an error, not as its end', async (owner, reason) => {
+        let callback!: () => Promise<ReadableStream>
+        const host = new SandboxHost({
+            ...bridgeStubs(),
+            stream: () => new ReadableStream({ start(controller) { controller.enqueue('chunk') }, pull: () => Promise.reject(reason) }),
+            register: (fn: typeof callback) => { callback = fn },
+        })
+        const thrown = JSON.stringify(reason) ?? 'undefined'
+        const child = await runGuest(host, owner === 'host'
+            ? `globalThis.response = await risuai.stream()`
+            : `await risuai.register(() => new ReadableStream({ start(controller) { controller.enqueue('chunk') }, pull: () => Promise.reject(${thrown}) }))`,
+            // happy-dom frames lack MessageChannel, which the plugin side needs to send a stream.
+            child => Object.assign(child, { MessageChannel }))
+        let stream: ReadableStream
+        if (owner === 'host') {
+            await vi.waitFor(() => expect((child as any).response).toBeDefined())
+            stream = (child as any).response
+        } else {
+            await vi.waitFor(() => expect(callback).toBeTypeOf('function'))
+            stream = await callback()
+        }
+        const reader = stream.getReader()
+        expect(await reader.read()).toEqual({ done: false, value: 'chunk' })
+        const failure = await reader.read().then(() => undefined, (error: unknown) => error)
+        expect((failure as Error | undefined)?.message).toBe(reason ?? 'Stream failed')
+        // The plugin sees what fetch reports for a body that fails midway.
+        if (owner === 'host') expect(failure).toBeInstanceOf((child as any).TypeError)
+        await vi.waitFor(() => expect(host.isIdle()).toBe(true))
+        host.terminate()
+    })
+
     // Each method reads the signal field of the host function it reaches.
     it.each([
         ['nativeFetch', 'signal' satisfies keyof Parameters<typeof fetchNative>[1]],
@@ -536,6 +576,167 @@ describe('sandbox script completion', () => {
     })
 })
 
+describe('native canvas WebP fallback', () => {
+    const imageFixture = (name: string) => new Uint8Array(readFileSync(`tests/fixtures/images/${name}`))
+    const webpResult = (bytes: Uint8Array, side = 1) => ({ data: [...bytes], outputSize: bytes.length, metadata: { mime: 'image/webp', size: bytes.length, width: side, height: side } })
+
+    /** A WebView canvas without WebP encoding returns its PNG snapshot for WebP requests. */
+    function preparePngCanvas(child: Window & typeof globalThis, side: number, pixels: number[]) {
+        Object.assign(child, {
+            // happy-dom's postMessage shim does not clone views into the receiving realm.
+            Uint8Array,
+            createImageBitmap: vi.fn(async () => ({ width: side, height: side, close() {} })),
+            OffscreenCanvas: class {
+                async convertToBlob() { return new child.Blob(['PNG fallback'], { type: 'image/png' }) }
+            },
+        })
+        vi.spyOn(child.HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+            drawImage() {},
+            getImageData: () => ({ data: new Uint8ClampedArray(pixels) }),
+        } as unknown as CanvasRenderingContext2D)
+        vi.spyOn(child.HTMLCanvasElement.prototype, 'toBlob').mockImplementation(callback => {
+            callback(new child.Blob(['PNG fallback'], { type: 'image/png' }))
+        })
+    }
+
+    beforeEach(() => vi.mocked(invoke).mockReset())
+    afterEach(() => {
+        platform.native = false
+        vi.mocked(invoke).mockReset()
+        vi.restoreAllMocks()
+    })
+
+    it.each([['toBlob', 1], ['convertToBlob', 1], ['convertToBlob', 129]] as const)('lets a plugin save WebP through %s at %s pixels per side when the native WebView canvas falls back to PNG', async (method, side) => {
+        platform.native = true
+        const bytes = imageFixture('still.webp')
+        const pixels = Array.from({ length: side * side }, () => [20, 40, 80, 128]).flat()
+        const uploaded: number[] = []
+        vi.mocked(invoke).mockImplementation(async (command, args) => {
+            const input = args as any
+            if (command === 'native_asset_bytes_probe') return false
+            if (command === 'native_media_inlay_input_open') return { capacity: 64 * 1024 }
+            if (command === 'native_media_inlay_input_chunk') {
+                uploaded.push(...input.data)
+                return uploaded.length
+            }
+            if (command === 'native_media_inlay_input_cancel') return
+            if (command !== 'native_media_encode_canvas_webp' && command !== 'native_media_encode_canvas_webp_finish') throw new Error(`Unexpected command: ${command}`)
+            expect(args).toMatchObject({ width: side, height: side, quality: 0.85 })
+            expect(command === 'native_media_encode_canvas_webp' ? input.data : uploaded).toEqual(pixels)
+            return webpResult(bytes, side)
+        })
+        const host = new SandboxHost(bridgeStubs())
+        const child = await runGuest(host, `
+            try {
+                const canvas = ${method === 'toBlob' ? "document.createElement('canvas')" : 'new OffscreenCanvas(1, 1)'};
+                canvas.width = canvas.height = ${side};
+                const options = { type: 'image/webp', quality: 0.85 };
+                const pending = ${method === 'toBlob' ? "new Promise(resolve => canvas.toBlob(resolve, 'image/webp', 0.85))" : 'canvas.convertToBlob(options)'};
+                options.quality = 0.1;
+                const blob = await pending;
+                if (!blob || blob.type !== 'image/webp') throw new Error('이 브라우저는 WebP 저장을 지원하지 않습니다.');
+                window.savedType = blob.type;
+                window.savedBytes = [...new Uint8Array(await blob.arrayBuffer())];
+            } catch (error) { window.encodingError = error.message; }
+        `, child => preparePngCanvas(child, side, pixels))
+        await vi.waitFor(() => expect((child as any).savedType ?? (child as any).encodingError).toBeDefined())
+        expect((child as any).encodingError).toBeUndefined()
+        expect((child as any).savedType).toBe('image/webp')
+        await vi.waitFor(() => expect((child as any).savedBytes).toEqual([...bytes]))
+        host.terminate()
+    })
+
+    it.each(['toBlob', 'convertToBlob'] as const)('keeps the browser PNG from %s when native WebP encoding fails', async method => {
+        platform.native = true
+        vi.mocked(invoke).mockRejectedValue(new Error('native media transfer capacity is unavailable'))
+        const host = new SandboxHost(bridgeStubs())
+        const child = await runGuest(host, `
+            const canvas = ${method === 'toBlob' ? "document.createElement('canvas')" : 'new OffscreenCanvas(1, 1)'};
+            const blob = await ${method === 'toBlob' ? "new Promise(resolve => canvas.toBlob(resolve, 'image/webp', 0.85))" : "canvas.convertToBlob({ type: 'image/webp', quality: 0.85 })"};
+            window.saved = { type: blob?.type, text: await blob?.text() };
+        `, child => preparePngCanvas(child, 1, [20, 40, 80, 128]))
+        await vi.waitFor(() => expect((child as any).saved).toEqual({ type: 'image/png', text: 'PNG fallback' }))
+        host.terminate()
+    })
+
+    it('encodes concurrent plugin canvases one at a time within the native transfer limit', async () => {
+        const bytes = imageFixture('still.webp')
+        let active = 0
+        vi.mocked(invoke).mockImplementation(async () => {
+            // The native transfer pool refuses requests past four in flight.
+            if (active === 4) throw new Error('native media transfer capacity is unavailable')
+            active += 1
+            await Promise.resolve()
+            active -= 1
+            return webpResult(bytes)
+        })
+        const encoded = await Promise.all(Array.from({ length: 6 }, () => encodeNativeCanvasWebp(new Uint8Array(4), 1, 1, 0.85)))
+        expect(encoded).toEqual(Array(6).fill(bytes))
+    })
+
+    it('skips the queued canvases of a plugin that was terminated', async () => {
+        const bytes = imageFixture('still.webp')
+        let release!: () => void
+        vi.mocked(invoke).mockImplementationOnce(async () => {
+            await new Promise<void>(resolve => { release = resolve })
+            return webpResult(bytes)
+        }).mockResolvedValue(webpResult(bytes))
+        let terminated = false
+        const first = encodeNativeCanvasWebp(new Uint8Array(4), 1, 1, 0.85)
+        const queued = encodeNativeCanvasWebp(new Uint8Array(4), 1, 1, 0.85, () => terminated)
+        await vi.waitFor(() => expect(release).toBeDefined())
+        terminated = true
+        release()
+        await expect(first).resolves.toEqual(bytes)
+        await expect(queued).rejects.toThrow(/cancelled/)
+    })
+
+    it.each([
+        { native: true, type: 'image/webp', resultType: 'image/webp' },
+        { native: true, type: 'image/jpeg', resultType: 'image/jpeg' },
+        { native: false, type: 'image/webp', resultType: 'image/png' },
+    ])('keeps browser encoding for $type on native=$native when it needs no native fallback', async ({ native, type, resultType }) => {
+        platform.native = native
+        const host = new SandboxHost(bridgeStubs())
+        const child = await runGuest(host, `
+            const canvas = document.createElement('canvas');
+            window.savedBlob = await new Promise(resolve => canvas.toBlob(resolve, '${type}'));
+        `, child => {
+            const blob = new child.Blob(['browser bytes'], { type: resultType })
+            ;(child as any).originalBlob = blob
+            vi.spyOn(child.HTMLCanvasElement.prototype, 'toBlob').mockImplementation(callback => callback(blob))
+        })
+        await vi.waitFor(() => expect((child as any).savedBlob).toBe((child as any).originalBlob))
+        expect(invoke).not.toHaveBeenCalled()
+        host.terminate()
+    })
+
+    it.each([false, true])('rejects malformed private canvas requests before native work on native=%s', async native => {
+        platform.native = native
+        const host = new SandboxHost(bridgeStubs())
+        const child = await runGuest(host, `
+            try { await risuai._encodeCanvasWebp(new Uint8Array(4), 16384, 1, 0.85); }
+            catch (error) { window.encodingError = error.message; }
+        `)
+        await vi.waitFor(() => expect((child as any).encodingError).toMatch(native ? /Invalid plugin WebP canvas input/ : /unavailable/))
+        expect(invoke).not.toHaveBeenCalled()
+        host.terminate()
+    })
+
+    it('rejects native bytes that are labelled WebP but contain PNG', async () => {
+        platform.native = true
+        const data = imageFixture('still.png')
+        vi.mocked(invoke).mockResolvedValue(webpResult(data))
+        const host = new SandboxHost(bridgeStubs())
+        const child = await runGuest(host, `
+            try { await risuai._encodeCanvasWebp(new Uint8Array(4), 1, 1, 0.85); }
+            catch (error) { window.encodingError = error.message; }
+        `, child => Object.assign(child, { Uint8Array }))
+        await vi.waitFor(() => expect((child as any).encodingError).toMatch(/Invalid plugin WebP canvas bytes/))
+        host.terminate()
+    })
+})
+
 describe('sandbox result lifetime and policy', () => {
     afterEach(() => {
         vi.restoreAllMocks()
@@ -578,6 +779,31 @@ describe('sandbox result lifetime and policy', () => {
         expect(post).not.toHaveBeenCalled()
         host.terminate()
         expect(cancel).toHaveBeenCalledTimes(1)
+    })
+
+    it('releases every instance a batched release names and keeps the others callable', async () => {
+        const host = new SandboxHost({ make: (label: string) => ({ __classType: 'REMOTE_REQUIRED', label: () => label }) })
+        const frame = document.createElement('iframe')
+        document.body.append(frame)
+        host.run(frame, '')
+        const post = vi.spyOn(frame.contentWindow!, 'postMessage')
+        const send = (data: unknown) => window.dispatchEvent(new MessageEvent('message', { source: frame.contentWindow, data }))
+        const reply = async (reqId: string) => {
+            await vi.waitFor(() => expect(post.mock.calls.some(([message]) => message.reqId === reqId)).toBe(true))
+            return post.mock.calls.find(([message]) => message.reqId === reqId)![0]
+        }
+        const ids: string[] = []
+        for (const label of ['first', 'second', 'kept']) {
+            send({ type: 'CALL_ROOT', method: 'make', reqId: `make-${label}`, args: [label] })
+            ids.push((await reply(`make-${label}`)).result.id)
+        }
+        expect(new Set(ids).size).toBe(3)
+        send({ type: 'RELEASE_INSTANCE', ids: ids.slice(0, 2) })
+        ids.forEach((id, index) => send({ type: 'CALL_INSTANCE', id, method: 'label', reqId: `label-${index}`, args: [] }))
+        expect((await reply('label-0')).error).toMatch(/not found or released/)
+        expect((await reply('label-1')).error).toMatch(/not found or released/)
+        expect((await reply('label-2')).result).toBe('kept')
+        host.terminate()
     })
 
     it('cancels an undeliverable response body', async () => {

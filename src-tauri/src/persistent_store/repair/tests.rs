@@ -71,7 +71,7 @@ fn check_repair_and_undo_sync_identity(external: bool) {
     store.connection.execute_batch("DELETE FROM content_changes; ").unwrap();
     let (_, journal) = store.apply_repair(1, &[candidate(RepairAction::DropReference {
         owner: crate::data_health::Owner { kind: "root".into(), id: "database".into() },
-        source_path: "$.userIcon".into(), occurrence: 0,
+        source_path: "$.userIcon".into(), occurrence: 0, token: None,
     })], 10).unwrap();
     for revision in [2, 3] {
         if revision == 3 { store.undo_repair(&journal, 2).unwrap(); }
@@ -102,6 +102,7 @@ fn a_reference_removal_rewrites_only_the_field_it_names() {
                 },
                 source_path: "$.userIcon".to_owned(),
                 occurrence: 0,
+                token: None,
             })],
             10,
         )
@@ -163,6 +164,7 @@ fn several_removals_in_one_record_keep_naming_the_same_elements() {
                     owner: owner.clone(),
                     source_path: "$.enabledModules[0]".to_owned(),
                     occurrence: 0,
+                    token: None,
                 }),
                 RepairCandidate {
                     id: "1:test".to_owned(),
@@ -170,6 +172,7 @@ fn several_removals_in_one_record_keep_naming_the_same_elements() {
                         owner,
                         source_path: "$.enabledModules[1]".to_owned(),
                         occurrence: 1,
+                        token: None,
                     })
                 },
             ],
@@ -197,6 +200,7 @@ fn an_undo_restores_the_previous_image_and_raises_the_revision() {
                 },
                 source_path: "$.userIcon".to_owned(),
                 occurrence: 0,
+                token: None,
             })],
             10,
         )
@@ -221,6 +225,7 @@ fn an_undo_leaves_a_record_the_reader_changed_after_the_repair() {
                 },
                 source_path: "$.userIcon".to_owned(),
                 occurrence: 0,
+                token: None,
             })],
             10,
         )
@@ -274,6 +279,7 @@ fn a_repair_onto_another_revision_is_refused_before_anything_is_staged() {
                 },
                 source_path: "$.userIcon".to_owned(),
                 occurrence: 0,
+                token: None,
             })],
             10,
         )
@@ -310,6 +316,7 @@ fn a_repair_that_leaves_the_library_refused_is_not_applied() {
                 },
                 source_path: "$.userIcon".to_owned(),
                 occurrence: 0,
+                token: None,
             })],
             10,
         )
@@ -356,6 +363,7 @@ fn a_repair_is_applied_while_the_sync_server_holds_a_body_this_device_does_not()
                 },
                 source_path: "$.userIcon".to_owned(),
                 occurrence: 0,
+                token: None,
             })],
             10,
         )
@@ -415,6 +423,7 @@ fn a_path_no_record_uses_changes_nothing() {
                 },
                 source_path: "$.neverPresent".to_owned(),
                 occurrence: 0,
+                token: None,
             })],
             10,
         )
@@ -439,8 +448,22 @@ fn parse_path_reads_the_shapes_the_reference_graph_emits() {
             Step::Key("data".to_owned()),
         ])
     );
+    for key in ["$__name.with.dots", "한글 변수", "a]b", "quote\"and\\slash", "123", ""] {
+        let path = format!("{}[0]", crate::lossless_f0::property_path("$.scriptstate", key));
+        assert_eq!(
+            parse_path(&path),
+            Some(vec![
+                Step::Key("scriptstate".to_owned()),
+                Step::Key(key.to_owned()),
+                Step::Index(0),
+            ]),
+            "{path}"
+        );
+    }
     assert_eq!(parse_path("userIcon"), None);
     assert_eq!(parse_path("$.a[x]"), None);
+    assert_eq!(parse_path(r#"$.a["unterminated]"#), None);
+    assert_eq!(parse_path(r#"$.a["b"x]"#), None);
 }
 
 #[test]
@@ -456,7 +479,7 @@ fn a_failure_during_repair_activation_preserves_live_data_identity_and_capture()
         WHEN NEW.key='currentRevision' BEGIN SELECT RAISE(ABORT,'synthetic activation failure'); END;").unwrap();
     assert!(store.apply_repair(1, &[candidate(RepairAction::DropReference {
         owner: crate::data_health::Owner { kind: "root".into(), id: "database".into() },
-        source_path: "$.userIcon".into(), occurrence: 0,
+        source_path: "$.userIcon".into(), occurrence: 0, token: None,
     })], 10).is_err());
     let after = super::super::sync_selection::identity(&store.connection).unwrap();
     assert_eq!(after.library_epoch, before.library_epoch);
@@ -545,7 +568,7 @@ fn measures_single_reference_repair_and_undo_on_a_large_library() {
     let started = std::time::Instant::now();
     let (repaired, journal) = store.apply_repair(identity.revision, &[candidate(RepairAction::DropReference {
         owner: crate::data_health::Owner { kind: "root".into(), id: "database".into() },
-        source_path: "$.userIcon".into(), occurrence: 0,
+        source_path: "$.userIcon".into(), occurrence: 0, token: None,
     })], 10).unwrap();
     let repair_ms = started.elapsed().as_millis();
     let repair_after = footprint();
@@ -592,7 +615,15 @@ fn library() -> (tempfile::TempDir, PersistentStore) {
     let mut store = PersistentStore::open(directory.path()).unwrap();
     let staging = store.replace_begin().unwrap().staging_id;
     store
-        .replace_put_root(&staging, &json!({ "customBackground": "assets/missing.png" }))
+        .replace_put_root(
+            &staging,
+            &json!({
+                "customBackground": "assets/missing.png",
+                "personas": [{ "id": "persona-a", "name": "P", "icon": "assets/missing.png" }],
+                "modules": [{ "id": "module-a", "name": "M", "assets": [["gone", "assets/missing.png", "png"]] }],
+                "loadouts": [{ "id": "loadout-a", "name": "Loadout", "characterIds": ["char-gone"] }],
+            }),
+        )
         .unwrap();
     store
         .replace_put_presets(
@@ -651,6 +682,7 @@ fn drop_reference(kind: &str, id: &str, path: &str) -> RepairCandidate {
         owner: owner(kind, id),
         source_path: path.to_owned(),
         occurrence: 0,
+        token: None,
     })
 }
 
@@ -823,6 +855,9 @@ fn references_dropped_from_records_reach_the_outbox() {
         ("preset", "preset-a", "$.bias[0]", unit(&["preset", "preset-a", "bias"])),
         ("character", "char-a", "$.emotionImages[0]", unit(&["character", "char-a", "emotionImages"])),
         ("conversation", "char-a/conv-a", "$.note", unit(&["conversation", "char-a", "conv-a", "note"])),
+        ("persona", "persona-a", "$.icon", unit(&["persona", "persona-a", "icon"])),
+        ("module", "module-a", "$.assets[0]", unit(&["record", "modules", "module-a"])),
+        ("loadout", "Loadout", "$.characterIds[0]", unit(&["record", "loadouts", "loadout-a"])),
     ] {
         let (_directory, mut store) = library();
         check_repair_and_undo(&mut store, &[drop_reference(kind, id, path)], &[changed]);
@@ -1202,20 +1237,284 @@ fn diagnosis_repairs_duplicate_preset_names_and_scoped_plugin_keys() {
         let (repaired, journal) = store.apply_repair(revision, &selected, 10).unwrap();
         let changed = if plugin { unit(&["plugin", "plugin/a", key]) } else { unit(&["preset", "preset-a", "image"]) };
         check_step(&mut store, "diagnosed repair", &before, &[changed.clone()]);
-        let (table, selected_id, other_id, field) = if plugin {
-            ("plugin_storage", vec!["plugin/a", key], vec!["plugin/b", key], "icon")
-        } else { ("bot_presets", vec!["preset-a"], vec!["preset-b"], "image") };
-        assert!(json_record(&store, table, &selected_id).get(field).is_none());
-        assert!(json_record(&store, table, &other_id).get(field).is_some());
+        // An inlay is cut from the plugin's text, while the preset's image field goes.
+        let (table, selected_id, other_id, field, original, repaired_value) = if plugin {
+            ("plugin_storage", vec!["plugin/a", key], vec!["plugin/b", key], "icon", json!("{{inlay::missing}}"), Some(json!("")))
+        } else { ("bot_presets", vec!["preset-a"], vec!["preset-b"], "image", json!("assets/missing.png"), None) };
+        assert_eq!(json_record(&store, table, &selected_id).get(field), repaired_value.as_ref());
+        assert_eq!(json_record(&store, table, &other_id).get(field), Some(&original));
         drop(store);
         let mut store = PersistentStore::open(directory.path()).unwrap();
-        assert!(json_record(&store, table, &selected_id).get(field).is_none());
+        assert_eq!(json_record(&store, table, &selected_id).get(field), repaired_value.as_ref());
         let before = queued(&store);
         let (_, skipped) = store.undo_repair(&journal, repaired.revision).unwrap();
         assert!(skipped.is_empty());
-        assert!(json_record(&store, table, &selected_id).get(field).is_some());
+        assert_eq!(json_record(&store, table, &selected_id).get(field), Some(&original));
         check_step(&mut store, "diagnosed undo", &before, &[changed]);
     }
+}
+
+/// A repair names an owner inside the root by its identity, so when it is applied it edits the
+/// entry that carries that identity wherever the entry has moved, and it is refused when no single
+/// entry carries it any more.
+#[test]
+fn a_repair_finds_its_entry_in_the_root_again_when_applied() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    let a = json!({ "id": "persona-a", "name": "A", "icon": "assets/missing.png" });
+    let b = json!({ "id": "persona-b", "name": "B", "icon": "assets/kept.png" });
+    let loadout = json!({ "id": "loadout-a", "name": "Loadout", "characterIds": ["char-gone"] });
+    let staging = store.replace_begin().unwrap().staging_id;
+    store
+        .replace_put_root(&staging, &json!({ "personas": [a, b], "loadouts": [loadout] }))
+        .unwrap();
+    store.replace_commit(&staging, Some(0)).unwrap();
+    stored_alias(&mut store, 9);
+    // The root selects no preset or persona, and removing a selection cannot answer that.
+    let selected = diagnosed_candidates(&mut store, |action| matches!(action, RepairAction::DropReference { .. }));
+    assert_eq!(selected.len(), 2, "{selected:?}");
+    let revision = store.revision().unwrap();
+    // The lists change under the diagnosis without a save moving the revision.
+    let generation = active_generation(&store.connection).unwrap();
+    let rewrite = |store: &PersistentStore, personas: Value, loadouts: Value| {
+        store
+            .connection
+            .execute(
+                "UPDATE root SET value=json_set(value, '$.personas', json(?2), '$.loadouts', json(?3)) WHERE generation=?1",
+                rusqlite::params![generation, personas.to_string(), loadouts.to_string()],
+            )
+            .unwrap();
+    };
+
+    let other = json!({ "id": "loadout-b", "name": "Loadout", "characterIds": ["char-gone"] });
+    rewrite(&store, json!([a, b]), json!([loadout, other]));
+    let before = root_of(&store);
+    let error = store.apply_repair(revision, &selected, 10).unwrap_err();
+    assert!(matches!(error, StoreError::Validation { .. }), "{error:?}");
+    assert_eq!(store.revision().unwrap(), revision);
+    assert_eq!(root_of(&store), before, "neither loadout carrying the name is edited");
+
+    rewrite(&store, json!([b, a]), json!([loadout]));
+    store.apply_repair(revision, &selected, 10).unwrap();
+    let root = root_of(&store);
+    assert_eq!(root["personas"], json!([b, { "id": "persona-a", "name": "A" }]));
+    assert_eq!(root["loadouts"], json!([{ "id": "loadout-a", "name": "Loadout", "characterIds": [] }]));
+}
+
+/// The manifest an import keeps for a module's assets, which describes exactly these tuples.
+fn owner_head(store: &PersistentStore, owner: crate::persistent_store::AssetOwnerLocator, tuples: &[[&str; 3]]) -> crate::persistent_store::AssetOwnerHead {
+    use crate::asset_repository::owner_manifest_codec::{encode_owner_manifest, OwnerManifestEntry};
+    let entries: Vec<_> = tuples
+        .iter()
+        .map(|tuple| OwnerManifestEntry { tuple: tuple.map(str::to_owned), payload_hash: None })
+        .collect();
+    let cas = crate::asset_repository::PayloadCas::new(store.repository_root()).unwrap();
+    let manifest = cas.prepare_bytes(&encode_owner_manifest(&entries).unwrap()).unwrap();
+    crate::persistent_store::AssetOwnerHead::present(owner, manifest.content_hash, entries.len() as i64)
+}
+
+fn owner_heads(store: &PersistentStore) -> Vec<(String, String)> {
+    store
+        .connection
+        .prepare("SELECT owner_kind, owner_locator FROM asset_owner_heads WHERE generation=?1 ORDER BY 1, 2")
+        .unwrap()
+        .query_map([active_generation(&store.connection).unwrap()], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// Selecting everything the diagnosis offers applies as one repair, and each change removes the
+/// dangling reference itself: an inlay token leaves the text around it, an asset tuple goes as a
+/// whole, and a reference the repair cannot address is not offered. An owner inside the root is
+/// edited where one entry carries its identity, and a module or character whose assets change
+/// loses the manifest that described them.
+#[test]
+fn every_offered_reference_repair_applies_and_removes_only_the_reference() {
+    use crate::persistent_store::AssetOwnerLocator;
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    let staging = store.replace_begin().unwrap().staging_id;
+    // A loadout is named by its name, which two loadouts may share.
+    let shared = ["loadout-b", "loadout-c"].map(|id| {
+        json!({ "id": id, "name": "Shared", "characterIds": ["char-gone"], "presetName": "Preset A", "personaId": "persona-a" })
+    });
+    store
+        .replace_put_root(
+            &staging,
+            &json!({
+                "botPresetsId": 0,
+                "selectedPersona": 0,
+                "personas": [{
+                    "id": "persona-a", "name": "P", "icon": "assets/missing.png",
+                    "note": "a {{inlay::gone-g}} b",
+                    "embeddedModule": {
+                        "id": "embedded-a", "name": "E",
+                        "assets": [["gone", "assets/missing.png", "png"], ["kept", "assets/kept.png", "png"]],
+                    },
+                }],
+                "modules": [{
+                    "id": "module-a", "name": "M", "icon": "assets/missing.png",
+                    "assets": [["kept", "assets/kept.png", "png"], ["gone", "assets/missing.png", "png"]],
+                    "lorebook": [{ "content": "x {{inlay::gone-h}} y" }],
+                }],
+                "loadouts": [
+                    {
+                        "id": "loadout-a", "name": "Loadout",
+                        "characterIds": ["char-gone", "char-a"], "modules": ["module-a", "module-gone"],
+                        "presetName": "Preset A", "personaId": "persona-gone", "icons": ["assets/missing.png"],
+                    },
+                    shared[0],
+                    shared[1],
+                ],
+            }),
+        )
+        .unwrap();
+    store
+        .replace_put_presets(&staging, &[json!({ "id": "preset-a", "name": "Preset A" })])
+        .unwrap();
+    store
+        .replace_add_characters(
+            &staging,
+            &[json!({
+                "chaId": "char-a", "name": "A", "type": "character", "chatPage": 0,
+                "firstMessage": "before {{inlay::gone-a}} after",
+                "emotionImages": [["happy", "assets/missing.png"], ["calm", "assets/kept.png"]],
+                "additionalAssets": [["gone", "assets/missing.png", "png"], ["kept", "assets/kept.png", "png"]],
+                "chats": [{
+                    "id": "conv-a", "name": "Chat A",
+                    "scriptstate": {
+                        "$__name.with.dots": "{{inlay::gone-b}}",
+                        "한글 변수": "x {{inlay::gone-c}} y {{inlayed::gone-d}}",
+                    },
+                    "message": [{ "role": "char", "data": "hi {{inlay::gone-e}} there", "chatId": "m-0" }],
+                }],
+            })],
+        )
+        .unwrap();
+    let heads = [
+        owner_head(
+            &store,
+            AssetOwnerLocator::RootModuleAssets { module_id: "module-a".into() },
+            &[["kept", "assets/kept.png", "png"], ["gone", "assets/missing.png", "png"]],
+        ),
+        owner_head(
+            &store,
+            AssetOwnerLocator::PersonaEmbeddedModuleAssets { persona_id: "persona-a".into(), module_id: "embedded-a".into() },
+            &[["gone", "assets/missing.png", "png"], ["kept", "assets/kept.png", "png"]],
+        ),
+        owner_head(
+            &store,
+            AssetOwnerLocator::CharacterAdditionalAssets { character_id: "char-a".into() },
+            &[["gone", "assets/missing.png", "png"], ["kept", "assets/kept.png", "png"]],
+        ),
+    ];
+    store.replace_put_asset_owner_heads(&staging, &heads).unwrap();
+    store.replace_commit(&staging, Some(0)).unwrap();
+    store
+        .commit(&crate::persistent_store::WorkingSetCommit {
+            expected_revision: 1,
+            plugin_storage: Some(vec![crate::persistent_store::PluginStorageMutation::Set {
+                owner: "plugin-a".into(),
+                key: "saved".into(),
+                value: json!({ "nested": { "a.b": "{{inlay::gone-f}}" }, "kept": true }),
+            }]),
+            ..Default::default()
+        })
+        .unwrap();
+    stored_alias(&mut store, 9);
+
+    let result = diagnosis(&mut store);
+    let offered = crate::data_health::repair::plan(&result);
+    let unoffered = |owner: &str| {
+        result
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(index, finding)| {
+                finding.owner.id == owner && offered.iter().all(|candidate| candidate.finding != *index)
+            })
+            .count()
+    };
+    assert_eq!(unoffered("Shared"), 2, "two loadouts carry that name: {:?}", result.items);
+    let revision = store.revision().unwrap();
+    let (original_root, original_heads) = (root_of(&store), owner_heads(&store));
+    assert_eq!(original_heads.len(), 3);
+    let (repaired, journal) = store.apply_repair(revision, &offered, 10).unwrap();
+    assert_eq!(unpublished(&mut store), Vec::<UnitKey>::new());
+    let manifests: BTreeSet<String> = heads.iter().filter_map(|head| head.manifest_hash.clone()).collect();
+    assert!(
+        journal.released_objects.is_superset(&manifests),
+        "the journal holds the manifests an undo restores"
+    );
+
+    let character = json_record(&store, "characters", &["char-a"]);
+    assert_eq!(character["firstMessage"], "before  after");
+    assert_eq!(character["emotionImages"], json!([["calm", "assets/kept.png"]]));
+    assert_eq!(character["additionalAssets"], json!([["kept", "assets/kept.png", "png"]]));
+    assert_eq!(
+        json_record(&store, "conversations", &["char-a", "conv-a"])["scriptstate"],
+        json!({ "$__name.with.dots": "", "한글 변수": "x  y " })
+    );
+    let message: String = store
+        .connection
+        .query_row(
+            "SELECT value FROM messages WHERE generation=?1 AND character_id='char-a' AND conversation_id='conv-a'",
+            [active_generation(&store.connection).unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&message).unwrap()["data"], "hi  there");
+    assert_eq!(
+        json_record(&store, "plugin_storage", &["plugin-a", "saved"]),
+        json!({ "nested": { "a.b": "" }, "kept": true })
+    );
+    let root = root_of(&store);
+    assert_eq!(
+        root["personas"][0],
+        json!({
+            "id": "persona-a", "name": "P", "note": "a  b",
+            "embeddedModule": { "id": "embedded-a", "name": "E", "assets": [["kept", "assets/kept.png", "png"]] },
+        })
+    );
+    assert_eq!(
+        root["modules"][0],
+        json!({
+            "id": "module-a", "name": "M", "assets": [["kept", "assets/kept.png", "png"]],
+            "lorebook": [{ "content": "x  y" }],
+        })
+    );
+    assert_eq!(
+        root["loadouts"],
+        json!([
+            {
+                "id": "loadout-a", "name": "Loadout", "characterIds": ["char-a"], "modules": ["module-a"],
+                "presetName": "Preset A", "personaId": "persona-gone", "icons": [],
+            },
+            shared[0],
+            shared[1],
+        ])
+    );
+    assert_eq!(owner_heads(&store), Vec::<(String, String)>::new());
+    let remaining = diagnosis(&mut store);
+    let mut missing: Vec<(&str, &str)> = remaining
+        .items
+        .iter()
+        .filter(|finding| finding.code == crate::data_health::codes::REFERENCE_MISSING)
+        .map(|finding| (finding.owner.id.as_str(), finding.locator.as_ref().unwrap().source_path.as_str()))
+        .collect();
+    missing.sort();
+    assert_eq!(
+        missing,
+        [("Loadout", "$.personaId"), ("Shared", "$.characterIds[0]"), ("Shared", "$.characterIds[0]")],
+        "{:?}",
+        remaining.items
+    );
+    let (_, skipped) = store.undo_repair(&journal, repaired.revision).unwrap();
+    assert!(skipped.is_empty(), "{skipped:?}");
+    assert_eq!(root_of(&store), original_root);
+    assert_eq!(owner_heads(&store), original_heads, "an undo restores the manifests too");
+    assert_eq!(unpublished(&mut store), Vec::<UnitKey>::new());
 }
 
 #[test]

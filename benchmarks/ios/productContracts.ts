@@ -17,6 +17,27 @@ async function until(predicate: () => boolean, message: string) {
   }
 }
 
+function storedProfile(stored: string | null): string | null {
+  try {
+    return stored === null ? null : JSON.parse(stored).performanceProfile ?? null;
+  } catch {
+    return "unreadable";
+  }
+}
+
+/** The performance profile buttons of the RisuNest settings page, opened as a reader opens it. */
+async function profileButtons() {
+  const { language } = await import("../../src/lang");
+  const { SettingsMenuIndex, settingsOpen } = await import("../../src/ts/stores.svelte");
+  SettingsMenuIndex.set(17);
+  settingsOpen.set(true);
+  const find = (label: string) => [...document.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => button.textContent?.trim() === label);
+  const lowSpec = () => find(language.risuNest.perf.profileLowSpec);
+  await until(() => Boolean(lowSpec()), "RisuNest performance profile did not render");
+  return { lowSpec, close: () => settingsOpen.set(false) };
+}
+
 /** Product UI and storage, mounted only by the isolated verification entry. */
 export async function productApp(restart: boolean) {
   if (restart) {
@@ -40,7 +61,33 @@ export async function productApp(restart: boolean) {
         },
       },
     );
-    return { passed: true, restarted: true };
+    const storedSetting = await invoke<string | null>("pds_get_device_setting", { key: "risuNestDeviceSettings" });
+    document.getElementById("benchmark")!.remove();
+    const app = await import("../../src/main");
+    await app.default;
+    await until(
+      () => performance.getEntriesByName("boot:interactive").length > 0,
+      "product Svelte app did not initialize after the restart",
+    );
+    const { getDeviceSettings, updateDeviceSettings, flushDeviceSettings } = await import(
+      "../../src/ts/storage/deviceSettings"
+    );
+    const buttons = await profileButtons();
+    const profile = {
+      stored: storedProfile(storedSetting),
+      loaded: getDeviceSettings().performanceProfile,
+      shown: buttons.lowSpec()?.getAttribute("aria-pressed") ?? null,
+    };
+    buttons.close();
+    check(
+      profile.stored === "low-spec" && profile.loaded === "low-spec" && profile.shown === "true",
+      "low-spec performance profile survives process restart",
+      profile,
+    );
+    // Later phases start from the default profile again.
+    updateDeviceSettings({ performanceProfile: "normal" });
+    await flushDeviceSettings();
+    return { passed: true, restarted: true, profile };
   }
   await initialize();
   const opened = await invoke<{ revision: number }>("pds_open");
@@ -123,8 +170,21 @@ export async function productApp(restart: boolean) {
     { revision: persisted.revision, last: persisted.value.message.at(-1)?.data },
   );
   localStorage.setItem(expectedKey, JSON.stringify({ conversationId, marker }));
+  const buttons = await profileButtons();
+  buttons.lowSpec()!.click();
+  await until(
+    () => buttons.lowSpec()?.getAttribute("aria-pressed") === "true",
+    "low-spec performance profile was not selected",
+  );
+  // A reader leaves without waiting for anything, so only a short pause separates the tap from the process end.
+  await pause(2_000);
+  const selectedProfile = storedProfile(
+    await invoke<string | null>("pds_get_device_setting", { key: "risuNestDeviceSettings" }),
+  );
+  buttons.close();
   return {
     passed: true,
+    selectedProfile,
     revision: persisted.revision,
     renderedTextLength: document.getElementById("app")!.textContent!.length,
   };

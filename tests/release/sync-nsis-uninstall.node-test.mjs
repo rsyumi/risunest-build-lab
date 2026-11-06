@@ -9,6 +9,13 @@ const compiler = process.env.NSIS_MAKENSIS ?? join(process.env.LOCALAPPDATA ?? '
 const skip = process.platform !== 'win32' || !existsSync(compiler);
 if (process.env.RISUNEST_REQUIRE_NSIS === '1' && skip) throw new Error('NSIS compiler is required');
 const installedExecutable = '$INSTDIR\\${MAINBINARYNAME}.exe';
+// NSIS names its plug-in directory after the tick count, so NSIS processes that other test files
+// start in the same TEMP at the same moment can share that directory and delete each other's files.
+function runNsis(directory, executable, args, { env = process.env } = {}) {
+  const temp = join(directory, 'nsis-temp');
+  mkdirSync(temp, { recursive: true });
+  return spawnSync(executable, args, { env: { ...env, TEMP: temp, TMP: temp }, timeout: 30000, windowsHide: true });
+}
 test('Sync removal hooks compile in the uninstaller context', { skip }, () => {
   const directory = mkdtempSync(join(tmpdir(), 'risunest-sync-nsis-'));
   try {
@@ -46,12 +53,12 @@ SectionEnd
 `);
     const result = spawnSync(compiler, ['/V2', script], { encoding: 'utf8', timeout: 30000, windowsHide: true });
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-    assert.equal(spawnSync(join(directory, 'test.exe'), ['/S'], { timeout: 30000, windowsHide: true }).status, 0);
+    assert.equal(runNsis(directory, join(directory, 'test.exe'), ['/S']).status, 0);
     const displayed = [String.raw`C:\data 경로`, String.raw`C:\data 경로`, String.raw`\\server\share\data`, String.raw`\\server\share\data`];
     for (let index = 0; index < paths.length; index++) {
       assert.equal(readFileSync(join(directory, `display-${index}`), 'utf16le'), `${displayed[index]}\r\n${paths[index]}`);
     }
-  } finally { rmSync(directory, { recursive: true, force: true }); }
+  } finally { rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
 import { readFileSync, mkdirSync, copyFileSync, symlinkSync, unlinkSync } from 'node:fs';
 
@@ -121,7 +128,7 @@ catch { $missingFailed = $true }
       replaced: 'replacement', successAttempts: 2, sharingFailures: 2,
       timeoutCode: 32, timeoutAttempts: 1, missingFailed: true, missingAttempts: 1,
     });
-  } finally { rmSync(directory, { recursive: true, force: true }); }
+  } finally { rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
 
 test('released uninstall validation selects exact previous sources and keeps the legacy baseline', { skip: process.platform !== 'win32' }, () => {
@@ -160,7 +167,7 @@ ConvertTo-Json -Depth 8 -InputObject $result
     assert.equal(resumablePrevious[0].directory, 'previous-bundle');
     assert.equal(resumablePrevious[2].directory, 'current-bundle');
     assert.equal(existsSync(join(resumablePrevious[1].directory, 'risunest-sync-bundle.json')), true);
-  } finally { rmSync(directory, { recursive: true, force: true }); }
+  } finally { rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
 
 const q = value => value.replaceAll('$', '$$').replaceAll('"', '$\\"');
@@ -354,9 +361,9 @@ SectionEnd
       if (!scenario.unregistered) writeFileSync(join(dataRoot, 'risunest-sync-instance.json'), '{}');
       if (scenario.fail) writeFileSync(join(location, 'fail'), 'fixture');
       if (scenario.failRemove) writeFileSync(join(location, 'fail-remove'), 'fixture');
-      assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true }).status, 0);
+      assert.equal(runNsis(directory, join(directory, 'installer.exe'), ['/S', `/D=${location}`]).status, 0);
       if (scenario.missingManager) rmSync(join(location, 'risunest-sync-manager.exe'));
-      const uninstall = () => spawnSync(join(location, 'uninstall.exe'), ['/S', ...scenario.args, `_?=${location}`], { timeout: 30000, windowsHide: true, env: { ...process.env, RISUNEST_SYNC_UNINSTALL_DATA_DIR: scenario.custom ? dataRoot : '' } });
+      const uninstall = () => runNsis(directory, join(location, 'uninstall.exe'), ['/S', ...scenario.args, `_?=${location}`], { env: { ...process.env, RISUNEST_SYNC_UNINSTALL_DATA_DIR: scenario.custom ? dataRoot : '' } });
       const result = uninstall();
       assert.equal(result.status, scenario.code, `${scenario.name}: exit ${existsSync(join(location, "calls")) ? readFileSync(join(location, "calls"), "utf8") : "no manager calls"}\ndiagnostic: ${existsSync(join(location, 'diagnostic')) ? readFileSync(join(location, 'diagnostic'), 'utf8') : 'unavailable'}`);
       assert.equal(existsSync(join(location, 'risunest-sync-manager.exe')), scenario.installed, `${scenario.name}: manager remains on failure`);
@@ -411,12 +418,12 @@ SectionEnd
       mkdirSync(location); mkdirSync(outside);
       writeFileSync(join(outside, 'receipt.json'), '{}');
       writeFileSync(join(outside, 'complete'), 'true');
-      assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true }).status, 0);
+      assert.equal(runNsis(directory, join(directory, 'installer.exe'), ['/S', `/D=${location}`]).status, 0);
       const retry = join(location, '.risunest-sync-removal');
       symlinkSync(outside, retry, 'junction');
       try {
-        assert.equal(spawnSync(join(location, 'uninstall.exe'), ['/S', `_?=${location}`], { timeout: 30000, windowsHide: true }).status, 1);
-        assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true }).status, 1);
+        assert.equal(runNsis(directory, join(location, 'uninstall.exe'), ['/S', `_?=${location}`]).status, 1);
+        assert.equal(runNsis(directory, join(directory, 'installer.exe'), ['/S', `/D=${location}`]).status, 1);
         assert.equal(readFileSync(join(outside, 'receipt.json'), 'utf8'), '{}');
         assert.equal(existsSync(join(location, 'risunest-sync-manager.exe')), true);
       } finally { unlinkSync(retry); }
@@ -424,7 +431,7 @@ SectionEnd
     for (const boundary of ['helper-copy', 'receipt-staged', 'receipt', 'manager-deleted', 'final-files-deleted', 'registration-forgotten', 'complete', 'helper-cleaned', 'receipt-cleaned']) {
       const location = join(directory, `interrupted-${boundary}`);
       mkdirSync(join(location, 'local/RisuNestSyncData'), { recursive: true });
-      assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true }).status, 0);
+      assert.equal(runNsis(directory, join(directory, 'installer.exe'), ['/S', `/D=${location}`]).status, 0);
       const retry = join(location, '.risunest-sync-removal');
       mkdirSync(retry);
       writeFileSync(join(retry, 'data-path'), Buffer.from(join(location, 'local/RisuNestSyncData'), 'utf16le'));
@@ -437,7 +444,7 @@ SectionEnd
       if (['helper-cleaned', 'receipt-cleaned'].includes(boundary)) rmSync(join(retry, 'manager.exe'));
       if (boundary === 'receipt-cleaned') rmSync(join(retry, 'receipt.json'));
       if (boundary === 'receipt') {
-        const refused = spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true });
+        const refused = runNsis(directory, join(directory, 'installer.exe'), ['/S', `/D=${location}`]);
         assert.equal(refused.status, 1, 'unfinished removal refuses reinstall');
         assert.equal(readFileSync(join(retry, 'receipt.json'), 'utf8'), '{}');
       }
@@ -445,16 +452,16 @@ SectionEnd
         writeFileSync(join(retry, 'receipt.json'), 'synthetic completed receipt');
         const releaseLock = holdDeletion(binary, join(retry, 'receipt.json'));
         try {
-          const refused = spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true });
+          const refused = runNsis(directory, join(directory, 'installer.exe'), ['/S', `/D=${location}`]);
           assert.equal(refused.status, 1, 'locked completed residue refuses reinstall');
           assert.equal(readFileSync(join(retry, 'complete'), 'utf8'), 'true', 'cleanup refusal retains completion evidence');
         } finally { await releaseLock(); }
-        const reinstall = spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true });
+        const reinstall = runNsis(directory, join(directory, 'installer.exe'), ['/S', `/D=${location}`]);
         assert.equal(reinstall.status, 0, 'completed residue permits reinstall');
         assert.equal(existsSync(retry), false, 'reinstall clears only completed retry residue');
         assert.equal(existsSync(join(location, 'risunest-sync-manager.exe')), true);
       }
-      const result = spawnSync(join(location, 'uninstall.exe'), ['/S', `_?=${location}`], { timeout: 30000, windowsHide: true });
+      const result = runNsis(directory, join(location, 'uninstall.exe'), ['/S', `_?=${location}`]);
       assert.equal(result.status, 0, `${boundary}: ${existsSync(join(location, 'diagnostic')) ? readFileSync(join(location, 'diagnostic'), 'utf8') : result.error ?? ''}`);
       assert.equal(existsSync(join(location, 'risunest-sync-manager.exe')), false, boundary);
       assert.equal(existsSync(retry), false, `${boundary}: retry artifacts removed`);
@@ -466,7 +473,7 @@ SectionEnd
       mkdirSync(data, { recursive: true });
       writeFileSync(join(data, 'synthetic'), 'fixture');
       if (boundary === 'pending') writeFileSync(join(data, 'risunest-sync-instance.json'), '{}');
-      assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true }).status, 0);
+      assert.equal(runNsis(directory, join(directory, 'installer.exe'), ['/S', `/D=${location}`]).status, 0);
       const retry = join(location, '.risunest-sync-removal');
       mkdirSync(retry);
       writeFileSync(join(retry, 'data-path'), Buffer.from(`\\\\?\\${data}`, 'utf16le'));
@@ -475,7 +482,7 @@ SectionEnd
       rmSync(join(location, 'risunest-sync-manager.exe'));
       if (boundary === 'complete') writeFileSync(join(retry, 'complete'), 'true');
       if (deleted) rmSync(data, { recursive: true });
-      const result = spawnSync(join(location, 'uninstall.exe'), ['/S', '/DELETEAPPDATA', `_?=${location}`], { timeout: 30000, windowsHide: true });
+      const result = runNsis(directory, join(location, 'uninstall.exe'), ['/S', '/DELETEAPPDATA', `_?=${location}`]);
       assert.equal(result.status, 0, boundary);
       assert.equal(existsSync(data), !deleted && boundary !== 'pending', boundary);
       assert.equal(existsSync(join(location, 'data-kept')), !deleted && boundary !== 'pending');
@@ -493,16 +500,16 @@ SectionEnd
       const rawData = `\\\\?\\${data}`;
       const env = { ...process.env, RISUNEST_NSIS_TEST_LANGUAGE: language };
       mkdirSync(data, { recursive: true });
-      assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { env, timeout: 30000, windowsHide: true }).status, 0);
+      assert.equal(runNsis(directory, join(directory, 'installer.exe'), ['/S', `/D=${location}`], { env }).status, 0);
       const retry = join(location, '.risunest-sync-removal');
       mkdirSync(retry);
       writeFileSync(join(retry, 'data-path'), Buffer.from(rawData, 'utf16le'));
       writeFileSync(join(retry, 'receipt.json'), '{}');
       copyFileSync(binary, join(retry, 'manager.exe'));
       writeFileSync(join(location, 'fail-resume'), 'fixture');
-      assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { env, timeout: 30000, windowsHide: true }).status, 1);
+      assert.equal(runNsis(directory, join(directory, 'installer.exe'), ['/S', `/D=${location}`], { env }).status, 1);
       assert.ok(readFileSync(join(location, 'diagnostic'), 'utf16le').startsWith(pendingMessage));
-      assert.equal(spawnSync(join(location, 'uninstall.exe'), ['/S', `_?=${location}`], { env, timeout: 30000, windowsHide: true }).status, 1);
+      assert.equal(runNsis(directory, join(location, 'uninstall.exe'), ['/S', `_?=${location}`], { env }).status, 1);
       assert.ok(readFileSync(join(location, 'failure-message'), 'utf16le').startsWith(resumeMessage));
       assert.ok(readFileSync(join(location, 'calls'), 'utf8').includes(`installer resume-removal preserve: ${rawData}`));
       assert.equal(readFileSync(join(retry, 'data-path'), 'utf16le'), rawData);
@@ -510,13 +517,13 @@ SectionEnd
     for (const invalid of ['', 'relative', 'x'.repeat(20000)]) {
       const location = join(directory, `invalid-path-${invalid.length}`);
       mkdirSync(location);
-      assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true }).status, 0);
+      assert.equal(runNsis(directory, join(directory, 'installer.exe'), ['/S', `/D=${location}`]).status, 0);
       rmSync(join(location, 'risunest-sync-manager.exe'));
       const retry = join(location, '.risunest-sync-removal');
       mkdirSync(retry);
       writeFileSync(join(retry, 'complete'), 'true');
       writeFileSync(join(retry, 'data-path'), Buffer.from(invalid, 'utf16le'));
-      assert.equal(spawnSync(join(location, 'uninstall.exe'), ['/S', '/DELETEAPPDATA', `_?=${location}`], { timeout: 30000, windowsHide: true }).status, 1);
+      assert.equal(runNsis(directory, join(location, 'uninstall.exe'), ['/S', '/DELETEAPPDATA', `_?=${location}`]).status, 1);
       assert.equal(existsSync(join(location, 'data-kept')), false, 'an invalid path never reports the default data directory');
       assert.equal(existsSync(join(location, 'uninstall.exe')), true);
     }
@@ -524,7 +531,7 @@ SectionEnd
       const location = join(directory, `locked-completed-${locked}`);
       const data = join(location, 'custom data');
       mkdirSync(data, { recursive: true });
-      assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true }).status, 0);
+      assert.equal(runNsis(directory, join(directory, 'installer.exe'), ['/S', `/D=${location}`]).status, 0);
       rmSync(join(location, 'risunest-sync-manager.exe'));
       const retry = join(location, '.risunest-sync-removal');
       mkdirSync(retry);
@@ -532,11 +539,11 @@ SectionEnd
       writeFileSync(join(retry, 'data-path'), Buffer.from(data, 'utf16le'));
       const releaseLock = holdDeletion(binary, join(retry, locked));
       try {
-        assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true }).status, 1);
+        assert.equal(runNsis(directory, join(directory, 'installer.exe'), ['/S', `/D=${location}`]).status, 1);
         assert.equal(readFileSync(join(retry, 'complete'), 'utf8'), 'true');
         assert.equal(readFileSync(join(retry, 'data-path'), 'utf16le'), data);
       } finally { await releaseLock(); }
-      assert.equal(spawnSync(join(location, 'uninstall.exe'), ['/S', '/FORCE', '/DELETEAPPDATA', `_?=${location}`], { timeout: 30000, windowsHide: true }).status, 0);
+      assert.equal(runNsis(directory, join(location, 'uninstall.exe'), ['/S', '/FORCE', '/DELETEAPPDATA', `_?=${location}`]).status, 0);
       assert.equal(existsSync(retry), false);
       assert.equal(existsSync(data), true);
       assert.ok(readFileSync(join(location, 'data-kept'), 'utf16le').includes(data));
@@ -583,7 +590,7 @@ SectionEnd
     const compiled = spawnSync(compiler, ['/V2', script], { encoding: 'utf8', timeout: 30000, windowsHide: true });
     assert.equal(compiled.status, 0, `${compiled.stdout}\n${compiled.stderr}`);
     for (const [requested, expected] of [[original, normalized], [custom, custom]]) {
-      const result = spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${requested}`], { timeout: 30000, windowsHide: true });
+      const result = runNsis(directory, join(directory, 'installer.exe'), ['/S', `/D=${requested}`]);
       assert.equal(result.status, 0);
       assert.equal(readFileSync(join(directory, 'checked-path'), 'utf8'), join(expected, 'SyntheticSync.exe'));
     }
@@ -629,7 +636,7 @@ File /oname=risunest-sync-bundle.json "${q(replacement)}"
 !insertmacro NSIS_HOOK_POSTINSTALL`));
     const compiled = spawnSync(compiler, ['/V2', script], { encoding: 'utf8', timeout: 30000, windowsHide: true });
     assert.equal(compiled.status, 0, `${compiled.stdout}\n${compiled.stderr}`);
-    const install = location => spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true });
+    const install = location => runNsis(directory, join(directory, 'installer.exe'), ['/S', `/D=${location}`]);
     const location = join(directory, 'installed');
     const baseline = join(location, 'risunest-sync-bundle.previous.json');
     const previous = '{"version":"1.0.4","files":["risunest-sync-manager.exe","risunest-sync-retired.exe"]}\n';
@@ -691,7 +698,7 @@ FileClose $1`));
       const location = join(directory, name);
       mkdirSync(location);
       if (marker !== undefined) writeFileSync(join(location, 'risunest-sync-bundle.json'), marker);
-      assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true }).status, 0);
+      assert.equal(runNsis(directory, join(directory, 'installer.exe'), ['/S', `/D=${location}`]).status, 0);
       assert.equal(readFileSync(join(location, 'installed-version'), 'utf8'), expected, name);
     }
   } finally {
@@ -739,7 +746,7 @@ SectionEnd
 `);
     const compile = spawnSync(compiler, ['/V2', script], { encoding: 'utf8', timeout: 30000, windowsHide: true });
     assert.equal(compile.status, 0, `${compile.stdout}\n${compile.stderr}`);
-    assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true }).status, 0);
+    assert.equal(runNsis(directory, join(directory, 'installer.exe'), ['/S', `/D=${location}`]).status, 0);
     const installed = join(location, 'uninstall.exe');
     const active = join(directory, 'active-uninstaller.exe');
     copyFileSync(installed, active);
@@ -748,25 +755,39 @@ SectionEnd
     const binary = buildManagerStub(directory);
     const releaseLock = holdDeletion(binary, installed);
     try {
-      assert.equal(spawnSync(active, ['/S', `_?=${location}`], { timeout: 30000, windowsHide: true }).status, 1);
+      assert.equal(runNsis(directory, active, ['/S', `_?=${location}`]).status, 1);
       assert.equal(existsSync(installed), true);
       assert.equal(readFileSync(join(retry, 'complete'), 'utf8'), 'true');
       const registration = spawnSync('reg.exe', ['query', `HKCU\\${key}`, '/v', 'UninstallString'], { encoding: 'utf8', windowsHide: true });
       assert.equal(registration.status, 0);
       assert.ok(registration.stdout.includes(installed), 'Apps registration retains the same retry executable');
     } finally { await releaseLock(); }
-    assert.equal(spawnSync(active, ['/S', `_?=${location}`], { timeout: 30000, windowsHide: true }).status, 0);
+    assert.equal(runNsis(directory, active, ['/S', `_?=${location}`]).status, 0);
     assert.equal(existsSync(installed), false);
     assert.equal(existsSync(retry), false);
     assert.equal(spawnSync('reg.exe', ['query', `HKCU\\${key}`], { windowsHide: true }).status, 1);
-    assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true }).status, 0);
-    mkdirSync(retry); writeFileSync(join(retry, 'complete'), 'true');
-    assert.equal(spawnSync(installed, ['/S', `_?=${location.toUpperCase()}`], { timeout: 30000, windowsHide: true }).status, 0, 'in-place removal leaves its image for the caller');
-    assert.equal(existsSync(installed), true);
-    assert.equal(existsSync(location), true);
-    assert.equal(existsSync(retry), false);
-    assert.equal(spawnSync('reg.exe', ['query', `HKCU\\${key}`], { windowsHide: true }).status, 1);
-    assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true }).status, 0);
+    assert.equal(runNsis(directory, join(directory, 'installer.exe'), ['/S', `/D=${location}`]).status, 0);
+    // The launched image and _?= may spell the same folder differently.
+    const shortName = path => spawnSync('cmd.exe', ['/d', '/c', `for %I in ("${path}") do @echo %~sI`], { encoding: 'utf8', windowsHide: true, windowsVerbatimArguments: true }).stdout.trim();
+    const inPlaceRuns = [
+      [installed, location.toUpperCase()],
+      [installed, `${directory}\\\\installed`],
+      [`${location}\\.\\uninstall.exe`, location],
+    ];
+    const shortLocation = shortName(location);
+    if (shortLocation && shortLocation.toLowerCase() !== location.toLowerCase()) {
+      inPlaceRuns.push([installed, shortLocation], [shortName(installed), location]);
+    }
+    for (const [image, instdir] of inPlaceRuns) {
+      const run = `${image} _?=${instdir}`;
+      mkdirSync(retry); writeFileSync(join(retry, 'complete'), 'true');
+      assert.equal(runNsis(directory, image, ['/S', `_?=${instdir}`]).status, 0, `in-place removal leaves its image for the caller (${run})`);
+      assert.equal(existsSync(installed), true, run);
+      assert.equal(existsSync(location), true, run);
+      assert.equal(existsSync(retry), false, run);
+      assert.equal(spawnSync('reg.exe', ['query', `HKCU\\${key}`], { windowsHide: true }).status, 1, run);
+      assert.equal(runNsis(directory, join(directory, 'installer.exe'), ['/S', `/D=${location}`]).status, 0);
+    }
     mkdirSync(retry); writeFileSync(join(retry, 'complete'), 'true');
     const registryDeletionDenied = deny => {
       const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `
@@ -786,12 +807,12 @@ SectionEnd
     };
     registryDeletionDenied(true);
     try {
-      assert.equal(spawnSync(active, ['/S', `_?=${location}`], { timeout: 30000, windowsHide: true }).status, 1, 'access denied remains a removal failure');
+      assert.equal(runNsis(directory, active, ['/S', `_?=${location}`]).status, 1, 'access denied remains a removal failure');
       assert.equal(existsSync(installed), true);
       assert.equal(readFileSync(join(retry, 'complete'), 'utf8'), 'true');
     } finally { registryDeletionDenied(false); }
     assert.equal(spawnSync('reg.exe', ['delete', `HKCU\\${key}`, '/f'], { windowsHide: true }).status, 0);
-    assert.equal(spawnSync(active, ['/S', `_?=${location}`], { timeout: 30000, windowsHide: true }).status, 0, 'retry after registry removal finishes uninstall');
+    assert.equal(runNsis(directory, active, ['/S', `_?=${location}`]).status, 0, 'retry after registry removal finishes uninstall');
     assert.equal(existsSync(installed), false);
     assert.equal(existsSync(retry), false);
   } finally {

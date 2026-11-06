@@ -3453,11 +3453,13 @@ impl restore::ReplacementSink for PersistentReplacementSink {
         &self,
         staging_id: &str,
         expected_revision: i64,
+        binding_authority: Option<&str>,
     ) -> crate::persistent_store::StoreResult<crate::persistent_store::RevisionResult> {
         crate::persistent_store::commands::commit_staged_replacement(
             &self.app,
             staging_id,
             Some(expected_revision),
+            binding_authority,
         )
     }
 
@@ -4069,11 +4071,14 @@ fn validate_detail_transition(
     if next.stage < previous.stage {
         return Err("native job stage cannot move backwards".to_owned());
     }
+    // A stage total may become unknown, as when a restore starts reading
+    // payloads of unknown size, but it never changes to another value.
     if next.stage == previous.stage
         && (next.stage_completed < previous.stage_completed
             || previous
                 .stage_total
-                .is_some_and(|total| next.stage_total != Some(total)))
+                .zip(next.stage_total)
+                .is_some_and(|(before, after)| before != after))
     {
         return Err("native job stage progress is invalid or non-monotonic".to_owned());
     }
@@ -7144,10 +7149,11 @@ mod tests {
                     "unknownFutureField": { "retained": true },
                     "assets": [
                         ["duplicate", "legacy-a", ".unsafe/path", { "future": true }],
-                        ["duplicate", "legacy-b", "bin"]
+                        ["duplicate", "legacy-b", "bin"],
+                        ["undeclared", "legacy-c", null]
                     ]
                 }),
-                &[b"exact ordinary bytes", b""],
+                &[b"exact ordinary bytes", b"", b"RIFF\x04\0\0\0WEBPVP8 "],
             ),
         )
         .unwrap();
@@ -7191,6 +7197,23 @@ mod tests {
             Some(expected_logical_id.as_str())
         );
         assert_eq!(serialized.pointer("/assets/1/ext"), Some(&json!("bin")));
+        assert_eq!(serialized.pointer("/assets/2/ext"), Some(&json!("webp")));
+        assert_eq!(
+            serialized
+                .pointer("/assets/2/logicalId")
+                .and_then(Value::as_str),
+            Some(
+                format!(
+                    "assets/{}.webp",
+                    serialized
+                        .pointer("/assets/2/objectHash")
+                        .and_then(Value::as_str)
+                        .unwrap()
+                )
+                .as_str()
+            )
+        );
+        assert_eq!(serialized.pointer("/metadata/assets/2/2"), Some(&json!("")));
         assert_eq!(
             serialized.pointer("/metadata/assets/0/3/future"),
             Some(&json!(true))
@@ -7198,7 +7221,33 @@ mod tests {
         assert!(serialized.pointer("/assets/0/token").is_none());
         assert!(serialized.pointer("/assets/0/referenceKey").is_none());
         assert_eq!(serialized.pointer("/ownerHead/present"), Some(&json!(true)));
-        assert_eq!(serialized.pointer("/ownerHead/entryCount"), Some(&json!(2)));
+        assert_eq!(serialized.pointer("/ownerHead/entryCount"), Some(&json!(3)));
+        let manifest = crate::asset_repository::owner_manifest_codec::decode_owner_manifest(
+            &crate::asset_repository::PayloadCas::new(directory.path())
+                .unwrap()
+                .read_object(
+                    serialized
+                        .pointer("/ownerHead/manifestHash")
+                        .and_then(Value::as_str)
+                        .unwrap(),
+                )
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        // TypeScript activation keeps each metadata tuple with its logical ID
+        // and requires the owner manifest to carry exactly that tuple.
+        for (position, entry) in manifest.iter().enumerate() {
+            let tuple = &serialized["metadata"]["assets"][position];
+            assert_eq!(
+                json!(entry.tuple),
+                json!([
+                    tuple[0],
+                    serialized["assets"][position]["logicalId"],
+                    tuple[2]
+                ])
+            );
+        }
         assert_eq!(content.cas_session_id, started.job_id);
         let encoded = serde_json::to_string(content).unwrap();
         assert!(!encoded.contains("stagedPath"));
@@ -7231,7 +7280,7 @@ mod tests {
             &started.job_id,
         )
         .unwrap();
-        assert_eq!(session.pin_count(), 3);
+        assert_eq!(session.pin_count(), 4);
         assert!(!session.is_sealed());
     }
 
