@@ -42,9 +42,7 @@ let disposeSpoolListener: (() => void) | undefined
 export interface AndroidOpenedSpoolDispatchDependencies {
     enqueueRestore(batch: AndroidSpoolBatch): Promise<void>
     importCharacter(source: AndroidSpoolReady): Promise<NativeAndroidCharacterSpoolResult<string>>
-    /** Imports two or more content files, with the ones Android could not copy, in one operation. */
-    importContentBatch(sources: AndroidSpoolReady[], failures: AndroidSpoolFailure[]): Promise<unknown>
-    reportCharacterError(error: unknown, startedAt: number): void
+    reportCharacterError(source: AndroidSpoolReady, error: unknown, startedAt: number): void
     reportDestinationRequired(source: AndroidSpoolReady, startedAt: number): void
 }
 
@@ -54,30 +52,14 @@ export async function dispatchAndroidOpenedSpoolBatch(
     dependencies: AndroidOpenedSpoolDispatchDependencies,
     handledCharacterTokens?: Set<string>,
 ): Promise<void> {
-    const contentSources = batch.ready.filter((source) =>
-        isAndroidNativeContentSpool(source) && !handledCharacterTokens?.has(source.token))
-    const contentFailures = batch.failures.filter(isAndroidNativeContentSpool)
-    const batched = contentSources.length + contentFailures.length > 1
-    // Backups keep their own restore, which runs before the content files.
+    const characterSources = batch.ready.filter(isAndroidNativeContentSpool)
     await dependencies.enqueueRestore({
         ...batch,
         ready: batch.ready.filter((source) => !isAndroidNativeContentSpool(source)),
-        failures: batched
-            ? batch.failures.filter((failure) => !isAndroidNativeContentSpool(failure))
-            : batch.failures,
     })
-    for (const source of contentSources) handledCharacterTokens?.add(source.token)
-    if (batched) {
-        const startedAt = Date.now()
-        try {
-            await dependencies.importContentBatch(contentSources, contentFailures)
-        }
-        catch (error) {
-            dependencies.reportCharacterError(error, startedAt)
-        }
-        return
-    }
-    for (const source of contentSources) {
+    for (const source of characterSources) {
+        if (handledCharacterTokens?.has(source.token)) continue
+        handledCharacterTokens?.add(source.token)
         const startedAt = Date.now()
         try {
             const result = await dependencies.importCharacter(source)
@@ -86,7 +68,7 @@ export async function dispatchAndroidOpenedSpoolBatch(
             }
         }
         catch (error) {
-            dependencies.reportCharacterError(error, startedAt)
+            dependencies.reportCharacterError(source, error, startedAt)
         }
     }
 }
@@ -152,49 +134,16 @@ export async function importAndroidOpenedPreparedContent(
         : { kind: 'imported', value: result }
 }
 
-async function openedPreparedContentDependencies(): Promise<AndroidOpenedPreparedContentDependencies> {
-    const [
-        { activatePreparedNativeCharacterContent },
-        { activatePreparedNativeModuleContent },
-    ] = await Promise.all([
-        import('./nativeCharacterContentActivation'),
-        import('./nativeModuleContentActivation'),
-    ])
-    return {
-        prepare: prepareNativeContentImport,
-        activateCharacter: (content, lifecycle, signal) =>
-            activatePreparedNativeCharacterContent(content, lifecycle, undefined, signal),
-        activateModule: (content, lifecycle, signal) =>
-            activatePreparedNativeModuleContent(content, lifecycle, undefined, signal),
-    }
-}
-
-export async function importAndroidContentSpoolBatch(
-    sources: AndroidSpoolReady[],
-    failures: AndroidSpoolFailure[],
-): Promise<string | null> {
-    const [{ importOpenedAndroidContentSpools }, dependencies] = await Promise.all([
-        import('./androidContentPicker'),
-        openedPreparedContentDependencies(),
-    ])
-    return await importOpenedAndroidContentSpools(sources, failures, async (source, context) => {
-        const result = await importAndroidOpenedPreparedContent(
-            source,
-            dependencies,
-            { signal: context.signal, onStatus: context.onStatus },
-        )
-        return result.kind === 'imported' ? result.value : null
-    })
-}
-
 export async function importAndroidCharacterSpool(
     source: AndroidSpoolReady,
 ): Promise<NativeAndroidCharacterSpoolResult<string>> {
-    const { androidSpoolReplayDestination, importReplayedAndroidContentSpool } = await import(
-        './androidContentPicker'
-    )
-    const replayDestination = androidSpoolReplayDestination(source)
+    const replayDestination = source.importDestination
+        ?? (/\.lorebook$/i.test(source.displayName) ? 'module'
+            : /\.json$/i.test(source.displayName) ? 'auto' : null)
     if (replayDestination) {
+        const { importReplayedAndroidContentSpool } = await import(
+            './androidContentPicker'
+        )
         const value = await importReplayedAndroidContentSpool(
             source,
             replayDestination,
@@ -206,11 +155,13 @@ export async function importAndroidCharacterSpool(
     const [
         { importAndroidNativeCharacterSpool },
         { isNativeCharacterContentImportEnabled },
-        dependencies,
+        { activatePreparedNativeCharacterContent },
+        { activatePreparedNativeModuleContent },
     ] = await Promise.all([
         import('./nativeCharacterFileRoute'),
         import('../characterCards'),
-        openedPreparedContentDependencies(),
+        import('./nativeCharacterContentActivation'),
+        import('./nativeModuleContentActivation'),
     ])
     return await importAndroidNativeCharacterSpool(source, {
         chooseDesktopPath: async () => null,
@@ -224,7 +175,35 @@ export async function importAndroidCharacterSpool(
             await runExternalAndroidNativeFileOperation(
                 'import',
                 ({ signal, onStatus }) =>
-                    importAndroidOpenedPreparedContent(source, dependencies, { signal, onStatus }),
+                    importAndroidOpenedPreparedContent(
+                        source,
+                        {
+                            prepare: prepareNativeContentImport,
+                            activateCharacter: (
+                                content,
+                                lifecycle,
+                                activationSignal,
+                            ) =>
+                                activatePreparedNativeCharacterContent(
+                                    content,
+                                    lifecycle,
+                                    undefined,
+                                    activationSignal,
+                                ),
+                            activateModule: (
+                                content,
+                                lifecycle,
+                                activationSignal,
+                            ) =>
+                                activatePreparedNativeModuleContent(
+                                    content,
+                                    lifecycle,
+                                    undefined,
+                                    activationSignal,
+                                ),
+                        },
+                        { signal, onStatus },
+                    ),
                 { presentation: 'dialog', format: 'content' },
             ),
         legacyImport: async () => {
@@ -331,8 +310,7 @@ export function registerAndroidRisuSaveRoute(): void {
     const dispatcher = createAndroidOpenedSpoolDispatcher({
         enqueueRestore: route.enqueue,
         importCharacter: importAndroidCharacterSpool,
-        importContentBatch: importAndroidContentSpoolBatch,
-        reportCharacterError: showAndroidFileError,
+        reportCharacterError: (_source, error, startedAt) => showAndroidFileError(error, startedAt),
         reportDestinationRequired: showDestinationRequired,
     })
     disposeSpoolListener = listenAndroidSpoolBatches((batch) => {

@@ -37,7 +37,6 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
     private let fileQueue = DispatchQueue(label: "io.github.rsyumi.risunest.files", qos: .userInitiated)
     private var stagingSweepStarted = false
     private var openedFiles: [[String: String]] = []
-    private var openedFilesStaging = 0
     private var pickerCall: Invoke?
     private var portablePicker = false
     private var fileBatchPicker = false
@@ -500,26 +499,20 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
 
     @objc func receiveOpenedFiles(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(OpenedArgs.self)
-        // Enqueued before the staging below, so the main queue counts this delivery before it finishes.
-        DispatchQueue.main.async { self.openedFilesStaging += 1 }
         fileQueue.async {
-            var entries: [[String: String]] = []
             for text in args.urls {
                 guard let url = URL(string: text), url.isFileURL,
                       ["risum", "risup", "charx", "risunest", "risudat"].contains(url.pathExtension.lowercased()) else { continue }
+                let entry: [String: String]
                 do {
                     let staged = try self.stageFile(url)
-                    entries.append(["path": staged["path"] as! String])
+                    entry = ["path": staged["path"] as! String]
                     if let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
                         try? NativeFileState.removeStagedInboxSource(url, inbox: documents.appendingPathComponent("Inbox", isDirectory: true))
                     }
-                } catch { entries.append(["error": "The selected file could not be prepared for import"]) }
-            }
-            DispatchQueue.main.async {
-                self.openedFiles.append(contentsOf: entries)
-                self.openedFilesStaging -= 1
-                // Files opened while others are still staged reach the web app together and import in one batch.
-                if self.openedFilesStaging == 0 && !self.openedFiles.isEmpty {
+                } catch { entry = ["error": "The selected file could not be prepared for import"] }
+                DispatchQueue.main.async {
+                    self.openedFiles.append(entry)
                     self.webView?.evaluateJavaScript("window.dispatchEvent(new Event('risunest-ios-opened-files'))")
                 }
             }
@@ -529,8 +522,6 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
 
     @objc func takeOpenedFiles(_ invoke: Invoke) {
         DispatchQueue.main.async {
-            // Files still being staged arrive with the event that follows them.
-            guard self.openedFilesStaging == 0 else { return invoke.resolve(["files": [[String: String]]()]) }
             let files = self.openedFiles
             self.openedFiles.removeAll()
             invoke.resolve(["files": files])
