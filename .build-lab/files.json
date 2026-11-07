@@ -5851,6 +5851,12 @@
       "sha256": "0db67fc64021cfb1341a2276d7c24ea1cdf50c7ed0372ee55d016a6dd2229fc0"
     },
     {
+      "path": "src-tauri/icon-src/logo.svg",
+      "mode": "100644",
+      "bytes": 2434,
+      "sha256": "90d44f6bc6852b0a6764369bcf31b23d4fcc01163f34f1798c8839599cf9bac1"
+    },
+    {
       "path": "src-tauri/icons/128x128.png",
       "mode": "100644",
       "bytes": 4091,
@@ -21062,13 +21068,6 @@
       "mode": "100644",
       "bytes": 168,
       "sha256": "ae10276c7b032061df5567fd43fcfca44fcd93ceec8e3a633a35cb6b43c96057",
-      "reason": "unused-source"
-    },
-    {
-      "path": "src-tauri/icon-src/logo.svg",
-      "mode": "100644",
-      "bytes": 2434,
-      "sha256": "90d44f6bc6852b0a6764369bcf31b23d4fcc01163f34f1798c8839599cf9bac1",
       "reason": "unused-source"
     },
     {

@@ -3,6 +3,6 @@
   "lane": "ios",
   "source_commit": "ddb05de5ecc1f65f1b94ca81607b4733aa89fe3b",
   "source_tree": "be7358035e158d068c9f7911fa975627f29561e8",
-  "file_list_sha256": "c4ff8ed5c4c9c41f977e85a46962bb018355cd0e1b9b32626fa4b8223eb994ce",
-  "exclusion_rules_version": "risunest-build-inputs-v2"
+  "file_list_sha256": "1380a92093e6330e4096f5bc8cba038bcc42489d2c6457af21b6c588762737f5",
+  "exclusion_rules_version": "risunest-build-inputs-v3"
 }
