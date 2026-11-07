@@ -243,6 +243,50 @@ def monitor():
                 continue
         memory.append(totals)
 
+def owner_lock_report():
+    try:
+        targets = {str(path.resolve()) for path in profile.rglob('owner.lock')}
+    except OSError:
+        targets = set()
+    if not targets:
+        diagnostic('owner-lock-none')
+        return
+    started = time.monotonic()
+    last = None
+    pids = []
+    while True:
+        holders = set()
+        for entry in Path('/proc').glob('[0-9]*/task/[0-9]*/fd/*'):
+            try:
+                if os.readlink(entry) in targets:
+                    holders.add(int(entry.parts[2]))
+            except (OSError, ValueError):
+                continue
+        pids = sorted(holders)
+        detail = []
+        for pid in pids:
+            threads = []
+            for task in sorted(Path(f'/proc/{pid}/task').glob('[0-9]*'), key=lambda item: int(item.name)):
+                try:
+                    stat = (task / 'stat').read_text()
+                    threads.append({'tid': int(task.name), 'comm': (task / 'comm').read_text().strip(),
+                                    'state': stat[stat.rfind(')') + 2:].split()[0],
+                                    'wchan': (task / 'wchan').read_text().strip()})
+                except OSError:
+                    continue
+            detail.append({'pid': pid, 'threads': threads[:80]})
+        key = json.dumps(detail, sort_keys=True)
+        if key != last:
+            elapsed = round(time.monotonic() - started, 3)
+            diagnostic('owner-lock-holders', elapsed=elapsed, holders=detail)
+            print(json.dumps({'phase': args.phase, 'ownerLockElapsed': elapsed, 'holders': detail})[:6000], flush=True)
+            last = key
+        if not pids or time.monotonic() - started > 15:
+            break
+        time.sleep(0.01)
+    print(json.dumps({'phase': args.phase, 'ownerLock': 'held' if pids else 'free',
+                      'elapsed': round(time.monotonic() - started, 3)}), flush=True)
+
 try:
     diagnostic('driver-start', driverPid=driver.pid)
     inspect_seed_receipt()
@@ -303,7 +347,7 @@ try:
         operation = f"{args.phase}()"
     current_stage = 'operation'
     diagnostic('operation-enter')
-    execute(f"window.__linuxResult=null; window.__RISUNEST_LINUX_BENCHMARK__.{operation}.then(result=>window.__linuxResult={{result}},error=>window.__linuxResult={{error:String(error)}})")
+    execute(f"const benchmark=window.__RISUNEST_LINUX_BENCHMARK__; window.__linuxResult=null; benchmark.{operation}.then(result=>window.__linuxResult={{result}},error=>window.__linuxResult={{error:JSON.stringify(benchmark.failureRecord(error))}})")
     if args.phase.startswith('app-lock-'):
         current_stage = 'app-lock-ready'
         deadline = time.monotonic() + 120
@@ -462,6 +506,7 @@ finally:
         driver.kill()
         driver.wait()
     process_snapshot('driver-cleanup-return')
+    owner_lock_report()
     log.close()
     if capture_error is not None and primary_error is None:
         raise capture_error
