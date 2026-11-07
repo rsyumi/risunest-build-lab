@@ -33,13 +33,18 @@ on:
         description: Run the product launch even after a simulator check failure and keep later launch evidence
         type: boolean
         default: false
+      prebuilt_run_id:
+        description: Only launch the simulator app built by this ios-check run for the same snapshot
+        type: string
+        default: ""
 permissions:
   contents: read
 concurrency:
-  group: ios-check-${{ inputs.source_sha }}-${{ inputs.runner }}-${{ inputs.ipad }}-${{ inputs.scope }}${{ inputs.xcode != '26.3' && format('-xcode-{0}', inputs.xcode) || '' }}${{ inputs.ios_runtime != '' && format('-ios-{0}', inputs.ios_runtime) || '' }}${{ inputs.launch_diagnostics && '-launch-diagnostics' || '' }}
+  group: ios-check-${{ inputs.source_sha }}-${{ inputs.runner }}-${{ inputs.ipad }}-${{ inputs.scope }}${{ inputs.xcode != '26.3' && format('-xcode-{0}', inputs.xcode) || '' }}${{ inputs.ios_runtime != '' && format('-ios-{0}', inputs.ios_runtime) || '' }}${{ inputs.launch_diagnostics && '-launch-diagnostics' || '' }}${{ inputs.prebuilt_run_id != '' && format('-prebuilt-{0}', inputs.prebuilt_run_id) || '' }}
   cancel-in-progress: true
 jobs:
   simulator:
+    if: inputs.prebuilt_run_id == ''
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 360
     defaults:
@@ -262,5 +267,64 @@ jobs:
         with:
           name: ios-simulator-${{ inputs.source_sha }}-${{ github.run_attempt }}
           path: source/artifacts/
+          retention-days: 3
+          if-no-files-found: warn
+  prebuilt-launch:
+    if: inputs.prebuilt_run_id != ''
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_${{ inputs.xcode }}.app/Contents/Developer
+      SNAPSHOT_SHA: ${{ inputs.source_sha }}
+      PREBUILT_RUN_ID: ${{ inputs.prebuilt_run_id }}
+      IOS_CHECK_RUNNER: ${{ inputs.runner }}
+      IOS_CHECK_XCODE: ${{ inputs.xcode }}
+      IOS_CHECK_RUNTIME: ${{ inputs.ios_runtime }}
+    steps:
+      - name: Validate dispatch
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$PREBUILT_RUN_ID" =~ ^[0-9]+$ ]]
+          case "$IOS_CHECK_RUNNER" in macos-15|macos-26|xcode-27) ;; *) exit 1;; esac
+          case "$IOS_CHECK_XCODE" in 26.3|27.0|27.1|27.2) ;; *) exit 1;; esac
+          [[ "$IOS_CHECK_RUNTIME" =~ ^([0-9]+(\.[0-9]+)*)?$ ]]
+      - name: Select Apple toolchain
+        run: |
+          set -euo pipefail
+          if [ ! -d "$DEVELOPER_DIR" ]; then
+            echo "Xcode $IOS_CHECK_XCODE is not installed on $IOS_CHECK_RUNNER" >&2
+            ls -d /Applications/Xcode* >&2 || true
+            exit 1
+          fi
+          sudo xcode-select --switch "$DEVELOPER_DIR"
+          xcodebuild -version
+          test "$(uname -m)" = arm64
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - name: Download prebuilt simulator app
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh run view "$PREBUILT_RUN_ID" --repo "$GITHUB_REPOSITORY" --json workflowName --jq .workflowName)" = "iOS simulator check"
+          gh run download "$PREBUILT_RUN_ID" --repo "$GITHUB_REPOSITORY" --pattern "ios-simulator-$SNAPSHOT_SHA-*" --dir prebuilt
+      - name: Launch prebuilt simulator app
+        run: python3 control/scripts/ios-prebuilt-launch.py prebuilt artifacts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-prebuilt-launch-${{ inputs.source_sha }}-${{ github.run_attempt }}
+          path: artifacts/
           retention-days: 3
           if-no-files-found: warn
