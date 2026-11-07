@@ -59,6 +59,8 @@ macro_rules! async_commands {
 async_commands![
     diagnostics::diagnostic_device_info,
     network_log::network_log_command,
+    native_log::file_page::native_log_file_read,
+    native_log::file_export::native_log_file_export,
     app_paths::app_paths_roots,
     app_lock::app_lock_check,
     app_lock::app_lock_authenticate,
@@ -140,6 +142,8 @@ async_commands![
     appimage_integration::appimage_integration_register,
     native_tokenizer::tokenize_batch,
     native_media::native_media_encode_inlay_image,
+    native_media::ipc::native_media_encode_canvas_webp,
+    native_media::ipc::native_media_encode_canvas_webp_finish,
     native_media::ipc::native_media_inlay_input_open,
     native_media::ipc::native_media_inlay_input_chunk,
     native_media::ipc::native_media_inlay_input_chunk_raw,

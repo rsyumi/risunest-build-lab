@@ -16,6 +16,12 @@ import type {
     AccountWriteResult,
 } from '../accountStorage'
 import type { NativeFileJobOptions } from '../nativeFileJobs'
+import {
+    measuredTaskPercent,
+    runWithDeferredMobileBackgroundTask,
+    runWithMobileBackgroundTask,
+    type MobileBackgroundTask,
+} from '../../mobileBackgroundTask'
 import type { BlobStore } from '../blobStore'
 import type { Database } from '../database.svelte'
 import type {
@@ -136,8 +142,8 @@ export interface OfficialNativeDatabasePublicationInput {
     accountId: string
     lease: PersistentRevisionLease
     resourceReplacements: Readonly<Record<string, string>>
-    signal?: AbortSignal
-    userInitiated?: boolean
+    /** The publication's background task, whose signal also ends when the platform ends the task. */
+    background: MobileBackgroundTask
     onStatus?: NativeFileJobOptions['onStatus']
 }
 
@@ -155,7 +161,8 @@ export interface OfficialNativeAssetPublicationInput {
     accountId: string
     lease: PersistentRevisionLease
     assets: readonly { key: string; localKey: string }[]
-    signal?: AbortSignal
+    /** The publication's background task, whose signal also ends when the platform ends the task. */
+    background: MobileBackgroundTask
     /** Throws once the publication no longer belongs to the signed-in account. */
     guard(): Promise<void>
     /** The account now holds `key` under `replacementKey`. */
@@ -422,7 +429,18 @@ class OfficialPinnedPublication implements PinnedPublication {
             throw new Error('Official account session changed before publication')
         }
     }
-    private async publishOnce(signal: AbortSignal): Promise<void> {
+    /**
+     * One background task covers the assets and the database. A save starts an automatic publication,
+     * so it is protected only if the app leaves the screen while it runs.
+     */
+    private publishOnce(signal: AbortSignal): Promise<void> {
+        const held = (background: MobileBackgroundTask) => this.publishHeld(background, background.signal ?? signal)
+        return this.options.userInitiated
+            ? runWithMobileBackgroundTask('sync', held, signal, true)
+            : runWithDeferredMobileBackgroundTask('sync', held, signal)
+    }
+
+    private async publishHeld(background: MobileBackgroundTask, signal: AbortSignal): Promise<void> {
         if (this.publicationCommitted) return this.finalizePublication()
         this.assertAccountCurrent()
         const uploads = this.assets.filter(asset => !this.replacements.has(asset.key))
@@ -430,7 +448,9 @@ class OfficialPinnedPublication implements PinnedPublication {
         const record = (key: string, replacementKey: string) => {
             this.replacements.set(key, replacementKey)
             this.dependencies.ledger.record(key, replacementKey)
-            this.options.onProgress?.(++completed, uploads.length)
+            completed += 1
+            this.options.onProgress?.(completed, uploads.length)
+            background.progress(measuredTaskPercent(completed, uploads.length))
         }
         this.options.onProgress?.(completed, uploads.length)
         if (uploads.length > 0 && this.dependencies.nativeAssetPublisher && this.accountId) {
@@ -440,7 +460,7 @@ class OfficialPinnedPublication implements PinnedPublication {
                 accountId: this.accountId,
                 lease: this.lease,
                 assets: uploads.map(({ key, localKey }) => ({ key, localKey })),
-                signal,
+                background,
                 guard: async () => this.assertAccountCurrent(),
                 // The ledger follows the signed-in account, so a write settled after a switch is not recorded.
                 written: (key, replacementKey) => {
@@ -479,8 +499,7 @@ class OfficialPinnedPublication implements PinnedPublication {
                     accountId: this.accountId,
                     lease: this.lease,
                     resourceReplacements: replacementRecord,
-                    signal,
-                    userInitiated: this.options.userInitiated,
+                    background,
                     onStatus: this.options.onStatus,
                 })
             } catch (error) {

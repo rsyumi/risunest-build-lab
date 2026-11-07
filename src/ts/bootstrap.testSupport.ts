@@ -134,6 +134,12 @@ export function deviceSettingsModule(startup: BootstrapTestState) {
     } satisfies Partial<DeviceSettings>
 }
 
+export function storeCompactionModule() {
+    return {
+        compactRequestedStoreAtStart: vi.fn(async () => null), showStoreCompactionNotice: vi.fn(async () => {}),
+    } satisfies Partial<typeof import('./storage/storeCompaction')>
+}
+
 export function persistentStorageRuntimeModule() {
     return {
         initializePersistentStorage: vi.fn(),
@@ -152,7 +158,7 @@ export function nativeFileJobRecoveryModule() {
 }
 
 export function persistentBootstrapModule(startup: BootstrapTestState) {
-    return { bootstrapPersistentDatabase: async () => ({ database: startup.database, revision: 1, source: 'persistent' }) } satisfies Partial<typeof import('./storage/persistentBootstrap')>
+    return { bootstrapPersistentDatabase: vi.fn(async () => ({ database: startup.database, revision: 1, source: 'persistent' })) } satisfies Partial<typeof import('./storage/persistentBootstrap')>
 }
 
 export function databaseModule(startup: BootstrapTestState) {

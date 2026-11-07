@@ -3,7 +3,7 @@ use super::{
     ConversationMutation, PluginStorageMutation, RevisionResult, StagingResult, StoreError,
     StoreResult, WorkingSetCommit, GENERATION_TABLES,
 };
-use super::plugin_owner;
+use super::{plugin_owner, replacement_scan};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -35,6 +35,9 @@ pub(super) fn incremental_commit<T>(
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::{Map, Value};
+use super::held_binary::HeldBinaries;
+use super::stored_json::{self, Depth, Document, Object, Raw};
+use std::borrow::Cow;
 
 pub(super) fn apply_root_mutations(
     mut root: Value,
@@ -707,6 +710,8 @@ pub(super) fn replace_put_root_with_plugin_storage(
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     require_staging(&transaction, staging_id)?;
     let mut staged_root = object(root, "Persistent root")?.clone();
+    // Every later root save names an embedded module's owner by its id.
+    super::record_projection::assign_embedded_module_ids(&mut staged_root);
     let plugin_storage_meta = staged_root.shift_remove("pluginStorageMeta");
     let plugin_storage = staged_root.shift_remove("pluginCustomStorage");
     if let Some(plugin_storage_values) = plugin_storage_values {
@@ -815,6 +820,16 @@ pub(super) fn replace_add_characters(
     staging_id: &str,
     characters: &[Value],
 ) -> StoreResult<()> {
+    replace_add_characters_with_binaries(connection, staging_id, characters, &HeldBinaries::default())
+}
+
+/// Stages characters whose `bin` values `binaries` holds behind placeholders.
+pub(super) fn replace_add_characters_with_binaries(
+    connection: &mut Connection,
+    staging_id: &str,
+    characters: &[Value],
+    binaries: &HeldBinaries,
+) -> StoreResult<()> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     require_staging(&transaction, staging_id)?;
     let mut configured_index: i64 = transaction.query_row(
@@ -830,7 +845,7 @@ pub(super) fn replace_add_characters(
                 "Persistent data import requires unique character IDs",
             ));
         }
-        put_full_character(&transaction, staging_id, character, configured_index)?;
+        put_full_character(&transaction, staging_id, character, configured_index, binaries)?;
         page_staged_conversations(&transaction, staging_id, character_id)?;
         configured_index += 1;
     }
@@ -864,6 +879,7 @@ pub(super) fn replace_put_character_detail(
         None,
         configured_index,
         conversation_count,
+        &HeldBinaries::default(),
     )?;
     transaction.commit()?;
     Ok(())
@@ -904,7 +920,7 @@ pub(super) fn replace_put_conversation_row(
         recent_at,
         name,
         message_count,
-        detail,
+        &serde_json::to_string(detail)?,
     )?;
     page_staged_conversation(&transaction, staging_id, character_id, conversation_id)?;
     transaction.commit()?;
@@ -960,6 +976,7 @@ pub(super) fn replace_add_conversation_messages(
         conversation_id,
         start,
         messages,
+        &HeldBinaries::default(),
     )?;
     page_staged_conversation(&transaction, staging_id, character_id, conversation_id)?;
     transaction.commit()?;
@@ -1235,10 +1252,8 @@ fn prune_proven_unreachable_forwarded_aliases(
     }
 
     let mut references = BTreeSet::new();
-    root.visit_values(|value| {
-        observe_replacement_alias_references(&value, &mut references);
-        Ok(())
-    })?;
+    // The spool's own decoder reads root values without a depth limit.
+    root.visit_value_texts(|text| replacement_scan::observe_alias_references(text, true, &mut references))?;
     for query in [
         "SELECT value FROM bot_presets WHERE generation = ?1",
         "SELECT detail FROM characters WHERE generation = ?1",
@@ -1248,8 +1263,8 @@ fn prune_proven_unreachable_forwarded_aliases(
         let mut statement = transaction.prepare(query)?;
         let mut rows = statement.query([generation])?;
         while let Some(row) = rows.next()? {
-            let encoded: String = row.get(0)?;
-            observe_replacement_alias_references(&serde_json::from_str(&encoded)?, &mut references);
+            let encoded = row.get_ref(0)?.as_str().map_err(rusqlite::Error::from)?;
+            replacement_scan::observe_alias_references(encoded, false, &mut references)?;
         }
     }
     for query in [
@@ -1259,7 +1274,7 @@ fn prune_proven_unreachable_forwarded_aliases(
         let mut statement = transaction.prepare(query)?;
         let mut rows = statement.query([generation])?;
         while let Some(row) = rows.next()? {
-            observe_replacement_alias_text(&row.get::<_, String>(0)?, &mut references);
+            replacement_scan::observe_alias_text(&row.get::<_, String>(0)?, &mut references);
         }
     }
 
@@ -1313,13 +1328,12 @@ fn replacement_asset_owner_scan_is_complete(
         }
     }
     let mut complete=true;
-    root.visit("modules",|_,module| {
-        complete &= module.as_object().is_some_and(|module|module.get("assets").is_none_or(Value::is_array));
+    root.visit_member_texts("modules",|module| {
+        complete &= replacement_scan::module_assets_are_listed(module)?;
         Ok(())
     })?;
-    root.visit("personas",|_,persona| {
-        complete &= persona.as_object().is_some_and(|persona|persona.get("embeddedModule").is_none_or(|module|
-            module.as_object().is_some_and(|module|module.get("assets").is_none_or(Value::is_array))));
+    root.visit_member_texts("personas",|persona| {
+        complete &= replacement_scan::embedded_module_assets_are_listed(persona)?;
         Ok(())
     })?;
     if !complete { return Ok(false); }
@@ -1328,52 +1342,12 @@ fn replacement_asset_owner_scan_is_complete(
         .prepare("SELECT detail FROM characters WHERE generation = ?1 ORDER BY character_id ASC")?;
     let mut rows = statement.query([generation])?;
     while let Some(row) = rows.next()? {
-        let detail: Value = serde_json::from_str(&row.get::<_, String>(0)?)?;
-        let Some(detail) = detail.as_object() else {
-            return Ok(false);
-        };
-        if detail
-            .get("additionalAssets")
-            .is_some_and(|value| !value.is_array())
-        {
+        let detail = row.get_ref(0)?.as_str().map_err(rusqlite::Error::from)?;
+        if !replacement_scan::additional_assets_are_listed(detail)? {
             return Ok(false);
         }
     }
     Ok(true)
-}
-
-fn observe_replacement_alias_references(value: &Value, references: &mut BTreeSet<String>) {
-    match value {
-        Value::String(value) => observe_replacement_alias_text(value, references),
-        Value::Array(values) => {
-            for value in values {
-                observe_replacement_alias_references(value, references);
-            }
-        }
-        Value::Object(values) => {
-            for value in values.values() {
-                observe_replacement_alias_references(value, references);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn observe_replacement_alias_text(value: &str, references: &mut BTreeSet<String>) {
-    if value.starts_with("assets/") {
-        references.insert(value.to_owned());
-    }
-    for prefix in ["{{inlay::", "{{inlayed::", "{{inlayeddata::"] {
-        let mut remainder = value;
-        while let Some(start) = remainder.find(prefix) {
-            remainder = &remainder[start + prefix.len()..];
-            let Some(end) = remainder.find("}}") else {
-                break;
-            };
-            references.insert(remainder[..end].to_owned());
-            remainder = &remainder[end + 2..];
-        }
-    }
 }
 
 fn validate_staged_owner_heads(database: &Value, heads: &[AssetOwnerHead]) -> StoreResult<()> {
@@ -1530,18 +1504,16 @@ fn replacement_owner_tuple(
     if !root.is_object() { return Err(validation("Replacement root must be an object")); }
     match owner {
         AssetOwnerLocator::CharacterAdditionalAssets { character_id } => {
-            let detail: Option<String> = connection
+            let assets = connection
                 .query_row(
                     "SELECT detail FROM characters
                      WHERE generation = ?1 AND character_id = ?2",
                     params![generation, character_id],
-                    |row| row.get(0),
+                    |row| Ok(replacement_scan::additional_assets(row.get_ref(0)?.as_str()?)),
                 )
-                .optional()?;
-            let Some(detail) = detail else {
-                return Ok(None);
-            };
-            replacement_owner_tuple_from_parent(&serde_json::from_str(&detail)?, "additionalAssets")
+                .optional()?
+                .transpose()?;
+            Ok(listed_owner_tuple(assets))
         }
         AssetOwnerLocator::RootModuleAssets { .. } | AssetOwnerLocator::PersonaEmbeddedModuleAssets { .. } => {
             let Some(module)=owner.root_parent(root) else{return Ok(None)};
@@ -1556,19 +1528,27 @@ fn streamed_replacement_owner_tuple(
     root: &super::upstream_stream::RootSpool,
     owner: &AssetOwnerLocator,
 ) -> StoreResult<Option<ReplacementOwnerTuple>> {
-    let parent=match owner {
+    let assets=match owner {
         AssetOwnerLocator::CharacterAdditionalAssets { .. } => {
             return replacement_owner_tuple(connection,generation,&serde_json::json!({}),owner);
         }
-        AssetOwnerLocator::RootModuleAssets { module_id } => root.record_by_id("modules",module_id)?,
+        AssetOwnerLocator::RootModuleAssets { module_id } => {
+            root.read_record("modules",module_id,replacement_scan::module_assets)?
+        }
         AssetOwnerLocator::PersonaEmbeddedModuleAssets { persona_id,module_id } => {
-            root.record_by_id("personas",persona_id)?
-                .and_then(|mut persona|persona.as_object_mut()?.shift_remove("embeddedModule"))
-                .filter(|module|module.get("id").and_then(Value::as_str)==Some(module_id))
+            root.read_record("personas",persona_id,|persona|replacement_scan::embedded_module_assets(persona,module_id))?.flatten()
         }
     };
-    let Some(parent)=parent else { return Ok(None); };
-    replacement_owner_tuple_from_parent(&parent,"assets")
+    Ok(listed_owner_tuple(assets))
+}
+
+// Matches `replacement_owner_tuple_from_parent` for entries read without the parent.
+fn listed_owner_tuple(assets: Option<replacement_scan::ArrayProperty>) -> Option<ReplacementOwnerTuple> {
+    match assets {
+        None | Some(replacement_scan::ArrayProperty::Unusable) => None,
+        Some(replacement_scan::ArrayProperty::Absent) => Some(ReplacementOwnerTuple::Absent),
+        Some(replacement_scan::ArrayProperty::Entries(entries)) => Some(ReplacementOwnerTuple::Present(entries)),
+    }
 }
 
 // A malformed parent or non-array property yields no tuple, so the head is
@@ -1823,11 +1803,7 @@ pub(super) fn put_plugin_storage_map(
     first_ordinal: i64,
 ) -> StoreResult<()> {
     for (offset, (key, value)) in values.iter().enumerate() {
-        let owner = sidecar_owner(meta, key);
-        // The staging identity names this import, so a plugin that starts once
-        // afterwards can take a value the save left without an owner.
-        let import_batch = plugin_owner::is_unowned(owner)
-            .then(|| carried.get(key.as_str()).map(String::as_str).unwrap_or(generation));
+        let (owner, import_batch) = imported_plugin_owner(generation, key, meta, carried);
         put_plugin_storage(
             transaction,
             generation,
@@ -1839,6 +1815,38 @@ pub(super) fn put_plugin_storage_map(
         )?;
     }
     Ok(())
+}
+
+/// `put_plugin_storage_map` of one value stored as `text`, written from it.
+pub(super) fn put_plugin_storage_text(
+    transaction: &Transaction<'_>,
+    generation: &str,
+    key: &str,
+    text: &str,
+    meta: Option<&Map<String, Value>>,
+    carried: &HashMap<String, String>,
+    ordinal: i64,
+) -> StoreResult<()> {
+    let (owner, import_batch) = imported_plugin_owner(generation, key, meta, carried);
+    let mut value = Vec::new();
+    Document::parse(text, Depth::Unlimited)?.value().write_json(&mut value)?;
+    put_plugin_storage_json(transaction, generation, owner, key, &stored_json::text(value)?, Some(ordinal), import_batch)
+}
+
+/// The owner of an imported plugin value, and the import batch that holds it
+/// when it has none.
+fn imported_plugin_owner<'a>(
+    generation: &'a str,
+    key: &str,
+    meta: Option<&'a Map<String, Value>>,
+    carried: &'a HashMap<String, String>,
+) -> (&'a str, Option<&'a str>) {
+    let owner = sidecar_owner(meta, key);
+    // The staging identity names this import, so a plugin that starts once
+    // afterwards can take a value the save left without an owner.
+    let import_batch = plugin_owner::is_unowned(owner)
+        .then(|| carried.get(key).map(String::as_str).unwrap_or(generation));
+    (owner, import_batch)
 }
 
 fn sidecar_owner<'a>(meta: Option<&'a Map<String, Value>>, key: &str) -> &'a str {
@@ -1860,10 +1868,22 @@ fn put_plugin_storage(
     ordinal: Option<i64>,
     import_batch: Option<&str>,
 ) -> StoreResult<()> {
+    put_plugin_storage_json(transaction, generation, owner, key, &serde_json::to_string(value)?, ordinal, import_batch)
+}
+
+/// `put_plugin_storage` of the value `serde_json::to_string` writes as `serialized`.
+fn put_plugin_storage_json(
+    transaction: &Transaction<'_>,
+    generation: &str,
+    owner: &str,
+    key: &str,
+    serialized: &str,
+    ordinal: Option<i64>,
+    import_batch: Option<&str>,
+) -> StoreResult<()> {
     if !plugin_owner::validate_owner(owner) {
         return Err(validation("plugin storage owner is invalid"));
     }
-    let serialized = serde_json::to_string(value)?;
     transaction.execute(
         "INSERT INTO plugin_storage
              (generation, owner, storage_key, byte_size, ordinal, value, import_batch_id)
@@ -1944,18 +1964,18 @@ pub(super) fn replace_presets(
     put_preset_rows(transaction, generation, presets, 0)
 }
 
+const PUT_PRESET: &str = "INSERT INTO bot_presets (generation, preset_id, configured_index, name, image, value)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+     ON CONFLICT(generation,preset_id) DO UPDATE SET configured_index=excluded.configured_index,
+         name=excluded.name,image=excluded.image,value=excluded.value";
+
 pub(super) fn put_preset_rows(
     transaction: &Transaction<'_>,
     generation: &str,
     presets: &[Value],
     first_index: i64,
 ) -> StoreResult<()> {
-    let mut statement = transaction.prepare_cached(
-        "INSERT INTO bot_presets (generation, preset_id, configured_index, name, image, value)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(generation,preset_id) DO UPDATE SET configured_index=excluded.configured_index,
-             name=excluded.name,image=excluded.image,value=excluded.value",
-    )?;
+    let mut statement = transaction.prepare_cached(PUT_PRESET)?;
     for (offset, preset) in presets.iter().enumerate() {
         statement.execute(params![
             generation,
@@ -1970,6 +1990,29 @@ pub(super) fn put_preset_rows(
         ])?;
     }
     Ok(())
+}
+
+/// `put_preset_rows` of one preset stored as `text`, written from it.
+pub(super) fn put_preset_text(transaction: &Transaction<'_>, generation: &str, text: &str, index: i64) -> StoreResult<()> {
+    let document = Document::parse(text, Depth::Unlimited)?;
+    let preset = document.value().object()?;
+    let id = stored_string(preset.as_ref(), "id")?.filter(|id| !id.is_empty()).ok_or_else(|| requires("Preset", "id"))?;
+    let mut value = Vec::new();
+    document.value().write_json(&mut value)?;
+    transaction.prepare_cached(PUT_PRESET)?.execute(params![
+        generation,
+        id,
+        index,
+        stored_string(preset.as_ref(), "name")?.unwrap_or_default(),
+        stored_string(preset.as_ref(), "image")?,
+        stored_json::text(value)?,
+    ])?;
+    Ok(())
+}
+
+/// The string a stored record holds as `name`, or `None` for any other value.
+fn stored_string<'a>(record: Option<&Object<'a>>, name: &str) -> StoreResult<Option<Cow<'a, str>>> {
+    Ok(record.and_then(|record| record.get(name)).map(Raw::as_str).transpose()?.flatten())
 }
 
 pub(super) fn require_staging(connection: &Connection, staging_id: &str) -> StoreResult<()> {
@@ -2081,6 +2124,7 @@ pub(super) fn put_character_detail(
         None,
         configured_index,
         conversation_count,
+        &HeldBinaries::default(),
     )
 }
 
@@ -2107,7 +2151,7 @@ fn replace_character(
     };
 
     delete_character_contents(transaction, generation, character_id)?;
-    put_full_character(transaction, generation, character, configured_index)
+    put_full_character(transaction, generation, character, configured_index, &HeldBinaries::default())
 }
 
 fn put_full_character(
@@ -2115,12 +2159,13 @@ fn put_full_character(
     generation: &str,
     character: &Value,
     configured_index: i64,
+    binaries: &HeldBinaries,
 ) -> StoreResult<()> {
     let character_id = required_string(character, "chaId", "Character")?;
     let chats = character
         .get("chats")
         .and_then(Value::as_array)
-        .cloned()
+        .map(Vec::as_slice)
         .unwrap_or_default();
     put_character_records(
         transaction,
@@ -2129,6 +2174,7 @@ fn put_full_character(
         Some("chats"),
         configured_index,
         chats.len() as i64,
+        binaries,
     )?;
     for (index, conversation) in chats.iter().enumerate() {
         put_conversation(
@@ -2137,6 +2183,7 @@ fn put_full_character(
             character_id,
             conversation,
             index as i64,
+            binaries,
         )?;
     }
     Ok(())
@@ -2149,6 +2196,7 @@ fn put_character_records(
     omitted: Option<&str>,
     configured_index: i64,
     conversation_count: i64,
+    binaries: &HeldBinaries,
 ) -> StoreResult<()> {
     let object = object(detail, "Character detail")?;
     let character_id = required_string(detail, "chaId", "Character detail")?;
@@ -2193,7 +2241,7 @@ fn put_character_records(
             character_type,
             creator_notes,
             trash_time,
-            serde_json::to_string(&WithoutField(object, omitted))?,
+            serde_json::to_string(&WithoutField(object, omitted, binaries))?,
         ],
     )?;
     Ok(())
@@ -2205,6 +2253,7 @@ fn put_conversation(
     character_id: &str,
     conversation: &Value,
     configured_index: i64,
+    binaries: &HeldBinaries,
 ) -> StoreResult<()> {
     let object = object(conversation, "Conversation")?;
     let conversation_id = required_string(conversation, "id", "Conversation")?;
@@ -2212,13 +2261,12 @@ fn put_conversation(
     let messages = object
         .get("message")
         .and_then(Value::as_array)
-        .cloned()
+        .map(Vec::as_slice)
         .unwrap_or_default();
     let recent_at = conversation_recent_at(
         conversation,
         messages.last().and_then(|message| message.get("time")),
     );
-    let detail = without_field(conversation, "message")?;
     put_conversation_record(
         transaction,
         generation,
@@ -2228,7 +2276,7 @@ fn put_conversation(
         recent_at,
         name,
         messages.len() as i64,
-        &detail,
+        &serde_json::to_string(&WithoutField(object, Some("message"), binaries))?,
     )?;
     insert_messages(
         transaction,
@@ -2236,7 +2284,8 @@ fn put_conversation(
         character_id,
         conversation_id,
         0,
-        &messages,
+        messages,
+        binaries,
     )
 }
 
@@ -2258,7 +2307,7 @@ fn put_conversation_record(
     recent_at: i64,
     name: &str,
     message_count: i64,
-    detail: &Value,
+    detail: &str,
 ) -> StoreResult<()> {
     transaction.execute(
         "INSERT INTO conversations (
@@ -2279,7 +2328,7 @@ fn put_conversation_record(
             recent_at,
             name,
             message_count,
-            serde_json::to_string(detail)?,
+            detail,
         ],
     )?;
     Ok(())
@@ -2292,6 +2341,7 @@ fn insert_messages(
     conversation_id: &str,
     start: i64,
     messages: &[Value],
+    binaries: &HeldBinaries,
 ) -> StoreResult<()> {
     let mut statement = transaction.prepare_cached(
         "INSERT INTO messages (
@@ -2299,7 +2349,7 @@ fn insert_messages(
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
     )?;
     for (offset, message) in messages.iter().enumerate() {
-        let canonical = risunest_sync_wire::payload_value::encode(message).map_err(super::lww::error)?;
+        let canonical = binaries.canonical(message)?;
         let message_id = message.get("chatId").and_then(Value::as_str);
         statement.execute(params![
             generation,
@@ -2307,7 +2357,7 @@ fn insert_messages(
             conversation_id,
             start + offset as i64,
             message_id,
-            serde_json::to_string(message)?,
+            binaries.json(message)?,
             {
                 #[cfg(test)]
                 crate::persistent_store::hash_work::observe("native_message_insert", canonical.len());
@@ -2461,6 +2511,7 @@ pub(super) fn apply_conversation_mutation(
                     character_id,
                     &Value::Object(value),
                     configured_index,
+                    &HeldBinaries::default(),
                 )?;
                 refresh_character_summary(transaction, generation, character_id)?;
                 return Ok(());
@@ -2510,6 +2561,7 @@ pub(super) fn apply_conversation_mutation(
                 conversation_id,
                 start,
                 messages,
+                &HeldBinaries::default(),
             )?;
 
             let stored_detail: Value;
@@ -2534,7 +2586,7 @@ pub(super) fn apply_conversation_mutation(
                 recent_at,
                 name,
                 old_count + delta,
-                detail,
+                &serde_json::to_string(detail)?,
             )?;
             refresh_character_summary(transaction, generation, character_id)?;
 
@@ -2784,18 +2836,15 @@ pub(super) fn set_active(
     Ok(())
 }
 
-fn without_field(value: &Value, field: &str) -> StoreResult<Value> {
-    let mut object = object(value, "JSON object")?.clone();
-    object.shift_remove(field);
-    Ok(Value::Object(object))
-}
-
-// Serializes the same text as `without_field` without copying the object.
-struct WithoutField<'a>(&'a Map<String, Value>, Option<&'a str>);
+// Serializes an object without one of its fields, and with the bytes behind
+// its placeholders, without copying it.
+struct WithoutField<'a>(&'a Map<String, Value>, Option<&'a str>, &'a HeldBinaries);
 
 impl Serialize for WithoutField<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_map(self.0.iter().filter(|(key, _)| Some(key.as_str()) != self.1))
+        serializer.collect_map(self.0.iter()
+            .filter(|(key, _)| Some(key.as_str()) != self.1)
+            .map(|(key, value)| (key, self.2.expanded(value))))
     }
 }
 
@@ -2813,15 +2862,9 @@ mod ordered_removal_tests {
             "c": 3,
         });
 
-        let result = without_field(&value, "removed").unwrap();
-        let keys = result
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
+        let result = WithoutField(value.as_object().unwrap(), Some("removed"), &HeldBinaries::default());
 
-        assert_eq!(keys, ["a", "b", "c"]);
+        assert_eq!(serde_json::to_string(&result).unwrap(), r#"{"a":1,"b":2,"c":3}"#);
     }
 }
 
@@ -2844,7 +2887,11 @@ fn required_string<'a>(value: &'a Value, key: &str, context: &str) -> StoreResul
         .get(key)
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| validation(format!("{context} requires {key}")))
+        .ok_or_else(|| requires(context, key))
+}
+
+fn requires(context: &str, key: &str) -> StoreError {
+    validation(format!("{context} requires {key}"))
 }
 
 fn validation(message: impl Into<String>) -> StoreError {
@@ -3249,9 +3296,9 @@ fn staged_plugin_names(connection: &Connection, repository_root: &std::path::Pat
         return Ok(Vec::new());
     }
     let mut names=Vec::new();
-    root.visit("plugins",|_,entry| {
-        if let Some(Value::String(name))=entry.get("name") {
-            if !name.is_empty() { names.push(name.clone()); }
+    root.visit_member_texts("plugins",|entry| {
+        if let Some(name)=replacement_scan::record_name(entry)? {
+            if !name.is_empty() { names.push(name); }
         }
         Ok(())
     })?;

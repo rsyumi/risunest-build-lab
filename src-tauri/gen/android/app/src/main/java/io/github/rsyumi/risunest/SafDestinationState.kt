@@ -271,6 +271,38 @@ internal class SafDestinationStateStore(
   }
 }
 
+// Recovered receipts that a newer export moved out of the journal, one file per request until acknowledged.
+internal class SafDestinationReceiptStore(
+  private val directory: File,
+  private val atomicPublisher: SafAtomicPublisher,
+) {
+  private fun store(requestId: String) =
+    SafDestinationStateStore(directory.resolve("$requestId.json"), atomicPublisher)
+
+  fun save(record: SafDestinationRecord) = store(record.requestId).save(record)
+
+  fun loadAll(): List<SafDestinationRecord> = directory.listFiles().orEmpty()
+    .map { it.name.removeSuffix(".json") }
+    .filter(::isCanonicalUuidV4)
+    .mapNotNull { requestId -> store(requestId).load()?.takeIf { it.requestId == requestId } }
+    .sortedBy { it.updatedAtMillis }
+
+  fun clear(requestId: String): Boolean =
+    !directory.resolve("$requestId.json").exists() || store(requestId).clear(requestId)
+}
+
+/** Moves a recovered receipt still waiting for its owner out of the journal before another export takes it. */
+internal fun keepRecoveredSafReceipt(
+  current: SafDestinationRecord?,
+  nextRequestId: String,
+  session: SafDestinationRendererSession,
+  receipts: SafDestinationReceiptStore,
+) {
+  if (current != null && current.requestId != nextRequestId && session.hasRecovered(current.requestId)) {
+    receipts.save(current)
+  }
+}
+
 internal fun completedSafPublicationPrerequisites(
   record: SafDestinationRecord,
   requestId: String,

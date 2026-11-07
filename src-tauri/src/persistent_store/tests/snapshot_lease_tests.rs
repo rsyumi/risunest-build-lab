@@ -202,7 +202,7 @@ fn snapshot_restore_stages_large_message_manifests_and_archive_metadata() {
     use risunest_sync_wire::{descriptor::RecordDescriptor,unit::{UnitKey,UnitValue}};
     let (_directory,mut store,database)=open_fixture();
     let mut archive=Archive::open(&store.snapshots_dir).unwrap();
-    let (scratch,_)=super::super::snapshot::capture_scratch(&mut store,&archive).unwrap();
+    let (scratch,_)=super::super::snapshot::capture_scratch(&mut store,&archive,super::super::snapshot::KeepCount::MAX).unwrap();
     let source=Connection::open(&scratch.path).unwrap();
     source.execute_batch("BEGIN").unwrap();
     let (mut units,mut bodies,large)=super::super::external_capture::large_metadata_fixture();
@@ -252,7 +252,7 @@ fn snapshot_restore_rejects_damaged_large_units_and_oversized_reference_pages() 
         let revision=store.revision().unwrap();
         let clock=serde_json::to_value(store.lww_clock_state().unwrap()).unwrap();
         let mut archive=Archive::open(&store.snapshots_dir).unwrap();
-        let (scratch,_)=super::super::snapshot::capture_scratch(&mut store,&archive).unwrap();
+        let (scratch,_)=super::super::snapshot::capture_scratch(&mut store,&archive,super::super::snapshot::KeepCount::MAX).unwrap();
         let source=Connection::open(&scratch.path).unwrap();
         let key=UnitKey::new(&["record","plugins","synthetic-snapshot-plugin"]).unwrap();
         let encoded:String=source.query_row("SELECT value FROM snapshot_original_units WHERE key=?1",[key.as_str()],|row|row.get(0)).unwrap();
@@ -653,6 +653,35 @@ fn asset_gc_dry_run_scans_plugin_references_without_retaining_unreferenced_objec
     }
 }
 
+/// GC fails as busy, without waiting, while a capture defers the inventory or another
+/// operation holds the snapshot archive, and the renderer and server sync both see it as busy.
+#[test]
+fn asset_gc_fails_busy_while_a_capture_or_another_archive_holder_runs() {
+    let directory = tempfile::tempdir().expect("create temporary directory");
+    let store = PersistentStore::open(directory.path()).expect("open persistent store");
+    let deferral = store.active_readers.defer_asset_inventory();
+    assert_eq!(store.asset_gc_dry_run(128, None, 0, 0).map(|_| ()), Err(StoreError::AssetInventoryBusy));
+    drop(deferral);
+
+    let (store, held_result) = std::thread::scope(|scope| {
+        let held = Archive::open(&store.snapshots_dir).unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let gc = scope.spawn(move || {
+            sent.send(store.asset_gc_dry_run(128, None, 0, 0).map(|_| ())).unwrap();
+            store
+        });
+        let result = received.recv_timeout(std::time::Duration::from_secs(5));
+        drop(held);
+        (gc.join().unwrap(), result)
+    });
+    let error = held_result.expect("GC returned without waiting for the archive").unwrap_err();
+    assert_eq!(error, StoreError::AssetInventoryBusy);
+    // The storage screen reads this code to ask for a retry instead of offering the data check.
+    assert_eq!(serde_json::to_value(&error).unwrap(), serde_json::json!({ "code": "library-operation-busy" }));
+    assert_eq!(crate::server_sync::SyncError::from(error).code, "library-operation-busy");
+    assert!(store.asset_gc_dry_run(128, None, 0, 0).is_ok());
+}
+
 #[test]
 fn asset_gc_dry_run_keeps_detached_export_roots_until_reader_release() {
     use super::asset_object_catalog::AssetObjectRegistration;
@@ -881,7 +910,7 @@ fn checkpoints_accept_both_documented_modes() {
 }
 
 #[test]
-fn active_lease_rejects_truncate_and_final_release_truncates_the_wal() {
+fn active_lease_turns_truncate_into_passive_and_final_release_truncates_the_wal() {
     let (directory, mut store, _) = open_fixture();
     store
         .connection
@@ -891,27 +920,28 @@ fn active_lease_rejects_truncate_and_final_release_truncates_the_wal() {
     store
         .set_app_kv("device-backup-commit:after-lease", &json!(true))
         .expect("append WAL frame after lease");
-    store
-        .checkpoint(CheckpointMode::Passive)
-        .expect("passive checkpoint with active lease");
+    let database_path = directory.path().join("persistent/persistent.sqlite");
+    let wal_path = PathBuf::from(format!("{}-wal", database_path.display()));
 
     let started = std::time::Instant::now();
-    let error = store
+    store
         .checkpoint(CheckpointMode::Truncate)
-        .expect_err("truncate must reject an active lease");
+        .expect("truncate request under an active lease checkpoints passively");
     // Far above scheduler/disk jitter, comfortably below the 5s SQLite busy timeout:
-    // proves the call rejected promptly instead of waiting out the busy handler.
+    // proves the call returned promptly instead of waiting out the busy handler.
     assert!(started.elapsed() < Duration::from_secs(1));
-    assert!(matches!(
-        error,
-        StoreError::Store { message } if message.contains("active read lease")
-    ));
+    assert!(fs::metadata(&wal_path).expect("read leased WAL").len() > 0);
+    assert_eq!(
+        store
+            .read_root(Some(&lease.lease))
+            .expect("lease stays pinned after the checkpoint")
+            .revision,
+        1
+    );
 
     store
         .release_revision(&lease.lease)
         .expect("release final lease and truncate WAL");
-    let database_path = directory.path().join("persistent/persistent.sqlite");
-    let wal_path = PathBuf::from(format!("{}-wal", database_path.display()));
     assert_eq!(fs::metadata(wal_path).expect("read final WAL").len(), 0);
 }
 
@@ -974,7 +1004,7 @@ fn attached_export_can_leave_the_store_lock_and_restore_the_same_lease() {
 }
 
 #[test]
-fn detached_export_reader_rejects_truncate_until_it_is_released() {
+fn detached_export_reader_keeps_truncate_passive_until_it_is_released() {
     let (directory, mut store, _) = open_fixture();
     store
         .connection
@@ -986,24 +1016,21 @@ fn detached_export_reader_rejects_truncate_until_it_is_released() {
     store
         .set_app_kv("device-backup-commit:after-detached-export", &json!(true))
         .expect("append WAL frame after detached reader");
+    let database_path = directory.path().join("persistent/persistent.sqlite");
+    let wal_path = PathBuf::from(format!("{}-wal", database_path.display()));
 
     let started = std::time::Instant::now();
-    let error = store
+    store
         .checkpoint(CheckpointMode::Truncate)
-        .expect_err("truncate must reject a detached export reader");
+        .expect("truncate request beside a detached export reader checkpoints passively");
     // Far above scheduler/disk jitter, comfortably below the 5s SQLite busy timeout.
     assert!(started.elapsed() < Duration::from_secs(1));
-    assert!(matches!(
-        error,
-        StoreError::Store { message } if message.contains("active read lease")
-    ));
+    assert!(fs::metadata(&wal_path).expect("read leased WAL").len() > 0);
 
     let reader = prepared.take_reader().expect("take detached export reader");
     prepared
         .release(reader)
         .expect("release detached export reader");
-    let database_path = directory.path().join("persistent/persistent.sqlite");
-    let wal_path = PathBuf::from(format!("{}-wal", database_path.display()));
     assert_eq!(fs::metadata(wal_path).expect("read final WAL").len(), 0);
 }
 
@@ -1140,7 +1167,7 @@ fn byte_rotation_keeps_newest_and_durable_stage_owns_rotated_source() {
     store.snapshot_create("middle").unwrap();
     let latest=store.snapshot_create("latest").unwrap();
     let mut archive=Archive::open(&store.snapshots_dir).unwrap();
-    archive.rotate(0,&latest.id).unwrap();
+    archive.rotate(8,0,&latest.id).unwrap();
     let ids:Vec<_>=archive.list().unwrap().into_iter().map(|s|s.id).collect();
     assert_eq!(ids,vec![latest.id]);
     let authority=store.lww_binding_authority().unwrap();

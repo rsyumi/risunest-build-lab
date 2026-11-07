@@ -63,6 +63,7 @@ export const languageEnglish = {
             'toggle-preset-prompt-name-unmatched':
                 'Toggle preset prompts without matching names',
             'unavailable-persona-binding': 'Unavailable persona bindings',
+            'missing-asset-references': 'Attachment references without a file',
             'unsupported-inlay-references': 'Unsupported inlay references',
             'unsupported-option-value': 'Unsupported setting values',
             'unsupported-structural-field': 'Unsupported data fields',
@@ -108,6 +109,7 @@ export const languageEnglish = {
             damagedPluginStorage: (count: number) => `Damaged plugin storage (${count}) will not be restored.`,
             oversizedPluginStorage: (count: number) => `Oversized plugin storage (${count}) will not be restored.`,
             inlays: (count: number) => `Unsupported inlay entries (${count}) will not be restored.`,
+            missingAssets: (count: number) => `Attachment references without a file (${count}) will be restored without the file.`,
         },
         "recovery": {
             "dismiss": 'Dismiss attempt',
@@ -1909,7 +1911,8 @@ export const languageEnglish = {
     enableRemoteSaving: "Enable Remote Saving",
     blockquoteStyling: "Blockquote Styling",
     dynamicModelRegistry: "Dynamic Model Registry",
-    confirmInstallPluginViaPlugin: "You are trying to install a plugin via another plugin. This can be dangerous if the source plugin is not trustworthy. Do you want to continue?",
+    confirmInstallPluginViaPlugin: "You are trying to install the plugin \"{plugin}\" via another plugin. This can be dangerous if the source plugin is not trustworthy. Do you want to continue?",
+    confirmReplacePluginViaPlugin: "Another plugin is trying to replace the installed plugin \"{plugin}\" with a different script. This can be dangerous if the source plugin is not trustworthy. Do you want to continue?",
     risuaiProTools: "RisuNest Pro Tools",
     enableRisuaiProTools: "Enable RisuNest Pro Tools",
     easyPanel: "Easy Panel",
@@ -1975,6 +1978,13 @@ export const languageEnglish = {
     skipSavingAssetsOnWebSync: "Skip Saving Assets on Web Sync",
     applyAdditionalParamsToAll: "Apply Additional Parameters to All Models",
     risuNest: {
+        moduleScope: {
+            info: 'Global applies a module to every chat, Character to every chat with this character, and Chat to this chat only.',
+            global: 'Global',
+            character: 'Character',
+            chat: 'Chat',
+            noMatch: 'No modules match the search.',
+        },
         appLock: {
             title: 'App lock',
             enable: 'Use app lock',
@@ -2307,6 +2317,10 @@ export const languageEnglish = {
             unsupportedApiVersionLoad:
                 'These plugins use an unsupported Plugin API version and did not run. Install versions updated to API 3.0.\n\n{plugins}',
 
+            installViaPlugin: 'The plugin "{source}" is trying to install the plugin "{plugin}". Do you want to install it?',
+            replaceViaPlugin: 'The plugin "{source}" is trying to replace the code of the plugin "{plugin}". If you replace it, the new code uses the data saved by "{plugin}". Do you want to replace it?',
+            replaceSelfViaPlugin: 'The plugin "{plugin}" is trying to replace its own code. Do you want to replace it?',
+
             "removeTitle": "Remove this plugin?",
             "removeDescription": "Deleting plugin data also removes its settings and saved content, even if you reinstall the plugin. Keeping plugin data lets you use it again after reinstalling.",
             "removeDataOption": "Also delete plugin data",
@@ -2390,6 +2404,7 @@ export const languageEnglish = {
         },
         startup: {
             storage: 'Opening storage',
+            compacting: 'Compacting database {0}%',
             data: 'Preparing chat data',
             compatibility: 'Preparing plugin compatibility data',
             plugins: 'Preparing plugins',
@@ -2761,6 +2776,12 @@ export const languageEnglish = {
             counts: '{0} characters · {1} chats · {2} messages',
             subMetrics:
                 'Chat attachments {0} (included in images & media) · Plugin data {1}',
+            automaticSnapshots: 'Automatic snapshots',
+            automaticSnapshotsHelp:
+                'Creates a new snapshot once 24 hours have passed since the last one.',
+            snapshotKeepCount: 'Snapshots to keep',
+            snapshotKeepCountHelp:
+                'Creating a snapshot beyond this number deletes the oldest automatic snapshots first. Up to {0} snapshots can be kept.',
             createSnapshotTitle: 'Create a snapshot',
             createSnapshotHelp:
                 'Saves the current state so you can return to it later.',
@@ -2787,6 +2808,20 @@ export const languageEnglish = {
             gcResult: 'Removable: {0} items ({1})',
             gcDeletedResult: 'Deleted: {0} items ({1})',
             gcConfirm: 'This will delete {0} unused files ({1}). Continue?',
+            compactTitle: 'Database compaction',
+            compactHelp: 'Clears unused space in the database to make its files smaller, and restarts the app.',
+            compactReclaimable: '{0} reclaimable',
+            compact: 'Compact',
+            compactConfirm:
+                'The app restarts to compact the database, and the start may take longer than usual. Continue?',
+            compactNoSpace: 'Not enough storage space to compact. Free up at least {0} and try again.',
+            compactRestartFailed: "Couldn't restart the app. The database is compacted the next time the app starts.",
+            compactOffer:
+                'Compacting the database frees {0}. Compacting restarts the app, and the start may take longer than usual. Compact now?',
+            compacted: 'Compacted the database and freed {0}.',
+            compactStartNoSpace:
+                "Not enough storage space to compact the database. Free up at least {0} and try again.",
+            compactFailed: "Couldn't compact the database. Try again.",
             deleteSnapshotConfirm:
                 "Delete this snapshot? You won't be able to restore to this point.",
             deleteConflictBackupConfirm:
@@ -2872,6 +2907,9 @@ export const languageEnglish = {
             actionAdoptStoredPayload: 'Use the file as it is now',
             actionNormalizeRecords: 'Recalculate the values',
             actionSelectFirstConversation: 'Select the first chat',
+            actionSelectFirstPreset: 'Select the first preset',
+            actionSelectFirstPersona: 'Select the first persona',
+            actionAssignEmbeddedModuleId: 'Give the module a new ID',
             actionKeepSingleRecord: 'Keep one and drop the rest',
             actionRecoverOrphans: 'Put them back under an owner',
             actionDiscards: 'deletes the value',
@@ -3030,6 +3068,8 @@ export const languageEnglish = {
             currentItem: 'Current: {0}',
             itemsOf: '{0} / {1}',
             itemsCount: '{0} items',
+            batchFile: 'File {0} of {1}',
+            batchFiles: '{0} files',
             countCharacters: 'Characters',
             countPresets: 'Presets',
             countAssets: 'Assets',
@@ -3049,6 +3089,9 @@ export const languageEnglish = {
             resultCancelledPartial:
                 'Import cancelled. Some attachments that were already saved may remain.',
             resultFailed: 'Import failed. Your existing data is unchanged.',
+            resultBatchFailed: 'Could not import {0} of {1} files.',
+            resultBatchCancelled: 'Import cancelled. {0} of {1} files were imported.',
+            resultBatchPartial: '{0} of {1} files were imported.',
             resultFailedAfterCommit:
                 'The data was imported, but the screen could not be refreshed. Select Refresh screen before making more changes.',
             resultActivationUnresolved: 'The restore result could not be confirmed. Select Refresh screen to check it before making more changes.',
@@ -3070,6 +3113,9 @@ export const languageEnglish = {
             reasonExportTooLarge: '{0} is too large to export.',
             reasonCompatibleDatabaseTooLarge: 'The data is too large to export as a compatible backup. Use a RisuNest backup.',
             reasonCompatibleUnsupportedValue: 'The data contains a value the target app does not support, so it could not be exported as a compatible backup. Use a RisuNest backup.',
+            failureOwners: {
+                character: 'Character: {0}', chat: 'Chat: {1} of {0}', preset: 'Preset: {0}', module: 'Module: {0}', persona: 'Persona: {0}',
+            },
             tooLargeItems: {
                 root: 'Settings data', preset: 'A preset', character: 'A character', conversation: 'A chat', message: 'A message', 'plugin-value': 'Plugin data',
                 record: 'A data item', backup: 'Backup data', 'backup-entry': 'A backup entry', card: 'The character card', module: 'The module', content: 'The card or module', 'owner-manifest': 'The additional asset list', 'compatible-database': 'The data',
@@ -3209,6 +3255,16 @@ export const languageEnglish = {
             fileLogHelp:
                 'Secrets such as API keys are masked before being written.',
             logEmpty: 'No errors recorded.',
+            savedLogTitle: 'Saved error log',
+            savedLogHelp: 'View the error log saved to the file, including entries from before the app restarted. Copy covers the page on screen, and Save covers the whole log.',
+            savedLogEmpty: 'No errors saved.',
+            saveLog: 'Save',
+            savedLogSaved: 'Error log saved.',
+            saveFailed: 'Could not save the error log.',
+            savedLogList: 'Saved error log entries',
+            appStarted: 'App started',
+            newerPage: 'Previous page',
+            olderPage: 'Next page',
             actionFailed:
                 'Diagnostics are unavailable right now. Restart the app and try again.',
         },

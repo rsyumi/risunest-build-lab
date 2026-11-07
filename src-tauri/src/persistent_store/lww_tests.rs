@@ -3192,9 +3192,14 @@ fn ranges_for_one_conversation_in_one_commit_capture_once_from_their_pages() {
 }
 
 #[test]
-fn superseded_message_pages_are_collected_only_after_the_grace_period() {
-    let (_dir, mut store) = store();
-    create_conversation(&mut store, "char", "chat");
+fn superseded_message_pages_are_collected_after_the_short_grace() {
+    let (grace, short, limit) = (
+        super::super::ASSET_GC_PRODUCT_MINIMUM_GRACE_MS,
+        super::super::SUPERSEDED_OBJECT_GRACE_MS,
+        super::super::MESSAGE_PAGE_SWEEP_LIMIT,
+    );
+    let library = super::super::MessageObjectStore::Library;
+    let clock = || super::super::commands::current_time_ms().unwrap();
     let message = |i: usize| serde_json::json!({"chatId":format!("m-{i}"),"data":format!("synthetic-{i}")});
     let append = |store: &mut PersistentStore, start: usize, messages: Vec<Value>| {
         store.commit(&WorkingSetCommit {
@@ -3206,42 +3211,53 @@ fn superseded_message_pages_are_collected_only_after_the_grace_period() {
             ..Default::default()
         }).unwrap();
     };
-    let referenced = |store: &PersistentStore| -> BTreeSet<String> {
-        let mut hashes = store.connection.prepare("SELECT hash FROM message_page_indexes").unwrap()
-            .query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<BTreeSet<_>, _>>().unwrap();
-        let body: Vec<u8> = store.connection.query_row("SELECT body FROM message_page_manifests", [], |row| row.get(0)).unwrap();
-        hashes.insert(risunest_sync_wire::hash(&body));
-        hashes
+    let objects = |store: &PersistentStore| -> BTreeSet<String> {
+        store.connection.prepare("SELECT hash FROM message_page_objects").unwrap()
+            .query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<BTreeSet<_>, _>>().unwrap()
     };
-    let present = |store: &PersistentStore, hash: &str| -> bool {
-        store.connection.query_row("SELECT EXISTS(SELECT 1 FROM message_page_objects WHERE hash=?1)", [hash], |row| row.get(0)).unwrap()
-    };
-    append(&mut store, 0, (0..40).map(message).collect());
-    let before = referenced(&store);
-    append(&mut store, 40, vec![message(40)]);
-    let after = referenced(&store);
-    let superseded = before.difference(&after).cloned().collect::<Vec<_>>();
-    assert!(!superseded.is_empty());
-    let now = 1_900_000_000_000i64;
-    store.sweep_message_page_objects(super::super::MessageObjectStore::Library, now, super::super::MESSAGE_PAGE_SWEEP_LIMIT).unwrap();
-    assert!(superseded.iter().all(|hash| present(&store, hash)));
-    store.sweep_message_page_objects(super::super::MessageObjectStore::Library, now + super::super::ASSET_GC_PRODUCT_MINIMUM_GRACE_MS - 1, super::super::MESSAGE_PAGE_SWEEP_LIMIT).unwrap();
-    assert!(superseded.iter().all(|hash| present(&store, hash)));
-    store.sweep_message_page_objects(super::super::MessageObjectStore::Library, now + super::super::ASSET_GC_PRODUCT_MINIMUM_GRACE_MS, super::super::MESSAGE_PAGE_SWEEP_LIMIT).unwrap();
-    for hash in &superseded {
-        assert!(!present(&store, hash), "superseded object {hash} survived maintenance");
-        let proofs: i64 = store.connection.query_row(
-            "SELECT (SELECT count(*) FROM message_page_proofs WHERE hash=?1)+(SELECT count(*) FROM message_page_verified_objects WHERE hash=?1)",
-            [hash], |row| row.get(0),
-        ).unwrap();
-        assert_eq!(proofs, 0);
-    }
-    assert!(after.iter().all(|hash| present(&store, hash)));
     let key = UnitKey::new(&["messages", "char", "chat"]).unwrap();
-    let value = read_unit(&store.connection, &key).unwrap().unwrap().1;
-    let UnitValue::Object { descriptor_hash, descriptor } = &value else { panic!() };
-    assert!(present(&store, descriptor_hash) && present(&store, &descriptor.object_hash));
-    super::super::message_pages::validate_manifest(&store.connection, &value).unwrap();
+    let value = |store: &PersistentStore| read_unit(&store.connection, &key).unwrap().unwrap().1;
+    let dependency_root = |store: &PersistentStore| match value(store) {
+        UnitValue::Object { descriptor, .. } => descriptor.dependency_root,
+        other => panic!("{other:?}"),
+    };
+    // A short conversation names its pages inline, a long one through a reference tree.
+    for (count, tree) in [(40, false), (4_000, true)] {
+        let (_dir, mut store) = store();
+        create_conversation(&mut store, "char", "chat");
+        append(&mut store, 0, (0..count).map(message).collect());
+        assert_eq!(dependency_root(&store).is_some(), tree, "{count} messages");
+        let settled = clock() + 2 * grace;
+        store.sweep_message_page_objects(library, settled, limit).unwrap();
+        store.sweep_message_page_objects(library, settled + grace, limit).unwrap();
+        let held = objects(&store);
+        let replaced_root = dependency_root(&store);
+
+        let before = clock();
+        append(&mut store, count, vec![message(count)]);
+        let after = clock();
+        store.sweep_message_page_objects(library, before + short - 60_000, limit).unwrap();
+        assert!(held.is_subset(&objects(&store)), "{count}: a replaced object went before its grace");
+        store.sweep_message_page_objects(library, after + short, limit).unwrap();
+        let collected = objects(&store);
+        assert!(!held.is_subset(&collected), "{count}: the write replaced nothing");
+        // The long path, which marks whatever no reference names, has nothing left to delete.
+        store.sweep_message_page_objects(library, after + short + grace, limit).unwrap();
+        store.sweep_message_page_objects(library, after + short + 2 * grace, limit).unwrap();
+        let lingering = collected.difference(&objects(&store)).cloned().collect::<Vec<_>>();
+        assert!(lingering.is_empty(), "{count}: replaced objects waited for the long grace: {lingering:?}");
+        if let Some(root) = replaced_root {
+            assert!(!collected.contains(&root), "the replaced reference tree outlived the short grace");
+        }
+        for hash in held.difference(&collected) {
+            let proofs: i64 = store.connection.query_row(
+                "SELECT (SELECT count(*) FROM message_page_proofs WHERE hash=?1)+(SELECT count(*) FROM message_page_verified_objects WHERE hash=?1)",
+                [hash], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(proofs, 0);
+        }
+        super::super::message_pages::validate_manifest(&store.connection, &value(&store)).unwrap();
+    }
 }
 
 #[test]
@@ -3542,6 +3558,83 @@ fn released_reader_rejects_guarded_gallery_intents_without_changing_ordinary_com
             let old_body = serde_json::to_string(&released.unwrap()).unwrap();
             assert_eq!(old_body, body);
             assert!(serde_json::from_str::<Intent>(&old_body).is_ok());
+        }
+    }
+}
+
+/// Stored roots with converted binaries, repeated keys, escapes, numbers that
+/// a parse rewrites, and the shapes a root rewrite leaves alone.
+fn stored_roots() -> Vec<String> {
+    let binary = (0..40).map(|index| format!("\"{index}\":{}", index % 256)).collect::<Vec<_>>().join(",");
+    vec![
+        format!(
+            r#"{{"username":"aé\n","modules":[{{"id":"m2","binary":{{{binary}}}}},{{"name":"x"}},{{"id":"m1","configured_index":3,"binary":{{{binary}}},"id":"m3"}},7],
+            "plugins":[{{"name":"p2"}},{{"name":"p1","script":"\"x\""}}],"personas":[{{"id":"b","embeddedModule":{{"id":"e","binary":{{{binary}}}}}}},{{"id":"a"}}],
+            "characterOrder":["c2",{{"folder":"f","data":["c1"]}}],"localOnly":{{"binary":{{{binary}}}}},"n":-0,"f":1E5,"x":1,"x":[2]}}"#
+        ),
+        r#"{"username":"only","modules":{"id":"m1"},"loadouts":[{"id":"l2"},{"id":"l1"}],"localOnly":1}"#.into(),
+        r#"{"$serde_json::private::RawValue":"{\"modules\":[{\"id\":\"m2\"},{\"id\":\"m1\"}],\"characterOrder\":[]}"}"#.into(),
+        "{}".into(),
+        "[]".into(),
+    ]
+}
+
+#[test]
+fn root_rewrites_write_what_the_parsed_root_writes() {
+    let (_dir, mut store) = store();
+    let active = active_generation(&store.connection).unwrap();
+    let active = active.as_str();
+    let staged = store.replace_begin().unwrap().staging_id;
+    store.replace_put_root(&staged, &serde_json::json!({})).unwrap();
+    let db = &store.connection;
+    let set = |generation: &str, text: &str| {
+        db.execute("UPDATE root SET value=?2 WHERE generation=?1", params![generation, text]).unwrap();
+    };
+    let get = |generation: &str| -> String {
+        db.query_row("SELECT value FROM root WHERE generation=?1", [generation], |r| r.get(0)).unwrap()
+    };
+    let order = serde_json::json!(["c1", {"folder": "g", "data": ["c2"]}, "\u{d55c}"]);
+    let ids: Vec<String> = ["m1", "m2", "m3", "p1", "a", "b", "l1"].map(String::from).into();
+    let roots = stored_roots();
+    for text in &roots {
+        type Rewrite<'a> = Box<dyn Fn(bool) -> StoreResult<()> + 'a>;
+        let mut rewrites: Vec<Rewrite<'_>> = vec![Box::new(|text: bool| {
+            if text {
+                projection::set_character_order(db, active, &order)
+            } else {
+                projection::value_reference::set_character_order(db, active, &order)
+            }
+        })];
+        for collection in ["modules", "plugins", "personas", "loadouts"] {
+            let ids = &ids;
+            rewrites.push(Box::new(move |text: bool| {
+                if text {
+                    projection::sort_root_records(db, active, collection, ids)
+                } else {
+                    projection::value_reference::sort_root_records(db, active, collection, ids)
+                }
+            }));
+        }
+        for (index, rewrite) in rewrites.iter().enumerate() {
+            let run = |text_rewrite: bool| {
+                set(active, text);
+                let result = rewrite(text_rewrite);
+                (result, get(active))
+            };
+            assert_eq!(run(true), run(false), "{index} {text}");
+        }
+        for next in &roots {
+            let run = |text_rewrite: bool| {
+                set(active, text);
+                set(&staged, next);
+                let result = if text_rewrite {
+                    projection::preserve_local_root(db, active, &staged)
+                } else {
+                    projection::value_reference::preserve_local_root(db, active, &staged)
+                };
+                (result, get(&staged))
+            };
+            assert_eq!(run(true), run(false), "{text} {next}");
         }
     }
 }

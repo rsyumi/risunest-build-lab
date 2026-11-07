@@ -1,0 +1,602 @@
+//! Reads what a database-only replacement needs from stored JSON text without
+//! building the value. Results match a parsed `serde_json::Value`: every value
+//! is still decoded, so malformed text, out-of-range numbers and nesting past
+//! the recursion limit fail as before, and a repeated object key keeps only its
+//! last value.
+
+use super::StoreResult;
+use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
+use serde_json::Value;
+use std::borrow::Cow;
+use std::collections::{BTreeSet, HashMap};
+use std::fmt;
+
+/// Whether `text` is an object whose `additionalAssets`, when present, is an array.
+pub(super) fn additional_assets_are_listed(text: &str) -> StoreResult<bool> {
+    let property = read(text, false, Property { name: "additionalAssets", value: IsArray })?;
+    Ok(matches!(property, Some(None | Some(true))))
+}
+
+/// One array property of a stored object.
+#[derive(Debug, PartialEq)]
+pub(super) enum ArrayProperty {
+    Absent,
+    Entries(Vec<Value>),
+    /// The value is not an object, or the property is not an array.
+    Unusable,
+}
+
+/// Decodes only the `additionalAssets` of a stored character detail into values.
+pub(super) fn additional_assets(text: &str) -> StoreResult<ArrayProperty> {
+    array_property(text, false, "additionalAssets")
+}
+
+fn array_property(text: &str, unbounded_depth: bool, name: &'static str) -> StoreResult<ArrayProperty> {
+    Ok(match read(text, unbounded_depth, Property { name, value: Entries })? {
+        Some(None) => ArrayProperty::Absent,
+        Some(Some(Some(entries))) => ArrayProperty::Entries(entries),
+        None | Some(Some(None)) => ArrayProperty::Unusable,
+    })
+}
+
+// Root members follow: the root spool decodes them without a depth limit, so
+// these readers have none either.
+
+/// Checks that `text` decodes as a value, without keeping it.
+pub(super) fn check_value(text: &str) -> StoreResult<()> {
+    read(text, true, Skip)
+}
+
+/// Whether a root record's `id` is the string `id`.
+pub(super) fn record_id_is(text: &str, id: &str) -> StoreResult<bool> {
+    let found = read(text, true, Property { name: "id", value: Text })?;
+    Ok(matches!(found, Some(Some(Some(found))) if found == id))
+}
+
+/// A root record's `name` when it is a string.
+pub(super) fn record_name(text: &str) -> StoreResult<Option<String>> {
+    Ok(match read(text, true, Property { name: "name", value: Text })? {
+        Some(Some(Some(name))) => Some(name.into_owned()),
+        _ => None,
+    })
+}
+
+/// Whether a root module is an object whose `assets`, when present, is an array.
+pub(super) fn module_assets_are_listed(text: &str) -> StoreResult<bool> {
+    let property = read(text, true, Property { name: "assets", value: IsArray })?;
+    Ok(matches!(property, Some(None | Some(true))))
+}
+
+/// Whether a persona is an object whose `embeddedModule`, when present, is an
+/// object whose `assets`, when present, is an array.
+pub(super) fn embedded_module_assets_are_listed(text: &str) -> StoreResult<bool> {
+    let module = Property { name: "assets", value: IsArray };
+    let property = read(text, true, Property { name: "embeddedModule", value: module })?;
+    Ok(matches!(property, Some(None | Some(Some(None | Some(true))))))
+}
+
+/// Decodes only the `assets` of a root module into values.
+pub(super) fn module_assets(text: &str) -> StoreResult<ArrayProperty> {
+    array_property(text, true, "assets")
+}
+
+/// Decodes only the `assets` of a persona's `embeddedModule` into values, or
+/// `None` when the persona embeds no module object whose `id` is `module_id`.
+pub(super) fn embedded_module_assets(text: &str, module_id: &str) -> StoreResult<Option<ArrayProperty>> {
+    Ok(match read(text, true, Property { name: "embeddedModule", value: EmbeddedModule })? {
+        Some(Some(Some((Some(id), assets)))) if id == module_id => Some(match assets {
+            None => ArrayProperty::Absent,
+            Some(Some(entries)) => ArrayProperty::Entries(entries),
+            Some(None) => ArrayProperty::Unusable,
+        }),
+        _ => None,
+    })
+}
+
+fn read<'de, S: DeserializeSeed<'de>>(text: &'de str, unbounded_depth: bool, seed: S) -> StoreResult<S::Value> {
+    let mut decoder = serde_json::Deserializer::from_str(text);
+    if unbounded_depth {
+        decoder.disable_recursion_limit();
+    }
+    let value = seed.deserialize(&mut decoder)?;
+    decoder.end()?;
+    Ok(value)
+}
+
+/// Adds the asset keys and Inlay ids named by string values in `text`.
+pub(super) fn observe_alias_references(
+    text: &str,
+    unbounded_depth: bool,
+    references: &mut BTreeSet<String>,
+) -> StoreResult<()> {
+    references.extend(read(text, unbounded_depth, References)?);
+    Ok(())
+}
+
+pub(super) fn observe_alias_text(value: &str, references: &mut impl Extend<String>) {
+    if value.starts_with("assets/") {
+        references.extend([value.to_owned()]);
+    }
+    for prefix in ["{{inlay::", "{{inlayed::", "{{inlayeddata::"] {
+        let mut remainder = value;
+        while let Some(start) = remainder.find(prefix) {
+            remainder = &remainder[start + prefix.len()..];
+            let Some(end) = remainder.find("}}") else {
+                break;
+            };
+            references.extend([remainder[..end].to_owned()]);
+            remainder = &remainder[end + 2..];
+        }
+    }
+}
+
+macro_rules! scalars {
+    ($value:expr) => {
+        fn visit_bool<E: de::Error>(self, _: bool) -> Result<Self::Value, E> {
+            Ok($value)
+        }
+        fn visit_i64<E: de::Error>(self, _: i64) -> Result<Self::Value, E> {
+            Ok($value)
+        }
+        fn visit_u64<E: de::Error>(self, _: u64) -> Result<Self::Value, E> {
+            Ok($value)
+        }
+        fn visit_f64<E: de::Error>(self, _: f64) -> Result<Self::Value, E> {
+            Ok($value)
+        }
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok($value)
+        }
+    };
+}
+
+/// Decodes and discards one value. `IgnoredAny` would skip the checks a parse makes.
+struct Skip;
+
+impl<'de> DeserializeSeed<'de> for Skip {
+    type Value = ();
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Skip {
+    type Value = ();
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+    scalars!(());
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut values: A) -> Result<(), A::Error> {
+        while values.next_element_seed(Skip)?.is_some() {}
+        Ok(())
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut entries: A) -> Result<(), A::Error> {
+        while entries.next_key_seed(Skip)?.is_some() {
+            entries.next_value_seed(Skip)?;
+        }
+        Ok(())
+    }
+}
+
+struct Key;
+
+impl<'de> DeserializeSeed<'de> for Key {
+    type Value = Cow<'de, str>;
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_str(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Key {
+    type Value = Cow<'de, str>;
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an object key")
+    }
+    fn visit_borrowed_str<E: de::Error>(self, key: &'de str) -> Result<Self::Value, E> {
+        Ok(Cow::Borrowed(key))
+    }
+    fn visit_str<E: de::Error>(self, key: &str) -> Result<Self::Value, E> {
+        Ok(Cow::Owned(key.to_owned()))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct IsArray;
+
+impl<'de> DeserializeSeed<'de> for IsArray {
+    type Value = bool;
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<bool, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for IsArray {
+    type Value = bool;
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+    scalars!(false);
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<bool, E> {
+        Ok(false)
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, values: A) -> Result<bool, A::Error> {
+        Skip.visit_seq(values).map(|()| true)
+    }
+    fn visit_map<A: MapAccess<'de>>(self, entries: A) -> Result<bool, A::Error> {
+        Skip.visit_map(entries).map(|()| false)
+    }
+}
+
+/// An array's elements as parsed values, or `None` for any other value.
+#[derive(Clone, Copy)]
+struct Entries;
+
+impl<'de> DeserializeSeed<'de> for Entries {
+    type Value = Option<Vec<Value>>;
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Entries {
+    type Value = Option<Vec<Value>>;
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+    scalars!(None);
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut values: A) -> Result<Self::Value, A::Error> {
+        let mut entries = Vec::new();
+        while let Some(entry) = values.next_element::<Value>()? {
+            entries.push(entry);
+        }
+        Ok(Some(entries))
+    }
+    fn visit_map<A: MapAccess<'de>>(self, entries: A) -> Result<Self::Value, A::Error> {
+        Skip.visit_map(entries).map(|()| None)
+    }
+}
+
+/// A string, or `None` for any other value.
+#[derive(Clone, Copy)]
+struct Text;
+
+impl<'de> DeserializeSeed<'de> for Text {
+    type Value = Option<Cow<'de, str>>;
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Text {
+    type Value = Option<Cow<'de, str>>;
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+    scalars!(None);
+    fn visit_borrowed_str<E: de::Error>(self, value: &'de str) -> Result<Self::Value, E> {
+        Ok(Some(Cow::Borrowed(value)))
+    }
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(Some(Cow::Owned(value.to_owned())))
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, values: A) -> Result<Self::Value, A::Error> {
+        Skip.visit_seq(values).map(|()| None)
+    }
+    fn visit_map<A: MapAccess<'de>>(self, entries: A) -> Result<Self::Value, A::Error> {
+        Skip.visit_map(entries).map(|()| None)
+    }
+}
+
+/// A module's `id` and `assets` entries, or `None` when the value is not an object.
+#[derive(Clone, Copy)]
+struct EmbeddedModule;
+
+type ModuleProperties<'de> = (Option<Cow<'de, str>>, Option<Option<Vec<Value>>>);
+
+impl<'de> DeserializeSeed<'de> for EmbeddedModule {
+    type Value = Option<ModuleProperties<'de>>;
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for EmbeddedModule {
+    type Value = Option<ModuleProperties<'de>>;
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+    scalars!(None);
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, values: A) -> Result<Self::Value, A::Error> {
+        Skip.visit_seq(values).map(|()| None)
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut entries: A) -> Result<Self::Value, A::Error> {
+        let (mut id, mut assets) = (None, None);
+        while let Some(key) = entries.next_key_seed(Key)? {
+            match key.as_ref() {
+                "id" => id = entries.next_value_seed(Text)?,
+                "assets" => assets = Some(entries.next_value_seed(Entries)?),
+                _ => entries.next_value_seed(Skip)?,
+            }
+        }
+        Ok(Some((id, assets)))
+    }
+}
+
+/// One property of an object, decoded by `value` while every other value is
+/// skipped. `None` when the value is not an object, `Some(None)` when the
+/// property is absent.
+#[derive(Clone, Copy)]
+struct Property<S> {
+    name: &'static str,
+    value: S,
+}
+
+impl<'de, S: DeserializeSeed<'de> + Copy> DeserializeSeed<'de> for Property<S> {
+    type Value = Option<Option<S::Value>>;
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de, S: DeserializeSeed<'de> + Copy> Visitor<'de> for Property<S> {
+    type Value = Option<Option<S::Value>>;
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+    scalars!(None);
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, values: A) -> Result<Self::Value, A::Error> {
+        Skip.visit_seq(values).map(|()| None)
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut entries: A) -> Result<Self::Value, A::Error> {
+        let mut found = None;
+        while let Some(key) = entries.next_key_seed(Key)? {
+            if key == self.name {
+                found = Some(entries.next_value_seed(self.value)?);
+            } else {
+                entries.next_value_seed(Skip)?;
+            }
+        }
+        Ok(Some(found))
+    }
+}
+
+struct References;
+
+impl<'de> DeserializeSeed<'de> for References {
+    type Value = Vec<String>;
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Vec<String>, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for References {
+    type Value = Vec<String>;
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+    scalars!(Vec::new());
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<Vec<String>, E> {
+        let mut found = Vec::new();
+        observe_alias_text(value, &mut found);
+        Ok(found)
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut values: A) -> Result<Vec<String>, A::Error> {
+        let mut found = Vec::new();
+        while let Some(value) = values.next_element_seed(References)? {
+            found.extend(value);
+        }
+        Ok(found)
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut entries: A) -> Result<Vec<String>, A::Error> {
+        // Only entries that name something are kept, keyed so a repeated key
+        // replaces what its earlier value named.
+        let mut found = HashMap::<Cow<'de, str>, Vec<String>>::new();
+        while let Some(key) = entries.next_key_seed(Key)? {
+            let value = entries.next_value_seed(References)?;
+            if !value.is_empty() {
+                found.insert(key, value);
+            } else if !found.is_empty() {
+                found.remove(&key);
+            }
+        }
+        Ok(found.into_values().flatten().collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn references(text: &str) -> StoreResult<BTreeSet<String>> {
+        let mut found = BTreeSet::new();
+        observe_alias_references(text, false, &mut found)?;
+        Ok(found)
+    }
+
+    fn set(values: &[&str]) -> BTreeSet<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn alias_references_come_from_string_values_at_any_depth() {
+        let binary = (0..300).map(|index| format!("\"{index}\":{}", index % 256)).collect::<Vec<_>>().join(",");
+        let text = [
+            r#"{"name":"assets/top.png","assets/key-only.png":1,"late":1,"#,
+            r#""emotionImages":[["happy","assets/nested.png"],[{"deep":{"deeper":["assets/escaped.png"]}}]],"#,
+            r#""description":"x {{inlay::one}} y {{inlayed::two}} {{inlayeddata::three}} {{inlay::one}} {{inlay::open","#,
+            r#""prefix":" assets/not-a-prefix.png","values":[null,true,-1,2.5e3,"plain"],"#,
+            r#""replaced":"assets/first.png","kept":"assets/kept.png","replaced":{"inner":"assets/second.png"},"#,
+            r#""emptied":"assets/emptied.png","emptied":7,"late":"assets/late.png","inlay":"{{inlay::escaped-key}}","#,
+            &format!(r#""binary":{{{binary}}}}}"#),
+        ]
+        .concat();
+        assert_eq!(
+            references(&text).unwrap(),
+            set(&[
+                "assets/top.png", "assets/nested.png", "assets/escaped.png", "one", "two", "three",
+                "assets/second.png", "assets/kept.png", "assets/late.png", "escaped-key",
+            ])
+        );
+        assert_eq!(references(r#""assets/scalar.png""#).unwrap(), set(&["assets/scalar.png"]));
+        assert_eq!(references(r#"["{{inlay::a}}{{inlay::b}}"]"#).unwrap(), set(&["a", "b"]));
+        for empty in ["7", "null", "{}", "[]", r#"{"a":{"b":[1,{"c":false}]}}"#] {
+            assert!(references(empty).unwrap().is_empty(), "{empty}");
+        }
+    }
+
+    #[test]
+    fn root_values_read_past_the_default_depth_like_their_decoder() {
+        let deep = format!("{}\"assets/deep.png\"{}", "[".repeat(200), "]".repeat(200));
+        assert!(references(&deep).is_err());
+        let mut found = BTreeSet::new();
+        observe_alias_references(&deep, true, &mut found).unwrap();
+        assert_eq!(found, set(&["assets/deep.png"]));
+    }
+
+    #[test]
+    fn additional_assets_shape_follows_the_parsed_detail() {
+        for (text, listed) in [
+            (r#"{"name":"x"}"#, true),
+            (r#"{"additionalAssets":[]}"#, true),
+            (r#"{"additionalAssets":[["a","assets/a.png","png"],{"odd":true},7]}"#, true),
+            (r#"{"additionalAssets":null}"#, false),
+            (r#"{"additionalAssets":{}}"#, false),
+            (r#"{"additionalAssets":"assets/a.png"}"#, false),
+            (r#"{"additionalAssets":{},"additionalAssets":[]}"#, true),
+            (r#"{"additionalAssets":[],"additionalAssets":0}"#, false),
+            (r#"{"additionalAssets":{}}"#, false),
+            (r#"{"nested":{"additionalAssets":{}},"list":[{"additionalAssets":7}]}"#, true),
+            (r#"[{"additionalAssets":[]}]"#, false),
+            ("null", false),
+            (r#""text""#, false),
+            ("3", false),
+        ] {
+            assert_eq!(additional_assets_are_listed(text).unwrap(), listed, "{text}");
+        }
+    }
+
+    #[test]
+    fn malformed_text_fails_as_a_parse_would() {
+        let deep = format!("{{\"a\":{}1{}}}", "[".repeat(200), "]".repeat(200));
+        let deep_entries = format!("{{\"additionalAssets\":[{}1{}]}}", "[".repeat(200), "]".repeat(200));
+        for text in [
+            r#"{"a":1} trailing"#, r#"{"a":"#, "", r#"{"a":1e400}"#, r#"{"a":"\ud800"}"#, deep.as_str(),
+            r#"{"additionalAssets":[1e400]}"#, r#"{"additionalAssets":["\ud800"]}"#, deep_entries.as_str(),
+        ] {
+            assert!(serde_json::from_str::<serde_json::Value>(text).is_err(), "{text}");
+            assert!(additional_assets_are_listed(text).is_err(), "{text}");
+            assert!(additional_assets(text).is_err(), "{text}");
+            assert!(references(text).is_err(), "{text}");
+        }
+        for text in [
+            r#"{"a":1} trailing"#, r#"{"a":"#, "", r#"{"a":1e400}"#, r#"{"a":"\ud800"}"#,
+            r#"{"id":"m","assets":[1e400]}"#, r#"{"embeddedModule":{"id":"m","assets":["\ud800"]}}"#,
+        ] {
+            assert!(check_value(text).is_err(), "{text}");
+            assert!(record_id_is(text, "m").is_err(), "{text}");
+            assert!(record_name(text).is_err(), "{text}");
+            assert!(module_assets_are_listed(text).is_err(), "{text}");
+            assert!(embedded_module_assets_are_listed(text).is_err(), "{text}");
+            assert!(module_assets(text).is_err(), "{text}");
+            assert!(embedded_module_assets(text, "m").is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn root_member_readers_follow_the_value_the_spool_decodes() {
+        use serde::Deserialize;
+        fn parse(text: &str) -> Value {
+            let mut decoder = serde_json::Deserializer::from_str(text);
+            decoder.disable_recursion_limit();
+            let value = Value::deserialize(&mut decoder).unwrap();
+            decoder.end().unwrap();
+            value
+        }
+        fn listed(parent: &Value) -> bool {
+            parent.as_object().is_some_and(|parent| parent.get("assets").is_none_or(Value::is_array))
+        }
+        fn entries(parent: &Value) -> ArrayProperty {
+            let Some(parent) = parent.as_object() else { return ArrayProperty::Unusable };
+            match parent.get("assets") {
+                None => ArrayProperty::Absent,
+                Some(Value::Array(entries)) => ArrayProperty::Entries(entries.clone()),
+                Some(_) => ArrayProperty::Unusable,
+            }
+        }
+        let deep = format!("{}1{}", "[".repeat(200), "]".repeat(200));
+        let texts = [
+            r#"{"id":"m","assets":[["a","assets/a.png","png"],{"k":1,"k":2}]}"#.to_owned(),
+            r#"{"id":"m","assets":{}}"#.into(),
+            r#"{"id":"m","assets":null}"#.into(),
+            r#"{"id":"m"}"#.into(),
+            r#"{"id":"stale","id":"m","assets":{},"assets":[1]}"#.into(),
+            r#"{"id":"m","id":7}"#.into(),
+            r#"{"id":"m","nested":{"id":"x","assets":{},"embeddedModule":7}}"#.into(),
+            r#"{"embeddedModule":null}"#.into(),
+            r#"{"embeddedModule":{"id":"m","assets":[]}}"#.into(),
+            r#"{"embeddedModule":{"id":"m","id":"n","assets":[1]}}"#.into(),
+            r#"{"embeddedModule":{"id":"m","assets":[],"assets":{}}}"#.into(),
+            r#"{"embeddedModule":{"assets":[]},"embeddedModule":{"id":"m"}}"#.into(),
+            r#"{"embeddedModule":["m"]}"#.into(),
+            r#"{"embeddedModule":{"id":"m","assets":"x"}}"#.into(),
+            "[]".into(),
+            r#""m""#.into(),
+            "null".into(),
+            format!(r#"{{"id":"m","assets":[{deep}],"embeddedModule":{{"id":"m","assets":[{deep}]}}}}"#),
+        ];
+        for text in &texts {
+            let value = parse(text);
+            check_value(text).unwrap();
+            assert_eq!(record_id_is(text, "m").unwrap(), value.get("id").and_then(Value::as_str) == Some("m"), "{text}");
+            assert_eq!(module_assets_are_listed(text).unwrap(), listed(&value), "{text}");
+            assert_eq!(
+                embedded_module_assets_are_listed(text).unwrap(),
+                value.as_object().is_some_and(|persona| persona.get("embeddedModule").is_none_or(listed)),
+                "{text}"
+            );
+            assert_eq!(module_assets(text).unwrap(), entries(&value), "{text}");
+            assert_eq!(
+                embedded_module_assets(text, "m").unwrap(),
+                value.get("embeddedModule").filter(|module| module.get("id").and_then(Value::as_str) == Some("m")).map(entries),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn additional_assets_entries_follow_the_parsed_detail() {
+        use serde_json::json;
+        use ArrayProperty::{Absent, Entries, Unusable};
+        for (text, expected) in [
+            (r#"{"name":"x","nested":{"additionalAssets":[1]}}"#, Absent),
+            (
+                r#"{"additionalAssets":[["a","assets/a.png","png"],{"k":1,"k":2},7,null],"after":{"additionalAssets":{}}}"#,
+                Entries(vec![json!(["a", "assets/a.png", "png"]), json!({"k": 2}), json!(7), json!(null)]),
+            ),
+            (r#"{"additionalAssets":[]}"#, Entries(Vec::new())),
+            (r#"{"additionalAssets":{},"additionalAssets":[1]}"#, Entries(vec![json!(1)])),
+            (r#"{"additionalAssets":[1],"additionalAssets":[2]}"#, Entries(vec![json!(2)])),
+            (r#"{"additionalAssets":["escaped"]}"#, Entries(vec![json!("escaped")])),
+            (r#"{"additionalAssets":[1],"additionalAssets":"x"}"#, Unusable),
+            (r#"{"additionalAssets":null}"#, Unusable),
+            (r#"{"additionalAssets":{"0":1}}"#, Unusable),
+            (r#"[{"additionalAssets":[]}]"#, Unusable),
+            ("null", Unusable),
+            (r#""text""#, Unusable),
+        ] {
+            assert_eq!(additional_assets(text).unwrap(), expected, "{text}");
+        }
+    }
+}

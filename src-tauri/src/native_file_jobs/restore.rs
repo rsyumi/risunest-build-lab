@@ -4,11 +4,13 @@ mod upstream_import;
 pub(super) mod pocket_features;
 mod historical;
 mod cold_plugin_storage;
+pub(crate) mod cold_keys;
 use super::{
     ImportCounts, JobControl, JobDetail, JobPhase, JobProgress, JobResultSummary, JobStage,
     NativeJobError, OpenedJobSource, StageUnit,
 };
 use crate::persistent_store::{RevisionResult, StagingResult, StoreError, StoreResult};
+use crate::persistent_store::held_binary::HeldBinaries;
 use crate::persistent_store::upstream_stream::{FieldKind, RootSpool};
 use flate2::bufread::GzDecoder;
 use rmpv::Value as MessagePackValue;
@@ -17,7 +19,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -69,6 +71,11 @@ pub(crate) trait ReplacementSink: Send + Sync {
         Err(StoreError::Store { message: "streamed legacy root staging is unavailable".into() })
     }
     fn add_characters(&self, staging_id: &str, characters: &[Value]) -> StoreResult<()>;
+    /// Stages characters whose `bin` values `binaries` holds behind placeholders.
+    fn add_characters_with_binaries(&self, staging_id: &str, characters: &[Value], binaries: &HeldBinaries) -> StoreResult<()> {
+        let characters = characters.iter().map(|character| binaries.expand(character)).collect::<StoreResult<Vec<_>>>()?;
+        self.add_characters(staging_id, &characters)
+    }
     fn prepare_character(&self, character: Value) -> StoreResult<Value> {
         Ok(character)
     }
@@ -143,7 +150,8 @@ pub(crate) trait ReplacementSink: Send + Sync {
     fn incomplete_restore_preview(&self) -> StoreResult<super::IncompleteRestorePreview> {
         Ok(super::IncompleteRestorePreview::default())
     }
-    fn commit(&self, staging_id: &str, expected_revision: i64) -> StoreResult<RevisionResult>;
+    /// `binding_authority` is the authority `prepare_activation_receipt` recorded, which the commit keeps.
+    fn commit(&self, staging_id: &str, expected_revision: i64, binding_authority: Option<&str>) -> StoreResult<RevisionResult>;
     fn abort(&self, staging_id: &str) -> StoreResult<()>;
 }
 
@@ -191,9 +199,31 @@ pub(crate) struct RestoreProgressScale {
     /// Keeps the top-level item counter at this value instead of counting blocks.
     pub(crate) fixed_items: Option<(u64, Option<u64>)>,
     /// Cold payloads the sink has read from outside the source, counted with the blocks.
-    pub(crate) cold_payloads: Option<Arc<AtomicU64>>,
+    pub(crate) cold_payloads: Option<Arc<ColdPayloadProgress>>,
     /// Counters gathered before the database read, carried into every report.
     pub(crate) counts: ImportCounts,
+}
+
+/// What a sink has read from outside the source: items count with the blocks and
+/// bytes with the database read.
+#[derive(Debug, Default)]
+pub(crate) struct ColdPayloadProgress {
+    pub(crate) items: AtomicU64,
+    pub(crate) bytes: AtomicU64,
+    /// The source bytes read so far; staging looks up only keys named before them.
+    pub(crate) source: AtomicU64,
+}
+
+/// Reports cold payload bytes read while the database read waits for the sink,
+/// so a block with many references keeps moving. The read's detail then has no
+/// known total, matching what the reader reports next.
+pub(crate) fn report_cold_payload_bytes(job: &JobControl, bytes: u64) -> Result<(), NativeJobError> {
+    let Some(mut detail) = job.status().detail.filter(|detail| detail.stage_unit == StageUnit::Bytes) else {
+        return Ok(());
+    };
+    detail.stage_completed = detail.stage_completed.saturating_add(bytes);
+    detail.stage_total = None;
+    job.set_detail(detail).map_err(|error| job_error(job, error))
 }
 
 pub(crate) fn restore_block_risu_save(
@@ -448,7 +478,7 @@ fn restore_risu_save_reader_controlled<R: Read>(
             publication: None,
         };
         let authority = sink.prepare_activation_receipt(&staging_id, job, &result).map_err(store_error)?;
-        result.revision = match sink.commit(&staging_id, activation_revision) {
+        result.revision = match sink.commit(&staging_id, activation_revision, authority.as_deref()) {
             Ok(committed) => committed.revision,
             Err(error) => {
                 if let Some(authority) = authority.as_deref() {
@@ -709,19 +739,29 @@ fn stream_legacy_root_entry<S: TrackedSource>(
             } else { index.to_string() };
             let packed = rmpv::decode::read_value_with_max_depth(input,LEGACY_ROOT_ENTRY_DEPTH-2)
                 .map_err(|error|messagepack_error(error,job))?;
-            let value = match messagepack_to_json(packed, job)? {
-                JsonSlot::Value(value) => Some(value),
-                JsonSlot::Undefined if kind == FieldKind::Array => Some(Value::Null),
-                JsonSlot::Undefined => None,
+            let value = match messagepack_to_converted(packed, job)? {
+                Some(value) => Some(value),
+                None if kind == FieldKind::Array => Some(Converted::Json(Value::Null)),
+                None => None,
             };
-            root.put_member(key,&member,value.as_ref()).map_err(|error|legacy_staging_error(job,error))?;
+            let text = value.as_ref().map(serde_json::to_string).transpose()
+                .map_err(|error|legacy_staging_error(job,error.into()))?;
+            root.put_member_json(key,&member,text.as_deref()).map_err(|error|legacy_staging_error(job,error))?;
         }
     } else {
         let prefix = [marker.to_u8()];
         let packed = rmpv::decode::read_value_with_max_depth(&mut prefix.as_slice().chain(&mut *input),LEGACY_ROOT_ENTRY_DEPTH)
             .map_err(|error|messagepack_error(error,job))?;
-        let value = match messagepack_to_json(packed, job)? { JsonSlot::Value(value)=>Some(value), JsonSlot::Undefined=>None };
-        root.put(key,value.as_ref()).map_err(|error|legacy_staging_error(job,error))?;
+        match messagepack_to_converted(packed, job)? {
+            // A converted binary is an object field with a member per byte.
+            Some(Converted::Binary(bytes)) => {
+                root.begin(key,FieldKind::Object).map_err(|error|legacy_staging_error(job,error))?;
+                for (index,byte) in bytes.iter().enumerate() {
+                    root.put_member_json(key,&index.to_string(),Some(byte.to_string().as_str())).map_err(|error|legacy_staging_error(job,error))?;
+                }
+            }
+            value => root.put(key,value.map(Converted::into_value).as_ref()).map_err(|error|legacy_staging_error(job,error))?,
+        }
     }
     Ok(())
 }
@@ -753,6 +793,7 @@ fn stream_legacy_characters<S: TrackedSource>(
     let mut retained = 0;
     let mut batch = Vec::new();
     let mut batch_bytes = 0u64;
+    let mut binaries = HeldBinaries::new(&uuid::Uuid::new_v4().to_string());
     let mut character_ids = HashSet::new();
     for index in 0..total {
         if job.is_cancel_requested() {
@@ -762,28 +803,36 @@ fn stream_legacy_characters<S: TrackedSource>(
         let packed = rmpv::decode::read_value_with_max_depth(input, LEGACY_CHARACTER_DEPTH)
             .map_err(|error| messagepack_error(error, job))?;
         let bytes = (decoded_position(input) - start).saturating_add(binary_json_growth(&packed));
-        let mut character = match messagepack_to_json(packed, job)? {
-            JsonSlot::Value(value) => value,
-            JsonSlot::Undefined => Value::Null,
+        let held = binaries.next_index();
+        let mut character = match messagepack_to_converted(packed, job)? {
+            Some(value) => value.into_held_character(&mut binaries)?,
+            None => Value::Null,
         };
         if upstream_import::exclude_record(&character, excluded) {
             job.record_restore_omission("excludedCharacters", 1).map_err(|error| job_error(job, error))?;
+            binaries.truncate(held);
             continue;
         }
         character = sink.prepare_character(character).map_err(store_error)?;
         if !sink.expands_cold_payloads() { omit_unavailable_cold(&mut character, job)?; }
         if upstream_import::exclude_record(&character, excluded) {
             job.record_restore_omission("excludedCharacters", 1).map_err(|error| job_error(job, error))?;
+            binaries.truncate(held);
             continue;
         }
-        if !prepare_legacy_character(&mut character, &mut character_ids) { continue; }
+        if !prepare_legacy_character(&mut character, &mut character_ids) {
+            binaries.truncate(held);
+            continue;
+        }
         retained += 1;
         pocket_features::character(&mut character, &format!("character:{index}"));
         assign_legacy_chat_ids(std::slice::from_mut(&mut character));
         if !batch.is_empty() && batch_bytes.saturating_add(bytes) > CHARACTER_BATCH_BYTES as u64 {
-            sink.add_characters(staging_id, &batch)
+            sink.add_characters_with_binaries(staging_id, &batch, &binaries)
                 .map_err(store_error)?;
             batch.clear();
+            // This character's bytes stay for the next batch.
+            binaries.release_before(held);
             batch_bytes = 0;
         }
         batch.push(character);
@@ -793,14 +842,15 @@ fn stream_legacy_characters<S: TrackedSource>(
             .inner
             .report_counts(|counts| counts.characters = retained)?;
         if batch.len() >= CHARACTER_BATCH_COUNT {
-            sink.add_characters(staging_id, &batch)
+            sink.add_characters_with_binaries(staging_id, &batch, &binaries)
                 .map_err(store_error)?;
             batch.clear();
+            binaries.release_before(binaries.next_index());
             batch_bytes = 0;
         }
     }
     if !batch.is_empty() {
-        sink.add_characters(staging_id, &batch)
+        sink.add_characters_with_binaries(staging_id, &batch, &binaries)
             .map_err(store_error)?;
     }
     Ok(retained)
@@ -983,16 +1033,116 @@ fn prepare_legacy_root(root: &RootSpool, excluded: &HashSet<String>) -> StoreRes
             root.rename_member("protectedPresetValues",from,to)?;
         }
     }
-    root.visit("botPresets",|key,mut value| {
-        upstream_import::prepare_presets(std::slice::from_mut(&mut value));
-        root.put_member("botPresets",key,Some(&value))
-    })?;
+    root.rename_object_members("botPresets",&upstream_import::MESSAGE_NAME_SETTINGS)?;
     Ok(())
 }
 
 enum JsonSlot {
     Value(Value),
     Undefined,
+}
+
+/// A converted MessagePack value whose binaries are still bytes. It converts
+/// to, and serializes as, the value `messagepack_to_json` gives, without the
+/// object per binary that costs about a hundred and fifty bytes per byte.
+enum Converted {
+    Json(Value),
+    Binary(Vec<u8>),
+    Array(Vec<Converted>),
+    /// Members with distinct keys, in order.
+    Object(Vec<(String, Converted)>),
+}
+
+impl Converted {
+    fn into_value(self) -> Value {
+        match self {
+            Self::Json(value) => value,
+            Self::Binary(bytes) => Value::Object(bytes.into_iter().enumerate()
+                .map(|(index, byte)| (index.to_string(), Value::from(byte))).collect()),
+            Self::Array(values) => Value::Array(values.into_iter().map(Self::into_value).collect()),
+            Self::Object(members) => Value::Object(members.into_iter()
+                .map(|(key, value)| (key, value.into_value())).collect()),
+        }
+    }
+
+    /// The value of a staged character, with each `bin` held in `binaries`
+    /// behind a placeholder. Restore fills in fields of the character and of
+    /// each chat, so a `bin` that is the character or a chat is expanded.
+    fn into_held_character(self, binaries: &mut HeldBinaries) -> Result<Value, NativeJobError> {
+        let Self::Object(members) = self else {
+            return Ok(self.into_value());
+        };
+        let mut character = Map::with_capacity(members.len());
+        for (key, value) in members {
+            let value = match (key.as_str(), value) {
+                ("chats", Self::Array(chats)) => Value::Array(chats.into_iter()
+                    .map(|chat| match chat {
+                        Self::Binary(_) => Ok(chat.into_value()),
+                        chat => chat.into_held(binaries),
+                    })
+                    .collect::<Result<_, _>>()?),
+                (_, value) => value.into_held(binaries)?,
+            };
+            insert_held_member(&mut character, key, value, binaries)?;
+        }
+        Ok(Value::Object(character))
+    }
+
+    fn into_held(self, binaries: &mut HeldBinaries) -> Result<Value, NativeJobError> {
+        Ok(match self {
+            Self::Json(value) => value,
+            Self::Binary(bytes) => binaries.hold(bytes),
+            Self::Array(values) => Value::Array(values.into_iter()
+                .map(|value| value.into_held(binaries)).collect::<Result<_, _>>()?),
+            Self::Object(members) => {
+                let mut object = Map::with_capacity(members.len());
+                for (key, value) in members {
+                    let value = value.into_held(binaries)?;
+                    insert_held_member(&mut object, key, value, binaries)?;
+                }
+                Value::Object(object)
+            }
+        })
+    }
+}
+
+fn insert_held_member(object: &mut Map<String, Value>, key: String, value: Value, binaries: &HeldBinaries) -> Result<(), NativeJobError> {
+    if binaries.is_placeholder_key(&key) {
+        return Err(invalid("legacy MessagePack object key is reserved"));
+    }
+    object.insert(key, value);
+    Ok(())
+}
+
+impl serde::Serialize for Converted {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeMap, SerializeSeq};
+        match self {
+            Self::Json(value) => value.serialize(serializer),
+            Self::Binary(bytes) => {
+                // An index key is written as the decimal text the member's key holds.
+                let mut map = serializer.serialize_map(Some(bytes.len()))?;
+                for (index, byte) in bytes.iter().enumerate() {
+                    map.serialize_entry(&index, byte)?;
+                }
+                map.end()
+            }
+            Self::Array(values) => {
+                let mut sequence = serializer.serialize_seq(Some(values.len()))?;
+                for value in values {
+                    sequence.serialize_element(value)?;
+                }
+                sequence.end()
+            }
+            Self::Object(members) => {
+                let mut map = serializer.serialize_map(Some(members.len()))?;
+                for (key, value) in members {
+                    map.serialize_entry(key, value)?;
+                }
+                map.end()
+            }
+        }
+    }
 }
 
 // PocketRisu and upstream RisuAI assign absent/duplicate chat IDs when loading
@@ -1085,6 +1235,118 @@ fn binary_json_growth(value: &MessagePackValue) -> u64 {
 }
 
 fn messagepack_to_json(value: MessagePackValue, job: &JobControl) -> Result<JsonSlot, NativeJobError> {
+    Ok(match messagepack_to_converted(value, job)? {
+        Some(value) => JsonSlot::Value(value.into_value()),
+        None => JsonSlot::Undefined,
+    })
+}
+
+/// `None` is a value JavaScript reads as undefined.
+fn messagepack_to_converted(value: MessagePackValue, job: &JobControl) -> Result<Option<Converted>, NativeJobError> {
+    let json = |value: Value| Ok(Some(Converted::Json(value)));
+    match value {
+        MessagePackValue::Nil => json(Value::Null),
+        MessagePackValue::Boolean(value) => json(Value::Bool(value)),
+        MessagePackValue::Integer(value) => {
+            let number = if let Some(value) = value.as_i64() {
+                js_number(value as f64)
+            } else if let Some(value) = value.as_u64() {
+                js_number(value as f64)
+            } else {
+                return Err(corrupt("invalid legacy MessagePack integer"));
+            };
+            json(number)
+        }
+        MessagePackValue::F32(value) => json(js_number(value as f64)),
+        MessagePackValue::F64(value) => json(js_number(value)),
+        MessagePackValue::String(value) => value
+            .into_str()
+            .map(|value| Some(Converted::Json(Value::String(value))))
+            .ok_or_else(|| corrupt("invalid UTF-8 legacy MessagePack string")),
+        MessagePackValue::Binary(bytes) => Ok(Some(Converted::Binary(bytes))),
+        MessagePackValue::Array(values) => {
+            let mut output = Vec::with_capacity(values.len());
+            for value in values {
+                output.push(messagepack_to_converted(value, job)?.unwrap_or(Converted::Json(Value::Null)));
+            }
+            Ok(Some(Converted::Array(output)))
+        }
+        MessagePackValue::Map(entries) => messagepack_map_to_converted(entries, job),
+        MessagePackValue::Ext(kind, bytes) if kind == 0 && bytes == [0] => Ok(None),
+        MessagePackValue::Ext(-1, bytes) if bytes == [0xff] => json(Value::Null),
+        MessagePackValue::Ext(-1, bytes) => {
+            match timestamp_to_iso(&bytes) {
+                Ok(value) => json(Value::String(value)),
+                Err(error) if error.code == "unsupported-format" => {
+                    job.record_restore_omission("values", 1).map_err(|error| job_error(job, error))?;
+                    Ok(None)
+                }
+                Err(error) => Err(error),
+            }
+        }
+        MessagePackValue::Ext(_, _) => {
+            job.record_restore_omission("values", 1).map_err(|error| job_error(job, error))?;
+            Ok(None)
+        }
+    }
+}
+
+fn messagepack_map_to_converted(
+    entries: Vec<(MessagePackValue, MessagePackValue)>,
+    job: &JobControl,
+) -> Result<Option<Converted>, NativeJobError> {
+    let mut indexed = BTreeMap::<u32, (String, Option<Converted>)>::new();
+    // Other keys keep their first position and their last value, as object
+    // properties do.
+    let mut ordinary = Vec::<(String, Converted)>::new();
+    let mut positions = HashMap::<String, usize>::new();
+    let mut undefined = HashSet::new();
+    for (key, value) in entries {
+        let key = key
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| invalid("legacy MessagePack object keys must be strings"))?;
+        let key = if key == "__proto__" {
+            "__proto_".to_owned()
+        } else {
+            key
+        };
+        let value = messagepack_to_converted(value, job)?;
+        if let Some(index) = javascript_array_index(&key) {
+            indexed.insert(index, (key, value));
+            continue;
+        }
+        let value = match value {
+            Some(value) => {
+                undefined.remove(&key);
+                value
+            }
+            None => {
+                undefined.insert(key.clone());
+                Converted::Json(Value::Null)
+            }
+        };
+        match positions.get(&key) {
+            Some(&position) => ordinary[position].1 = value,
+            None => {
+                positions.insert(key.clone(), ordinary.len());
+                ordinary.push((key, value));
+            }
+        }
+    }
+    ordinary.retain(|(key, _)| !undefined.contains(key));
+    let mut output: Vec<_> = indexed
+        .into_values()
+        .filter_map(|(key, value)| value.map(|value| (key, value)))
+        .collect();
+    output.extend(ordinary);
+    Ok(Some(Converted::Object(output)))
+}
+
+/// The conversion as it was made into values, before binaries stayed bytes.
+/// Tests compare both.
+#[cfg(test)]
+fn messagepack_to_json_reference(value: MessagePackValue, job: &JobControl) -> Result<JsonSlot, NativeJobError> {
     match value {
         MessagePackValue::Nil => Ok(JsonSlot::Value(Value::Null)),
         MessagePackValue::Boolean(value) => Ok(JsonSlot::Value(Value::Bool(value))),
@@ -1109,14 +1371,14 @@ fn messagepack_to_json(value: MessagePackValue, job: &JobControl) -> Result<Json
         MessagePackValue::Array(values) => {
             let mut output = Vec::with_capacity(values.len());
             for value in values {
-                output.push(match messagepack_to_json(value, job)? {
+                output.push(match messagepack_to_json_reference(value, job)? {
                     JsonSlot::Value(value) => value,
                     JsonSlot::Undefined => Value::Null,
                 });
             }
             Ok(JsonSlot::Value(Value::Array(output)))
         }
-        MessagePackValue::Map(entries) => messagepack_map_to_json(entries, job),
+        MessagePackValue::Map(entries) => messagepack_map_to_json_reference(entries, job),
         MessagePackValue::Ext(kind, bytes) if kind == 0 && bytes == [0] => Ok(JsonSlot::Undefined),
         MessagePackValue::Ext(-1, bytes) if bytes == [0xff] => Ok(JsonSlot::Value(Value::Null)),
         MessagePackValue::Ext(-1, bytes) => {
@@ -1136,7 +1398,8 @@ fn messagepack_to_json(value: MessagePackValue, job: &JobControl) -> Result<Json
     }
 }
 
-fn messagepack_map_to_json(
+#[cfg(test)]
+fn messagepack_map_to_json_reference(
     entries: Vec<(MessagePackValue, MessagePackValue)>,
     job: &JobControl,
 ) -> Result<JsonSlot, NativeJobError> {
@@ -1153,7 +1416,7 @@ fn messagepack_map_to_json(
         } else {
             key
         };
-        let value = messagepack_to_json(value, job)?;
+        let value = messagepack_to_json_reference(value, job)?;
         if let Some(index) = javascript_array_index(&key) {
             indexed.insert(
                 index,
@@ -2617,7 +2880,7 @@ impl<'de> Visitor<'de> for MessagesVisitor<'_> {
             de::Error::custom(message)
         };
         let mut spool = MessageSpool::new(self.0.spool_directory, self.0.record_bytes.limit).map_err(&spool_error)?;
-        let file = spool.file.as_mut().expect("created message spool");
+        let mut file = io::BufWriter::with_capacity(READ_CHUNK_BYTES, spool.file.take().expect("created message spool"));
         while let Some(message) = sequence.next_element_seed(BoundedValueSeed(self.0.record_bytes))? {
             if self.0.job.is_cancel_requested() {
                 return Err(de::Error::custom("restore cancelled while reading messages"));
@@ -2636,6 +2899,8 @@ impl<'de> Visitor<'de> for MessagesVisitor<'_> {
             spool.count = spool.count.checked_add(1).ok_or_else(|| de::Error::custom("message count overflow"))?;
             spool.last_time = message.get("time").and_then(Value::as_i64);
         }
+        // Replay rewinds and reads the file, so every buffered record must reach it first.
+        spool.file = Some(file.into_inner().map_err(|error| spool_error(error.into_error()))?);
         Ok(spool)
     }
 
@@ -2750,7 +3015,7 @@ impl<'a, R: Read> TrackedReader<'a, R> {
         let (completed_items, total_items) = match self.scale.fixed_items {
             Some((completed, total)) => (completed, total),
             None => {
-                let cold = self.scale.cold_payloads.as_ref().map_or(0, |count| count.load(Ordering::Acquire));
+                let cold = self.scale.cold_payloads.as_ref().map_or(0, |cold| cold.items.load(Ordering::Acquire));
                 (self.completed_items.saturating_add(cold), None)
             }
         };
@@ -2769,12 +3034,14 @@ impl<'a, R: Read> TrackedReader<'a, R> {
     /// Reports the byte-level database read under the current stage.
     fn report(&mut self) -> Result<(), NativeJobError> {
         self.report_progress()?;
+        let cold = self.scale.cold_payloads.as_ref().map_or(0, |cold| cold.bytes.load(Ordering::Acquire));
         self.job
             .set_detail(JobDetail::new(
                 self.stage,
                 StageUnit::Bytes,
-                self.completed,
-                Some(self.total),
+                self.completed.saturating_add(cold),
+                // Cold payloads not read yet have no known size.
+                (cold == 0).then_some(self.total),
                 self.counts.clone(),
             ))
             .map_err(|error| job_error(self.job, error))
@@ -2843,6 +3110,9 @@ impl<'a, R: Read> TrackedReader<'a, R> {
         }
         self.hasher.update(&buffer[..read]);
         self.completed += read as u64;
+        if let Some(cold) = &self.scale.cold_payloads {
+            cold.source.store(self.completed, Ordering::Release);
+        }
         self.report()?;
         Ok(read)
     }
@@ -3007,6 +3277,11 @@ pub(super) fn store_error(error: StoreError) -> NativeJobError {
             NativeJobError::new("store-error", "persistent snapshot was released")
         }
         StoreError::RawBodyUnavailable | StoreError::CommitBusy => NativeJobError::new("store-error", error.to_string()),
+        StoreError::AssetInventoryBusy => NativeJobError::new("library-operation-busy", error.to_string()),
+        // A sync binding switch before activation refuses the commit like a concurrent revision.
+        StoreError::Validation { message } if message == "binding-authority-changed" => {
+            NativeJobError::new("revision-conflict", message)
+        }
         StoreError::Committed { message, .. } | StoreError::CommitDecode { message } | StoreError::Validation { message } | StoreError::SchemaMismatch { message } | StoreError::Store { message } => {
             NativeJobError::new("store-error", message)
         }
@@ -3059,6 +3334,7 @@ pub(super) mod tests {
         fail_character_batches: bool,
         record_activation: bool,
         lose_commit_reply: bool,
+        switch_binding_before_commit: bool,
         pub(crate) abort_calls: AtomicUsize,
         preserve_calls: AtomicUsize,
         full_character_calls: AtomicUsize,
@@ -3069,6 +3345,8 @@ pub(super) mod tests {
         unavailable_cold_payloads: std::collections::HashMap<String, ColdPayloadUnavailable>,
         unavailable_cold: Mutex<Vec<(String, String)>>,
         cancel_after_page: Option<(Arc<JobRegistry>, String)>,
+        /// Called with each conversation row as it is staged.
+        pub(crate) on_conversation_row: Option<Box<dyn Fn(&Value) + Send + Sync>>,
     }
 
     impl ReplacementSink for StoreSink {
@@ -3114,6 +3392,19 @@ pub(super) mod tests {
                 .lock()
                 .unwrap()
                 .replace_add_characters(staging_id, characters)
+        }
+
+        fn add_characters_with_binaries(&self, staging_id: &str, characters: &[Value], binaries: &HeldBinaries) -> StoreResult<()> {
+            self.full_character_calls.fetch_add(1, Ordering::AcqRel);
+            if self.fail_character_batches {
+                return Err(crate::persistent_store::StoreError::Store {
+                    message: "simulated disk full".to_owned(),
+                });
+            }
+            self.store
+                .lock()
+                .unwrap()
+                .replace_add_characters_with_binaries(staging_id, characters, binaries)
         }
 
         fn supports_incremental_characters(&self) -> bool {
@@ -3182,6 +3473,7 @@ pub(super) mod tests {
                     message: "simulated disk full".to_owned(),
                 });
             }
+            if let Some(observe) = &self.on_conversation_row { observe(detail); }
             self.store.lock().unwrap().replace_put_conversation_row(
                 staging_id,
                 character_id,
@@ -3231,11 +3523,19 @@ pub(super) mod tests {
                 .map(|_| ())
         }
 
-        fn commit(&self, staging_id: &str, expected_revision: i64) -> StoreResult<RevisionResult> {
-            let result = self.store
-                .lock()
-                .unwrap()
-                .replace_commit(staging_id, Some(expected_revision))?;
+        fn commit(&self, staging_id: &str, expected_revision: i64, binding_authority: Option<&str>) -> StoreResult<RevisionResult> {
+            let mut store = self.store.lock().unwrap();
+            if self.switch_binding_before_commit {
+                use crate::persistent_store::sync_selection::{SwitchBindingRequest, SyncTarget};
+                let before = store.lww_binding_state().unwrap();
+                store.switch_lww_binding(&SwitchBindingRequest {
+                    initial_publication: false,
+                    header: crate::persistent_store::lww::Header { binding_authority: before.target_authority, request_id: "synthetic-switch-before-restore".into() },
+                    expected_selection_epoch: before.selection_epoch, target: SyncTarget::None, inspection_id: None,
+                }).unwrap();
+            }
+            let prepared = store.prepare_replace_commit(staging_id, Some(expected_revision))?;
+            let result = store.finish_prepared_replace_under(prepared, binding_authority)?;
             if self.lose_commit_reply { return Err(StoreError::Store { message: "Synthetic post-commit cleanup failure".into() }); }
             Ok(result)
         }
@@ -3265,6 +3565,7 @@ pub(super) mod tests {
                 fail_character_batches: false,
                 record_activation: false,
                 lose_commit_reply: false,
+                switch_binding_before_commit: false,
                 abort_calls: AtomicUsize::new(0),
                 preserve_calls: AtomicUsize::new(0),
                 full_character_calls: AtomicUsize::new(0),
@@ -3275,6 +3576,7 @@ pub(super) mod tests {
                 unavailable_cold_payloads: Default::default(),
                 unavailable_cold: Mutex::new(Vec::new()),
                 cancel_after_page: None,
+                on_conversation_row: None,
             },
         )
     }
@@ -4247,6 +4549,31 @@ pub(super) mod tests {
         }
     }
 
+    #[test]
+    fn a_binding_switch_after_the_activation_receipt_refuses_the_commit_and_leaves_the_receipt_resolvable() {
+        let (directory, mut sink) = fixture();
+        sink.record_activation = true;
+        sink.switch_binding_before_commit = true;
+        let path = directory.path().join("switched.risudat");
+        fs::write(&path, save_bytes(valid_blocks())).unwrap();
+        let registry = JobRegistry::default();
+        let job = registry.create(JobKind::RestoreBlockRisuSave).unwrap();
+
+        let error = restore_block_risu_save_path(&path, 1, &job, &sink).unwrap_err();
+
+        assert_eq!(error.code, "revision-conflict", "{error:?}");
+        assert!(error.message.contains("binding-authority-changed"), "{error:?}");
+        assert_eq!(sink.abort_calls.load(Ordering::Acquire), 1);
+        let store = sink.store.lock().unwrap();
+        assert_eq!(store.revision().unwrap(), 1);
+        assert_eq!(store.materialize(None).unwrap()["username"], "Old");
+        let restarted = JobRegistry::default();
+        super::super::restore_receipts::reconcile(&store, &restarted).unwrap();
+        let recovered = restarted.status(&job.id()).unwrap();
+        assert_eq!(recovered.state, JobState::Cancelled);
+        assert_eq!(recovered.activation_revision, None);
+    }
+
     fn msgpackr_parity_fixture() -> Value {
         serde_json::from_str(MSGPACKR_PARITY_FIXTURE).unwrap()
     }
@@ -4570,7 +4897,7 @@ pub(super) mod tests {
         job.start(JobPhase::ReadingSource).unwrap();
         let staging_id = sink.begin().unwrap().staging_id;
         stage_legacy_json(&database, &staging_id, &job, &sink).unwrap();
-        sink.commit(&staging_id, 1).unwrap();
+        sink.commit(&staging_id, 1, None).unwrap();
         let restored = sink.store.lock().unwrap().materialize(None).unwrap();
         let chats = restored["characters"][0]["chats"].as_array().unwrap();
         assert_eq!(chats.len(), 3);
@@ -4605,7 +4932,7 @@ pub(super) mod tests {
         job.start(JobPhase::ReadingSource).unwrap();
         let staging_id = sink.begin().unwrap().staging_id;
         stage_legacy_json(&database, &staging_id, &job, &sink).unwrap();
-        sink.commit(&staging_id, 1).unwrap();
+        sink.commit(&staging_id, 1, None).unwrap();
 
         let exported_path = {
             let mut store = sink.store.lock().unwrap();
@@ -5165,6 +5492,7 @@ pub(super) mod tests {
             fail_character_batches: false,
             record_activation: false,
             lose_commit_reply: false,
+            switch_binding_before_commit: false,
             abort_calls: AtomicUsize::new(0),
             preserve_calls: AtomicUsize::new(0),
             full_character_calls: AtomicUsize::new(0),
@@ -5175,6 +5503,7 @@ pub(super) mod tests {
             unavailable_cold_payloads: Default::default(),
             unavailable_cold: Mutex::new(Vec::new()),
             cancel_after_page: None,
+            on_conversation_row: None,
         };
         let job = JobRegistry::default()
             .create(JobKind::RestoreBlockRisuSave)
@@ -5530,8 +5859,8 @@ pub(super) mod tests {
             self.inner.add_characters(staging_id, characters)
         }
 
-        fn commit(&self, staging_id: &str, expected_revision: i64) -> StoreResult<RevisionResult> {
-            self.inner.commit(staging_id, expected_revision)
+        fn commit(&self, staging_id: &str, expected_revision: i64, binding_authority: Option<&str>) -> StoreResult<RevisionResult> {
+            self.inner.commit(staging_id, expected_revision, binding_authority)
         }
 
         fn abort(&self, staging_id: &str) -> StoreResult<()> {
@@ -5846,8 +6175,8 @@ pub(super) mod tests {
             self.inner.add_characters(staging_id, characters)
         }
 
-        fn commit(&self, staging_id: &str, expected_revision: i64) -> StoreResult<RevisionResult> {
-            self.inner.commit(staging_id, expected_revision)
+        fn commit(&self, staging_id: &str, expected_revision: i64, binding_authority: Option<&str>) -> StoreResult<RevisionResult> {
+            self.inner.commit(staging_id, expected_revision, binding_authority)
         }
 
         fn abort(&self, staging_id: &str) -> StoreResult<()> {
@@ -5985,5 +6314,376 @@ pub(super) mod tests {
         *released_lock.lock().unwrap() = true;
         released_signal.notify_all();
         assert_eq!(worker.join().unwrap().unwrap().revision, 2);
+    }
+
+    #[test]
+    fn restoring_converted_binaries_keeps_the_stored_root_and_unit_values() {
+        // Binaries past the inline unit bound and within it, in several root
+        // records, a persona's module and a character.
+        let binary = |length: usize| MessagePackValue::Binary((0..length).map(|index| (index % 256) as u8).collect());
+        let text = |value: &str| MessagePackValue::from(value);
+        let map = |entries: Vec<(&str, MessagePackValue)>| {
+            MessagePackValue::Map(entries.into_iter().map(|(key, value)| (text(key), value)).collect())
+        };
+        let module = |id: &str, length: usize| map(vec![("id", text(id)), ("name", text("Synthetic")), ("assets", MessagePackValue::Array(vec![])), ("binary", binary(length))]);
+        let database = map(vec![
+            ("username", text("Synthetic")),
+            ("userIcon", binary(50)),
+            ("customBinary", binary(30_000)),
+            ("globalChatVariables", map(vec![("blob", binary(20))])),
+            ("modules", MessagePackValue::Array(vec![module("module-large", 30_000), module("module-small", 100), module("module-second", 30_000)])),
+            ("personas", MessagePackValue::Array(vec![map(vec![("id", text("persona")), ("name", text("Synthetic")), ("embeddedModule", module("embedded", 30_000))])])),
+            ("characters", MessagePackValue::Array(vec![map(vec![
+                ("type", text("character")),
+                ("chaId", text("character")),
+                ("name", text("Synthetic")),
+                ("extentions", map(vec![("blob", binary(100))])),
+                ("chatFolders", MessagePackValue::Array(vec![map(vec![("id", text("folder")), ("name", text("Folder"))])])),
+                ("chats", MessagePackValue::Array(vec![map(vec![("id", text("chat")), ("name", text("Chat")), ("message", MessagePackValue::Array(vec![]))])])),
+            ])])),
+            ("characterOrder", MessagePackValue::Array(vec![text("character")])),
+        ]);
+        let (directory, sink) = fixture();
+        let source = directory.path().join("binaries.risudat");
+        fs::write(&source, legacy_wire(7, &super::legacy_stream_tests::messagepack_bytes(&database))).unwrap();
+        let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+        restore_risu_save(&source, 1, &job, &sink).unwrap();
+        let store = sink.store.lock().unwrap();
+        let rows = store.library_rows();
+        let root: String = rows.query_row("SELECT value FROM root WHERE generation=(SELECT json_extract(value,'$') FROM meta WHERE key='activeGeneration')", [], |row| row.get(0)).unwrap();
+        let units: Vec<(String, String)> = rows.prepare("SELECT key,value FROM lww_units ORDER BY key").unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap().collect::<Result<_, _>>().unwrap();
+        assert!(units.iter().any(|(key, value)| key.contains("module-large") && value.contains("\"object\"")));
+        assert!(units.iter().any(|(key, value)| key.contains("module-small") && value.contains("\"inline\"")));
+        let mut digest = Sha256::new();
+        for (key, value) in &units {
+            digest.update(key.as_bytes());
+            digest.update([0]);
+            digest.update(value.as_bytes());
+            digest.update([1]);
+        }
+        // Digests of what this restore stored before stored text was read one
+        // record at a time. A change to them changes stored values.
+        assert_eq!(
+            (hex::encode(Sha256::digest(root.as_bytes())), units.len(), hex::encode(digest.finalize())),
+            (
+                "c0dd8ab1780897c4d02b17778f1a8e42ee2596e0431113a4905fbf376e190fae".to_owned(),
+                24,
+                "52e5b9888db57ec9f664409a490cefceff0e5d113bb6d4e986b3c7edaf6a0651".to_owned(),
+            )
+        );
+    }
+
+    fn character_rows_digest(store: &PersistentStore) -> (Vec<i64>, String) {
+        rows_digest(store, &[
+            "SELECT character_id,configured_index,recent_at,trashed,name,image,conversation_count,type,creator_notes,trash_time,detail FROM characters WHERE generation={active} ORDER BY character_id",
+            "SELECT character_id,conversation_id,configured_index,recent_at,name,message_count,detail FROM conversations WHERE generation={active} ORDER BY character_id,conversation_id",
+            "SELECT character_id,conversation_id,message_index,message_id,value,canonical_hash,canonical_size FROM messages WHERE generation={active} ORDER BY character_id,conversation_id,message_index",
+            "SELECT key,value FROM lww_units ORDER BY key",
+        ])
+    }
+
+    /// The row counts and a digest of what `queries` select, with `{active}`
+    /// naming the active generation.
+    fn rows_digest(store: &PersistentStore, queries: &[&str]) -> (Vec<i64>, String) {
+        let rows = store.library_rows();
+        let active = "(SELECT json_extract(value,'$') FROM meta WHERE key='activeGeneration')";
+        let mut counts = Vec::new();
+        let mut digest = Sha256::new();
+        for sql in queries {
+            let mut statement = rows.prepare(&sql.replace("{active}", active)).unwrap();
+            let columns = statement.column_count();
+            let mut query = statement.query([]).unwrap();
+            let mut count = 0;
+            while let Some(row) = query.next().unwrap() {
+                for index in 0..columns {
+                    digest.update(format!("{:?}", row.get::<_, rusqlite::types::Value>(index).unwrap()).as_bytes());
+                    digest.update([0]);
+                }
+                digest.update([1]);
+                count += 1;
+            }
+            digest.update([2]);
+            counts.push(count);
+        }
+        (counts, hex::encode(digest.finalize()))
+    }
+
+    #[test]
+    fn restoring_characters_with_binaries_keeps_their_stored_rows() {
+        // Binaries in a character's fields, a chat's fields and toggles, and
+        // messages, including one whose swipes copy it into each variant, in
+        // two characters on either side of a batch closed by its byte bound.
+        let binary = |length: usize, seed: usize| MessagePackValue::Binary((0..length).map(|index| ((index * 7 + seed) % 256) as u8).collect());
+        let text = |value: &str| MessagePackValue::from(value);
+        let map = |entries: Vec<(&str, MessagePackValue)>| {
+            MessagePackValue::Map(entries.into_iter().map(|(key, value)| (text(key), value)).collect())
+        };
+        let array = MessagePackValue::Array;
+        let first = map(vec![
+            ("type", text("character")),
+            ("chaId", text("pinned-first")),
+            ("name", text("Synthetic")),
+            ("binary", binary(30_000, 1)),
+            ("extentions", map(vec![("blob", binary(100, 2))])),
+            ("additionalAssets", array(vec![array(vec![text("asset"), binary(20, 3), text("png")])])),
+            ("modules", array(vec![binary(10, 4)])),
+            ("chats", array(vec![map(vec![
+                ("id", text("chat")),
+                ("name", text("Chat")),
+                ("hypaV3Data", map(vec![("blob", binary(40, 5))])),
+                ("savedToggleValues", binary(8, 6)),
+                ("message", array(vec![
+                    map(vec![("role", text("user")), ("data", text("hello")), ("blob", binary(30_000, 7)), ("time", MessagePackValue::from(5))]),
+                    map(vec![("role", text("char")), ("data", text("a")), ("swipes", array(vec![text("a"), text("b")])), ("swipeId", MessagePackValue::from(0)), ("blob", binary(50, 8))]),
+                    binary(12, 9),
+                ])),
+            ])])),
+        ]);
+        let second = map(vec![
+            ("type", text("character")),
+            ("chaId", text("pinned-second")),
+            ("name", text("Second")),
+            ("binary", binary(64, 10)),
+            ("filler", text(&"x".repeat(CHARACTER_BATCH_BYTES + 1))),
+            ("chats", array(vec![map(vec![
+                ("id", text("chat")),
+                ("name", text("Chat")),
+                ("message", array(vec![map(vec![("data", text("x")), ("blob", binary(16, 11))])])),
+            ])])),
+        ]);
+        let database = map(vec![
+            ("username", text("Synthetic")),
+            ("characters", array(vec![first, second])),
+            ("characterOrder", array(vec![text("pinned-first"), text("pinned-second")])),
+        ]);
+        let (directory, sink) = fixture();
+        let source = directory.path().join("characters.risudat");
+        fs::write(&source, legacy_wire(7, &super::legacy_stream_tests::messagepack_bytes(&database))).unwrap();
+        let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+        restore_risu_save(&source, 1, &job, &sink).unwrap();
+        assert_eq!(sink.full_character_calls.load(Ordering::Acquire), 2);
+        // Digests of what this restore stored while characters were staged as
+        // values. A change to them changes stored rows.
+        assert_eq!(
+            character_rows_digest(&sink.store.lock().unwrap()),
+            (vec![2, 2, 4, 21], "8b39b35cfb23c4228cf48707378ad39bd5924fb6bfdd2c24a4efcfc8c9ad7b70".to_owned())
+        );
+    }
+
+    #[test]
+    fn preset_settings_renamed_in_member_texts_are_written_as_the_renamed_values() {
+        let presets = [
+            r#"{"id":"a","groupTemplate":"t","x":1}"#,
+            r#"{"messageNameTemplate":"old","groupTemplate":"t","groupOtherBotRole":"r","namedMessageRole":"stale","z":0}"#,
+            r#"{"groupOtherBotRole":"r","groupTemplate":{"blob":{"0":1,"1":2}},"a":[]}"#,
+            r#"{"groupTemplate":1,"b":0,"groupTemplate":2,"messageNameTemplate":3}"#,
+            r#"{"namedMessageRole":"kept","groupOtherBotRole":null}"#,
+            r#"{"id":"plain"}"#,
+            r#"[{"groupTemplate":"t"}]"#,
+            r#""groupTemplate""#,
+            r#"{"$serde_json::private::RawValue":"{\"groupTemplate\":\"t\",\"n\":-0}"}"#,
+            "{ \"a\" : -0 , \"groupTemplate\" : 1e21 , \"b\":\"\\u00e9\\n\" }",
+        ];
+        let spool = || {
+            let root = RootSpool::new(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))).unwrap();
+            root.begin("presets", FieldKind::Array).unwrap();
+            for (index, preset) in presets.iter().enumerate() {
+                root.put_member_json("presets", &index.to_string(), Some(preset)).unwrap();
+            }
+            root
+        };
+        let text = |root: &RootSpool| {
+            let mut out = Vec::new();
+            root.write_root(&mut out, false).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        let parsed = spool();
+        parsed.visit("presets", |key, mut value| {
+            upstream_import::prepare_presets(std::slice::from_mut(&mut value));
+            parsed.put_member("presets", key, Some(&value))
+        }).unwrap();
+        let renamed = spool();
+        renamed.rename_object_members("presets", &upstream_import::MESSAGE_NAME_SETTINGS).unwrap();
+        assert_eq!(text(&renamed), text(&parsed));
+    }
+
+    #[test]
+    fn restoring_presets_and_plugin_storage_with_binaries_keeps_their_stored_rows() {
+        // Binaries in presets, one with the upstream setting names restore
+        // renames, and in owned and unowned plugin storage.
+        let binary = |length: usize, seed: usize| MessagePackValue::Binary((0..length).map(|index| ((index * 7 + seed) % 256) as u8).collect());
+        let text = |value: &str| MessagePackValue::from(value);
+        let map = |entries: Vec<(&str, MessagePackValue)>| {
+            MessagePackValue::Map(entries.into_iter().map(|(key, value)| (text(key), value)).collect())
+        };
+        let database = map(vec![
+            ("username", text("Synthetic")),
+            ("characters", MessagePackValue::Array(vec![])),
+            ("botPresets", MessagePackValue::Array(vec![
+                map(vec![
+                    ("id", text("preset-binary")),
+                    ("name", text("Preset \"one\"")),
+                    ("namedMessageRole", text("stale")),
+                    ("NAISettings", map(vec![("blob", binary(30_000, 1))])),
+                    ("groupTemplate", text("{{char}}")),
+                    ("groupOtherBotRole", text("assistant")),
+                    ("image", text("preset.png")),
+                ]),
+                map(vec![("id", text("preset-plain")), ("binary", binary(100, 2)), ("temperature", MessagePackValue::from(0.5))]),
+            ])),
+            ("botPresetsId", MessagePackValue::from(1)),
+            ("pluginCustomStorage", map(vec![
+                ("owned", map(vec![("blob", binary(30_000, 3))])),
+                ("unowned", binary(64, 4)),
+                ("plain", text("\u{d55c}\n")),
+            ])),
+            ("pluginStorageMeta", map(vec![("owned", map(vec![("plugin", text("synthetic-plugin"))]))])),
+        ]);
+        let (directory, sink) = fixture();
+        let source = directory.path().join("presets.risudat");
+        fs::write(&source, legacy_wire(7, &super::legacy_stream_tests::messagepack_bytes(&database))).unwrap();
+        let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+        restore_risu_save(&source, 1, &job, &sink).unwrap();
+        let store = sink.store.lock().unwrap();
+        let preset: String = store.library_rows().query_row(
+            "SELECT value FROM bot_presets WHERE preset_id='preset-binary'
+             AND generation=(SELECT json_extract(value,'$') FROM meta WHERE key='activeGeneration')",
+            [], |row| row.get(0),
+        ).unwrap();
+        let preset: Value = serde_json::from_str(&preset).unwrap();
+        let keys: Vec<&str> = preset.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["id", "name", "namedMessageRole", "NAISettings", "image", "messageNameTemplate"]);
+        assert_eq!((&preset["namedMessageRole"], &preset["messageNameTemplate"]), (&json!("assistant"), &json!("{{char}}")));
+        // Digests of what this restore stored while presets and plugin storage
+        // were staged as values. A change to them changes stored rows.
+        assert_eq!(
+            rows_digest(&store, &[
+                "SELECT preset_id,configured_index,name,image,value FROM bot_presets WHERE generation={active} ORDER BY configured_index",
+                "SELECT owner,storage_key,byte_size,ordinal,value,import_batch_id IS NULL FROM plugin_storage WHERE generation={active} ORDER BY owner,storage_key",
+                "SELECT value FROM root WHERE generation={active}",
+                "SELECT key,value FROM lww_units ORDER BY key",
+            ]),
+            (vec![2, 3, 1, 18], "5a98cbd7ba91c885a2020ffb61a2d0bad88c84bb7bedc60760cc704f361b8a04".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_binary_character_or_chat_is_staged_as_the_object_it_converts_to() {
+        // Restore fills in the ID and name of such a record, so it is expanded
+        // before that happens.
+        let binary = |length: usize| MessagePackValue::Binary((0..length).map(|index| (index * 7 % 256) as u8).collect());
+        let text = |value: &str| MessagePackValue::from(value);
+        let map = |entries: Vec<(&str, MessagePackValue)>| {
+            MessagePackValue::Map(entries.into_iter().map(|(key, value)| (text(key), value)).collect())
+        };
+        let database = map(vec![
+            ("username", text("Synthetic")),
+            ("characters", MessagePackValue::Array(vec![
+                binary(5),
+                map(vec![("type", text("character")), ("chaId", text("holder")), ("name", text("Holder")), ("chats", MessagePackValue::Array(vec![binary(3)]))]),
+            ])),
+        ]);
+        let (directory, sink) = fixture();
+        let source = directory.path().join("records.risudat");
+        fs::write(&source, legacy_wire(7, &super::legacy_stream_tests::messagepack_bytes(&database))).unwrap();
+        let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+        restore_risu_save(&source, 1, &job, &sink).unwrap();
+        let store = sink.store.lock().unwrap();
+        let rows = store.library_rows();
+        let active = "(SELECT json_extract(value,'$') FROM meta WHERE key='activeGeneration')";
+        let (character, detail): (String, String) = rows.query_row(&format!("SELECT character_id,detail FROM characters WHERE generation={active} AND character_id<>'holder'"), [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(detail, format!(r#"{{"0":0,"1":7,"2":14,"3":21,"4":28,"chaId":"{character}","name":""}}"#));
+        let (chat, detail): (String, String) = rows.query_row(&format!("SELECT conversation_id,detail FROM conversations WHERE generation={active} AND character_id='holder'"), [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(detail, format!(r#"{{"0":0,"1":7,"2":14,"id":"{chat}","name":""}}"#));
+    }
+
+    #[test]
+    fn binaries_kept_as_bytes_convert_and_serialize_as_converted_values() {
+        let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+        let text = |value: &str| MessagePackValue::from(value);
+        let binary = |length: usize| MessagePackValue::Binary((0..length).map(|index| (index * 7 % 256) as u8).collect());
+        let undefined = || MessagePackValue::Ext(0, vec![0]);
+        let mut values: Vec<_> = [0, 1, 9, 10, 99, 100, 1_023, 1_024, 65_536].into_iter().map(binary).collect();
+        values.extend([
+            MessagePackValue::Map(vec![
+                (text("b"), binary(3)),
+                (text("1"), binary(2)),
+                (text("0"), text("zero")),
+                (text("b"), undefined()),
+                (text("a"), undefined()),
+                (text("a"), binary(1)),
+                (text("c"), binary(1)),
+                (text("c"), undefined()),
+                (text("10"), undefined()),
+                (text("__proto__"), binary(2)),
+                (text("01"), MessagePackValue::from(1.5)),
+                (text("4294967295"), MessagePackValue::Nil),
+                (text("nested"), MessagePackValue::Array(vec![
+                    binary(4),
+                    undefined(),
+                    MessagePackValue::Map(vec![(text("x"), binary(2)), (text("\u{d55c}\n"), MessagePackValue::Boolean(true))]),
+                    MessagePackValue::Ext(-1, vec![0xff]),
+                    MessagePackValue::Ext(5, vec![1]),
+                ])),
+                (text("numbers"), MessagePackValue::Array(vec![
+                    MessagePackValue::from(-0.0f64),
+                    MessagePackValue::from(u64::MAX),
+                    MessagePackValue::from(i64::MIN),
+                    MessagePackValue::F32(1.5),
+                    MessagePackValue::from(f64::NAN),
+                    MessagePackValue::from(1e21),
+                ])),
+            ]),
+            MessagePackValue::Array(vec![MessagePackValue::Map(vec![]), MessagePackValue::Array(vec![]), binary(0)]),
+            undefined(),
+            MessagePackValue::Map(vec![(MessagePackValue::from(1), text("x"))]),
+        ]);
+        for value in values {
+            let expected = messagepack_to_json_reference(value.clone(), &job);
+            match (expected, messagepack_to_converted(value, &job)) {
+                (Ok(JsonSlot::Value(expected)), Ok(Some(converted))) => {
+                    let expected = serde_json::to_string(&expected).unwrap();
+                    assert_eq!(serde_json::to_string(&converted).unwrap(), expected);
+                    assert_eq!(serde_json::to_string(&converted.into_value()).unwrap(), expected);
+                }
+                (Ok(JsonSlot::Undefined), Ok(None)) => {}
+                (Err(expected), Err(actual)) => assert_eq!(actual, expected),
+                _ => panic!("the conversions differ"),
+            }
+        }
+    }
+
+    #[test]
+    fn converting_a_character_holds_its_binaries_beside_it() {
+        let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+        let text = |value: &str| MessagePackValue::from(value);
+        let binary = |length: usize| MessagePackValue::Binary((0..length).map(|index| (index * 7 % 256) as u8).collect());
+        let map = |entries: Vec<(&str, MessagePackValue)>| {
+            MessagePackValue::Map(entries.into_iter().map(|(key, value)| (text(key), value)).collect())
+        };
+        let character = map(vec![
+            ("chaId", text("held")),
+            ("binary", binary(5)),
+            ("nested", MessagePackValue::Array(vec![map(vec![("x", binary(3))])])),
+            ("chats", MessagePackValue::Array(vec![binary(2), map(vec![("id", text("chat")), ("blob", binary(4))])])),
+        ]);
+        let JsonSlot::Value(expected) = messagepack_to_json_reference(character.clone(), &job).unwrap() else { unreachable!() };
+        let mut binaries = HeldBinaries::new("fixed");
+        let held = messagepack_to_converted(character, &job).unwrap().unwrap().into_held_character(&mut binaries).unwrap();
+        assert_eq!(binaries.expand(&held).unwrap(), expected);
+        // Every binary stays bytes except the chat that is one, which restore fills in.
+        assert_eq!(binaries.next_index(), 3);
+        assert_eq!(held["chats"][0], expected["chats"][0]);
+        // A source object that holds the placeholder key fails the conversion.
+        let key = held["binary"].as_object().unwrap().keys().next().unwrap();
+        for value in [
+            MessagePackValue::Map(vec![(text(key), MessagePackValue::from(0))]),
+            map(vec![("chaId", text("source")), ("field", MessagePackValue::Map(vec![(text(key), MessagePackValue::from(0))]))]),
+            map(vec![("chats", MessagePackValue::Array(vec![MessagePackValue::Map(vec![(text(key), MessagePackValue::from(0))])]))]),
+        ] {
+            let converted = messagepack_to_converted(value, &job).unwrap().unwrap();
+            assert!(converted.into_held_character(&mut binaries).is_err());
+        }
     }
 }
