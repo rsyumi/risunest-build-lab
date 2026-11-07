@@ -7641,8 +7641,8 @@
     {
       "path": "src-tauri/src/native_file_jobs/restore.rs",
       "mode": "100644",
-      "bytes": 302947,
-      "sha256": "80916953ba4db08bd34cd1e78e36360ba139d84e5ffbeab23474e025189ae644"
+      "bytes": 302966,
+      "sha256": "2fea227cdcfc9fd1b752e3c10f80f6085cc60276079fb14cbfe69594b2dd12b9"
     },
     {
       "path": "src-tauri/src/native_file_jobs/restore/cold_keys.rs",
@@ -10809,26 +10809,26 @@
     {
       "path": "src/lib/Setting/Pages/RisuNestLogViewer.svelte",
       "mode": "100644",
-      "bytes": 27202,
-      "sha256": "c4e7772bd3b8ce47d387816a6c4ca1910ff5ae4adb60749547fac61b9e6e453a"
+      "bytes": 27496,
+      "sha256": "8a63378be00f1e968658a8310c620660cd09b5931e70de046aef3cafb8548bff"
     },
     {
       "path": "src/lib/Setting/Pages/RisuNestLogViewer.test.ts",
       "mode": "100644",
-      "bytes": 30372,
-      "sha256": "0cc5afcd9dde8087c26a54c69b765c44807d3bf70837bec753039f31bad918d1"
+      "bytes": 31193,
+      "sha256": "4875d448519dead090b7fca59a69d3e3fa0ad38218fea4ca2361a5a9161897ea"
     },
     {
       "path": "src/lib/Setting/Pages/RisuNestNetworkLog.svelte",
       "mode": "100644",
-      "bytes": 25325,
-      "sha256": "5911087872b9229c6303b39925f61fbd1bcc92b417d75addea1a90790e57510c"
+      "bytes": 25531,
+      "sha256": "901412a705900d7eca87da074137e2bd3f6ce67f024502011c4d81333053e110"
     },
     {
       "path": "src/lib/Setting/Pages/RisuNestNetworkLog.test.ts",
       "mode": "100644",
-      "bytes": 11729,
-      "sha256": "9c01e10b056525cc1cab05d99ec95c967a9cc657108154d30d0968863ce57fc4"
+      "bytes": 12127,
+      "sha256": "01d51246e5d3118d565b3e6181f60d020811216f3d6c8d1f1020fbbd6844af9f"
     },
     {
       "path": "src/lib/Setting/Pages/RisuNestPerformanceSettings.svelte",
@@ -13407,14 +13407,14 @@
     {
       "path": "src/ts/nativeLog.test.ts",
       "mode": "100644",
-      "bytes": 1427,
-      "sha256": "4b6aa0923f3300edf786634c9a9c0f9caacb5339c8bac2f5c9e86f0ff7f056b7"
+      "bytes": 3065,
+      "sha256": "422742a381cdbd26f4e190a7b38f122d147a5186e53ac9753a71d2b7bdfb2693"
     },
     {
       "path": "src/ts/nativeLog.ts",
       "mode": "100644",
-      "bytes": 3545,
-      "sha256": "32be359aff553c3e1e47865e2139e3a2be8e9eedc7ea8ce51aef3ab5a1adc3c1"
+      "bytes": 3655,
+      "sha256": "1c00b1e7a735ff58055fd1bf4a8991a8a1d9ae2ad36289eba4b893849ee14512"
     },
     {
       "path": "src/ts/nativeScreenshotArchiveWriter.test.ts",
@@ -13473,8 +13473,8 @@
     {
       "path": "src/ts/network/networkLog.test.ts",
       "mode": "100644",
-      "bytes": 6812,
-      "sha256": "d45871552819298e53fae7d96d37d87610bca9c3e1f5cc0cbf0516960e35ce97"
+      "bytes": 7360,
+      "sha256": "fc1305bbe29729fadff2e99ba78ae5031f3e69339501c85a4f24bf57fe812bfe"
     },
     {
       "path": "src/ts/network/networkLog.ts",
@@ -17187,8 +17187,8 @@
     {
       "path": "src/ts/storage/nativeExportFile.ts",
       "mode": "100644",
-      "bytes": 2419,
-      "sha256": "3408ceca11bd9dc48ebfd7666e2d57588b28303e256a8236dccf29aa742ab4ae"
+      "bytes": 3669,
+      "sha256": "a6b41ab059bb96d028f902f1a555041006e02b42f316704d90986f7894b66930"
     },
     {
       "path": "src/ts/storage/nativeFileJobManager.test.ts",
