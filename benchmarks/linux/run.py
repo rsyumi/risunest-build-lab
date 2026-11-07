@@ -132,6 +132,7 @@ diagnostic_path = out / f'{args.phase}-diagnostics.jsonl'
 receipt_path = out / 'owned-process-receipt.json'
 profile_id = hashlib.sha256(str(profile).encode()).hexdigest()
 owned_processes = {}
+app_processes = {}
 primary_error = None
 current_stage = 'driver-start'
 
@@ -171,11 +172,32 @@ def process_snapshot(event):
                 identities.append({'pid': pid, 'starttime': expected_start, 'status': 'pid-reused'})
             else:
                 owned_processes[pid] = identity['starttime']
+                if identity['isBenchmarkBinary']:
+                    app_processes[pid] = identity['starttime']
                 identities.append(identity)
         diagnostic(event, driverReturncode=driver.poll(), processes=identities,
                    omittedProcesses=max(0, len(candidates) - 64))
     except (OSError, subprocess.SubprocessError, ValueError) as error:
         diagnostic('process-snapshot-error', sourceEvent=event, errorType=type(error).__name__)
+
+def process_present(pid, starttime):
+    try:
+        text = Path(f'/proc/{pid}/stat').read_text()
+        return int(text[text.rfind(')') + 2:].split()[19]) == starttime
+    except (OSError, ValueError, IndexError):
+        return False
+
+def wait_for_app_exit(timeout=30):
+    # The main thread of a killed app can exit while another thread finishes uninterruptible
+    # disk I/O; until the last one does, the process keeps its files and the profile's startup lock.
+    deadline = time.monotonic() + timeout
+    while any(process_present(pid, starttime) for pid, starttime in app_processes.items()):
+        if time.monotonic() > deadline:
+            diagnostic('app-exit-timeout')
+            return RuntimeError('The synthetic app process did not exit after its session ended')
+        time.sleep(0.05)
+    diagnostic('app-exit-complete')
+    return None
 
 def inspect_seed_receipt():
     if args.phase != 'appearance-app' or not receipt_path.exists():
@@ -242,50 +264,6 @@ def monitor():
             except (OSError, ValueError):
                 continue
         memory.append(totals)
-
-def owner_lock_report():
-    try:
-        targets = {str(path.resolve()) for path in profile.rglob('owner.lock')}
-    except OSError:
-        targets = set()
-    if not targets:
-        diagnostic('owner-lock-none')
-        return
-    started = time.monotonic()
-    last = None
-    pids = []
-    while True:
-        holders = set()
-        for entry in Path('/proc').glob('[0-9]*/task/[0-9]*/fd/*'):
-            try:
-                if os.readlink(entry) in targets:
-                    holders.add(int(entry.parts[2]))
-            except (OSError, ValueError):
-                continue
-        pids = sorted(holders)
-        detail = []
-        for pid in pids:
-            threads = []
-            for task in sorted(Path(f'/proc/{pid}/task').glob('[0-9]*'), key=lambda item: int(item.name)):
-                try:
-                    stat = (task / 'stat').read_text()
-                    threads.append({'tid': int(task.name), 'comm': (task / 'comm').read_text().strip(),
-                                    'state': stat[stat.rfind(')') + 2:].split()[0],
-                                    'wchan': (task / 'wchan').read_text().strip()})
-                except OSError:
-                    continue
-            detail.append({'pid': pid, 'threads': threads[:80]})
-        key = json.dumps(detail, sort_keys=True)
-        if key != last:
-            elapsed = round(time.monotonic() - started, 3)
-            diagnostic('owner-lock-holders', elapsed=elapsed, holders=detail)
-            print(json.dumps({'phase': args.phase, 'ownerLockElapsed': elapsed, 'holders': detail})[:6000], flush=True)
-            last = key
-        if not pids or time.monotonic() - started > 15:
-            break
-        time.sleep(0.01)
-    print(json.dumps({'phase': args.phase, 'ownerLock': 'held' if pids else 'free',
-                      'elapsed': round(time.monotonic() - started, 3)}), flush=True)
 
 try:
     diagnostic('driver-start', driverPid=driver.pid)
@@ -506,7 +484,9 @@ finally:
         driver.kill()
         driver.wait()
     process_snapshot('driver-cleanup-return')
-    owner_lock_report()
+    exit_error = wait_for_app_exit()
     log.close()
     if capture_error is not None and primary_error is None:
         raise capture_error
+    if exit_error is not None and primary_error is None:
+        raise exit_error

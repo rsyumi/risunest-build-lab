@@ -453,8 +453,8 @@
     {
       "path": "benchmarks/linux/run.py",
       "mode": "100644",
-      "bytes": 26880,
-      "sha256": "536cd873e5c4ad2824d4bcffd175722f223c142b78cddb28bf0c979ea9ea978f"
+      "bytes": 26077,
+      "sha256": "3ac50190b5868e99ab396ff125c1387a15e92c09b7f8249fb43963749ce66829"
     },
     {
       "path": "benchmarks/linux/summarize.mjs",
@@ -3801,8 +3801,8 @@
     {
       "path": "scripts/linux-package-smoke.py",
       "mode": "100644",
-      "bytes": 8782,
-      "sha256": "d1dd000ff6a655c896be20978baf2910d8d11df5b9e64662d37f22c17c22376d"
+      "bytes": 10388,
+      "sha256": "6b4fd6d41cf723d2d53d3de40084aa4dd83520d2e68730da12818b55b306e188"
     },
     {
       "path": "scripts/phase3AndroidSmoke.mjs",
@@ -6399,8 +6399,8 @@
     {
       "path": "src-tauri/src/desktop_lifecycle.js",
       "mode": "100644",
-      "bytes": 182,
-      "sha256": "8cccf6cb135847171db2c219d03fa67961b1d54d80139697af80bbc0be666a04"
+      "bytes": 183,
+      "sha256": "dd20f2f6bd84a6e977f54a8b9133daae8d0d60767f71d8e06e38ea630d2ccdf2"
     },
     {
       "path": "src-tauri/src/desktop_notifications.rs",
@@ -7275,8 +7275,8 @@
     {
       "path": "src-tauri/src/ipc_read_guard.test.ts",
       "mode": "100644",
-      "bytes": 11802,
-      "sha256": "c7cb65d7ded1232137d833dfeeb8873fdddac1b3630770473f293e6a1428c435"
+      "bytes": 12510,
+      "sha256": "5ba79331077f6073f65db26fc2276cd650dc697f8a716a645acae0a762ff1fd9"
     },
     {
       "path": "src-tauri/src/launch_profile.rs",
