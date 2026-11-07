@@ -60,15 +60,6 @@ struct AppLockState {
         awaitingReady = false
         return true
     }
-
-    /// Ends a launch or preview cover whose frame was never confirmed. A cover that waits for a lock
-    /// decision or the PIN screen stays until its frame is ready.
-    mutating func releaseUnconfirmed(epoch coveredEpoch: UInt64) -> Bool {
-        guard active, epoch == coveredEpoch, awaitingReady,
-              !policy.installsReturnCover, !policy.gateRequired else { return false }
-        awaitingReady = false
-        return true
-    }
 }
 
 final class AppLockAccessibilityMask<Content: AnyObject> {

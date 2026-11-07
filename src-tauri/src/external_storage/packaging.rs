@@ -4432,8 +4432,9 @@ mod tests {
         let changed = format!("{{\"value\":{revision}}}").into_bytes();
         let unchanged_hash = hex::encode(hash(&unchanged));
         let changed_hash = hex::encode(hash(&changed));
-        crate::external_storage::content_store::write_file_fixture(&external, &unchanged_hash, &unchanged);
-        crate::external_storage::content_store::write_file_fixture(&external, &changed_hash, &changed);
+        let objects = external.join("objects");
+        fs::write(objects.join(&unchanged_hash), &unchanged).unwrap();
+        fs::write(objects.join(&changed_hash), &changed).unwrap();
         {
             let mut insert = catalog
                 .db
@@ -4511,6 +4512,7 @@ mod tests {
             revision,
         };
         catalog.begin(&identity, None).unwrap();
+        let objects = external.join("objects");
         {
             let mut insert = catalog
                 .db
@@ -4526,7 +4528,10 @@ mod tests {
                 let value = if distance < edited { revision } else { 0 };
                 let body = format!("{{\"record\":{index},\"value\":{value}}}").into_bytes();
                 let digest = hex::encode(hash(&body));
-                crate::external_storage::content_store::write_file_fixture(&external, &digest, &body);
+                let path = objects.join(&digest);
+                if !path.exists() {
+                    fs::write(path, &body).unwrap();
+                }
                 insert
                     .execute(params![format!("record/{index:06}"), digest, body.len() as i64])
                     .unwrap();
@@ -4586,6 +4591,7 @@ mod tests {
             revision,
         };
         catalog.begin(&identity, None).unwrap();
+        let objects = external.join("objects");
         {
             let mut insert = catalog
                 .db
@@ -4595,7 +4601,10 @@ mod tests {
                 let value = if edited.contains(&index) { revision } else { 0 };
                 let body = format!("{{\"record\":{index},\"value\":{value}}}").into_bytes();
                 let digest = hex::encode(hash(&body));
-                crate::external_storage::content_store::write_file_fixture(&external, &digest, &body);
+                let path = objects.join(&digest);
+                if !path.exists() {
+                    fs::write(path, &body).unwrap();
+                }
                 insert
                     .execute(params![format!("record/{index:06}"), digest, body.len() as i64])
                     .unwrap();
@@ -6147,13 +6156,7 @@ mod tests {
             }
             assert_eq!(restored.objects.len(), 1);
             assert_eq!(restored.body(&restored.objects[0].source), b"asset");
-            let shard = staging.join("objects").join(&asset.content_hash[..2]);
-            assert!(matches!(&restored.objects[0].source,
-                ObjectSource::File(path) if *path == shard.join(&asset.content_hash)));
-            let entries = |directory: &Path| fs::read_dir(directory).unwrap()
-                .map(|entry| entry.unwrap().path()).collect::<Vec<_>>();
-            assert_eq!(entries(&staging.join("objects")), vec![shard.clone()]);
-            assert_eq!(entries(&shard), vec![shard.join(&asset.content_hash)]);
+            assert_eq!(fs::read_dir(staging.join("objects")).unwrap().count(), 1);
         });
     }
 
@@ -6441,6 +6444,7 @@ mod tests {
             revision,
         };
         catalog.begin(&identity, None).unwrap();
+        let objects = external.join("objects");
         {
             let mut insert = catalog
                 .db
@@ -6449,7 +6453,10 @@ mod tests {
             for index in keys {
                 let body = library_body(index, value(index));
                 let digest = hex::encode(hash(&body));
-                crate::external_storage::content_store::write_file_fixture(&external, &digest, &body);
+                let path = objects.join(&digest);
+                if !path.exists() {
+                    fs::write(path, &body).unwrap();
+                }
                 insert
                     .execute(params![variable_key(index), digest, body.len() as i64])
                     .unwrap();
@@ -6776,12 +6783,6 @@ mod tests {
             // is still wanted has to be fetched again.
             fs::remove_dir_all(restore_root.join("plaintext")).unwrap();
             fs::remove_dir_all(restore_root.join("downloads")).unwrap();
-            // Where an earlier version placed each object, directly in
-            // `objects`; a restore resumed after an update still uses it.
-            for object in &first.objects {
-                let placed = object.source.file().unwrap();
-                fs::rename(placed, restore_root.join("objects").join(placed.file_name().unwrap())).unwrap();
-            }
             let second = snapshot_restore::download_snapshot(&completed.reference, &restore_root,
                 &key, None, snapshot_restore::SourceTrust::Downloaded, &provider, &repository, &crate::external_storage::phase_progress::PhaseProgress::silent(), &cancel).await.unwrap();
             for pack in &packs {

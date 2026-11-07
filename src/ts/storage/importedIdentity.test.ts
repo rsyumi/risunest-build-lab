@@ -21,8 +21,7 @@ describe('upstream import identity preparation', () => {
     })
     it('assigns only missing or duplicate imported record IDs and preserves message references', () => {
         const message={chatId:'message-id', data:'synthetic'}
-        const source={botPresets:[],globalChatVariables:{},
-            personas:[{id:'a',embeddedModule:{id:7}},{id:'b',embeddedModule:{name:'m'}},{id:'c',embeddedModule:{id:'kept'}}],
+        const source={botPresets:[],personas:[],globalChatVariables:{},
             modules:[{id:'module'},{id:'module'}],loadouts:[{id:'loadout'}],customModels:[{}],
             characters:[{chaId:'card-assigned', chats:[{id:'conversation',message:[message],bookmarks:['message-id'],hypaV3Data:{memos:['message-id']}}]}],
         } as unknown as Database
@@ -31,9 +30,6 @@ describe('upstream import identity preparation', () => {
         expect(prepared.modules[1].id).not.toBe('module')
         expect(prepared.loadouts[0].id).toBe('loadout')
         expect(prepared.customModels[0].id).toMatch(/^[0-9a-f-]{36}$/)
-        expect(prepared.personas.map(persona=>persona.embeddedModule?.id)).toEqual([
-            expect.stringMatching(/^[0-9a-f-]{36}$/), expect.stringMatching(/^[0-9a-f-]{36}$/), 'kept',
-        ])
         expect(prepared.characters).toEqual(source.characters)
     })
 })

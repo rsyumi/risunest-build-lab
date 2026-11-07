@@ -630,8 +630,7 @@ export async function requestOpenAI(arg:RequestDataArgumentExtended):Promise<req
 
         const transtream = getTranStream(arg)
 
-        // A failed or stopped body reaches the reader through transtream.
-        da.body.pipeTo(transtream.writable).catch(() => {})
+        da.body.pipeTo(transtream.writable)
 
         return {
             type: 'streaming',
@@ -1287,8 +1286,7 @@ function wrapToolStream(
                         }
                         
                         const transtream = getTranStream(arg)                    
-                        // A failed or stopped body reaches the reader through transtream.
-                        resRec.body.pipeTo(transtream.writable).catch(() => {})
+                        resRec.body.pipeTo(transtream.writable)
                         
                         reader = transtream.readable.getReader()
                         
