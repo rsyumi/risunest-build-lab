@@ -61,7 +61,10 @@ assert len(apps)==1, apps
 app=apps[0]
 print(run(['codesign','--force','--deep','--sign','-',str(app)]))
 runtimes=json.loads(run(['xcrun','simctl','list','runtimes','--json']))['runtimes']
-runtime=sorted([x for x in runtimes if x['isAvailable'] and '.iOS-' in x['identifier']],key=lambda x:tuple(map(int,x['version'].split('.'))))[-1]
+wanted_runtime=os.environ.get('IOS_CHECK_RUNTIME','')
+runtimes=[x for x in runtimes if x['isAvailable'] and '.iOS-' in x['identifier'] and (not wanted_runtime or x['version']==wanted_runtime or x['version'].startswith(wanted_runtime+'.'))]
+assert runtimes, 'No available iOS runtime '+wanted_runtime
+runtime=sorted(runtimes,key=lambda x:tuple(map(int,x['version'].split('.'))))[-1]
 types=json.loads(run(['xcrun','simctl','list','devicetypes','--json']))['devicetypes']
 available=json.loads(run(['xcrun','simctl','list','devices','available','--json']))['devices'][runtime['identifier']]
 def compatible_type(prefix):
@@ -125,6 +128,35 @@ def launch(phase):
     print(output)
     current_pid=int(output.strip().rsplit(':',1)[1])
 
+launch_diagnostics=os.environ.get('IOS_CHECK_LAUNCH_DIAGNOSTICS')=='true'
+product_launched=False
+def product_first_launch():
+    global product_launched
+    product_launched=True
+    product=pathlib.Path((artifacts/'app-path.txt').read_text())
+    print(run(['codesign','--force','--deep','--sign','-',str(product)]))
+    print(run(['xcrun','simctl','install',device,str(product)]))
+    if not launch_diagnostics:
+        print(run(['xcrun','simctl','launch',device,'io.github.rsyumi.risunest']))
+        time.sleep(15)
+        print(run(['xcrun','simctl','io',device,'screenshot',str(artifacts/'ios-product-first-launch.png')]))
+        return product
+    output=run(['xcrun','simctl','launch',
+                '--stdout='+str(artifacts/'ios-product-first-launch.stdout.log'),
+                '--stderr='+str(artifacts/'ios-product-first-launch.stderr.log'),device,'io.github.rsyumi.risunest'])
+    print(output)
+    pid=int(output.strip().rsplit(':',1)[1])
+    alive={}
+    for wait,seconds,name in [(15,15,'ios-product-first-launch.png'),(45,60,'ios-product-first-launch-60s.png')]:
+        time.sleep(wait)
+        alive[seconds]=subprocess.run(['ps','-p',str(pid)],capture_output=True).returncode==0
+        subprocess.run(['xcrun','simctl','io',device,'screenshot',str(artifacts/name)],check=False)
+    with (artifacts/'ios-product-first-launch.log').open('w') as log:
+        subprocess.run(['xcrun','simctl','spawn',device,'log','show','--last','2m','--style','compact',
+                        '--predicate','processIdentifier == '+str(pid)],stdout=log,stderr=subprocess.STDOUT,check=False)
+    (artifacts/'ios-product-first-launch.json').write_text(json.dumps({'pid':pid,'aliveAfterSeconds':alive}))
+    return product
+
 try:
     print(run(['xcrun','simctl','boot',device]))
     print(run(['xcrun','simctl','bootstatus',device,'-b']))
@@ -177,12 +209,7 @@ try:
     frame_runner=root/'benchmarks/appLock/frames.py'
     if frame_runner.is_file():
         run_app_lock_frames()
-    product=pathlib.Path((artifacts/'app-path.txt').read_text())
-    print(run(['codesign','--force','--deep','--sign','-',str(product)]))
-    print(run(['xcrun','simctl','install',device,str(product)]))
-    print(run(['xcrun','simctl','launch',device,'io.github.rsyumi.risunest']))
-    time.sleep(15)
-    print(run(['xcrun','simctl','io',device,'screenshot',str(artifacts/'ios-product-first-launch.png')]))
+    product=product_first_launch()
     print(run(['xcrun','simctl','shutdown',device]))
     tablet_checked=os.environ.get('IOS_CHECK_IPAD')=='true'
     if tablet_checked:
@@ -208,6 +235,11 @@ except Exception:
         with (artifacts/'ios-owned-process.log').open('w') as output:
             subprocess.run(['xcrun','simctl','spawn',device,'log','show','--last','3m','--style','compact',
                             '--predicate','processIdentifier == '+str(current_pid)],stdout=output,stderr=subprocess.STDOUT,check=False)
+    if launch_diagnostics and not product_launched:
+        try:
+            product_first_launch()
+        except Exception as error:
+            print('Product launch diagnostics failed:',error,flush=True)
     raise
 finally:
     if (artifacts/'ios-ui.xcresult').exists():
