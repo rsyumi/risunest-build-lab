@@ -64,11 +64,13 @@ runtimes=json.loads(run(['xcrun','simctl','list','runtimes','--json']))['runtime
 wanted_runtime=os.environ.get('IOS_CHECK_RUNTIME','')
 runtimes=[x for x in runtimes if x['isAvailable'] and '.iOS-' in x['identifier'] and (not wanted_runtime or x['version']==wanted_runtime or x['version'].startswith(wanted_runtime+'.'))]
 assert runtimes, 'No available iOS runtime '+wanted_runtime
-runtime=sorted(runtimes,key=lambda x:tuple(map(int,x['version'].split('.'))))[-1]
+runtime=sorted(runtimes,key=lambda x:(tuple(map(int,x['version'].split('.'))),len(x.get('supportedDeviceTypes',[]))))[-1]
 types=json.loads(run(['xcrun','simctl','list','devicetypes','--json']))['devicetypes']
-available=json.loads(run(['xcrun','simctl','list','devices','available','--json']))['devices'][runtime['identifier']]
+available=json.loads(run(['xcrun','simctl','list','devices','available','--json']))['devices'].get(runtime['identifier'],[])
 def compatible_type(prefix):
     names={item['name'] for item in available if item['isAvailable'] and item['name'].startswith(prefix)}
+    if not names:
+        names={item['name'] for item in runtime.get('supportedDeviceTypes',[]) if item['name'].startswith(prefix)}
     candidates=[item for item in types if item['name'] in names]
     assert candidates, 'No compatible '+prefix+' device for '+runtime['identifier']
     return candidates[0]
