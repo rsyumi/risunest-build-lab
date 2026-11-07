@@ -653,6 +653,35 @@ fn asset_gc_dry_run_scans_plugin_references_without_retaining_unreferenced_objec
     }
 }
 
+/// GC fails as busy, without waiting, while a capture defers the inventory or another
+/// operation holds the snapshot archive, and the renderer and server sync both see it as busy.
+#[test]
+fn asset_gc_fails_busy_while_a_capture_or_another_archive_holder_runs() {
+    let directory = tempfile::tempdir().expect("create temporary directory");
+    let store = PersistentStore::open(directory.path()).expect("open persistent store");
+    let deferral = store.active_readers.defer_asset_inventory();
+    assert_eq!(store.asset_gc_dry_run(128, None, 0, 0).map(|_| ()), Err(StoreError::AssetInventoryBusy));
+    drop(deferral);
+
+    let (store, held_result) = std::thread::scope(|scope| {
+        let held = Archive::open(&store.snapshots_dir).unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let gc = scope.spawn(move || {
+            sent.send(store.asset_gc_dry_run(128, None, 0, 0).map(|_| ())).unwrap();
+            store
+        });
+        let result = received.recv_timeout(std::time::Duration::from_secs(5));
+        drop(held);
+        (gc.join().unwrap(), result)
+    });
+    let error = held_result.expect("GC returned without waiting for the archive").unwrap_err();
+    assert_eq!(error, StoreError::AssetInventoryBusy);
+    // The storage screen reads this code to ask for a retry instead of offering the data check.
+    assert_eq!(serde_json::to_value(&error).unwrap(), serde_json::json!({ "code": "library-operation-busy" }));
+    assert_eq!(crate::server_sync::SyncError::from(error).code, "library-operation-busy");
+    assert!(store.asset_gc_dry_run(128, None, 0, 0).is_ok());
+}
+
 #[test]
 fn asset_gc_dry_run_keeps_detached_export_roots_until_reader_release() {
     use super::asset_object_catalog::AssetObjectRegistration;

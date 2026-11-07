@@ -9,6 +9,7 @@ pub(crate) mod commands;
 pub(crate) mod commit;
 pub(crate) mod compaction;
 pub(crate) mod content_capture;
+pub(crate) mod held_binary;
 mod message_pages;
 #[cfg(test)]
 mod message_pages_copied_database_tests;
@@ -42,6 +43,7 @@ mod query;
 mod record_apply;
 mod record_projection;
 mod replacement_scan;
+mod stored_json;
 mod schema;
 #[cfg(test)]
 mod schema_contract_tests;
@@ -141,6 +143,10 @@ pub(crate) enum StoreError {
     SnapshotReleased,
     RawBodyUnavailable,
     CommitBusy,
+    /// A capture or another snapshot operation keeps asset GC from reading the asset
+    /// inventory. The renderer and server sync both report it as busy.
+    #[serde(rename = "library-operation-busy")]
+    AssetInventoryBusy,
     CommitDecode { message: String },
     Committed { revision: i64, message: String },
     Validation {
@@ -170,6 +176,7 @@ impl std::fmt::Display for StoreError {
             }
             Self::RawBodyUnavailable => formatter.write_str("raw commit body unavailable"),
             Self::CommitBusy => formatter.write_str("previous commit is still finishing"),
+            Self::AssetInventoryBusy => formatter.write_str("asset inventory is held by another library operation"),
             Self::Committed { message, .. } | Self::CommitDecode { message } | Self::Validation { message } | Self::SchemaMismatch { message } | Self::Store { message } => formatter.write_str(message),
         }
     }
@@ -184,6 +191,7 @@ impl crate::native_log::CommandFailure for StoreError {
             Self::SnapshotReleased => "snapshot-released",
             Self::RawBodyUnavailable => "raw-body-unavailable",
             Self::CommitBusy => "commit-busy",
+            Self::AssetInventoryBusy => "library-operation-busy",
             Self::CommitDecode { .. } => "commit-decode",
             Self::Committed { .. } => "committed",
             Self::Validation { .. } => "validation",
@@ -197,7 +205,7 @@ impl crate::native_log::CommandFailure for StoreError {
     }
     fn expected(&self) -> bool {
         match self {
-            Self::RevisionConflict { .. } | Self::CommitBusy | Self::SnapshotReleased => true,
+            Self::RevisionConflict { .. } | Self::CommitBusy | Self::AssetInventoryBusy | Self::SnapshotReleased => true,
             Self::Validation { message } => {
                 message == crate::data_health::CANCELLED
                     || message == archive::ARCHIVE_CANCELLED_MESSAGE
@@ -2329,6 +2337,16 @@ impl PersistentStore {
         commit::replace_add_characters(&mut self.connection, staging_id, characters)
     }
 
+    /// Stages characters whose `bin` values `binaries` holds behind placeholders.
+    pub(crate) fn replace_add_characters_with_binaries(
+        &mut self,
+        staging_id: &str,
+        characters: &[Value],
+        binaries: &held_binary::HeldBinaries,
+    ) -> StoreResult<()> {
+        commit::replace_add_characters_with_binaries(&mut self.connection, staging_id, characters, binaries)
+    }
+
     pub(crate) fn replace_put_character_detail(
         &mut self,
         staging_id: &str,
@@ -2854,6 +2872,7 @@ impl PersistentStore {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn snapshot_create_keeping(
         &mut self,
         reason: &str,
@@ -2867,10 +2886,12 @@ impl PersistentStore {
         self.snapshot_create_keeping(reason, snapshot::KeepCount::MAX)
     }
 
+    #[cfg(test)]
     pub(crate) fn snapshot_list(&self) -> StoreResult<Vec<SnapshotInfo>> {
         snapshot::list(&self.snapshots_dir)
     }
 
+    #[cfg(test)]
     pub(crate) fn snapshot_delete(&self, id: &str) -> StoreResult<()> {
         snapshot_archive::Archive::open(&self.snapshots_dir)?.delete(id)
     }
@@ -3802,8 +3823,11 @@ impl PersistentStore {
                 &self.repository_root,
             )?,
         ));
+        // A snapshot delete or restore can hold the archive for minutes, so GC stops here as it
+        // does during a capture instead of keeping the store waiting.
         roots.extend(
-            snapshot_archive::Archive::open(&self.snapshots_dir)?
+            snapshot_archive::Archive::try_open(&self.snapshots_dir)?
+                .ok_or(StoreError::AssetInventoryBusy)?
                 .roots()?
                 .into_iter()
                 .map(|set| ("snapshot", set)),

@@ -329,7 +329,7 @@ describe('character card additions', () => {
         )
     })
 
-    it('continues a desktop batch after one selected file fails', async () => {
+    it('continues a desktop batch after one selected file fails and reports the batch in one outcome', async () => {
         const error = new Error('synthetic invalid source')
         mocks.desktopPickerPaths = [
             'C:\\chosen\\first.charx',
@@ -342,9 +342,9 @@ describe('character card additions', () => {
             .mockResolvedValueOnce({ kind: 'imported', mode: 'native', value: 'last-card' })
 
         dismissNativeFileOperationOutcome()
-        const failures: NativeFileOperationOutcome[] = []
+        const outcomes: NativeFileOperationOutcome[] = []
         const unsubscribe = nativeFileOperationOutcome.subscribe(outcome => {
-            if (outcome?.state === 'failed') failures.push(outcome)
+            if (outcome) outcomes.push(outcome)
         })
         try {
             await expect(importCharacter()).resolves.toBe('last-card')
@@ -358,12 +358,13 @@ describe('character card additions', () => {
             'C:\\chosen\\last.charx',
             expect.any(Object),
         )
-        expect(failures).toEqual([expect.objectContaining({
+        const failure = { code: 'import-error', message: error.message, recoveryRequired: false }
+        expect(outcomes).toEqual([expect.objectContaining({
             kind: 'import',
             format: 'content',
             state: 'failed',
-            source: { name: 'broken.charx' },
-            error: { code: 'import-error', message: error.message, recoveryRequired: false },
+            error: failure,
+            batch: { total: 3, imported: 2, failures: [{ name: 'broken.charx', error: failure }] },
         })])
         expect(mocks.alertError).not.toHaveBeenCalled()
     })
@@ -1050,6 +1051,18 @@ describe('character card additions', () => {
         delete card.data.extensions.risuai.onboarding
         const without = await importCharacterCardSpec(structuredClone(card), undefined, 'normal', {}, null, true)
         expect(without && without.onboarding).toBeUndefined()
+    })
+
+    it('imports a card lorebook entry without content as empty text', async () => {
+        await exportCharacterCard(plainCharacter(), 'json', { spec: 'v3' })
+        const card = exportedJson(0)
+        card.data.assets = []
+        card.data.character_book = {
+            extensions: {},
+            entries: [{ keys: ['synthetic'], content: null, extensions: {}, enabled: true, insertion_order: 100 }],
+        }
+        const imported = await importCharacterCardSpec(structuredClone(card), undefined, 'normal', {}, null, true)
+        expect(imported && imported.globalLore[0]).toMatchObject({ key: 'synthetic', content: '' })
     })
 
     it('stops a Realm download or preview from a blocked creator before anything is downloaded', async () => {

@@ -71,6 +71,7 @@ mod regex_shadow;
 #[cfg(not(target_os = "android"))]
 mod renderer_recovery;
 mod server_sync;
+mod async_worker;
 mod slow_log;
 mod sqlite_open;
 mod trust_boundary;
@@ -700,6 +701,11 @@ fn builder_with_main_window(
                     device_backup
                         .attach_maintenance_guard(guard)
                         .map_err(|error| format!("device maintenance guard failed: {error}"))?;
+                } else {
+                    external_storage::content_store::move_flat_files_later(
+                        app.handle(),
+                        app_data_dir.join("external-storage"),
+                    );
                 }
                 app.state::<native_media::ipc::NativeMediaIpcState>()
                     .configure(app_data_dir.join("native-media-ipc"))?;
@@ -907,6 +913,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         generation_diagnostics::native_generation_diagnostic,
         native_log::native_log_file_path,
         native_log::file_page::native_log_file_read,
+        native_log::file_export::native_log_file_export,
         native_log::native_log_set_file_enabled,
         native_tokenizer::tokenize_batch,
         native_media::native_media_encode_inlay_image,

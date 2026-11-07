@@ -63,6 +63,7 @@ export const languageEnglish = {
             'toggle-preset-prompt-name-unmatched':
                 'Toggle preset prompts without matching names',
             'unavailable-persona-binding': 'Unavailable persona bindings',
+            'missing-asset-references': 'Attachment references without a file',
             'unsupported-inlay-references': 'Unsupported inlay references',
             'unsupported-option-value': 'Unsupported setting values',
             'unsupported-structural-field': 'Unsupported data fields',
@@ -108,6 +109,7 @@ export const languageEnglish = {
             damagedPluginStorage: (count: number) => `Damaged plugin storage (${count}) will not be restored.`,
             oversizedPluginStorage: (count: number) => `Oversized plugin storage (${count}) will not be restored.`,
             inlays: (count: number) => `Unsupported inlay entries (${count}) will not be restored.`,
+            missingAssets: (count: number) => `Attachment references without a file (${count}) will be restored without the file.`,
         },
         "recovery": {
             "dismiss": 'Dismiss attempt',
@@ -3066,6 +3068,8 @@ export const languageEnglish = {
             currentItem: 'Current: {0}',
             itemsOf: '{0} / {1}',
             itemsCount: '{0} items',
+            batchFile: 'File {0} of {1}',
+            batchFiles: '{0} files',
             countCharacters: 'Characters',
             countPresets: 'Presets',
             countAssets: 'Assets',
@@ -3085,6 +3089,9 @@ export const languageEnglish = {
             resultCancelledPartial:
                 'Import cancelled. Some attachments that were already saved may remain.',
             resultFailed: 'Import failed. Your existing data is unchanged.',
+            resultBatchFailed: 'Could not import {0} of {1} files.',
+            resultBatchCancelled: 'Import cancelled. {0} of {1} files were imported.',
+            resultBatchPartial: '{0} of {1} files were imported.',
             resultFailedAfterCommit:
                 'The data was imported, but the screen could not be refreshed. Select Refresh screen before making more changes.',
             resultActivationUnresolved: 'The restore result could not be confirmed. Select Refresh screen to check it before making more changes.',
@@ -3106,6 +3113,9 @@ export const languageEnglish = {
             reasonExportTooLarge: '{0} is too large to export.',
             reasonCompatibleDatabaseTooLarge: 'The data is too large to export as a compatible backup. Use a RisuNest backup.',
             reasonCompatibleUnsupportedValue: 'The data contains a value the target app does not support, so it could not be exported as a compatible backup. Use a RisuNest backup.',
+            failureOwners: {
+                character: 'Character: {0}', chat: 'Chat: {1} of {0}', preset: 'Preset: {0}', module: 'Module: {0}', persona: 'Persona: {0}',
+            },
             tooLargeItems: {
                 root: 'Settings data', preset: 'A preset', character: 'A character', conversation: 'A chat', message: 'A message', 'plugin-value': 'Plugin data',
                 record: 'A data item', backup: 'Backup data', 'backup-entry': 'A backup entry', card: 'The character card', module: 'The module', content: 'The card or module', 'owner-manifest': 'The additional asset list', 'compatible-database': 'The data',
@@ -3246,8 +3256,11 @@ export const languageEnglish = {
                 'Secrets such as API keys are masked before being written.',
             logEmpty: 'No errors recorded.',
             savedLogTitle: 'Saved error log',
-            savedLogHelp: 'View the error log saved to the file, including entries from before the app restarted.',
+            savedLogHelp: 'View the error log saved to the file, including entries from before the app restarted. Copy covers the page on screen, and Save covers the whole log.',
             savedLogEmpty: 'No errors saved.',
+            saveLog: 'Save',
+            savedLogSaved: 'Error log saved.',
+            saveFailed: 'Could not save the error log.',
             savedLogList: 'Saved error log entries',
             appStarted: 'App started',
             newerPage: 'Previous page',
