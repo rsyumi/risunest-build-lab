@@ -9,11 +9,6 @@ private struct AppLockReadyArgs: Decodable { let epoch: UInt64; let locked: Bool
 private struct AppLockAuthenticationArgs: Decodable { let reason: String }
 
 final class AppLockCoordinator {
-    // A launch or preview cover has no lock decision behind it. Its frame confirmation runs through
-    // async commands that can wait behind other native work, so the cover comes off after this long
-    // even when no confirmation arrives. Normal confirmations take a few frames.
-    private static let unconfirmedCoverLimit: TimeInterval = 3
-
     private weak var webView: WKWebView?
     private var state = AppLockState()
     private var observers: [NSObjectProtocol] = []
@@ -23,7 +18,6 @@ final class AppLockCoordinator {
     private var ownedPromptDepth = 0
     private var promptInactive = false
     private var readyGeneration: UInt64 = 0
-    private var unconfirmedRelease: DispatchWorkItem?
     var hasOwnedFlow: () -> Bool = { false }
 
     private static func now() -> UInt64 {
@@ -44,21 +38,6 @@ final class AppLockCoordinator {
             observe(Notification.Name("risunest-owned-prompt-end")) { [weak self] in self?.endOwnedPrompt() }
         }
         renderCover()
-        limitUnconfirmedCover()
-    }
-
-    private func limitUnconfirmedCover() {
-        unconfirmedRelease?.cancel()
-        guard state.coverRequired else { return }
-        let epoch = state.epoch
-        let release = DispatchWorkItem { [weak self] in
-            guard let self = self, self.state.releaseUnconfirmed(epoch: epoch) else { return }
-            NSLog("RisuNest app lock cover released after %.0f s without a confirmed frame", Self.unconfirmedCoverLimit)
-            self.renderCover()
-            self.emit()
-        }
-        unconfirmedRelease = release
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.unconfirmedCoverLimit, execute: release)
     }
 
     private func observe(_ name: Notification.Name, _ action: @escaping () -> Void) {
@@ -88,7 +67,6 @@ final class AppLockCoordinator {
 
     private func depart() {
         guard state.depart(at: Self.now()) else { return }
-        unconfirmedRelease?.cancel()
         promptInactive = false
         authentication?.invalidate()
         renderCover()
@@ -100,9 +78,7 @@ final class AppLockCoordinator {
             promptInactive = false
             renderCover()
             emit()
-            limitUnconfirmedCover()
-        } else if promptInactive || state.coverRequired {
-            // A later activation while the cover waits asks the page for its frame again.
+        } else if promptInactive {
             promptInactive = false
             renderCover()
             emit()

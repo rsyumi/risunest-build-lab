@@ -60,6 +60,7 @@ export const languageKorean = {
             'toggle-preset-prompt-name-unmatched':
                 '이름이 일치하지 않는 토글 프리셋 프롬프트',
             'unavailable-persona-binding': '사용할 수 없는 페르소나 연결',
+            'missing-asset-references': '파일이 없는 첨부 파일 참조',
             'unsupported-inlay-references': '지원하지 않는 인레이 참조',
             'unsupported-option-value': '지원하지 않는 설정값',
             'unsupported-structural-field': '지원하지 않는 데이터 필드',
@@ -105,6 +106,7 @@ export const languageKorean = {
             damagedPluginStorage: (count: number) => `손상된 플러그인 저장 데이터 ${count}개는 복원되지 않습니다.`,
             oversizedPluginStorage: (count: number) => `크기가 너무 큰 플러그인 저장 데이터 ${count}개는 복원되지 않습니다.`,
             inlays: (count: number) => `지원하지 않는 인레이 ${count}개는 복원되지 않습니다.`,
+            missingAssets: (count: number) => `파일이 없는 첨부 파일 참조 ${count}개는 파일 없이 복원됩니다.`,
         },
         "recovery": {
             "dismiss": '기록 삭제',
@@ -2726,9 +2728,6 @@ export const languageKorean = {
             actionAdoptStoredPayload: '지금 파일 그대로 쓰기',
             actionNormalizeRecords: '값 다시 계산',
             actionSelectFirstConversation: '첫 채팅 선택',
-            actionSelectFirstPreset: '첫 프리셋 선택',
-            actionSelectFirstPersona: '첫 페르소나 선택',
-            actionAssignEmbeddedModuleId: '모듈에 새 ID 부여',
             actionKeepSingleRecord: '하나만 남기고 정리',
             actionRecoverOrphans: '주인 아래로 되돌리기',
             actionDiscards: '값이 삭제됨',
@@ -2886,6 +2885,8 @@ export const languageKorean = {
             currentItem: '현재: {0}',
             itemsOf: '{0} / {1}',
             itemsCount: '{0}개 항목',
+            batchFile: '파일 {0} / {1}',
+            batchFiles: '파일 {0}개',
             countCharacters: '캐릭터',
             countPresets: '프리셋',
             countAssets: '에셋',
@@ -2905,6 +2906,9 @@ export const languageKorean = {
                 '가져오기를 취소했습니다. 이미 저장된 첨부 파일 일부가 남아 있을 수 있습니다.',
             resultFailed:
                 '가져오기에 실패했습니다. 기존 데이터는 그대로입니다.',
+            resultBatchFailed: '파일 {1}개 중 {0}개를 가져오지 못했습니다.',
+            resultBatchCancelled: '가져오기를 취소했습니다. 파일 {1}개 중 {0}개를 가져왔습니다.',
+            resultBatchPartial: '파일 {1}개 중 {0}개를 가져왔습니다.',
             resultFailedAfterCommit:
                 '데이터는 가져왔지만 화면을 새로 고치지 못했습니다. 다른 변경을 하기 전에 화면 새로 고침을 선택해주세요.',
             resultActivationUnresolved: '복원 결과를 확인하지 못했습니다. 다른 변경을 하기 전에 화면 새로 고침을 선택해 결과를 확인해주세요.',
@@ -2927,6 +2931,9 @@ export const languageKorean = {
             reasonExportTooLarge: '{0} 크기가 너무 커서 내보내지 못했습니다.',
             reasonCompatibleDatabaseTooLarge: '데이터 크기가 너무 커서 호환 백업으로 내보내지 못했습니다. RisuNest 백업을 사용하세요.',
             reasonCompatibleUnsupportedValue: '대상 앱이 지원하지 않는 값이 있어 호환 백업으로 내보내지 못했습니다. RisuNest 백업을 사용하세요.',
+            failureOwners: {
+                character: '캐릭터: {0}', chat: '대화: {0}의 {1}', preset: '프리셋: {0}', module: '모듈: {0}', persona: '페르소나: {0}',
+            },
             tooLargeItems: {
                 root: '설정', preset: '프리셋', character: '캐릭터', conversation: '대화', message: '메시지', 'plugin-value': '플러그인 데이터',
                 record: '데이터 항목', backup: '백업 데이터', 'backup-entry': '백업 항목', card: '캐릭터 카드', module: '모듈', content: '카드 또는 모듈', 'owner-manifest': '추가 에셋 목록', 'compatible-database': '데이터',
@@ -3066,13 +3073,6 @@ export const languageKorean = {
             fileLog: '오류 로그를 파일로 저장',
             fileLogHelp: 'API 키 같은 비밀 정보는 가려서 기록합니다.',
             logEmpty: '기록된 오류가 없습니다.',
-            savedLogTitle: '저장된 오류 로그',
-            savedLogHelp: '앱을 다시 시작하기 전의 기록을 포함해 파일에 저장된 오류 로그를 볼 수 있습니다.',
-            savedLogEmpty: '저장된 오류가 없습니다.',
-            savedLogList: '저장된 오류 로그 항목',
-            appStarted: '앱 시작',
-            newerPage: '이전 페이지',
-            olderPage: '다음 페이지',
             actionFailed:
                 '지금은 진단 기능을 사용할 수 없습니다. 앱을 다시 시작한 뒤 다시 시도하세요.',
         },

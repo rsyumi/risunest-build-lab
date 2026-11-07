@@ -71,6 +71,7 @@ mod regex_shadow;
 #[cfg(not(target_os = "android"))]
 mod renderer_recovery;
 mod server_sync;
+mod async_worker;
 mod slow_log;
 mod sqlite_open;
 mod trust_boundary;
@@ -601,8 +602,7 @@ fn builder_with_main_window(
                 "network_log_initialize",
                 network_log::initialize(&app.state::<app_paths::AppPaths>()),
             );
-            setup_native_log_state
-                .configure_file_path_for_run(&app_data_dir, &app.package_info().version.to_string());
+            setup_native_log_state.configure_file_path(&app_data_dir);
             app.manage(setup_native_log_state.clone());
             slow_log::start_stall_watch();
             app.manage(app_cleanup::CleanupState::initialize(app.handle())?);
@@ -906,7 +906,6 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         native_log::native_log_error,
         generation_diagnostics::native_generation_diagnostic,
         native_log::native_log_file_path,
-        native_log::file_page::native_log_file_read,
         native_log::native_log_set_file_enabled,
         native_tokenizer::tokenize_batch,
         native_media::native_media_encode_inlay_image,
