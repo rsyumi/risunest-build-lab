@@ -15,7 +15,6 @@ import { nativeDataPath } from "../../src/ts/storage/nativePaths";
 import { persistence, reload, regex, guard, check, pause } from "./contracts";
 import { PersistentBenchmarkMarker } from "./persistentMarker";
 import { showNativeHarness } from "../nativeAppLock";
-import { failureRecord } from "../failureRecord";
 
 const report = (stage: string, result: unknown) =>
   invoke("ios_bench_report", { stage, result });
@@ -82,7 +81,7 @@ async function main() {
   await guard();
   check(isTauriIOS && !isTauriDesktop, "iOS runtime classification");
   const phase = await invoke<string>("ios_bench_phase");
-  if (/^app-lock-(immediate|timed|immediate-mutant|ui)$/.test(phase)) {
+  if (/^app-lock-(immediate|timed|immediate-mutant|timed-mutant|ui)$/.test(phase)) {
     const { appLockFixture } = await import('../appLock/fixture');
     const { initialize } = await import('./contracts');
     await appLockFixture('ios', phase, initialize);
@@ -384,8 +383,6 @@ void main().catch(async (error) => {
   detail.textContent = "verification-error:" + message;
   document.getElementById("benchmark")?.append(detail);
   await report("failure", {
-    // A live cloud error can hold what the provider sent, so it records only the fixed message.
-    ...(phase.startsWith("cloud") ? {} : failureRecord(error)),
     message,
     detail: !phase.startsWith("cloud") && error instanceof Error
       ? (error as Error & { detail?: unknown }).detail

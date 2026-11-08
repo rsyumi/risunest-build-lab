@@ -430,7 +430,9 @@ mod tests {
         marker: &str,
     ) -> (DurableCaptureReference, String) {
         let external = root.join("external-storage");
+        let objects = external.join("objects");
         let capture_directory = external.join("captures").join("capture-a");
+        fs::create_dir_all(&objects).unwrap();
         fs::create_dir_all(&capture_directory).unwrap();
         let key = encode_logical_record_key(&LogicalRecordLocator::Root).unwrap();
         let encoded = encode_logical_record(&LogicalRecordEnvelope::Root {
@@ -438,7 +440,7 @@ mod tests {
             owner_heads: Vec::new(),
         })
         .unwrap();
-        crate::external_storage::content_store::write_file_fixture(&external, &encoded.hash, &encoded.bytes);
+        fs::write(objects.join(&encoded.hash), &encoded.bytes).unwrap();
         let identity = CaptureIdentity {
             store_id: "store-a".into(),
             library_epoch: "library-a".into(),
