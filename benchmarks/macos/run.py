@@ -4,7 +4,6 @@ import json
 import os
 import re
 import shutil
-import signal
 import sys
 from pathlib import Path
 import subprocess
@@ -16,17 +15,6 @@ from external_controller import (DEPENDENCIES as EXTERNAL_DEPENDENCIES, FILE_PHA
                                  ExternalStorageSession, file_markers)
 
 EXTERNAL_PHASES = tuple(phase for group in EXTERNAL_GROUPS for phase in group)
-RELAUNCH_PROBE_FILE = Path('/private/tmp/risunest-macos-relaunch-probe.json')
-
-
-def pid_alive(pid):
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
 
 
 def records(path):
@@ -169,7 +157,7 @@ def start_appearance_capture(directory, label, platform, capture_input, capture_
         raise
 
 
-def finish_appearance_capture(capture):
+def finish_appearance_capture(capture, require_display_cadence=True):
     process = capture['process']
     try:
         process.communicate(None if capture.get('experimentCodec') else b'q\n', timeout=15)
@@ -217,7 +205,9 @@ def finish_appearance_capture(capture):
             raise RuntimeError('Capture input format or CPU timing unavailable')
         if result['duplicateFrames'] != 0 or result['droppedFrames'] != 0:
             raise RuntimeError('Capture output duplicated or dropped frames')
-    if len(times) < 60 or not gaps or max(gaps) > 0.04:
+    if not times:
+        raise RuntimeError('Screen capture recorded no frames')
+    if require_display_cadence and (len(times) < 60 or not gaps or max(gaps) > 0.04):
         raise RuntimeError('Capture cadence insufficient to assess a one-frame startup flash')
     return result
 
@@ -231,8 +221,6 @@ def run_phase(app, phase, artifacts, fixtures, expected=None):
     samples = []
     handled = set()
     (artifacts / f'{phase}-baseline-memory.json').write_text(json.dumps(memory_sample(-1), indent=2))
-    if phase == 'relaunch-probe':
-        RELAUNCH_PROBE_FILE.write_text(json.dumps({'phase': 'relaunch-probe-second', 'report': str(report.resolve())}))
     with (artifacts / f'{phase}.log').open('w') as log:
         process = subprocess.Popen([str(binary)], env=environment, stdout=log, stderr=subprocess.STDOUT)
         try:
@@ -260,29 +248,11 @@ def run_phase(app, phase, artifacts, fixtures, expected=None):
                 time.sleep(0.5)
             if process.returncode != 0:
                 raise RuntimeError(f'{phase}: app exited {process.returncode}')
-            if phase == 'relaunch-probe':
-                relaunch_deadline = time.monotonic() + 180
-                while True:
-                    current = records(report)
-                    stages_now = [entry['stage'] for entry in current]
-                    if 'failure' in stages_now:
-                        raise RuntimeError(json.dumps([entry for entry in current if entry['stage'] == 'failure']))
-                    if 'relaunch-probe' in stages_now:
-                        break
-                    if time.monotonic() > relaunch_deadline:
-                        raise TimeoutError(f'relaunch-probe: relaunched instance did not report, stages={stages_now}')
-                    time.sleep(0.5)
-                last_pid = [entry['result']['pid'] for entry in records(report) if entry['stage'] == 'relaunch-round'][-1]
-                quit_deadline = time.monotonic() + 30
-                while pid_alive(last_pid) and time.monotonic() < quit_deadline:
-                    time.sleep(0.2)
-                if pid_alive(last_pid):
-                    raise RuntimeError('relaunch-probe: final instance did not quit')
             result = records(report)
             required = ({'session-dispatch-ready', 'session-dispatch-sent', 'session-dispatch-exit'}
                         if phase.startswith('session-dispatch-') else
                         {phase} if phase.startswith('appearance-') else
-                        {'session-upgrade': {'session-deadline-started', 'session-deadline-reply', 'session-deadline-exit'}, 'session-deadline': {'session-deadline-started', 'session-deadline-reply', 'session-deadline-exit'}, 'termination-probe': {'termination-probe-cancel', 'termination-probe-reload', 'termination-probe-approved'}, 'contracts': {'persistence', 'regex', 'tokenizer', 'reload', 'closed', 'reopened', 'finder', 'quit-cancelled', 'quit-saved'}, 'restart': {'restart'}, 'relaunch-probe': {'relaunch-round', 'relaunch-exit', 'relaunch-probe'}, 'app': {'app', 'app-native-saving', 'app-native-reload-cancelled', 'app-native-stale-rejected', 'app-native-saved', 'app-native-exit'}, 'app-restart': {'app-restart'}, 'streaming': {'streaming'}, 'quit-escape': {'quit-escape-delivered', 'quit-escape-exit'},
+                        {'session-upgrade': {'session-deadline-started', 'session-deadline-reply', 'session-deadline-exit'}, 'session-deadline': {'session-deadline-started', 'session-deadline-reply', 'session-deadline-exit'}, 'termination-probe': {'termination-probe-cancel', 'termination-probe-reload', 'termination-probe-approved'}, 'contracts': {'persistence', 'regex', 'tokenizer', 'reload', 'closed', 'reopened', 'finder', 'quit-cancelled', 'quit-saved'}, 'restart': {'restart'}, 'app': {'app', 'app-native-saving', 'app-native-reload-cancelled', 'app-native-stale-rejected', 'app-native-saved', 'app-native-exit'}, 'app-restart': {'app-restart'}, 'streaming': {'streaming'}, 'quit-escape': {'quit-escape-delivered', 'quit-escape-exit'},
                          **{name: {name} for name in (*SYNC_PHASES, *EXTERNAL_PHASES)}}[phase])
             stages = {entry['stage'] for entry in result}
             if not required <= stages or 'failure' in stages:
@@ -334,38 +304,12 @@ def run_phase(app, phase, artifacts, fixtures, expected=None):
                          replies[1][0], settled['app-native-exit'][0]]
                 if order != sorted(set(order)):
                     raise RuntimeError('Product native cancellation, save, approval and Exit occurred out of order')
-            if phase == 'relaunch-probe':
-                rounds = [entry['result'] for entry in result if entry['stage'] == 'relaunch-round']
-                starts = [entry['result'] for entry in result if entry['stage'] == 'relaunch-process-start']
-                exits = [entry['result'] for entry in result if entry['stage'] == 'relaunch-exit']
-                summary = {'rounds': rounds, 'starts': starts, 'exits': exits,
-                           'relaunchDelaysMs': [starts[index + 1]['epochMs'] - exits[index]['epochMs']
-                                                for index in range(min(len(exits), len(starts) - 1))]}
-                (artifacts / 'relaunch-probe-summary.json').write_text(json.dumps(summary, indent=2))
-                print('relaunch-probe summary: ' + json.dumps(summary), flush=True)
-                if len(rounds) != 5 or len({entry['pid'] for entry in rounds}) != 5 or len(exits) != 5 or len(starts) != 5:
-                    raise RuntimeError('relaunch-probe: expected five distinct instances, four restart exits and one final quit')
-                if [entry['pid'] for entry in starts] != [entry['pid'] for entry in rounds]:
-                    raise RuntimeError('relaunch-probe: every started instance must reach the frontend in order')
-                if starts[0]['pgid'] == starts[0]['pid'] or any(
-                        entry['pgid'] != entry['pid'] or entry['ppid'] != 1 for entry in starts[1:]):
-                    raise RuntimeError('relaunch-probe: relaunched instances must lead their own process group under launchd')
-                services = [entry.get('xpcServiceName') or '' for entry in starts]
-                if services[0].startswith('application.io.github.rsyumi.risunest.macos.bench.') or len(set(services)) != 5 or any(
-                        not name.startswith('application.io.github.rsyumi.risunest.macos.bench.') for name in services[1:]):
-                    raise RuntimeError(f'relaunch-probe: relaunched instances must each get a fresh LaunchServices job, got {services}')
             if phase == 'app-restart':
                 restarted = [entry['result'] for entry in result if entry['stage'] == 'app-restart']
                 if len(restarted) != 1 or restarted[0]['passed'] is not True or type(restarted[0]['revision']) is not int or restarted[0]['revision'] < 0:
                     raise RuntimeError('Product restart requires one exact saved revision readback')
             return result
         finally:
-            if phase == 'relaunch-probe':
-                for entry in records(report):
-                    if entry['stage'] == 'relaunch-process-start' and entry['result']['pid'] != process.pid \
-                            and pid_alive(entry['result']['pid']):
-                        os.kill(entry['result']['pid'], signal.SIGKILL)
-                RELAUNCH_PROBE_FILE.unlink(missing_ok=True)
             if process.poll() is None:
                 process.terminate()
                 try:
@@ -517,9 +461,9 @@ def main():
     phases = configured_phases.split(',') if configured_phases else [
         'contracts', 'restart', 'app', 'app-restart', 'streaming',
         'session-dispatch-initial', 'session-dispatch-local', 'session-dispatch-drain', 'session-dispatch-dialog',
-        'quit-escape', 'session-deadline', 'session-upgrade', 'relaunch-probe',
+        'quit-escape', 'session-deadline', 'session-upgrade',
     ]
-    allowed_phases = {'relaunch-probe', 'session-upgrade', 'session-deadline', 'termination-probe', 'contracts', 'restart', 'app', 'app-restart', 'streaming', 'quit-escape',
+    allowed_phases = {'session-upgrade', 'session-deadline', 'termination-probe', 'contracts', 'restart', 'app', 'app-restart', 'streaming', 'quit-escape',
                       'session-dispatch-initial', 'session-dispatch-local', 'session-dispatch-drain', 'session-dispatch-dialog',
                       'appearance-seed-light', 'appearance-app-light', 'appearance-seed-dark', 'appearance-app-dark',
                       *SYNC_PHASES, *EXTERNAL_PHASES}

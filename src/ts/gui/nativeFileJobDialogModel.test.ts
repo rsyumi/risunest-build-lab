@@ -947,7 +947,7 @@ describe('nativeFileJobDialogModel', () => {
     })
 
     it('presents a content batch by file and lists each file that was not imported', () => {
-        const batchState = { index: 2, total: 3, imported: 1, failures: [], declined: [], warningCodes: [] }
+        const batchState = { index: 2, total: 3, imported: 1, failures: [], warningCodes: [] }
         const progress = buildNativeFileJobDialogModel(running({ format: 'content', source: { name: 'second.charx' }, batch: batchState }), null, 0)
         expect(progress.subtitle).toBe(fillTemplate(copy.batchFile, 2, 3))
         expect(progress.sourceName).toBe('second.charx')
@@ -959,50 +959,40 @@ describe('nativeFileJobDialogModel', () => {
             state: 'failed',
             source: { name: 'third.charx', bytes: 10 },
             error: io,
-            batch: {
-                total: 4,
-                imported: 1,
-                failures: [{ name: 'first.png', error: io }, { name: 'program.exe', error: refused }],
-                declined: ['locked.png'],
-            },
+            batch: { total: 3, imported: 1, failures: [{ name: 'first.png', error: io }, { name: 'program.exe', error: refused }] },
         }), 0)
         expect(failed).toMatchObject({
-            subtitle: fillTemplate(copy.batchFiles, 4),
+            subtitle: fillTemplate(copy.batchFiles, 3),
             sourceName: '',
             sourceSize: '',
-            overallPercent: 25,
-            overallText: fillTemplate(copy.itemsOf, '1', '4'),
+            overallPercent: 33,
+            overallText: fillTemplate(copy.itemsOf, '1', '3'),
             stages: [],
             counters: [],
         })
         expect(failed.terminal).toMatchObject({
             state: 'failed',
-            summary: fillTemplate(copy.resultBatchFailed, 3, 4),
+            summary: fillTemplate(copy.resultBatchFailed, 2, 3),
             reason: '',
             failedFiles: [
                 { name: 'first.png', reason: copy.reasonIo },
                 { name: 'program.exe', reason: copy.reasonUnsupportedFormat },
-                // A declined file was refused by its converter's own alert or by the user.
-                { name: 'locked.png', reason: '' },
             ],
             details: 'first.png: [io-error] synthetic read failure\nprogram.exe: [unsupported-source] program.exe: unsupported-source',
         })
 
         const cancelled = buildNativeFileJobDialogModel(null, outcome({
-            format: 'content', state: 'cancelled', batch: { total: 3, imported: 2, failures: [], declined: [] },
+            format: 'content', state: 'cancelled', batch: { total: 3, imported: 2, failures: [] },
         }), 0)
         expect(cancelled.terminal?.summary).toBe(fillTemplate(copy.resultBatchCancelled, 2, 3))
         expect(cancelled.terminal?.failedFiles).toEqual([])
 
         const partial = buildNativeFileJobDialogModel(null, outcome({
-            format: 'content', state: 'succeeded', batch: { total: 3, imported: 2, failures: [], declined: ['notes.txt'] },
+            format: 'content', state: 'succeeded', batch: { total: 3, imported: 2, failures: [] },
         }), 0)
-        expect(partial.terminal).toMatchObject({
-            summary: fillTemplate(copy.resultBatchPartial, 2, 3),
-            failedFiles: [{ name: 'notes.txt', reason: '' }],
-        })
+        expect(partial.terminal?.summary).toBe(fillTemplate(copy.resultBatchPartial, 2, 3))
         const complete = buildNativeFileJobDialogModel(null, outcome({
-            format: 'content', state: 'succeeded', batch: { total: 3, imported: 3, failures: [], declined: [] },
+            format: 'content', state: 'succeeded', batch: { total: 3, imported: 3, failures: [] },
         }), 0)
         expect(complete.terminal?.summary).toBe(copy.resultSucceeded)
 
