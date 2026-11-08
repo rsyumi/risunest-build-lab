@@ -65,14 +65,61 @@ extern "C" fn observe_product_decision(reply: i32) {
     });
 }
 
+const RELAUNCH_PROBE_FILE: &str = "/private/tmp/risunest-macos-relaunch-probe.json";
+
+fn relaunch_probe_value(key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(RELAUNCH_PROBE_FILE).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value.get(key)?.as_str().map(str::to_owned)
+}
+
+fn report_path() -> Option<String> {
+    std::env::var("RISUNEST_MACOS_REPORT").ok().or_else(|| relaunch_probe_value("report"))
+}
+
+fn epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+#[cfg(unix)]
+fn parent_pid() -> u32 {
+    std::os::unix::process::parent_id()
+}
+
+#[cfg(not(unix))]
+fn parent_pid() -> u32 {
+    0
+}
+
+#[tauri::command]
+fn macos_bench_relaunch_probe() -> serde_json::Value {
+    let rounds = report_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|text| text.lines().filter(|line| line.contains("\"relaunch-round\"")).count())
+        .unwrap_or(0);
+    serde_json::json!({
+        "pid": std::process::id(), "ppid": parent_pid(),
+        "phaseFromEnvironment": std::env::var("RISUNEST_MACOS_PHASE").is_ok(),
+        "executable": std::env::current_exe().ok(),
+        "args": std::env::args().skip(1).collect::<Vec<_>>(),
+        "rounds": rounds, "epochMs": epoch_ms(),
+    })
+}
+
 #[tauri::command]
 fn macos_bench_phase() -> String {
-    std::env::var("RISUNEST_MACOS_PHASE").expect("controller phase")
+    std::env::var("RISUNEST_MACOS_PHASE")
+        .ok()
+        .or_else(|| relaunch_probe_value("phase"))
+        .expect("controller phase")
 }
 
 #[tauri::command]
 fn macos_bench_report(stage: String, result: serde_json::Value) -> Result<(), String> {
-    let path = std::env::var("RISUNEST_MACOS_REPORT").map_err(|error| error.to_string())?;
+    let path = report_path().ok_or("report path unavailable")?;
     let record = serde_json::json!({ "stage": stage, "result": result });
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -206,6 +253,7 @@ fn benchmark_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send
     tauri::generate_handler![
         macos_bench_phase,
         macos_bench_report,
+        macos_bench_relaunch_probe,
         macos_bench_expected,
         macos_bench_main_thread_settled,
         macos_bench_events,
@@ -228,6 +276,22 @@ fn benchmark_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send
 }
 
 fn main() {
+    let probe_phase = std::env::var("RISUNEST_MACOS_PHASE").ok().or_else(|| relaunch_probe_value("phase"));
+    if probe_phase.as_deref().is_some_and(|phase| phase.starts_with("relaunch-probe")) {
+        let pid = std::process::id().to_string();
+        let process = std::process::Command::new("/bin/ps")
+            .args(["-o", "pid=,ppid=,pgid=,tty=", "-p", pid.as_str()])
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            .unwrap_or_default();
+        let fields = process.split_whitespace().collect::<Vec<_>>();
+        let _ = macos_bench_report("relaunch-process-start".into(), serde_json::json!({
+            "pid": std::process::id(), "ppid": parent_pid(), "epochMs": epoch_ms(),
+            "pgid": fields.get(2).and_then(|value| value.parse::<u32>().ok()),
+            "tty": fields.get(3).copied(), "ps": process,
+            "phaseFromEnvironment": std::env::var("RISUNEST_MACOS_PHASE").is_ok(),
+        }));
+    }
     let product = risunest_lib::invoke_handler();
     let benchmark = benchmark_handler();
     let app = risunest_lib::builder()
@@ -240,7 +304,13 @@ fn main() {
             }
         })
         .build(tauri::generate_context!())
-        .expect("build isolated Mac harness");
+        .unwrap_or_else(|error| {
+            let _ = macos_bench_report("failure".into(), serde_json::json!({
+                "message": format!("harness build failed: {error}"),
+                "pid": std::process::id(), "epochMs": epoch_ms(),
+            }));
+            panic!("build isolated Mac harness: {error}");
+        });
     assert_eq!(
         app.config().identifier,
         "io.github.rsyumi.risunest.macos.bench"
@@ -268,6 +338,11 @@ fn main() {
         }
         #[cfg(target_os = "macos")]
         termination_probe::record_run_event(&event);
+        if matches!(&event, tauri::RunEvent::Exit) && macos_bench_phase().starts_with("relaunch-probe") {
+            let _ = macos_bench_report("relaunch-exit".into(), serde_json::json!({
+                "pid": std::process::id(), "epochMs": epoch_ms(),
+            }));
+        }
         risunest_lib::handle_run_event(app, event);
         if dispatch_exit {
             let state = app.state::<Events>();

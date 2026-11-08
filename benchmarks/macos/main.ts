@@ -355,6 +355,17 @@ async function startupAppearance(seed: boolean, theme: "light" | "dark") {
 async function main() {
   await guard();
   const phase = await invoke<string>("macos_bench_phase");
+  if (phase === "relaunch-probe" || phase === "relaunch-probe-second") {
+    const info = await invoke<{ rounds: number }>("macos_bench_relaunch_probe");
+    await report("relaunch-round", info);
+    if (info.rounds + 1 < 5) {
+      await invoke("desktop_relaunch");
+    } else {
+      await report("relaunch-probe", { passed: true, rounds: info.rounds + 1 });
+      await invoke("macos_bench_quit");
+    }
+    return;
+  }
   if (/^app-lock-(immediate|timed|immediate-mutant)$/.test(phase)) {
     const { appLockFixture } = await import('../appLock/fixture');
     const { initialize } = await import('./contracts');
