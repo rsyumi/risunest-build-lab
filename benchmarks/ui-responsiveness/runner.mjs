@@ -10,7 +10,6 @@ import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
 import { REALM_BLOCKED_URL_PATTERNS } from '../../scripts/realmBlocklist.mjs'
-import { evaluationErrorText } from '../support/cdpException.mjs'
 
 const HOST = '127.0.0.1'
 const TEMP_PREFIX = 'risunest-ui-responsiveness-'
@@ -211,12 +210,10 @@ async function evaluate(client, expression) {
         returnByValue: true,
     })
     if (response.exceptionDetails) {
-        throw new Error(await evaluationErrorText(
-            (method, params) => client.call(method, params),
-            response.exceptionDetails,
+        throw new Error(
             response.exceptionDetails.exception?.description ??
                 response.exceptionDetails.text,
-        ))
+        )
     }
     return response.result.value
 }

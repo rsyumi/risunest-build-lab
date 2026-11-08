@@ -778,8 +778,7 @@ function wrapResponsesToolStream(stream:ReadableStream<StreamResponseChunk>, bod
                 })
 
                 const transtream = getResponsesTranStream(arg)
-                // A failed or stopped body reaches the reader through transtream.
-                resRec.body.pipeTo(transtream.writable).catch(() => {})
+                resRec.body.pipeTo(transtream.writable)
                 reader = transtream.readable.getReader()
                 lastValue = { "0": '' }
             }
@@ -844,8 +843,7 @@ export async function requestOpenAIResponseAPI(arg:RequestDataArgumentExtended):
         })
 
         const transtream = getResponsesTranStream(arg)
-        // A failed or stopped body reaches the reader through transtream.
-        response.body.pipeTo(transtream.writable).catch(() => {})
+        response.body.pipeTo(transtream.writable)
         return {
             type: 'streaming',
             result: wrapResponsesToolStream(transtream.readable, body, headers, requestURL, arg, streamingLocalNetworkOptions)

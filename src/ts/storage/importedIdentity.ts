@@ -14,8 +14,7 @@ export function prepareUpstreamImport(database: Database): Database {
         }
     }
     for (const persona of candidate.personas ?? []) {
-        const embedded = persona.embeddedModule
-        if (embedded && (typeof embedded.id !== 'string' || !embedded.id)) embedded.id = v4()
+        if (persona.embeddedModule && !persona.embeddedModule.id) persona.embeddedModule.id = v4()
     }
     return candidate
 }
