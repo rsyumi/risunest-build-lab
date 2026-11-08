@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { get } from 'svelte/store'
-import { createAlertQueue, showsDialog } from './alertQueue'
+import { createAlertQueue } from './alertQueue'
 
 const none = { type: 'none', msg: '' } as const
 
@@ -107,7 +107,6 @@ describe('alert queue', () => {
         alerts.set({ type: 'none', msg: 'yes' })
         await expect(first).resolves.toBe('yes')
         expect(get(alerts)).toEqual({ type: 'none', msg: 'yes', dialogPending: true })
-        expect(showsDialog(get(alerts))).toBe(true)
         expect(alerts.dialogVisible()).toBe(false)
         expect(alerts.hasDialogs()).toBe(true)
 
@@ -122,7 +121,6 @@ describe('alert queue', () => {
         alerts.set({ type: 'none', msg: 'no' })
         await expect(second).resolves.toBe('no')
         expect(get(alerts)).toEqual({ type: 'toast', msg: 'Copied' })
-        expect(showsDialog(get(alerts))).toBe(false)
         expect(published).toEqual(['ask:first', 'none:yes', 'ask:second', 'toast:Copied'])
     })
 

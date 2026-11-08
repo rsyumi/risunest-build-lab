@@ -513,8 +513,7 @@ describe('sendChat with the history window', () => {
 
         await expect(sendChat({ historyLimit: true })).resolves.toBe(true)
 
-        // Generation also records its streaming flags as metadata-only updates, which write no message.
-        const idWrites = mutations.filter((mutation) => mutation.start < 1000 && mutation.messages.length > 0)
+        const idWrites = mutations.filter((mutation) => mutation.start < 1000)
         expect(idWrites).toHaveLength(1)
         expect(idWrites[0]).toMatchObject({ start: 900, deleteCount: 90 })
         expect(stored.slice(900, 990).every((message) => typeof message.chatId === 'string')).toBe(true)
