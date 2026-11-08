@@ -657,8 +657,8 @@
     {
       "path": "benchmarks/macos/native/src/main.rs",
       "mode": "100644",
-      "bytes": 17918,
-      "sha256": "a21c0f7ebe7a38f3d80be75b13e26998be99b90451a9a4cf01ce7e5f8fa95b29"
+      "bytes": 18066,
+      "sha256": "2926971ae2d183a8250aeb3ec2ded6613938b662fd3d69a9f13685a7fc71a2ff"
     },
     {
       "path": "benchmarks/macos/native/src/termination_probe.m",
@@ -681,8 +681,8 @@
     {
       "path": "benchmarks/macos/run.py",
       "mode": "100644",
-      "bytes": 39181,
-      "sha256": "f57e05c884881d4a76debc6ecb4dd0881d967f6501a119b0b5a916defa231c13"
+      "bytes": 39657,
+      "sha256": "aaa9dec9bd097787ee19db6643b451cc500b713b53b565d803049241d4400fbe"
     },
     {
       "path": "benchmarks/macos/sync.ts",

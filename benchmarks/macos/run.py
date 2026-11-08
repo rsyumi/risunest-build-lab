@@ -350,6 +350,10 @@ def run_phase(app, phase, artifacts, fixtures, expected=None):
                 if starts[0]['pgid'] == starts[0]['pid'] or any(
                         entry['pgid'] != entry['pid'] or entry['ppid'] != 1 for entry in starts[1:]):
                     raise RuntimeError('relaunch-probe: relaunched instances must lead their own process group under launchd')
+                services = [entry.get('xpcServiceName') or '' for entry in starts]
+                if services[0].startswith('application.io.github.rsyumi.risunest.macos.bench.') or len(set(services)) != 5 or any(
+                        not name.startswith('application.io.github.rsyumi.risunest.macos.bench.') for name in services[1:]):
+                    raise RuntimeError(f'relaunch-probe: relaunched instances must each get a fresh LaunchServices job, got {services}')
             if phase == 'app-restart':
                 restarted = [entry['result'] for entry in result if entry['stage'] == 'app-restart']
                 if len(restarted) != 1 or restarted[0]['passed'] is not True or type(restarted[0]['revision']) is not int or restarted[0]['revision'] < 0:

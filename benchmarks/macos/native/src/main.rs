@@ -289,6 +289,8 @@ fn main() {
             "pid": std::process::id(), "ppid": parent_pid(), "epochMs": epoch_ms(),
             "pgid": fields.get(2).and_then(|value| value.parse::<u32>().ok()),
             "tty": fields.get(3).copied(), "ps": process,
+            "xpcServiceName": std::env::var("XPC_SERVICE_NAME").ok(),
+            "cfBundleIdentifier": std::env::var("__CFBundleIdentifier").ok(),
             "phaseFromEnvironment": std::env::var("RISUNEST_MACOS_PHASE").is_ok(),
         }));
     }
