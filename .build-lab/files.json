@@ -633,8 +633,8 @@
     {
       "path": "benchmarks/macos/main.ts",
       "mode": "100644",
-      "bytes": 28661,
-      "sha256": "ed64355666d463371a2ba6e1076d4f85fede630d0a5a78bae7bc53ca2c0e9be8"
+      "bytes": 29084,
+      "sha256": "4f4595b75f14670d9c256ad9ac92557d0435939ecbf92127dcb3cd358119de58"
     },
     {
       "path": "benchmarks/macos/native/Cargo.lock",
@@ -657,8 +657,8 @@
     {
       "path": "benchmarks/macos/native/src/main.rs",
       "mode": "100644",
-      "bytes": 14881,
-      "sha256": "5802e7cc629c7ba78494ee0b6279d05457e099b8c9c6e3ddfb81ca05ec62722c"
+      "bytes": 17390,
+      "sha256": "24f6ebd4765333632eec3bad509f875cce21f1c9be45bbc4261f7e1fd863f4ed"
     },
     {
       "path": "benchmarks/macos/native/src/termination_probe.m",
@@ -681,8 +681,8 @@
     {
       "path": "benchmarks/macos/run.py",
       "mode": "100644",
-      "bytes": 35551,
-      "sha256": "d553a42082704f4ad43232bc1d88700c54e768174e9ed9c186c12d6195b6896b"
+      "bytes": 38969,
+      "sha256": "6adc176f66f9d4166b9d82fd892c260503e2dd4a965ee95fbd16d2e456fbcc72"
     },
     {
       "path": "benchmarks/macos/sync.ts",
