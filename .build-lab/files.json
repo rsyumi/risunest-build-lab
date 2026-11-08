@@ -45,8 +45,8 @@
     {
       "path": "benchmarks/appLock/frames.py",
       "mode": "100644",
-      "bytes": 19576,
-      "sha256": "d256cccc5184afee810fa73e3d2a26baaf89a5ea19b496e06d097189a24fec44"
+      "bytes": 20690,
+      "sha256": "695e0d1d057ece8f960d6342d3c21af62625216c019d3e57b4b3a52497d970ca"
     },
     {
       "path": "benchmarks/appLock/mutationPlugin.ts",
