@@ -39,14 +39,14 @@
     {
       "path": "benchmarks/appLock/fixture.ts",
       "mode": "100644",
-      "bytes": 7225,
-      "sha256": "67b40201e7c312540db56d791c882bef4f14d3b505841dfc336ab4e2d831be21"
+      "bytes": 7250,
+      "sha256": "ba6120ec828f469b6f1aff905bb6d0edb4390703355b8ffb9be7cc45dc7f2c29"
     },
     {
       "path": "benchmarks/appLock/frames.py",
       "mode": "100644",
-      "bytes": 16391,
-      "sha256": "54df1a3d67fe84dbcc95ad731c8a317782ba06da8f238aea24d3772d878ac16e"
+      "bytes": 19132,
+      "sha256": "52a140aad5098f57e2578a6da94e7d06c1c120b779d318397d6facbeccc0122c"
     },
     {
       "path": "benchmarks/appLock/mutationPlugin.ts",
@@ -279,8 +279,8 @@
     {
       "path": "benchmarks/ios/main.ts",
       "mode": "100644",
-      "bytes": 16569,
-      "sha256": "d67645482a23cfc13b39342f86c40b67e2feebf2e10dc239822531b5e58093fe"
+      "bytes": 16582,
+      "sha256": "e977d489b54a6e6355b1a5f193918a949d251350e1fe719268f3d06800fda292"
     },
     {
       "path": "benchmarks/ios/native/.gitignore",
@@ -681,8 +681,8 @@
     {
       "path": "benchmarks/macos/run.py",
       "mode": "100644",
-      "bytes": 35551,
-      "sha256": "d553a42082704f4ad43232bc1d88700c54e768174e9ed9c186c12d6195b6896b"
+      "bytes": 35693,
+      "sha256": "30ae41a2ae72c9ceb9934e5d6536c8d567122af406148ef04efbf12510390d2a"
     },
     {
       "path": "benchmarks/macos/sync.ts",
