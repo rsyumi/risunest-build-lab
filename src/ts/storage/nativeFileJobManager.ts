@@ -68,8 +68,6 @@ export interface NativeFileOperationBatch {
     total: number
     imported: number
     failures: NativeFileOperationBatchFailure[]
-    /** Files that ended without an import or an error: a converter refused them with its own alert, or the user stopped them. */
-    declined: string[]
     /** Warnings of the files already finished. */
     warningCodes: string[]
 }
@@ -236,7 +234,7 @@ function outcomeFromSettlement(
 ): NativeFileOperationOutcome | null {
     const statusWarnings = mergeWarningCodes(state.batch?.warningCodes ?? [], state.status?.result?.warningCodes ?? [])
     const batch = state.batch
-        ? { total: state.batch.total, imported: state.batch.imported, failures: state.batch.failures, declined: state.batch.declined }
+        ? { total: state.batch.total, imported: state.batch.imported, failures: state.batch.failures }
         : undefined
     const base = {
         kind: state.kind,
@@ -269,7 +267,6 @@ function outcomeFromSettlement(
         // A batch reports its files, whatever value the last one returned.
         const warningCodes = mergeWarningCodes(stringWarningCodes(settlement.value), statusWarnings)
         if (batch.failures.length) return { ...base, state: 'failed', error: batch.failures[0].error, warningCodes }
-        // Nothing imported means every file was left out, which the converter alerts or the user's own refusals already showed.
         return batch.imported ? { ...base, state: 'succeeded', warningCodes } : null
     }
     if (settlement.value && typeof settlement.value === 'object' && 'kind' in settlement.value
@@ -425,7 +422,7 @@ function runSharedNativeFileOperationWithAdmission<T>(
         },
         protect: () => {},
         beginBatch: total => {
-            if (activeController === controller) updateActiveState({ batch: { index: 0, total, imported: 0, failures: [], declined: [], warningCodes: [] } })
+            if (activeController === controller) updateActiveState({ batch: { index: 0, total, imported: 0, failures: [], warningCodes: [] } })
         },
         beginBatchItem: (index, source) => {
             const batch = activeController === controller ? activeState?.batch : undefined
@@ -441,8 +438,7 @@ function runSharedNativeFileOperationWithAdmission<T>(
             if (!batch) return
             updateActiveState({ batch: 'error' in result
                 ? { ...batch, failures: [...batch.failures, { name, error: outcomeError(kind, result.error) }] }
-                : result.imported ? { ...batch, imported: batch.imported + 1 }
-                : { ...batch, declined: [...batch.declined, name] } })
+                : { ...batch, imported: batch.imported + (result.imported ? 1 : 0) } })
         },
     }
     let taskSignal = controller.signal

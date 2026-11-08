@@ -117,9 +117,7 @@
                             {#each model.terminal.failedFiles as file, index (index)}
                                 <li class="flex flex-col">
                                     <span class="truncate">{file.name}</span>
-                                    {#if file.reason}
-                                        <span class="text-textcolor2">{file.reason}</span>
-                                    {/if}
+                                    <span class="text-textcolor2">{file.reason}</span>
                                 </li>
                             {/each}
                         </ul>
