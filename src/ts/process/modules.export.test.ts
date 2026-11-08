@@ -202,7 +202,7 @@ describe('legacy module export', () => {
         expect(mocks.open).toHaveBeenCalledWith(expect.objectContaining({ multiple: true }))
         expect(DBState.db.modules.map(module => module.name)).toEqual(['First', 'Second'])
         expect(get(nativeFileOperationOutcome)).toMatchObject({
-            kind: 'import', state: 'succeeded', batch: { total: 2, imported: 2, failures: [], declined: [] },
+            kind: 'import', state: 'succeeded', batch: { total: 2, imported: 2, failures: [] },
         })
     })
 
@@ -232,27 +232,20 @@ describe('legacy module export', () => {
         expect(alertError).toHaveBeenCalledExactlyOnceWith(language.risuNest.backup.fileBusy)
     })
 
-    it('lists the desktop modules that could not be read or were refused in the dialog and reports a refused start', async () => {
+    it('lists a desktop module that could not be read in the dialog and reports a refused start', async () => {
         mocks.platform = 'desktop'
-        mocks.open.mockResolvedValue(['C:/synthetic/first.json', 'C:/synthetic/missing.json', 'C:/synthetic/unnamed.json'])
+        mocks.open.mockResolvedValue(['C:/synthetic/first.json', 'C:/synthetic/missing.json'])
         mocks.readFile.mockImplementation(async (path: string) => {
             if (path.includes('missing')) throw Object.assign(new Error('synthetic read failure'), { code: 'io-error' })
-            return moduleJson(path.includes('unnamed') ? '' : 'First')
+            return moduleJson('First')
         })
         await expect(importModule()).resolves.toBe('module')
         expect(DBState.db.modules.map(module => module.name)).toEqual(['First'])
         expect(get(nativeFileOperationOutcome)).toMatchObject({
             state: 'failed',
-            batch: {
-                total: 3,
-                imported: 1,
-                failures: [{ name: 'missing.json', error: { code: 'io-error' } }],
-                declined: ['unnamed.json'],
-            },
+            batch: { total: 2, imported: 1, failures: [{ name: 'missing.json', error: { code: 'io-error' } }] },
         })
-        // The converter still names the refusal itself.
-        expect(alertError).toHaveBeenCalledExactlyOnceWith(language.errors.noData)
-        vi.mocked(alertError).mockClear()
+        expect(alertError).not.toHaveBeenCalled()
 
         dismissNativeFileOperationOutcome()
         let release!: () => void

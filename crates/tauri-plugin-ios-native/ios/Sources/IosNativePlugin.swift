@@ -892,4 +892,4 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
 }
 
 @_cdecl("init_plugin_ios_native")
-public func initPlugin() -> Plugin { IosNativePlugin() }
+func initPlugin() -> Plugin { IosNativePlugin() }
