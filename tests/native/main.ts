@@ -1,7 +1,7 @@
 import { runContractScenarios, verifyContractReadback } from './contractScenarios'
 import { endsByNativeExit, runNativeExitPhase, verifySessionEndReadback } from './lifecycleScenarios'
-import { isGenerationPhase, runGenerationPhase } from './generationScenarios'
 import { invoke } from '@tauri-apps/api/core'
+import { failureRecord } from '../../benchmarks/failureRecord'
 import { Buffer } from 'buffer'
 import { SqlitePersistentDataStore } from '../../src/ts/storage/sqlitePersistentDataStore'
 import { RevisionConflictError } from '../../src/ts/storage/persistentDataStore'
@@ -9,6 +9,8 @@ import { stableSelectionRoot } from '../../src/ts/storage/persistentSelectionBou
 import type { Database } from '../../src/ts/storage/database.svelte'
 
 globalThis.Buffer = Buffer
+// The window error handlers the native side injects record the cause chain through this.
+Object.assign(window, { __boundaryFailureRecord: failureRecord })
 
 const fixture = {
     username: '', botPresets: [], botPresetsId: 0, pluginCustomStorage: {},
@@ -59,10 +61,7 @@ try {
         await runNativeExitPhase(phase, store, fixture)
         await new Promise<never>(() => {})
     }
-    if (isGenerationPhase(phase.phase)) {
-        // A phase that a later document finishes leaves this one waiting for its loss.
-        if (await runGenerationPhase(phase, store.lastOpenResult?.revision, cases)) await new Promise<never>(() => {})
-    } else if (phase.phase === 'official-account-benchmark') {
+    if (phase.phase === 'official-account-benchmark') {
         const { runOfficialAccountMeasurements } = await import('../../benchmarks/official-account/suite')
         measurements = await runOfficialAccountMeasurements(store, phase.accountOrigin ?? '')
         cases.push('official-account-assets-and-ledger')
@@ -125,5 +124,5 @@ try {
     if (blockedRequests.length) throw new Error(`Unexpected blocked resources: ${blockedRequests.join(', ')}`)
     await invoke('boundary_finish', { report: { ...phase, cases, success: true, ...(measurements ? { measurements } : {}) } })
 } catch (error) {
-    await invoke('boundary_finish', { report: { ...phase, cases, success: false, error: String(error) } })
+    await invoke('boundary_finish', { report: { ...phase, cases, success: false, error: String(error), failure: failureRecord(error) } })
 }

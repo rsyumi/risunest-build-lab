@@ -16,6 +16,7 @@ import {
 import type { PreparedImmutablePayload } from './payloadCas'
 import type { DataHealthResult } from './dataHealth'
 import type { PersistentDataRuntime } from './persistentDataRuntime'
+import { readCurrentRevision } from './persistentDataStore'
 import { registerCommittedWorkingSetContinuation } from './committedWorkingSetContinuation'
 import {
     copyNativeExportToAndroidSaf,
@@ -147,39 +148,13 @@ export interface PreparedNativeContent {
     portraitLogicalId?: string
     module?: PreparedNativeCharacterCardModule
     ownerHead?: PreparedRisumOwnerHead
-    nativeMapping?: PreparedNativeCharacterMapping | PreparedNativeModuleMapping
-    nativeModuleMapping?: PreparedNativeModuleMapping
 }
-
-type PreparedNativeMappingDecline = {
-    outcome: 'declined'
-    reason: 'unsupported' | 'invalid' | 'limit' | 'cancelled' | 'host' | 'failed'
-    name: string
-}
-
-// The native port of the card mapping, for a JSON, PNG or CharX card: the character it maps, or why it did not.
-export type PreparedNativeCharacterMapping =
-    | { outcome: 'mapped'; character: Record<string, unknown> }
-    | PreparedNativeMappingDecline
-
-// The native port of the RISUM module activation, or of the conversion of a card imported as a module: the module it
-// appends, or why it did not.
-export type PreparedNativeModuleMapping =
-    | { outcome: 'mapped'; module: Record<string, unknown> }
-    | PreparedNativeMappingDecline
-
-const nativeMappingReasons = new Set(['unsupported', 'invalid', 'limit', 'cancelled', 'host', 'failed'])
 
 export interface PreparedNativeRisumContent extends PreparedNativeContent {
     format: 'risu-module'
     assets: PreparedRisumContentAssetDescriptor[]
     ownerHead: PreparedRisumOwnerHead
-    nativeMapping?: PreparedNativeModuleMapping
-    nativeModuleMapping?: never
 }
-
-// What a content import is for: a card imported as a module is converted too.
-export type PreparedContentImportDestination = 'character' | 'module'
 
 interface NativeOfficialPublicationCommonResult {
     accountId: string
@@ -473,6 +448,7 @@ export interface NativePortableBodyRetryRequest {
 export interface NativeFileJobStatus {
     officialAssets?: OfficialAccountAssetProgress
     officialAssetRestore?: NativeOfficialAssetRestoreProgress
+    officialAssetPublication?: NativeOfficialAssetPublicationProgress
     exportCaptureRevision?: number
     portableBodyRetry?: {stagingId: string; catalogSha256: string; pending: boolean; available: boolean; sourceRequired: boolean}
     jobId: string
@@ -482,7 +458,6 @@ export interface NativeFileJobStatus {
         | 'export-character-charx'
         | 'export-character-card'
         | 'export-risu-module'
-        | 'export-preset'
         | 'export-dataset'
         | 'export-gallery-file'
         | 'export-gallery-zip'
@@ -493,13 +468,13 @@ export interface NativeFileJobStatus {
         | 'restore-portable-backup'
         | 'snapshot-bodies'
         | 'prepare-content-import'
-        | 'prepare-preset-import'
         | 'import-jpeg-asset'
         | 'kei-backup-upload'
         | 'restore-official-account-snapshot'
         | 'restore-native-snapshot'
         | 'official-publication-upload'
         | 'restore-official-account-assets'
+        | 'publish-official-account-assets'
     expectedRevision?: number
     activationRevision?: number
     activationAuthority?: string
@@ -551,7 +526,16 @@ export interface NativeFileJobStatus {
         code: string
         message: string
         itemKind?: string
+        owner?: NativeFileJobFailureOwner
     }
+}
+
+/** The library item whose data a compatible export could not write. */
+export interface NativeFileJobFailureOwner {
+    kind: 'character' | 'chat' | 'preset' | 'module' | 'persona'
+    name: string
+    /** The character a chat belongs to. */
+    character?: string
 }
 
 export interface NativePortableSelection {
@@ -638,7 +622,7 @@ export interface NativeIncompleteRestorePreview {
     unavailableColdKeys: string[]
     characterNames: string[]
     invalidInlays: string[]
-    omissions?: Partial<Record<'data' | 'remote' | 'missing' | 'values' | 'pluginStorage' | 'damagedPluginStorage' | 'oversizedPluginStorage' | 'inlays' | 'excludedCharacters', number>>
+    omissions?: Partial<Record<'data' | 'remote' | 'missing' | 'values' | 'pluginStorage' | 'damagedPluginStorage' | 'oversizedPluginStorage' | 'inlays' | 'excludedCharacters' | 'missingAssets', number>>
 }
 
 export interface NativeFileRestoreJobOptions extends NativeFileJobOptions {
@@ -696,15 +680,6 @@ export interface NativeRisuModuleExportInput {
     expectedRevision: number
 }
 
-export interface NativePresetExportInput {
-    compatibilitySourcePath?: string
-    presetIndex: number
-    presetId: string
-    format: 'json' | 'risup'
-    destination: NativeCharacterCharxExportDestination
-    expectedRevision: number
-}
-
 export interface NativeDatasetExportInput {
     destination: NativeCharacterCharxExportDestination
     expectedRevision: number
@@ -737,8 +712,6 @@ export interface NativeBackupExportDependencies extends NativeFileJobDependencie
     copyToAndroidSaf(
         request: AndroidSafDestinationRequest,
     ): Promise<AndroidSafDestinationResult>
-    /** Keeps a user-started export running in the background, passing the signal that also ends on expiry. */
-    holdExport?<T>(operation: (signal: AbortSignal | undefined) => Promise<T>, signal: AbortSignal | undefined): Promise<T>
 }
 
 const productionDependencies: NativeFileJobDependencies = {
@@ -755,8 +728,6 @@ const productionBackupExportDependencies: NativeBackupExportDependencies = {
     copyToIOSFiles: exportIOSFile,
     copyToAndroidSaf: (request) => copyNativeExportToAndroidSaf(request),
     reserveAndroidDestination: reserveAndroidSafDestination,
-    holdExport: async (operation, signal) => (await import('../mobileBackgroundTask'))
-        .runWithMobileBackgroundTask('export', (task) => operation(task.signal), signal, true),
 }
 
 export class NativeFileJobError extends Error {
@@ -765,6 +736,7 @@ export class NativeFileJobError extends Error {
         message: string,
         readonly warningCodes: string[] = [],
         readonly itemKind?: string,
+        readonly owner?: NativeFileJobFailureOwner,
     ) {
         super(message)
         this.name = 'NativeFileJobError'
@@ -994,7 +966,6 @@ function validatePreparedAssetDescriptors(format: unknown, values: unknown[]): P
 function validatePreparedContent(
     value: unknown,
     expectedCasSessionId: string,
-    destination: PreparedContentImportDestination,
 ): PreparedNativeContent {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) {
         throw preparedContentError('Prepared content must be an object')
@@ -1040,10 +1011,6 @@ function validatePreparedContent(
         expectedContentFields.push('portraitLogicalId')
     if (content.module !== undefined) expectedContentFields.push('module')
     if (content.ownerHead !== undefined) expectedContentFields.push('ownerHead')
-    if (content.nativeMapping !== undefined)
-        expectedContentFields.push('nativeMapping')
-    if (content.nativeModuleMapping !== undefined)
-        expectedContentFields.push('nativeModuleMapping')
     if (
         Object.keys(content).sort().join('\0') !==
         expectedContentFields.sort().join('\0')
@@ -1054,8 +1021,7 @@ function validatePreparedContent(
     if (content.format === 'risu-module') {
         if (
             content.portraitLogicalId !== undefined ||
-            content.module !== undefined ||
-            content.nativeModuleMapping !== undefined
+            content.module !== undefined
         ) {
             throw preparedContentError(
                 'Prepared RISUM content cannot contain card fields',
@@ -1115,18 +1081,12 @@ function validatePreparedContent(
                 'Absent RISUM ownerHead must have no assets',
             )
         }
-        const nativeMapping =
-            content.nativeMapping === undefined
-                ? undefined
-                : validatePreparedNativeMapping(content.nativeMapping, 'module', (module) =>
-                      usableNativeModule(module, content.metadata as Record<string, unknown>, assets as PreparedRisumContentAssetDescriptor[]))
         return {
             casSessionId,
             format: 'risu-module',
             metadata: content.metadata as Record<string, unknown>,
             assets: assets as PreparedRisumContentAssetDescriptor[],
             ownerHead: ownerHead as PreparedRisumOwnerHead,
-            ...(nativeMapping === undefined ? {} : { nativeMapping }),
         }
     }
     const cardAssets = assets as PreparedCardContentAssetDescriptor[]
@@ -1285,19 +1245,6 @@ function validatePreparedContent(
                   }),
         }
     }
-    const nativeMapping =
-        content.nativeMapping === undefined
-            ? undefined
-            : validatePreparedNativeMapping(content.nativeMapping, 'character', usableNativeCharacter)
-    if (content.nativeModuleMapping !== undefined && destination !== 'module') {
-        throw preparedContentError('Prepared character content cannot contain a native module mapping')
-    }
-    const character = nativeMapping?.outcome === 'mapped' ? nativeMapping.character : undefined
-    const nativeModuleMapping =
-        content.nativeModuleMapping === undefined
-            ? undefined
-            : validatePreparedNativeMapping(content.nativeModuleMapping, 'module', (module) =>
-                  usableNativeCardModule(module, character))
     return {
         casSessionId,
         format: content.format,
@@ -1305,110 +1252,6 @@ function validatePreparedContent(
         assets: cardAssets,
         ...(portraitLogicalId === undefined ? {} : { portraitLogicalId }),
         ...(module === undefined ? {} : { module }),
-        ...(nativeMapping === undefined ? {} : { nativeMapping }),
-        ...(nativeModuleMapping === undefined ? {} : { nativeModuleMapping }),
-    }
-}
-
-// A character without the fields the activation reads before storing it is mapped in TS instead.
-function usableNativeCharacter(character: Record<string, unknown>): boolean {
-    const { chaId, chats, additionalAssets } = character
-    return !(
-        typeof chaId !== 'string' ||
-        chaId.length === 0 ||
-        !Array.isArray(chats) ||
-        !(additionalAssets == null || (Array.isArray(additionalAssets) && additionalAssets.every(Array.isArray)))
-    )
-}
-
-// The activation appends a mapped RISUM module under its id and skips the low-level access confirmation and the stdio
-// MCP check, so a module that would need either is mapped in TS instead, and so is one whose asset tuples do not name
-// the receipt's frames in order.
-function usableNativeModule(
-    module: Record<string, unknown>,
-    metadata: Record<string, unknown>,
-    frames: readonly PreparedRisumContentAssetDescriptor[],
-): boolean {
-    const { id, lowLevelAccess, mcp, assets } = module
-    const url = typeof mcp === 'object' && mcp !== null ? (mcp as Record<string, unknown>).url : undefined
-    return !(
-        typeof id !== 'string' ||
-        id.length === 0 ||
-        lowLevelAccess ||
-        (typeof url === 'string' && url.startsWith('stdio:')) ||
-        Object.hasOwn(module, 'assets') !== Object.hasOwn(metadata, 'assets') ||
-        (Object.hasOwn(module, 'assets') && !(
-            Array.isArray(assets) &&
-            assets.length === frames.length &&
-            assets.every((tuple, position) => Array.isArray(tuple) && tuple[1] === frames[position].logicalId)
-        ))
-    )
-}
-
-// The activation appends a converted module under its id beside the owner head of the mapped character's additional
-// assets, so it needs that character and the same asset tuples.
-function usableNativeCardModule(module: Record<string, unknown>, character: Record<string, unknown> | undefined): boolean {
-    const { id, assets } = module
-    if (typeof id !== 'string' || id.length === 0 || character === undefined) return false
-    const additionalAssets = character.additionalAssets
-    if (!Array.isArray(additionalAssets)) return assets === additionalAssets
-    return Array.isArray(assets) && assets.length === additionalAssets.length && assets.every((tuple, index) => {
-        const expected = additionalAssets[index] as unknown[]
-        return Array.isArray(tuple) && tuple.length === expected.length && tuple.every((slot, at) => slot === expected[at])
-    })
-}
-
-function validatePreparedNativeMapping(
-    value: unknown,
-    mapped: 'character',
-    usable: (character: Record<string, unknown>) => boolean,
-): PreparedNativeCharacterMapping
-function validatePreparedNativeMapping(
-    value: unknown,
-    mapped: 'module',
-    usable: (module: Record<string, unknown>) => boolean,
-): PreparedNativeModuleMapping
-function validatePreparedNativeMapping(
-    value: unknown,
-    mapped: 'character' | 'module',
-    usable: (record: Record<string, unknown>) => boolean,
-): PreparedNativeCharacterMapping | PreparedNativeModuleMapping {
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-        throw preparedContentError('Prepared content native mapping must be an object')
-    }
-    const mapping = value as Record<string, unknown>
-    const fields = Object.keys(mapping).sort().join('\0')
-    if (mapping.outcome === 'mapped') {
-        const result = mapping[mapped]
-        if (
-            fields !== [mapped, 'outcome'].join('\0') ||
-            typeof result !== 'object' ||
-            result === null ||
-            Array.isArray(result)
-        ) {
-            throw preparedContentError('Prepared content native mapping is invalid')
-        }
-        const record = result as Record<string, unknown>
-        if (!usable(record)) {
-            return { outcome: 'declined', reason: 'failed', name: mapped }
-        }
-        return mapped === 'character'
-            ? { outcome: 'mapped', character: record }
-            : { outcome: 'mapped', module: record }
-    }
-    if (
-        mapping.outcome !== 'declined' ||
-        fields !== ['name', 'outcome', 'reason'].join('\0') ||
-        typeof mapping.reason !== 'string' ||
-        !nativeMappingReasons.has(mapping.reason) ||
-        typeof mapping.name !== 'string'
-    ) {
-        throw preparedContentError('Prepared content native mapping is invalid')
-    }
-    return {
-        outcome: 'declined',
-        reason: mapping.reason as Extract<PreparedNativeCharacterMapping, { outcome: 'declined' }>['reason'],
-        name: mapping.name,
     }
 }
 
@@ -1765,7 +1608,7 @@ async function runNativeReplacementRestore(
                         if (preview?.unavailableColdKeys.length) warnings.push(language.errors.coldStorageIncompleteRestoreConfirm(preview.characterNames.join(', '), preview.unavailableColdKeys.length, 0))
                         if (preview?.invalidInlays.length) warnings.push(language.portableBackup.invalidInlaysConfirm(preview.invalidInlays.length))
                         if (preview?.omissions) {
-                            for (const key of ['data', 'remote', 'missing', 'values', 'pluginStorage', 'damagedPluginStorage', 'oversizedPluginStorage', 'inlays', 'excludedCharacters'] as const) {
+                            for (const key of ['data', 'remote', 'missing', 'values', 'pluginStorage', 'damagedPluginStorage', 'oversizedPluginStorage', 'inlays', 'excludedCharacters', 'missingAssets'] as const) {
                                 const count = preview.omissions[key] ?? 0
                                 if (count > 0) warnings.push(language.portableBackup.omittedRestoreData[key](count))
                             }
@@ -1832,9 +1675,9 @@ async function runNativeReplacementRestore(
                             }
                             if ((terminal.state === 'failed' || terminal.state === 'cancelled') &&
                                 (kind !== 'restore-portable-backup' || !Number.isSafeInteger(terminal.activationRevision))) {
-                                const current = await bounded(runtime.store.readRoot(), 'activation revision check')
-                                if (current.revision !== upstreamPause!.fence.revision) throw new Error('Failed native activation changed the library')
-                                return current.revision
+                                const current = await bounded(readCurrentRevision(runtime.store), 'activation revision check')
+                                if (current !== upstreamPause!.fence.revision) throw new Error('Failed native activation changed the library')
+                                return current
                             }
                             if (kind === 'restore-portable-backup') {
                                 if (!Number.isSafeInteger(terminal.activationRevision)) throw new NativeFileJobError('invalid-activation-receipt','Portable activation receipt is unavailable')
@@ -1846,9 +1689,9 @@ async function runNativeReplacementRestore(
                                 if (!terminal.result) throw new Error('Native activation result is unavailable')
                                 return terminal.result.revision
                             }
-                            const current = await bounded(runtime.store.readRoot(), 'activation revision check')
-                            if (current.revision !== upstreamPause!.fence.revision) throw new Error('Failed native activation changed the library')
-                            return current.revision
+                            const current = await bounded(readCurrentRevision(runtime.store), 'activation revision check')
+                            if (current !== upstreamPause!.fence.revision) throw new Error('Failed native activation changed the library')
+                            return current
                         },
                         async afterRefresh() {
                             const plugins = await import('../plugins/apiV3/v3.svelte')
@@ -2080,11 +1923,13 @@ async function runNativeReplacementRestore(
         if (upstreamPause && portableAdoptedRevision === undefined) {
             if (!activationUnresolved && (!activationSubmitted || terminal?.state === 'cancelled' || terminal?.state === 'failed')) {
                 try {
-                    const unchanged = await bounded(runtime.store.readRoot(), 'unchanged library check')
-                    if (unchanged.revision !== upstreamPause.fence.revision) throw new Error('Native restore changed the library')
+                    const unchanged = await bounded(readCurrentRevision(runtime.store), 'unchanged library check')
+                    if (unchanged !== upstreamPause.fence.revision) throw new Error('Native restore changed the library')
                     const plugins = await import('../plugins/apiV3/v3.svelte')
                     await bounded(plugins.restartPluginsAfterAuthorityReplacement(), 'plugin restart')
-                    await bounded(upstreamPause.abortUnchanged(async () => { await bounded(Promise.resolve(upstreamBinding?.assertAuthority()), 'binding verification') }), 'unchanged restore recovery')
+                    // Finishing after the deadline ends the guard and the recovery that would resume the binding.
+                    await bounded(upstreamPause.abortUnchanged(async () => { await bounded(Promise.resolve(upstreamBinding?.assertAuthority()), 'binding verification') }), 'unchanged restore recovery',
+                        () => upstreamBinding?.resume())
                     await bounded(Promise.resolve(upstreamBinding?.resume()), 'binding resume')
                 } catch { await bounded(upstreamPause.finish(), 'write pause release').catch(() => {}) }
             } else await bounded(upstreamPause.finish(), 'write pause release').catch(() => {})
@@ -2195,7 +2040,7 @@ export async function runNativeOfficialAccountSnapshotRestore(
         }
         if (
             error instanceof NativeFileJobError &&
-            (error.code === 'compatibility-required' || error.code === 'cold-expansion-required')
+            error.code === 'compatibility-required'
         ) {
             return { kind: 'compatibility-fallback' }
         }
@@ -2387,14 +2232,11 @@ interface NativeManagedExportSpec {
     operation: string
     safLengthMismatchLabel: string
     handoffCleanupCommand: string
-    bindAfterPreparation?: boolean
     destination: NativeCharacterCharxExportDestination
     androidSourceKind?: AndroidSafExportKind
     reservation?: AndroidSafDestinationReservation
     relaySafCopyProgress?: boolean
     retainHandoffOnPublicationFailure?: boolean
-    /** Holds its own background task; exports run inside a shared file operation already hold one. */
-    holdsBackground?: boolean
     prepareRequest(): Record<string, unknown> | Promise<Record<string, unknown>>
 }
 
@@ -2420,12 +2262,10 @@ async function runNativeManagedExport(
         reservation = await dependencies.reserveAndroidDestination(spec.destination.suggestedName, spec.androidSourceKind ?? 'risuSave', options.signal)
         owned = true
     }
-    const run = (signal = options.signal) =>
-        runNativeManagedExportToDestination(spec, { ...options, signal }, dependencies, reservation)
+    const run = () => runNativeManagedExportToDestination(spec, options, dependencies, reservation)
     // The destination is chosen by now, so the picker never holds the background task.
     options.onDestinationChosen?.()
-    const work = () => spec.holdsBackground && dependencies.holdExport ? dependencies.holdExport(run, options.signal) : run()
-    return owned ? withAndroidSafDestination(reservation, work) : work()
+    return owned ? withAndroidSafDestination(reservation, run) : run()
 }
 
 async function runNativeManagedExportToDestination(
@@ -2440,12 +2280,9 @@ async function runNativeManagedExportToDestination(
         request,
     })) as { jobId: string; warningCodes?: string[] }
     let terminal: NativeFileJobStatus
-    const deferredBinding = spec.bindAfterPreparation === true && reservation !== undefined
     try {
-        if (!deferredBinding) {
-            await reservation?.bind(started.jobId)
-            await options.onStarted?.(started.jobId, reservation?.requestId)
-        }
+        await reservation?.bind(started.jobId)
+        await options.onStarted?.(started.jobId, reservation?.requestId)
         terminal = await pollNativeFileJobUntilTerminal(
             started.jobId,
             options,
@@ -2470,7 +2307,7 @@ async function runNativeManagedExportToDestination(
             throw new NativeFileJobError(
                 terminal.error?.code ?? 'export-failed',
                 terminal.error?.message ?? `${spec.operation} failed`,
-                [], terminal.error?.itemKind,
+                [], terminal.error?.itemKind, terminal.error?.owner,
             )
         }
         if (!terminal.result) {
@@ -2496,10 +2333,6 @@ async function runNativeManagedExportToDestination(
                     'missing-handoff',
                     `${spec.operation} returned no native handoff path`,
                 )
-            }
-            if (deferredBinding) {
-                await reservation!.bind(started.jobId)
-                await options.onStarted?.(started.jobId, reservation!.requestId)
             }
             const committedResult = result
             const publish =
@@ -2624,7 +2457,6 @@ export function runNativeCharacterCharxExport(
     return runNativeManagedExport(
         {
             operation: 'Native character CharX export',
-            holdsBackground: true,
             safLengthMismatchLabel: 'character CharX',
             handoffCleanupCommand: 'native_character_charx_handoff_cleanup',
             destination: input.destination,
@@ -2654,7 +2486,6 @@ export function runNativeCharacterCardExport(
     return runNativeManagedExport(
         {
             operation: 'Native character card export',
-            holdsBackground: true,
             safLengthMismatchLabel: 'character card',
             handoffCleanupCommand: 'native_character_card_handoff_cleanup',
             destination: input.destination,
@@ -2683,7 +2514,6 @@ export function runNativeRisuModuleExport(
     return runNativeManagedExport(
         {
             operation: 'Native RISUM export',
-            holdsBackground: true,
             safLengthMismatchLabel: 'RISUM',
             handoffCleanupCommand: 'native_risu_module_handoff_cleanup',
             destination: input.destination,
@@ -2699,30 +2529,6 @@ export function runNativeRisuModuleExport(
         options,
         dependencies,
     )
-}
-
-export function runNativePresetExport(
-    input: NativePresetExportInput,
-    options: NativeFileJobOptions = {},
-    dependencies: NativeBackupExportDependencies = productionBackupExportDependencies,
-): Promise<NativeFileJobResult> {
-    return runNativeManagedExport({
-        operation: 'Native preset export',
-        bindAfterPreparation: true,
-        holdsBackground: true,
-        safLengthMismatchLabel: 'Preset',
-        handoffCleanupCommand: 'native_preset_handoff_cleanup',
-        destination: input.destination,
-        prepareRequest: () => ({
-            kind: 'export-preset',
-            ...(input.compatibilitySourcePath ? { compatibilitySourcePath: input.compatibilitySourcePath } : {}),
-            ...(input.destination.type === 'desktopPath' ? { destination: input.destination.path } : {}),
-            expectedRevision: input.expectedRevision,
-            presetIndex: input.presetIndex,
-            presetId: input.presetId,
-            format: input.format,
-        }),
-    }, options, dependencies)
 }
 
 export function runNativeDatasetExport(
@@ -2968,7 +2774,6 @@ export async function prepareNativeContentImport(
     displayName: string,
     options: NativeFileJobOptions = {},
     dependencies: NativeFileJobDependencies = productionDependencies,
-    destination: PreparedContentImportDestination = 'character',
 ): Promise<PreparedNativeContentReceipt> {
     if (!dependencies.isTauri()) {
         throw new Error('Native content preparation requires Tauri')
@@ -2980,7 +2785,6 @@ export async function prepareNativeContentImport(
             kind: 'prepare-content-import',
             source,
             displayName,
-            ...(destination === 'module' ? { importDestination: destination } : {}),
         },
     })) as { jobId: string; warningCodes?: string[] }
     let cancellationRequested = false
@@ -3099,7 +2903,6 @@ export async function prepareNativeContentImport(
             const content = validatePreparedContent(
                 await invokeNative(dependencies, 'native_file_job_prepared_content', { jobId: started.jobId }),
                 started.jobId,
-                destination,
             )
             options.signal?.throwIfAborted()
             let lifecycleState:
@@ -3900,6 +3703,136 @@ export async function runNativeOfficialAssetRestore(
     }
 }
 
+export interface NativeOfficialAssetPublicationProgress {
+    written: number
+    failed: number
+    bytes: number
+    active: number
+    limit: number
+    waitingUntil?: number
+    reason?: 'authentication' | 'reauthentication-needed' | 'local' | 'service' | 'auth-warning'
+    session?: string
+    warning?: string
+    reloadSession: boolean
+}
+
+export interface NativeOfficialAssetPublicationRequest {
+    baseUrl: string
+    credential: { kind: 'risu-auth'; token: string }
+    accountId: string
+    /** The native lease of the revision being published, which keeps the bodies pinned. */
+    lease: string
+    session: string | null
+    assets: readonly { localKey: string; key: string }[]
+    concurrency?: 1 | 2 | 4
+}
+
+export interface NativeOfficialAssetPublicationOptions {
+    signal?: AbortSignal
+    /** Runs on every poll; a failure cancels the job and is thrown once the job has stopped. */
+    guard?(): Promise<void>
+    /** The account now holds the asset under `replacementKey`. */
+    written?(key: string, replacementKey: string): void
+    progress?(progress: NativeOfficialAssetPublicationProgress): void
+}
+
+export interface NativeOfficialAssetPublicationResult {
+    reason?: NativeOfficialAssetPublicationProgress['reason']
+    cancelled: boolean
+    failed: number
+    session: string | null
+    warning: string | null
+    reloadSession: boolean
+    /** Keys the account does not hold yet, in request order. */
+    unwritten: string[]
+}
+
+export async function runNativeOfficialAssetPublication(
+    request: NativeOfficialAssetPublicationRequest,
+    options: NativeOfficialAssetPublicationOptions = {},
+    dependencies: NativeFileJobDependencies = productionDependencies,
+): Promise<NativeOfficialAssetPublicationResult> {
+    if (!dependencies.isTauri()) throw new Error('Native official asset publication requires Tauri')
+    if (options.signal?.aborted) throw abortError()
+    const { assets } = request
+    const started = await invokeNative(dependencies, 'native_file_job_start', {
+        request: { kind: 'publish-official-account-assets', ...request },
+    }) as { jobId?: unknown }
+    if (typeof started?.jobId !== 'string' || !started.jobId) {
+        throw new NativeFileJobError('invalid-result', 'Native official asset publication start returned no job ID')
+    }
+    const jobId = started.jobId
+    const written = new Uint8Array(assets.length)
+    let read = 0
+    let ended = false
+    let cancelling = false
+    let ownership: { error: unknown } | undefined
+    const cancel = async () => {
+        if (cancelling) return
+        cancelling = true
+        await invokeNative(dependencies, 'native_file_job_cancel', { jobId })
+    }
+    const readSettled = async () => {
+        while (true) {
+            const page = await invokeNative(dependencies, 'native_official_asset_publication_settled', {
+                jobId, offset: read, limit: officialAssetPage,
+            }) as { entries: { index: number; replacementKey: string | null }[]; total: number }
+            for (const { index, replacementKey } of page.entries) {
+                if (!Number.isInteger(index) || index < 0 || index >= assets.length || written[index]
+                    || (replacementKey !== null && (typeof replacementKey !== 'string' || !replacementKey))) {
+                    throw new NativeFileJobError('invalid-result', 'Native official asset publication settled an unknown asset')
+                }
+                written[index] = replacementKey === null ? 2 : 1
+                if (replacementKey !== null) options.written?.(assets[index].key, replacementKey)
+            }
+            read += page.entries.length
+            if (page.entries.length === 0 || read >= page.total) return
+        }
+    }
+    const status = async () => await invokeNative(dependencies, 'native_file_job_status', { jobId }) as NativeFileJobStatus
+    const poll = async () => {
+        while (true) {
+            if (!ownership && !cancelling) {
+                try { await options.guard?.() }
+                catch (error) { ownership = { error } }
+            }
+            if (ownership || options.signal?.aborted) await cancel()
+            const current = await status()
+            if (current.officialAssetPublication) options.progress?.(current.officialAssetPublication)
+            await readSettled()
+            if (isTerminalJob(current)) { ended = true; return current }
+            await dependencies.wait(150)
+        }
+    }
+    let terminal: NativeFileJobStatus
+    try {
+        terminal = await poll()
+    } finally {
+        try {
+            if (!ended) {
+                await cancel()
+                while (!isTerminalJob(await status())) await dependencies.wait(150)
+            }
+            await invokeNative(dependencies, 'native_file_job_forget', { jobId })
+        } catch {}
+    }
+    if (ownership) throw ownership.error
+    if (terminal.state === 'failed') {
+        throw new NativeFileJobError(terminal.error?.code ?? 'native-job-failed',
+            terminal.error?.message ?? 'Native official asset publication failed', terminal.warningCodes ?? [])
+    }
+    const progress = terminal.officialAssetPublication
+    return {
+        reason: progress?.reason,
+        cancelled: terminal.state === 'cancelled',
+        failed: progress?.failed ?? 0,
+        session: progress?.session ?? null,
+        warning: progress?.warning ?? null,
+        reloadSession: progress?.reloadSession ?? false,
+        unwritten: assets.filter((_asset, index) => written[index] !== 1).map(asset => asset.key),
+    }
+}
+
 export interface NativeGalleryExportInput {
     destination: NativeCharacterCharxExportDestination
     expectedRevision: number
@@ -3915,7 +3848,6 @@ export function runNativeGalleryExport(
 ): Promise<NativeFileJobResult> {
     return runNativeManagedExport({
         operation: 'Native gallery export',
-        holdsBackground: true,
         safLengthMismatchLabel: 'gallery download',
         handoffCleanupCommand: 'native_download_handoff_cleanup',
         androidSourceKind: 'download',
@@ -3927,84 +3859,4 @@ export function runNativeGalleryExport(
             selection: input.selection,
         }),
     }, options, dependencies)
-}
-
-export interface PreparedNativePresetReceipt {
-    displayName: string
-    sourceBytes: number
-    nativeMapping: { outcome: 'mapped'; preset: Record<string, unknown> } | PreparedNativeMappingDecline
-    readSource(): Promise<Uint8Array>
-    release(): Promise<void>
-}
-
-export async function prepareNativePresetImport(
-    source: NativeFileJobSource,
-    displayName: string,
-    options: NativeFileJobOptions = {},
-    dependencies: NativeFileJobDependencies = productionDependencies,
-): Promise<PreparedNativePresetReceipt> {
-    if (!dependencies.isTauri()) throw new Error('Native preset preparation requires Tauri')
-    options.signal?.throwIfAborted()
-    const started = await invokeNative(dependencies, 'native_file_job_start', {
-        request: { kind: 'prepare-preset-import', source, displayName },
-    }) as { jobId: string }
-    let released = false
-    const release = async () => {
-        if (released) return
-        await invokeNative(dependencies, 'native_file_job_forget', { jobId: started.jobId })
-        released = true
-    }
-    try {
-        const terminal = await pollNativeFileJobUntilTerminal(started.jobId, options, dependencies)
-        if (terminal.state === 'cancelled') throw abortError()
-        if (terminal.state !== 'succeeded') throw new NativeFileJobError(
-            terminal.error?.code ?? 'preset-prepare-failed', terminal.error?.message ?? 'Native preset preparation failed')
-        const raw = await invokeNative(dependencies, 'native_file_job_prepared_preset', { jobId: started.jobId }) as Record<string, unknown>
-        options.signal?.throwIfAborted()
-        if (!raw || typeof raw.displayName !== 'string' || !Number.isSafeInteger(raw.sourceBytes) || (raw.sourceBytes as number) < 0) {
-            throw new Error('Prepared preset receipt is invalid')
-        }
-        const sourceBytes = raw.sourceBytes as number
-        const mapping = raw.nativeMapping as Record<string, unknown> | undefined
-        const preset = mapping?.preset as Record<string, unknown> | undefined
-        const validPreset = preset && typeof preset === 'object' && !Array.isArray(preset)
-            && typeof preset.id === 'string' && preset.id.trim().length > 0 && preset.id.length <= 256
-        const nativeMapping: PreparedNativePresetReceipt['nativeMapping'] = mapping?.outcome === 'mapped' && validPreset
-            ? { outcome: 'mapped', preset }
-            : mapping?.outcome === 'declined' && nativeMappingReasons.has(mapping.reason as string) && typeof mapping.name === 'string'
-                ? mapping as PreparedNativeMappingDecline
-                : { outcome: 'declined', reason: 'failed', name: 'preset' }
-        return {
-            displayName: raw.displayName,
-            sourceBytes,
-            nativeMapping,
-            async readSource() {
-                if (released) throw new Error('Prepared preset source has been released')
-                const bytes = new Uint8Array(sourceBytes)
-                for (let offset = 0; offset < sourceBytes; offset += 1024 * 1024) {
-                    options.signal?.throwIfAborted()
-                    const length = Math.min(1024 * 1024, sourceBytes - offset)
-                    const chunk = await invokeNative(dependencies, 'native_file_job_preset_source', { jobId: started.jobId, offset, length })
-                    if (!Array.isArray(chunk) || chunk.length !== length || chunk.some(byte => !Number.isInteger(byte) || byte < 0 || byte > 255)) {
-                        throw new Error('Prepared preset source length is invalid')
-                    }
-                    bytes.set(chunk, offset)
-                }
-                options.signal?.throwIfAborted()
-                return bytes
-            },
-            release,
-        }
-    } catch (error) {
-        try {
-            await invokeNative(dependencies, 'native_file_job_cancel', { jobId: started.jobId })
-            for (;;) {
-                const status = await invokeNative(dependencies, 'native_file_job_status', { jobId: started.jobId }) as NativeFileJobStatus
-                if (isTerminalJob(status)) break
-                await dependencies.wait(options.pollIntervalMs ?? 100)
-            }
-            await release()
-        } catch {}
-        throw error
-    }
 }

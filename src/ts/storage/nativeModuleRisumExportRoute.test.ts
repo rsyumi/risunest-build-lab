@@ -5,7 +5,10 @@ vi.mock('../platform', async () => (await import('../platform.testSupport')).pla
 vi.mock('./persistentDataRuntime.svelte', () => ({ getPersistentDataRuntime: vi.fn() }))
 vi.mock('./database.svelte', () => ({ getDatabase: vi.fn() }))
 
+import { get } from 'svelte/store'
 import { exportNativeModuleRisumFromPicker } from './nativeModuleRisumExportRoute'
+import { registerLibraryFileOperationGate } from './libraryFileOperation'
+import { nativeFileOperation } from './nativeFileJobManager'
 
 describe('native RISUM export route', () => {
     it('pins metadata-only module changes before exporting the exact identity index', async () => {
@@ -75,6 +78,28 @@ describe('native RISUM export route', () => {
             runExport,
         })).rejects.toThrow('identity changed while pinning')
         expect(runExport).not.toHaveBeenCalled()
+    })
+
+    it('waits for sync and backups to settle before opening the picker', async () => {
+        const module = { id: 'selected', name: 'Selected' }
+        const calls: string[] = []
+        let settle!: () => void
+        const unregister = registerLibraryFileOperationGate(() => new Promise<void>(resolve => { settle = resolve }))
+        try {
+            const exporting = exportNativeModuleRisumFromPicker(module as never, {}, {
+                isDesktop: () => true,
+                isAndroid: () => false,
+                chooseDestination: async () => { calls.push('pick'); return 'C:\\chosen\\Selected.risum' },
+                runtime: () => ({ revision: 1, flushPendingData: async () => undefined }),
+                modules: () => [module] as never,
+                runExport: async () => { calls.push('export'); return null as never },
+            })
+            await vi.waitFor(() => expect(get(nativeFileOperation)?.waitingForSync).toBe(true))
+            expect(calls).toEqual([])
+            settle()
+            await exporting
+        } finally { unregister() }
+        expect(calls).toEqual(['pick', 'export'])
     })
 
     it('keeps Web on the legacy path and rejects a detached equal-ID object', async () => {

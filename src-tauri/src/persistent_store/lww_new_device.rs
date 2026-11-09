@@ -159,9 +159,6 @@ impl PersistentStore {
         authorization_id: &str,
     ) -> StoreResult<NewDeviceResult> {
         validate_header(header)?;
-        let completed: bool = self.device_store()?.connection().query_row(
-            "SELECT EXISTS(SELECT 1 FROM lww_intents WHERE request_id=?1 AND complete=1)", [&header.request_id], |row| row.get(0))?;
-        let admission = if completed { None } else { Some(self.acquire_intent_admission()?) };
         let existing: Option<(String, String, String, String, bool)> = self
             .device_store()?
             .connection()
@@ -199,9 +196,7 @@ impl PersistentStore {
                 return Err(error("request-id-integrity"));
             }
             if !complete {
-                let admission = admission.as_ref().ok_or_else(|| error("intent-replay-evidence-unavailable"))?;
-                self.require_unowned_intent_admission(admission)?;
-                self.finish_lww_new_device(admission,
+                self.finish_lww_new_device(
                     header,
                     staging_id,
                     &changes,
@@ -215,8 +210,7 @@ impl PersistentStore {
             }
             return self.new_device_result(header, &writer_id, new_authority);
         }
-        let admission = admission.as_ref().ok_or_else(|| error("intent-replay-evidence-unavailable"))?;
-        self.recover_intents_holding(false, admission)?;
+        self.lww_recover_intents()?;
         verify(self.device_store()?.connection(), header.binding_authority)?;
         let state = self.lww_clock_state()?;
         let row:Option<(String,String,String,String,String,String,bool)>=self.device_store()?.connection().query_row("SELECT request_id,authority,staging_id,old_writer_id,writer_id,selection_change,authorized FROM lww_new_device_authorizations WHERE authorization_id=?1",[authorization_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional()?;
@@ -271,12 +265,7 @@ impl PersistentStore {
                 None,
             ))?,
         };
-        admission.require(self.device_store()?.connection())?;
-        let library = &self.connection;
-        let device = self.device_store.as_mut().map_err(|failure| error(failure))?;
-        let tx = device.transaction()?;
-        let library = Transaction::new_unchecked(library, TransactionBehavior::Immediate)?;
-        super::super::receive_batches::require_unowned_intent_admission(&tx, &library)?;
+        let tx = self.device_store_mut()?.transaction()?;
         verify(&tx, header.binding_authority)?;
         tx.execute(
             "INSERT INTO lww_intents VALUES(?1,?2,?3,?4,?5,0)",
@@ -289,9 +278,8 @@ impl PersistentStore {
             ],
         )?;
         record_intent_identity(&tx, &header.request_id)?;
-        library.commit()?;
         tx.commit()?;
-        self.finish_lww_new_device(admission,
+        self.finish_lww_new_device(
             header,
             staging_id,
             &changes,
@@ -376,7 +364,6 @@ impl PersistentStore {
     }
     pub(super) fn finish_lww_new_device(
         &mut self,
-        admission: &IntentAdmissionGuard,
         header: &Header,
         staging_id: &str,
         changes: &[Change],
@@ -387,7 +374,6 @@ impl PersistentStore {
         digest: &str,
         selection_change: &BindingSelectionChange,
     ) -> StoreResult<()> {
-        admission.require(self.device_store()?.connection())?;
         self.verify_intent_device_revision(&header.request_id)?;
         let state = self.lww_clock_state()?;
         if state.binding_authority != header.binding_authority || state.writer_id != old_writer_id {
@@ -408,16 +394,12 @@ impl PersistentStore {
             None,
         )?;
         // A delayed device completion keeps edits made after library activation publishable.
-        admission.require(self.device_store()?.connection())?;
         self.connection.execute("UPDATE lww_outbox SET authority=?2 WHERE authority=?1", params![header.binding_authority.0.to_string(), new_authority.0.to_string()])?;
-        admission.require(self.device_store()?.connection())?;
         crate::server_sync::carry_operation_log(&self.repository_root, header.binding_authority, new_authority, false)
             .map_err(|failure| error(failure.code))?;
-        admission.require(self.device_store()?.connection())?;
-        self.copy_device_unit_bodies(changes)?;
+        let missing = self.copy_device_unit_bodies(changes)?;
         self.external_lww_release_writer_jobs(old_writer_id)?;
         let root = self.repository_root.clone();
-        admission.require(self.device_store()?.connection())?;
         let tx = self.device_store_mut()?.transaction()?;
         verify(&tx, header.binding_authority)?;
         verify_device_intent_revision(&tx, &header.request_id)?;
@@ -429,7 +411,7 @@ impl PersistentStore {
         if current_writer != old_writer_id {
             return Err(error("new-device-intent-writer-changed"));
         }
-        reset_target_device(&tx, &root, header, changes, new_authority)?;
+        reset_target_device(&tx, &root, header, changes, new_authority, &missing)?;
         tx.execute("DELETE FROM lww_progress", [])?;
         // The retired writer never sends again, so its unsettled segments and
         // sequences are dropped instead of waiting for an answer forever.
@@ -449,7 +431,6 @@ impl PersistentStore {
         )?;
         tx.execute("DELETE FROM lww_intent_failures WHERE request_id=?1", [&header.request_id])?;
         tx.execute("DELETE FROM lww_intent_proofs WHERE request_id=?1", [&header.request_id])?;
-        admission.require_identity()?;
         tx.commit()?;
         Ok(())
     }

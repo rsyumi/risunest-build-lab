@@ -20,6 +20,11 @@ async fn pause_compaction(job_id:&str) {
     let barrier=BARRIERS.lock().unwrap().remove(job_id);
     if let Some(barrier)=barrier {barrier.reached.notify_one();barrier.resume.notified().await;}
 }
+#[cfg(test)]
+thread_local! { static RELEASED_PART_CARRIAGE:std::cell::Cell<bool>=const {std::cell::Cell::new(false)}; }
+/// Leaves plugin value parts out of checkpoints, as a released compactor does.
+#[cfg(test)]
+pub(crate) fn set_released_part_carriage_for_test(released:bool) {RELEASED_PART_CARRIAGE.with(|value|value.set(released));}
 pub(crate) struct PublishedState {
     pub catalog: PublishedCatalog,
     pub body_spool: super::capture::BackupDependencySpool,
@@ -115,7 +120,7 @@ impl crate::local_backup::CancellationProbe for PublishedProbe<'_> {
 
 fn live_published_objects(state:&PublishedState,capture:&mut super::capture::CaptureCatalog,anchor:Option<&str>,directory:&Path,cancel:&Cancellation)
     ->Result<(BTreeSet<String>,bool)> {
-    use crate::persistent_store::external_capture::{original_unit_dependency_inventory_with_ranges,published_json_asset_roots,published_string_asset_roots,verified_string_control,BackupBodyRole};
+    use crate::persistent_store::external_capture::{original_unit_dependency_inventory_with_ranges,plugin_value_parts,published_json_asset_roots,published_string_asset_roots,verified_string_control,BackupBodyRole};
     use risunest_sync_wire::unit::UnitValue;
     let mut live=BTreeSet::new();let mut conservative=false;let mut controls=BTreeMap::new();let mut emitted=BTreeSet::new();
     let mut aliases=BTreeSet::new();let mut legacy=BTreeSet::new();let mut inlays=BTreeSet::new();
@@ -128,7 +133,8 @@ fn live_published_objects(state:&PublishedState,capture:&mut super::capture::Cap
     }
     state.catalog.visit_changes(&mut |change| {
         cancel.check()?;
-        if matches!(change.value,UnitValue::Deleted) {return Ok(())}
+        // The format level unit references no object.
+        if matches!(change.value,UnitValue::Deleted) || risunest_sync_wire::library_format::is_key(&change.key) {return Ok(())}
         if !crate::persistent_store::lww::lww_known_unit_key(&change.key) {conservative=true;}
         if let UnitValue::Inline{bytes}=&change.value {
             let bytes=URL_SAFE_NO_PAD.decode(bytes).map_err(error)?;
@@ -136,8 +142,9 @@ fn live_published_objects(state:&PublishedState,capture:&mut super::capture::Cap
             if matches!(parts[0].as_str(),"asset"|"inlay") {aliases.insert((parts[0].clone(),parts[1].clone()));}
             scan(&bytes,&mut live,&mut conservative,&mut legacy,&mut inlays).map_err(error)?;
         }
+        let parts=plugin_value_parts(&change.key,&change.value).to_vec();
         let units=BTreeMap::from([(change.key,change.value)]);
-        let inventory=original_unit_dependency_inventory_with_ranges(&units,&|hash|state.body_spool.control(hash),
+        let mut inventory=original_unit_dependency_inventory_with_ranges(&units,&|hash|state.body_spool.control(hash),
             &|_|Ok(None),&mut |hash| {
                 let Some(mut input)=state.body_spool.control_reader(hash)? else { return Ok(None); };
                 let length=input.len() as u64;
@@ -147,6 +154,19 @@ fn live_published_objects(state:&PublishedState,capture:&mut super::capture::Cap
                 emitted.insert(hash.to_owned());capture.object(hash,bytes)?;
                 if let Some(anchor)=anchor {capture.reference(anchor,hash,bytes.len() as u64)?;}Ok(())
             }).map_err(error)?;
+        // The parts of a structured plugin value are carried as controls, not assets.
+        // A part the repository no longer holds stays out, and receivers leave its value out.
+        for part in parts {
+            inventory.payloads.remove(&part);
+            #[cfg(test)]
+            if RELEASED_PART_CARRIAGE.with(std::cell::Cell::get) {continue}
+            if emitted.contains(&part) {continue}
+            let Some(mut input)=state.body_spool.control_reader(&part).map_err(error)? else {continue};
+            emitted.insert(part.clone());
+            let length=input.len() as u64;
+            capture.object_reader(&part,&mut input,length).map_err(error)?;
+            if let Some(anchor)=anchor {capture.reference(anchor,&part,length).map_err(error)?;}
+        }
         controls.extend(inventory.controls);
         live.extend(inventory.payloads.into_keys());
         // A content body can carry references that metadata alone cannot interpret.
@@ -494,6 +514,7 @@ impl ExternalLwwEngine {
                 let body=content.read_all(&record.content_hash).map_err(error)?;
                 let change:crate::persistent_store::lww::Change=risunest_sync_wire::canonical::decode(&body,risunest_sync_wire::MAX_METADATA_BYTES).map_err(error)?;
                 if record.key!=change.key.as_str() { return Err(segment::corrupt()); }
+                self.require_readable_format(std::slice::from_ref(&change))?;
                 proof.merge(&change)?; catalog.merge(&change)?;
             }
             if proof.identity()?!=snapshot.state_identity { return Err(segment::corrupt()); }
@@ -530,6 +551,7 @@ impl ExternalLwwEngine {
             if segment::digest(&bytes)!=hash { return Err(segment::corrupt()); }
             let mut payload=segment::open(&bytes,&self.library,&writer,seq,&self.root_key)?;
             drop(bytes);
+            self.require_readable_format(&payload.changes)?;
             for change in &payload.changes { if change.stamp.physical_ms.0>upper { return Err(super::clock::future_change("compaction",change.stamp.physical_ms.0,upper)); } history.merge(change)?; }
             if catalog.include_segment(&payload)? {
                 for (hash,bytes) in &payload.message_pages { body_spool.push(hash,&URL_SAFE_NO_PAD.decode(bytes).map_err(error)?,crate::persistent_store::external_capture::BackupBodyRole::Control).map_err(error)?; }

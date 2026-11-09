@@ -789,7 +789,7 @@ fn device_settings_are_not_tracked_as_section_changes() {
 
 #[test]
 fn device_settings_accept_only_the_assigned_keys() {
-    let (_directory, store) = open();
+    let (_directory, mut store) = open();
     assert_eq!(
         DEVICE_SETTING_KEYS,
         [
@@ -805,8 +805,6 @@ fn device_settings_accept_only_the_assigned_keys() {
             "risuNestDeviceSettings",
             "risuNestAppLock",
             "risuNestStartupExclusions",
-            "risuNestNativeOllamaGeneration",
-            "risuNestNativeDisplayRender",
             "risuNestPluginSyncSettings",
             "risuNestDefaultPluginsAttempted",
             "risuNestUpdateSettings",
@@ -818,7 +816,6 @@ fn device_settings_accept_only_the_assigned_keys() {
             "official-account.asset-continuation.v1",
             "sync-conflict-backups.index.v1",
             "native-file-restore-receipts.v1",
-            "native-server-receive-receipt.v1",
         ]
     );
 
@@ -1488,14 +1485,11 @@ mod section_exchange {
             "official-account.asset-continuation.v1",
             "sync-conflict-backups.index.v1",
             "native-file-restore-receipts.v1",
-            "native-server-receive-receipt.v1",
             "risuNestServerSyncRestoreHold",
             "risuNestDisplayRecovery",
             "risu_lastsaved",
             "risuNestDefaultPluginsAttempted",
             "risuNestPluginSyncSettings",
-            "risuNestNativeOllamaGeneration",
-            "risuNestNativeDisplayRender",
         ] {
             assert!(!LOCAL_SETTING_KEYS.contains(&key));
             store
@@ -1589,32 +1583,68 @@ mod section_exchange {
             assert!(past.contains(object) && !past.contains(inline));
             assert!(past.contains(&format!("\"byteLength\":\"{}\"", MAX_INLINE_VALUE_BYTES + 1)));
         }
-        use super::super::{sections, plugin_values::text_value};
-        use risunest_external_storage_format::{content_identity::hash, format::FingerprintBuilder};
+        use super::super::{sections, plugin_values::{structure, text_value}};
+        use risunest_external_storage_format::{content_identity::hash, format::FingerprintBuilder,
+            section::{decode_local_plugin_entry_key, LocalPluginValue, ObjectReference, PluginValue, SectionValue, StructureText}};
         let (directory, mut store) = open();
         let (_target_directory, mut target) = open();
-        let text = format!("{}가😀", "q".repeat(text_value::PART_BYTES - 3));
-        for space in ["string", "json"] {
-            let value = if space == "json" { serde_json::to_string(&text).unwrap() } else { text.clone() };
-            let opened = store.open_plugin_device_write("plugin-a", space, "multipart", text_value::encoded_length(&value)).unwrap();
+        let (_bare_directory, mut bare) = open();
+        let write = |store: &mut DeviceStore, space: &str, key: &str, value: &str| {
+            let opened = store.open_plugin_device_write("plugin-a", space, key, text_value::encoded_length(value)).unwrap();
             let id = serde_json::to_value(opened).unwrap()["sessionId"].as_str().unwrap().to_owned();
             let mut start = 0;
             while start < value.len() {
-                let mut end = (start + text_value::PART_BYTES - 16).min(value.len());
+                let mut end = (start + text_value::PART_BYTES / 8).min(value.len());
                 while !value.is_char_boundary(end) { end -= 1; }
                 store.append_plugin_device_write("plugin-a", &id, start as u64, &value[start..end]).unwrap(); start = end;
             }
             store.write_plugin_device_values("plugin-a", &[PluginDeviceMutation::Staged { session_id: id }]).unwrap();
+        };
+        let text = format!("{}가😀", "q".repeat(text_value::PART_BYTES - 3));
+        for space in ["string", "json"] {
+            let value = if space == "json" { serde_json::to_string(&text).unwrap() } else { text.clone() };
+            write(&mut store, space, "multipart", &value);
         }
+        // Structure text inline, as one object and past one section object,
+        // each naming parts that only the device object store holds.
+        let large_part = (0..text_value::PART_BYTES).map(|index| (index % 251) as u8).collect::<Vec<_>>();
+        let small_part = vec![0u8, 255, 128];
+        let hashes = [&large_part, &small_part].map(|bytes| structure::put_part(store.connection(), bytes).unwrap());
+        let reference = |bytes: &[u8]| ObjectReference { content_sha256: hash(bytes), byte_length: bytes.len() as u64 };
+        let structured = |parts: &[&String], bytes: usize, pad: usize| format!(
+            "#risunest-structured:1\n{{\"parts\":[{}],\"bytes\":{bytes},\"nodes\":[{{\"type\":\"ArrayBuffer\",\"offset\":0,\"byteLength\":{bytes}}}],\"root\":{{\"ref\":0}},\"pad\":\"{}\"}}",
+            parts.iter().map(|part| format!("\"p:{part}\"")).collect::<Vec<_>>().join(","), "p".repeat(pad));
+        let values = [
+            ("small", structured(&[&hashes[1]], 3, 0)),
+            ("medium", structured(&[&hashes[1]], 3, MAX_INLINE_VALUE_BYTES)),
+            ("large", structured(&[&hashes[0], &hashes[1]], text_value::PART_BYTES + 3, text_value::PART_BYTES)),
+        ];
+        for (key, value) in &values { write(&mut store, "json", key, value); }
         let captured = store.capture_backup_sections(&[SectionKind::Hypa, SectionKind::LocalPlugins, SectionKind::LocalSettings], directory.path()).unwrap();
         let mut received = Vec::new();
         for section in &captured {
             let mut builder = SectionSpoolBuilder::new_backup(section.kind(), directory.path()).unwrap();
             let mut fingerprint = FingerprintBuilder::new(&section.kind().fingerprint_domain());
             section.visit_entries(|entry, object| {
-                if section.kind() == SectionKind::LocalPlugins {
-                    assert_eq!(entry.value.object_references().len(), 2);
-                    assert!(entry.value.object_references().iter().all(|part| part.byte_length <= text_value::PART_BYTES as u64));
+                if let SectionValue::LocalPlugin(LocalPluginValue { value, .. }) = &entry.value {
+                    assert!(entry.value.object_references().all(|part| part.byte_length <= text_value::PART_BYTES as u64));
+                    let (_, _, key) = decode_local_plugin_entry_key(&entry.key).unwrap();
+                    match (key.as_str(), value) {
+                        ("multipart", PluginValue::Objects(parts)) => assert_eq!(parts.len(), 2),
+                        ("small", PluginValue::Structured(value)) => {
+                            assert!(matches!(value.text, StructureText::Inline(_)));
+                            assert_eq!(value.parts, [reference(&small_part)]);
+                        }
+                        ("medium", PluginValue::Structured(value)) => {
+                            assert!(matches!(value.text, StructureText::Object(_)));
+                            assert_eq!(value.parts, [reference(&small_part)]);
+                        }
+                        ("large", PluginValue::Structured(value)) => {
+                            assert!(matches!(&value.text, StructureText::Objects(text) if text.len() == 2));
+                            assert_eq!(value.parts, [reference(&large_part), reference(&small_part)]);
+                        }
+                        other => panic!("{other:?}"),
+                    }
                     let mut refused = SectionSpoolBuilder::new_backup(section.kind(), directory.path())?;
                     assert!(refused.push_backup_entry(entry.clone(), |_| Ok(vec![0])).is_err());
                 }
@@ -1623,20 +1653,43 @@ mod section_exchange {
             }).unwrap();
             received.push(builder.finish(&fingerprint.finish()).unwrap());
         }
+        drop(captured);
         let frozen = sections::freeze_backup_sections(&received.iter().collect::<Vec<_>>()).unwrap();
         let encoded = serde_json::to_vec(&frozen).unwrap();
-        assert!(encoded.len() < 4096);
+        assert!(encoded.len() < 4096 + values[1].1.len());
         let frozen = serde_json::from_slice(&encoded).unwrap();
+        let stamp = risunest_sync_wire::stamp::Stamp { physical_ms: 1.into(), logical: 0, writer_id: uuid::Uuid::new_v4().to_string() };
+        // Rows whose parts are not on the device are refused.
+        let tx = bare.transaction().unwrap();
+        for section in &received { section.retain_plugin_objects(&tx).unwrap(); }
+        for hash in &hashes { tx.execute("DELETE FROM message_page_objects WHERE hash=?1", [hash]).unwrap(); }
+        assert!(matches!(sections::restore_frozen_backup_sections(&tx, &frozen, &stamp),
+            Err(crate::persistent_store::StoreError::Validation { message }) if message.contains("part is missing")));
+        drop(tx);
         let tx = target.transaction().unwrap();
         for section in &received { section.retain_plugin_objects(&tx).unwrap(); }
         drop(received);
-        let stamp = risunest_sync_wire::stamp::Stamp { physical_ms: 1.into(), logical: 0, writer_id: uuid::Uuid::new_v4().to_string() };
         sections::restore_frozen_backup_sections(&tx, &frozen, &stamp).unwrap();
         tx.commit().unwrap();
         assert_eq!(target.read_plugin_device_value("plugin-a", "string", "multipart").unwrap(), Some(text.clone()));
         assert_eq!(target.read_plugin_device_value("plugin-a", "json", "multipart").unwrap(), Some(serde_json::to_string(&text).unwrap()));
+        for (key, value) in &values {
+            assert_eq!(target.read_plugin_device_value("plugin-a", "json", key).unwrap().as_ref(), Some(value));
+        }
+        for (hash, bytes) in hashes.iter().zip([&large_part, &small_part]) {
+            let body: Vec<u8> = target.connection().query_row("SELECT body FROM message_page_objects WHERE hash=?1", [hash], |row| row.get(0)).unwrap();
+            assert_eq!(&body, bytes);
+        }
         let types: i64 = target.connection().query_row("SELECT count(*) FROM plugin_device_storage WHERE typeof(value)='text'", [], |row| row.get(0)).unwrap();
-        assert_eq!(types, 2);
+        assert_eq!(types, 5);
+        // Restoring the same values again leaves them as they are.
+        let clocks = |target: &DeviceStore| target.connection().prepare("SELECT key,write_clock FROM plugin_device_storage ORDER BY key").unwrap()
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        let before = clocks(&target);
+        let tx = target.transaction().unwrap();
+        sections::restore_frozen_backup_sections(&tx, &frozen, &stamp).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(clocks(&target), before);
     }
 
     /// An object installs only as the stored text its entry names: the body
@@ -1832,28 +1885,4 @@ fn clear_hypa_cache_reclaims_vectors_and_issues_publishable_tombstones() {
     let cleared = store.revision().unwrap();
     store.clear_hypa_embeddings().unwrap();
     assert_eq!(store.revision().unwrap(), cleared);
-}
-
-#[test]
-fn borrowed_embedding_rows_preserve_raw_bytes_and_stop_on_consumer_error() {
-    let (_directory, mut store) = open();
-    store.write_hypa_embeddings(&[embedding("key-a", &[1.0]), embedding("key-b", &[2.0])]).unwrap();
-    store.connection().execute("UPDATE hypa_embeddings SET dimensions=2,vector=x'010203' WHERE cache_key='key-a'", []).unwrap();
-    let keys = vec!["key-a".to_owned(), "missing".to_owned(), "key-b".to_owned()];
-    let rows = store.read_hypa_embeddings(&keys).unwrap();
-    assert_eq!(rows[0].dimensions, 2);
-    assert_eq!(rows[0].vector.as_deref(), Some(&[1,2,3][..]));
-    let mut visited = Vec::new();
-    let result = store.visit_hypa_embeddings::<StoreError>(&keys, |index, row| {
-        visited.push((index, row.map(|(dimensions, bytes)| (dimensions, bytes.to_vec()))));
-        if index == 1 { return Err(invalid("synthetic consumer refusal")); }
-        Ok(())
-    });
-    assert!(matches!(result, Err(StoreError::Validation { .. })));
-    assert_eq!(visited, vec![(0, Some((2,vec![1,2,3]))), (1,None)]);
-    let mut called = false;
-    assert!(store.visit_hypa_embeddings::<StoreError>(&["key-a".into(), String::new()], |_, _| {
-        called = true; Ok(())
-    }).is_err());
-    assert!(!called, "validate every key before exposing any row");
 }

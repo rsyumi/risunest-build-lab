@@ -93,7 +93,7 @@ fn reconcile_matching(store: &PersistentStore, registry: &JobRegistry, job_id: O
             status.activation_revision = None;
             status.activation_authority = None;
             status.result = None;
-            status.error = Some(JobFailure { code: "activation-outcome-unresolved".into(), message: error.to_string(), item_kind: None });
+            status.error = Some(JobFailure { code: "activation-outcome-unresolved".into(), message: error.to_string(), item_kind: None, owner: None });
         } else if let Some(revision) = revision {
             status.state = JobState::Succeeded;
             status.error = None;
@@ -107,7 +107,7 @@ fn reconcile_matching(store: &PersistentStore, registry: &JobRegistry, job_id: O
             });
         } else {
             status.state = JobState::Cancelled;
-            status.error = Some(JobFailure { code: "cancelled".into(), message: "Backup preparation was interrupted before activation".into(), item_kind: None });
+            status.error = Some(JobFailure { code: "cancelled".into(), message: "Backup preparation was interrupted before activation".into(), item_kind: None, owner: None });
         }
     }
     Ok(())
@@ -190,7 +190,7 @@ mod tests {
                 status.activation_revision = None;
                 status.activation_authority = None;
                 status.result = None;
-                status.error = Some(JobFailure { code: "cancelled".into(), message: "Confirmed before activation".into(), item_kind: None });
+                status.error = Some(JobFailure { code: "cancelled".into(), message: "Confirmed before activation".into(), item_kind: None, owner: None });
             }
             *job.status.lock().unwrap() = status.clone();
             reconcile(&store, &registry).unwrap();
@@ -224,7 +224,7 @@ mod tests {
         let job = registry.lookup(&id).unwrap().unwrap();
         let mut failed = status;
         failed.state = JobState::Failed;
-        failed.error = Some(JobFailure { code: "store-error".into(), message: "Confirmed no activation".into(), item_kind: None });
+        failed.error = Some(JobFailure { code: "store-error".into(), message: "Confirmed no activation".into(), item_kind: None, owner: None });
         *job.status.lock().unwrap() = failed.clone();
         reconcile_job(&store, &registry, &id).unwrap();
         assert_eq!(serde_json::to_value(job.status()).unwrap(), serde_json::to_value(failed).unwrap());
@@ -302,5 +302,57 @@ mod tests {
         assert_eq!(store.revision().unwrap(), 1);
         reconcile_job(&store, &registry, &id).unwrap();
         assert_eq!(store.revision().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_restore_intent_closed_without_activation_stays_dismissed_after_restart() {
+        use crate::persistent_store::lww::UnitMutation;
+        use crate::persistent_store::WorkingSetCommit;
+        use risunest_sync_wire::unit::UnitKey;
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = PersistentStore::open(directory.path()).unwrap();
+        let stage = stage(&mut store);
+        let id = remember(&store, &stage);
+        let authority = read(&store).unwrap()[0].authority.clone();
+        // The activation's library write fails after its intent is reserved, as in the disk failure above.
+        let connection = rusqlite::Connection::open(directory.path().join("persistent").join(crate::persistent_store::DATABASE_FILE)).unwrap();
+        connection.execute_batch("CREATE TRIGGER reject_restore BEFORE UPDATE ON generations BEGIN SELECT RAISE(ABORT,'synthetic disk failure'); END;").unwrap();
+        assert!(store.replace_commit(&stage, Some(0)).is_err());
+        connection.execute_batch("DROP TRIGGER reject_restore").unwrap();
+        // Earlier builds drained deferred receive rows without replaying intents first, which moved
+        // the revision past the pending restore's base.
+        connection.execute("UPDATE meta SET value='1' WHERE key='currentRevision'", []).unwrap();
+        drop(connection);
+        assert_eq!(store.revision().unwrap(), 1);
+        // The next save replays the restore intent first; it now conflicts and is closed without changes.
+        store.commit(&WorkingSetCommit {
+            expected_revision: 1,
+            unit_mutations: Some(vec![UnitMutation::Set { key: UnitKey::new(&["root", "language"]).unwrap(), value: json!("ja") }]),
+            ..Default::default()
+        }).unwrap();
+        assert_eq!(store.revision().unwrap(), 2);
+        let complete: bool = store.device_store().unwrap().connection()
+            .query_row("SELECT complete FROM lww_intents WHERE request_id=?1", [&stage], |row| row.get(0)).unwrap();
+        let activated: bool = store.library_rows()
+            .query_row("SELECT EXISTS(SELECT 1 FROM lww_requests WHERE request_id=?1)", [&stage], |row| row.get(0)).unwrap();
+        assert!(complete && !activated);
+        assert_ne!(store.read_root(None).unwrap().value["username"], "Synthetic restore");
+        // Nothing can activate this restore any more, so startup recovery reports it as interrupted.
+        let registry = JobRegistry::default();
+        reconcile(&store, &registry).unwrap();
+        let interrupted = registry.status(&id).unwrap();
+        assert!(matches!(interrupted.state, JobState::Failed | JobState::Cancelled) && interrupted.activation_revision.is_none());
+        // Startup recovery dismisses the interrupted restore the way native_file_job_forget does.
+        registry.forget(&id).unwrap();
+        forget(&store, &registry, &id).unwrap();
+        drop(store);
+        let store = PersistentStore::open(directory.path()).unwrap();
+        let restarted = JobRegistry::default();
+        reconcile(&store, &restarted).unwrap();
+        let jobs = restarted.list().unwrap();
+        assert!(jobs.is_empty(), "A dismissed restore that can never activate came back after restart: {:?}, receipt lookup {:?}",
+            jobs.iter().map(|job| (job.job_id.clone(), job.error.as_ref().map(|error| error.code.clone()))).collect::<Vec<_>>(),
+            store.lww_file_restore_receipt(&stage, &stage, &authority).map_err(|error| error.to_string()));
+        assert_eq!(read(&store).unwrap().len(), 0);
     }
 }

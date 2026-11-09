@@ -11,6 +11,7 @@ import {
     normalizeInlayEncodeOptions,
     inferBlobMime,
     type BlobMetadata,
+    type BlobReadOptions,
     type BlobStore,
     type BlobWriteMetadata,
     type InlayBlobMetadata,
@@ -306,11 +307,11 @@ export async function getInlayAssetMetadata(id: string): Promise<InlayBlobMetada
 }
 
 // Returns with base64 data URI
-export async function getInlayAsset(id: string){
+export async function getInlayAsset(id: string, options?: BlobReadOptions){
     const blobStore = await resolveBlobStore()
     const metadata = await getInlayAssetMetadataInStore(id, blobStore)
     if (!metadata) return null
-    const bytes = await blobStore.read(id)
+    const bytes = await blobStore.read(id, undefined, options)
     if (!bytes) return null
     const data = metadata.inlayType === 'signature'
         ? new TextDecoder().decode(bytes)

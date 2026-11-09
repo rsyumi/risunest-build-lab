@@ -12,8 +12,9 @@ pub(super) fn store_error(error: StoreError) -> NativeJobError {
         StoreError::RevisionConflict { .. } => {
             NativeJobError::new("revision-conflict", error.to_string())
         }
+        StoreError::AssetInventoryBusy => NativeJobError::new("library-operation-busy", error.to_string()),
         StoreError::Validation { .. } | StoreError::CommitDecode { .. } => invalid_input(error.to_string()),
-        StoreError::Committed { .. } | StoreError::SnapshotReleased | StoreError::SnapshotPinned { .. } | StoreError::RawBodyUnavailable | StoreError::CommitBusy | StoreError::SchemaMismatch { .. } | StoreError::Store { .. } => {
+        StoreError::Committed { .. } | StoreError::SnapshotReleased | StoreError::RawBodyUnavailable | StoreError::CommitBusy | StoreError::SchemaMismatch { .. } | StoreError::Store { .. } => {
             NativeJobError::new("store-error", error.to_string())
         }
     }
@@ -50,6 +51,11 @@ pub(super) fn io_error(error: std::io::Error) -> NativeJobError {
 
 pub(super) fn invalid_input(message: impl AsRef<str>) -> NativeJobError {
     NativeJobError::new("invalid-input", message)
+}
+
+/// A pinned body that no device, Sync server or external storage keeps.
+pub(super) fn asset_missing(message: impl AsRef<str>) -> NativeJobError {
+    NativeJobError::new("asset-missing", message)
 }
 
 pub(super) fn cancelled(message: impl AsRef<str>) -> NativeJobError {

@@ -201,7 +201,9 @@ fn original_backup_restores_an_indivisible_message_above_the_metadata_bound() {
 #[test]
 fn oversized_large_unit_controls_are_spooled_and_scanned() {
     let asset = "a".repeat(64);
-    let body = risunest_sync_wire::payload_value::encode(&json!([asset, "x".repeat(risunest_sync_wire::MAX_METADATA_BYTES)])).unwrap();
+    // Up to one part a control body may be raw bytes, so the spool checks the form of larger ones.
+    let part = crate::persistent_store::device_store::plugin_values::structure::PART_BYTES as usize;
+    let body = risunest_sync_wire::payload_value::encode(&json!([asset, "x".repeat(part)])).unwrap();
     let hash = risunest_sync_wire::hash(&body);
     assert!(published_json_asset_roots(&body).unwrap().object_hashes.contains(&asset));
     let padded = [b"[".as_slice(), &body[1..body.len() - 1], b" ]"].concat();

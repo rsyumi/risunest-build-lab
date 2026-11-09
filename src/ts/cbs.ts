@@ -1,4 +1,5 @@
 import { createPureCbsCallbacks } from './cbsPure';
+import { effectiveAuthorNote } from './authorNotePresets';
 import type { Chat, Database, Message, character, loreBook } from './storage/database.svelte';
 import type { CbsHistoryAccess } from './cbsHistoryAccess';
 import type { CbsConditions } from './parser/parser.svelte';
@@ -460,8 +461,9 @@ export function registerCBS(arg:CBSRegisterArg) {
             const db = getDatabase()
             const selchar = db.characters?.[getSelectedCharID()]
             const chat = selchar?.chats?.[selchar.chatPage]
-            if(chat?.note){
-                return risuChatParser(chat.note, matcherArg)
+            const note = chat ? effectiveAuthorNote(db.authorNotePresets, chat) : ''
+            if(note){
+                return risuChatParser(note, matcherArg)
             }
             const template = db.promptTemplate
             if(template){

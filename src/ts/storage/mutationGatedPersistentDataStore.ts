@@ -18,35 +18,12 @@ import type {
     CharacterDetail,
 } from './persistentDataStore'
 import type { StorageMutationGate } from './storageMutationGate'
-import { prepareNativePersistenceValue } from './nativePersistenceValue'
 
 export function createMutationGatedPersistentDataStore(
     store: PersistentDataStore,
     gate: StorageMutationGate,
 ): PersistentDataStore {
-    const native = store.nativeReceive
-    const nativeReceive: PersistentDataStore['nativeReceive'] = native ? {
-        prepare: (source) => native.prepare(prepareNativePersistenceValue(source, 'commit')),
-        begin: (request) => {
-            const captured = prepareNativePersistenceValue(request, 'commit')
-            return gate.runWrite(() => native.begin(captured))
-        },
-        advance: (request) => {
-            const captured = prepareNativePersistenceValue(request, 'commit')
-            return gate.runWrite(() => native.advance(captured))
-        },
-        readPage: (request) => native.readPage(prepareNativePersistenceValue(request, 'commit')),
-        acknowledgeDelivery: (request) => {
-            const captured = prepareNativePersistenceValue(request, 'commit')
-            return gate.runWrite(() => native.acknowledgeDelivery(captured))
-        },
-        retire: (request) => {
-            const captured = prepareNativePersistenceValue(request, 'commit')
-            return gate.runWrite(() => native.retire(captured))
-        },
-    } : undefined
     const gated = {
-        nativeReceive,
         messageMetadataReadMode: store.messageMetadataReadMode,
         open: () => store.open(),
         lwwBindingState: store.lwwBindingState ? () => store.lwwBindingState!() : undefined,
@@ -60,7 +37,6 @@ export function createMutationGatedPersistentDataStore(
         readRoot: () => store.readRoot(),
         readRevision: store.readRevision ? () => store.readRevision!() : undefined,
         readLibraryIdentity: store.readLibraryIdentity ? () => store.readLibraryIdentity!() : undefined,
-        rebaseConversationHistory: store.rebaseConversationHistory ? (request) => store.rebaseConversationHistory!(request) : undefined,
         queryPresets: () => store.queryPresets(),
         readPreset: (id: string) => store.readPreset(id),
         queryCharacters: (input: CharacterQuery): Promise<CharacterPage> =>
@@ -70,6 +46,8 @@ export function createMutationGatedPersistentDataStore(
             store.readCharacter(id),
         queryConversations: (input: ConversationQuery): Promise<ConversationPage> =>
             store.queryConversations(input),
+        queryAuthorNotePresetUsage: store.queryAuthorNotePresetUsage
+            ? (presetId: string) => store.queryAuthorNotePresetUsage!(presetId) : undefined,
         readConversation: (characterId, conversationId) =>
             store.readConversation(characterId, conversationId),
         readConversationMetadata: (characterId, conversationId) =>
@@ -97,19 +75,6 @@ export function createMutationGatedPersistentDataStore(
         deleteAssetAlias: (identity: AssetAliasIdentity, expectedRevision: DataRevision) =>
             gate.runWrite(() => store.deleteAssetAlias(identity, expectedRevision)),
         commit: (input: WorkingSetCommit) => gate.runWrite(() => store.commit(input)),
-        readNativeReceiveEvidence: store.readNativeReceiveEvidence ? (lease) => store.readNativeReceiveEvidence!(lease) : undefined,
-        readConflictCopySource: store.readConflictCopySource ? (...args) => store.readConflictCopySource!(...args) : undefined,
-        hydrateConflictCopy: store.hydrateConflictCopy ? (...args) => store.hydrateConflictCopy!(...args) : undefined,
-        copyConflictedConversation: store.copyConflictedConversation ? (request, signal) => {
-            const captured = prepareNativePersistenceValue(request, 'commit')
-            return gate.runWrite(() => store.copyConflictedConversation!(captured, signal))
-        } : undefined,
-        archiveReconcileHistories: store.archiveReconcileHistories ? (...args) => store.archiveReconcileHistories!(...args) : undefined,
-        hydrateArchiveReconcile: store.hydrateArchiveReconcile ? (...args) => store.hydrateArchiveReconcile!(...args) : undefined,
-        reconcileArchivedCharacter: store.reconcileArchivedCharacter ? (request, signal) => {
-            const captured = prepareNativePersistenceValue(request, 'commit')
-            return gate.runWrite(() => store.reconcileArchivedCharacter!(captured, signal))
-        } : undefined,
         archivePreview: (characterId: string) => store.archivePreview(characterId),
         archiveCharacter: (
             characterId: string,

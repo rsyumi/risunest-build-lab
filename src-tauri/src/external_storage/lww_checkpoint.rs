@@ -314,6 +314,17 @@ mod tests {
         assert_eq!(identities.len(),1);
     }
     #[test]
+    fn the_format_level_keeps_the_highest_level_whatever_its_stamp_order() {
+        use risunest_sync_wire::library_format;
+        let level=|level:u64,clock:u64|change(&["library-format"],clock,library_format::value(level).unwrap());
+        for (inputs,expected) in [([level(3,1),level(2,2)],level(3,1)),([level(2,2),level(3,1)],level(3,1)),([level(2,1),level(2,2)],level(2,2))] {
+            let directory=tempfile::tempdir().unwrap(); let mut catalog=PublishedCatalog::create(&directory.path().join("units.sqlite")).unwrap();
+            for change in inputs {catalog.merge(&change).unwrap();}
+            let changes=catalog.changes().unwrap(); assert_eq!(changes.len(),1);
+            assert_eq!((&changes[0].stamp,&changes[0].value),(&expected.stamp,&expected.value));
+        }
+    }
+    #[test]
     fn historical_equal_stamp_conflict_is_detected_even_after_a_greater_winner() {
         let directory=tempfile::tempdir().unwrap(); let mut catalog=PublishedCatalog::create(&directory.path().join("units.sqlite")).unwrap();
         catalog.merge(&change(&["root","language"],1,UnitValue::inline(b"\"ko\"").unwrap())).unwrap();

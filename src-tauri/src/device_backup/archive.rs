@@ -157,20 +157,33 @@ pub(crate) fn validate_archive_catalog(
                     "Archive device graph exceeds its bound",
                 )
             })?;
-            let entry = SectionEntry::decode(&payload).map_err(section_codec_error)?;
-            require(
-                entry.kind == kind && entry.version.is_none(),
-                "Native backup entry has the wrong section identity",
-            )?;
-            require(
-                entry.encode().map_err(section_codec_error)? == payload,
-                "Native backup entry is not canonically encoded",
-            )?;
-            fingerprint
-                .push(&entry.key, &content_hash(&payload))
-                .map_err(section_codec_error)?;
-            for reference in entry.value.object_references() {
-                validate_native_object_reference(db, kind, reference)?;
+            match SectionEntry::decode_known(&payload).map_err(section_codec_error)? {
+                Ok(entry) => {
+                    require(
+                        entry.kind == kind && entry.version.is_none(),
+                        "Native backup entry has the wrong section identity",
+                    )?;
+                    require(
+                        entry.encode().map_err(section_codec_error)? == payload,
+                        "Native backup entry is not canonically encoded",
+                    )?;
+                    fingerprint
+                        .push(&entry.key, &content_hash(&payload))
+                        .map_err(section_codec_error)?;
+                    for reference in entry.value.object_references() {
+                        validate_native_object_reference(db, kind, reference)?;
+                    }
+                }
+                // A value form from a later build is skipped at restore.
+                Err(unknown) => {
+                    require(
+                        kind == SectionKind::LocalPlugins && unknown.version.is_none(),
+                        "Native backup entry has the wrong section identity",
+                    )?;
+                    fingerprint
+                        .push(&unknown.key, &content_hash(&payload))
+                        .map_err(section_codec_error)?;
+                }
             }
             spool::start_record_hash(&mut transport_hash, ordinal as u64, payload.len() as u64);
             for chunk in payload.chunks(MAX_CHUNK_BYTES) {
@@ -563,7 +576,14 @@ pub(crate) fn prepare_native_sections(
                 "Native backup entries are not contiguous",
             )?;
             let payload: Vec<u8> = row.get(1)?;
-            let entry = SectionEntry::decode(&payload).map_err(section_codec_error)?;
+            let entry = match SectionEntry::decode_known(&payload).map_err(section_codec_error)? {
+                Ok(entry) => entry,
+                Err(unknown) => {
+                    builder.skip_backup_entry(&unknown, &content_hash(&payload)).map_err(device_store_error)?;
+                    observed += 1;
+                    continue;
+                }
+            };
             let mut source_failure = None;
             let prepared = builder.push_backup_entry(entry, |reference| {
                 read_native_object(archive, reference, probe).map_err(|failure| {

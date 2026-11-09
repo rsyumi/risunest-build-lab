@@ -17,7 +17,7 @@
     import TextAreaInput from "src/lib/UI/GUI/TextAreaInput.svelte";
     import { untrack } from "svelte";
     import { tokenizePreset } from "src/ts/process/prompt";
-    import { countTogether, getCharToken } from "src/ts/tokenizer";
+    import { getCharToken } from "src/ts/tokenizer";
     import { PlusIcon, PencilIcon, TrashIcon, DownloadIcon, HardDriveUploadIcon } from "@lucide/svelte";
     import { alertError, alertInput, alertConfirm, alertNormal } from "src/ts/alert";
     import { createHypaV3Preset } from "src/ts/process/memory/hypav3";
@@ -60,11 +60,9 @@
     });
 
     async function getMaxMemoryRatio(): Promise<number> {
+        const promptTemplateToken = await tokenizePreset(DBState.db.promptTemplate);
         const char = DBState.db.characters[$selectedCharID];
-        const [promptTemplateToken, charToken] = await countTogether(
-            () => tokenizePreset(DBState.db.promptTemplate),
-            () => getCharToken(char),
-        );
+        const charToken = await getCharToken(char);
         const maxLoreToken = char.loreSettings?.tokenBudget ?? DBState.db.loreBookToken;
         const maxResponse = DBState.db.maxResponse;
         const requiredToken = promptTemplateToken + charToken.persistant + Math.min(charToken.dynamic, maxLoreToken) + maxResponse * 3;

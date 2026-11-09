@@ -1,10 +1,14 @@
 import { invoke } from '@tauri-apps/api/core'
 import {
-    pickAndroidContentSource,
+    AndroidSafSourceError,
+    pickAndroidContentSources,
     type AndroidSafJavascriptBridge,
+    type AndroidSpoolFailure,
     type AndroidSpoolReady,
 } from './androidSafBridge'
+import { importContentBatch } from './contentImportBatch'
 import {
+    runExternalAndroidNativeFileOperation,
     runSharedNativeFileOperation,
     type SharedNativeFileOperationContext,
 } from './nativeFileJobManager'
@@ -17,16 +21,9 @@ export function importAndroidContentFromPicker(
         'import',
         'content-picker',
         async (context) => {
-            let displayName = ''
-            let sourceBytes = 0
-            const source = await pickAndroidContentSource({
+            const picked = await pickAndroidContentSources({
                 destination,
                 signal: context.signal,
-                onSource: (file) => {
-                    displayName = file.displayName
-                    sourceBytes = file.bytes
-                    context.setSource({ name: displayName, bytes: file.bytes })
-                },
                 onProgress: (progress) => {
                     // Copying starts once the picker returns, so the copy is the first protected work.
                     context.protect()
@@ -43,21 +40,80 @@ export function importAndroidContentFromPicker(
                     )
                 },
             })
-            if (!source || source.type !== 'androidSpool') return null
+            if (!picked) return null
             context.protect()
-            return consumeAndroidContentSpool(
-                {
-                    token: source.token,
-                    displayName,
-                    bytes: sourceBytes,
-                    importDestination: destination,
-                },
-                destination,
+            return importContentBatch(
                 context,
+                picked.sources,
+                (source) => ({ name: source.displayName, bytes: source.bytes }),
+                (source) => consumeAndroidContentSpool(
+                    { ...source, importDestination: destination },
+                    destination,
+                    context,
+                ),
+                {
+                    failures: spoolFailures(picked.failures),
+                    releaseUnstarted: (source) => discardContentSpool(source.token),
+                },
             )
         },
         { presentation: 'dialog', format: 'content', protectAfterPicker: true },
     )
+}
+
+function spoolFailures(failures: readonly AndroidSpoolFailure[]) {
+    return failures.map((failure) => ({
+        name: failure.displayName,
+        error: new AndroidSafSourceError(failure.code, `${failure.displayName}: ${failure.code}`),
+    }))
+}
+
+/** The JSON converter destination of an opened spool, or null when the native classifier decides. */
+export function androidSpoolReplayDestination(
+    source: AndroidSpoolReady,
+): 'character' | 'module' | 'auto' | null {
+    return source.importDestination
+        ?? (/\.lorebook$/i.test(source.displayName) ? 'module'
+            : /\.json$/i.test(source.displayName) ? 'auto' : null)
+}
+
+/**
+ * Imports several shared or opened content spools in one operation, after any operation already
+ * running. Spools the JSON converters do not own go through `importPrepared`.
+ */
+export function importOpenedAndroidContentSpools(
+    sources: readonly AndroidSpoolReady[],
+    failures: readonly AndroidSpoolFailure[],
+    importPrepared: (source: AndroidSpoolReady, context: SharedNativeFileOperationContext) => Promise<string | null>,
+): Promise<string | null> {
+    return runExternalAndroidNativeFileOperation(
+        'import',
+        (context) => importContentBatch(
+            context,
+            sources,
+            (source) => ({ name: source.displayName, bytes: source.bytes }),
+            (source) => {
+                const destination = androidSpoolReplayDestination(source)
+                return destination
+                    ? consumeAndroidContentSpool(source, destination, context)
+                    : importPrepared(source, context)
+            },
+            {
+                failures: spoolFailures(failures),
+                releaseUnstarted: (source) => discardContentSpool(source.token),
+            },
+        ),
+        { presentation: 'dialog', format: 'content' },
+    )
+}
+
+async function discardContentSpool(token: string): Promise<void> {
+    const bridge = (
+        window as Window & {
+            RisuSafBridge?: AndroidSafJavascriptBridge
+        }
+    ).RisuSafBridge
+    await bridge?.discardSource?.(token)
 }
 
 export function importReplayedAndroidContentSpool(
@@ -107,8 +163,7 @@ async function consumeAndroidContentSpool(
             )
             if (destination === 'module' || moduleJson) {
                 const { importModuleData } = await import('../process/modules')
-                await importModuleData({ name: displayName, data, ...(parsedJson && { parsedJson }) })
-                return 'module'
+                return await importModuleData({ name: displayName, data, ...(parsedJson && { parsedJson }) }) ? 'module' : null
             }
             const { importCharacterProcess } = await import('../characterCards')
             const { getDatabase } = await import('./database.svelte')
@@ -142,13 +197,6 @@ async function consumeAndroidContentSpool(
         return result.kind === 'imported' ? result.value : null
     } finally {
         // A native job consumes the spool. Metadata-only imports release their ready spool here.
-        if (/\.(json|lorebook)$/i.test(displayName)) {
-            const bridge = (
-                window as Window & {
-                    RisuSafBridge?: AndroidSafJavascriptBridge
-                }
-            ).RisuSafBridge
-            await bridge?.discardSource?.(source.token)
-        }
+        if (/\.(json|lorebook)$/i.test(displayName)) await discardContentSpool(source.token)
     }
 }

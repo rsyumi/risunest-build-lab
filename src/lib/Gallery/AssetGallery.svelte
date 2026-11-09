@@ -18,6 +18,8 @@
     import { galleryText, galleryFormat } from 'src/ts/gallery/strings'
     import { galleryBytes, type GalleryItem, type GallerySize } from 'src/ts/gallery/types'
     import { downloadGallery } from 'src/ts/gallery/galleryDownloads'
+    import { nativeFileOperation } from 'src/ts/storage/nativeFileJobManager'
+    import { contentExportBusyMessage } from 'src/ts/storage/fileOperationErrorPresentation'
     import {
         prepareGalleryModuleMutation, readPinnedAssetOwner, assetGalleryItems, assetGalleryPage, assetSectionCount, assetExtension, assertAssetSnapshots, addGalleryAssets,
         deleteGalleryAssets, selectionAfterAssetDelete, renameGalleryAsset, replaceGalleryAsset, setGalleryCharacterIcon,
@@ -57,6 +59,8 @@
     let notice = $state('')
     let progressTitle = $state('')
     let progress = $state<{ done: number; total: number } | null>(null)
+    let downloading = $state(false)
+    const waitingForSync = $derived(downloading && $nativeFileOperation?.waitingForSync === true)
     let downloadAbort: AbortController | undefined
     const allExtensions = [...imageAliases, 'svg', 'bmp', 'mp4', 'webm', 'mov', 'mp3', 'wav', 'ogg', 'flac', 'm4a', 'ttf', 'otf', 'css', 'woff', 'woff2']
     const currentOwner = $derived(owner.kind === 'character'
@@ -188,7 +192,7 @@
     }
     async function report(error: unknown) {
         if (error instanceof StaleAssetSelectionError) { clear(); if (owner.kind === 'character') await readPersistentCharacterDetail(owner.id, 'gallery-stale-selection'); alertToast(text.staleAsset) }
-        else alertError(String(error))
+        else alertError(contentExportBusyMessage(error) ?? String(error))
     }
     async function mutate(action: string, change: (value: AssetOwnerData) => void) {
         if (owner.kind === 'character') {
@@ -263,6 +267,7 @@
             notice = ''
             progressTitle = archive ? text.zipTitle : text.download
             downloadAbort = new AbortController()
+            downloading = true
             let exportLease: PersistentRevisionLease | undefined
             const captureEntries = async (revision: number) => {
                 if (exportLease) { await releasePersistentRevisionLease(exportLease); exportLease = undefined }
@@ -279,7 +284,7 @@
                     else alertToast(text.fileSaved)
                 }
             } finally {
-                progress = null; downloadAbort = undefined
+                progress = null; downloadAbort = undefined; downloading = false
                 if (exportLease) await releasePersistentRevisionLease(exportLease)
             }
         })
@@ -310,7 +315,7 @@
                     </div>
                 </div>
             {/if}
-            {#if notice || progress}<div class="g-notices">{#if notice}<SettingNotice tone="info" text={notice}/>{/if}{#if progress}<SettingProgress label={progressTitle} detail={galleryFormat(text.zipProgress, progress.done, progress.total)} fraction={progress.total > 0 ? progress.done / progress.total : null}>{#snippet actions()}<button class="g-button small" onclick={() => downloadAbort?.abort()}>{text.cancel}</button>{/snippet}</SettingProgress>{/if}</div>{/if}
+            {#if notice || progress || waitingForSync}<div class="g-notices">{#if notice}<SettingNotice tone="info" text={notice}/>{/if}{#if waitingForSync}<SettingProgress label={progressTitle} detail={language.risuNest.importDialog.waitingForSync}>{#snippet actions()}<button class="g-button small" onclick={() => downloadAbort?.abort()}>{text.cancel}</button>{/snippet}</SettingProgress>{:else if progress}<SettingProgress label={progressTitle} detail={galleryFormat(text.zipProgress, progress.done, progress.total)} fraction={progress.total > 0 ? progress.done / progress.total : null}>{#snippet actions()}<button class="g-button small" onclick={() => downloadAbort?.abort()}>{text.cancel}</button>{/snippet}</SettingProgress>{/if}</div>{/if}
             <GalleryGrid bind:this={grid} total={listing.total} items={listing.items} {size} captions {selected} {selecting} onwindow={(nextOffset, nextLimit) => { offset = nextOffset; limit = nextLimit }} onopen={(item, index) => { opener = { item: item as AssetGalleryItem, index }; viewer = item as AssetGalleryItem; viewerIndex = index }} ontoggle={toggle}/>
             {#if !listing.total}<p class="asset-empty">{language.noData}</p>{/if}
         </div>

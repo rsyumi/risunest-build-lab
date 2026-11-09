@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
-import { appTestPackages, appTestProfile, embeddedCrateTests, harnessManifests, hostManifests, mluaHarnessTests, nativeCommands, packageCrateTests, protocolManifests, sharedCargoTarget, standaloneRustCommands, standaloneRustTests } from '../scripts/testNative.mjs'
+import { appTestProfile, embeddedCrateTests, harnessManifests, hostManifests, nativeCommands, packageCrateTests, protocolManifests, sharedCargoTarget, standaloneRustCommands, standaloneRustTests } from '../scripts/testNative.mjs'
 
 test('the Sync server runs as one plain cargo test and its source observer only through --harness', () => {
   const base = ['cargo', 'test', '--manifest-path', 'server/sync/Cargo.toml', '--release', '--locked']
@@ -19,59 +19,15 @@ test('the Sync server runs as one plain cargo test and its source observer only 
   ])
 })
 
-test('the core workspace runs once more for the tokenizer with its Hugging Face families', () => {
-  const base = ['cargo', 'test', '--manifest-path', 'crates/core/Cargo.toml']
-  for (const platform of ['win32', 'linux', 'darwin']) {
-    assert.deepEqual(nativeCommands('protocol', platform).filter(command => command.includes('crates/core/Cargo.toml')), [
-      [...base, '--release', '--locked'],
-      [...base, '--package', 'risunest-tokenizer', '--features', 'huggingface', '--release', '--locked'],
-    ])
-    assert(!nativeCommands('host', platform).some(command => command.includes('crates/core/Cargo.toml')))
-  }
-})
-
-test('experimental CBS, regex and Lua tests run only through the explicit harness lane', () => {
-  const manifests = [
-    'crates/cbs-experimental/Cargo.toml',
-    'benchmarks/rust-cbs/native/Cargo.toml',
-    'crates/regex-compat-experimental/Cargo.toml',
-    'benchmarks/rust-regex-compat/native/Cargo.toml',
-    'crates/native-lua-experimental/Cargo.toml',
-    'crates/regress/Cargo.toml',
-  ]
+test('experimental CBS tests run only through the explicit harness lane', () => {
+  const manifests = ['crates/cbs-experimental/Cargo.toml', 'benchmarks/rust-cbs/native/Cargo.toml']
   assert.deepEqual(harnessManifests, manifests)
-  assert.deepEqual(mluaHarnessTests, {
-    manifest: 'crates/mlua-terminal/Cargo.toml',
-    runnerManifest: 'benchmarks/native-lua-containment/Cargo.toml',
-    targets: [
-      { name: 'upstream-thread', source: 'crates/mlua-terminal/tests/thread.rs' },
-      { name: 'upstream-function', source: 'crates/mlua-terminal/tests/function.rs' },
-      { name: 'upstream-memory', source: 'crates/mlua-terminal/tests/memory.rs' },
-      { name: 'upstream-userdata', source: 'crates/mlua-terminal/tests/userdata.rs' },
-      { name: 'upstream-table', source: 'crates/mlua-terminal/tests/table.rs' },
-    ],
-  })
   for (const platform of ['win32', 'linux', 'darwin']) {
-    const commands = nativeCommands('harness', platform)
     for (const manifest of manifests) {
-      const expected = manifest === 'crates/native-lua-experimental/Cargo.toml'
-        ? [['cargo', 'test', '--manifest-path', manifest, '--locked', '--lib']]
-        : manifest === 'crates/regress/Cargo.toml'
-          ? [
-            ['cargo', 'test', '--manifest-path', manifest, '--locked'],
-            ['cargo', 'test', '--manifest-path', manifest, '--locked', '--features', 'utf16'],
-          ]
-          : [['cargo', 'test', '--manifest-path', manifest, '--release', '--locked']]
-      assert.deepEqual(commands.filter(command => command.includes(manifest)), expected)
-    }
-    assert.deepEqual(commands.filter(command => command.includes(mluaHarnessTests.runnerManifest)), [[
-      'cargo', 'test', '--manifest-path', 'benchmarks/native-lua-containment/Cargo.toml', '--locked', '--jobs', '2',
-      '--test', 'upstream-thread', '--test', 'upstream-function', '--test', 'upstream-memory',
-      '--test', 'upstream-userdata', '--test', 'upstream-table', '--', '--test-threads=1',
-    ]])
-    assert(!commands.some(command => command.includes(mluaHarnessTests.manifest)))
-    for (const group of ['protocol', 'host']) {
-      for (const manifest of [...manifests, mluaHarnessTests.manifest, mluaHarnessTests.runnerManifest]) {
+      assert.deepEqual(nativeCommands('harness', platform).filter(command => command.includes(manifest)), [
+        ['cargo', 'test', '--manifest-path', manifest, '--release', '--locked'],
+      ])
+      for (const group of ['protocol', 'host']) {
         assert(!nativeCommands(group, platform).some(command => command.includes(manifest)))
       }
     }
@@ -116,58 +72,8 @@ test('main checkout and worktrees share one target and reject an unrelated cache
   assert.throws(() => sharedCargoTarget(join(main, 'unknown'), undefined, worktree), /Cannot locate/)
 })
 
-test('host app selects patched four-coding library and Brotli documentation tests together', () => {
-  const codec = packageCrateTests.find(entry => entry.package === 'compression-codecs')
-  assert.deepEqual(codec, {
-    manifest: 'crates/compression-codecs/Cargo.toml',
-    runnerManifest: 'src-tauri/Cargo.toml',
-    package: 'compression-codecs',
-    platforms: ['win32', 'linux', 'darwin'],
-    withApp: true,
-    doctests: ['crates/compression-codecs/src/brotli/params.rs'],
-  })
-  assert.deepEqual(appTestPackages, ['--package', 'risunest', '--package', 'compression-codecs'])
-  for (const platform of codec.platforms) {
-    const commands = nativeCommands('host', platform)
-    const app = commands[0]
-    assert.deepEqual(app.slice(-6, -2), appTestPackages)
-    assert(!app.includes('--lib'))
-    assert(!app.includes('--doc'))
-    assert(!commands.slice(1).some(command => command.includes(codec.package)))
-    for (const group of ['protocol', 'harness']) {
-      assert(!nativeCommands(group, platform).some(command => command.includes(codec.package)))
-    }
-  }
-  for (const [manifest, path] of [
-    ['src-tauri/Cargo.toml', '../crates/compression-codecs'],
-    ['tests/native/native/Cargo.toml', '../../../crates/compression-codecs'],
-    ['benchmarks/macos/native/Cargo.toml', '../../../crates/compression-codecs'],
-    ['benchmarks/ios/native/Cargo.toml', '../../../crates/compression-codecs'],
-  ]) {
-    const source = readFileSync(new URL(`../${manifest}`, import.meta.url), 'utf8')
-    const patches = source.split('[patch.crates-io]')[1]?.split(/^\[/m)[0]
-    assert(patches?.includes(`compression-codecs = { path = "${path}" }`), manifest)
-  }
-  const appManifest = readFileSync(new URL('../src-tauri/Cargo.toml', import.meta.url), 'utf8')
-  const compression = appManifest.split('\n').find(line => line.startsWith('async-compression = '))
-  assert(compression?.includes('default-features = false'))
-  assert(compression?.includes('features = ["gzip", "zlib", "brotli", "zstd"]'))
-  const example = readFileSync(new URL(`../${codec.doctests[0]}`, import.meta.url), 'utf8')
-  assert(example.includes('/// use compression_codecs::brotli;'))
-})
-
 test('every local Rust crate with tests has an explicit runner', () => {
-  const selected = new Set([...protocolManifests, ...hostManifests, ...harnessManifests, mluaHarnessTests.manifest, ...embeddedCrateTests.map(entry => entry.manifest), ...packageCrateTests.map(entry => entry.manifest)])
-  const runnerUrl = new URL(`../${mluaHarnessTests.runnerManifest}`, import.meta.url)
-  const runnerManifest = readFileSync(runnerUrl, 'utf8')
-  const upstreamTargets = new Map([...runnerManifest.matchAll(/\[\[test\]\]\s*name = "([^"]+)"\s*path = "([^"]+)"/g)].map(match => [match[1], match[2]]))
-  for (const target of mluaHarnessTests.targets) {
-    assert(upstreamTargets.has(target.name), `Missing mlua harness target: ${target.name}`)
-    assert.equal(
-      fileURLToPath(new URL(upstreamTargets.get(target.name), runnerUrl)),
-      fileURLToPath(new URL(`../${target.source}`, import.meta.url)),
-    )
-  }
+  const selected = new Set([...protocolManifests, ...hostManifests, ...harnessManifests, ...embeddedCrateTests.map(entry => entry.manifest), ...packageCrateTests.map(entry => entry.manifest)])
   for (const entry of packageCrateTests) {
     assert(entry.runnerManifest === entry.manifest || hostManifests.includes(entry.runnerManifest))
     assert.deepEqual(entry.platforms, ['win32', 'linux', 'darwin'])
@@ -198,13 +104,10 @@ test('every local Rust crate with tests has an explicit runner', () => {
     const path = join(directory, entry.name)
     return entry.isDirectory() ? rustFiles(path) : entry.name.endsWith('.rs') ? [path] : []
   })
-  // A virtual workspace has no src of its own; its members run through the workspace manifest.
-  const sources = directory => existsSync(join(directory, 'src')) ? [join(directory, 'src')]
-    : readdirSync(directory, { withFileTypes: true }).filter(entry => entry.isDirectory() && existsSync(join(directory, entry.name, 'src')))
-      .map(entry => join(directory, entry.name, 'src'))
   const missing = []
   for (const crate of readdirSync(new URL('../crates/', import.meta.url), { withFileTypes: true }).filter(entry => entry.isDirectory())) {
-    const files = sources(fileURLToPath(new URL(`../crates/${crate.name}/`, import.meta.url))).flatMap(rustFiles)
+    const directory = new URL(`../crates/${crate.name}/src/`, import.meta.url)
+    const files = rustFiles(fileURLToPath(directory))
     if (files.some(path => /#\[(?:tokio::)?test(?:\([^\]]*\))?\]/.test(readFileSync(path, 'utf8')))) {
       if (!selected.has(`crates/${crate.name}/Cargo.toml`)) missing.push(crate.name)
     }
@@ -222,7 +125,6 @@ test('native HTTP and WebSocket raw entry points stay in the reviewed adapters',
   const root = fileURLToPath(new URL('../', import.meta.url))
   const reviewed = [
     'src-tauri/src/server_sync/client.rs',
-    'src-tauri/src/native_generation/ollama_transport.rs',
     'src-tauri/src/server_sync/notification.rs',
     'crates/network-log/src/reqwest.rs',
     'crates/tauri-plugin-updater/src/network_log.rs',
@@ -233,7 +135,7 @@ test('native HTTP and WebSocket raw entry points stay in the reviewed adapters',
       const path = `${directory}/${entry.name}`
       if (entry.isDirectory()) scan(path)
       else if (entry.name.endsWith('.rs') && !/(?:^|[/_])tests?\.rs$/.test(path)) {
-        // Tests may call transports directly; product entry points remain explicitly reviewed.
+        // Tests may call the transport directly; product code goes through the logged adapters.
         const product = readFileSync(join(root, path), 'utf8').split(/^#\[cfg\((?:all\()?test\b[^\n]*\]\r?\n(?:pub(?:\([^)]*\))? )?mod \w+ \{/m)[0]
         if (nativeNetworkBypasses(product).length) found.push(path)
       }
@@ -242,7 +144,6 @@ test('native HTTP and WebSocket raw entry points stay in the reviewed adapters',
   for (const directory of ['src-tauri/src', 'crates/network-log/src', 'crates/tauri-plugin-http/src', 'crates/tauri-plugin-updater/src']) scan(directory)
   assert.deepEqual(found.filter(path => !reviewed.includes(path)), [])
   assert(found.includes('crates/network-log/src/reqwest.rs'))
-  assert(found.includes('src-tauri/src/native_generation/ollama_transport.rs'))
   assert.equal(nativeNetworkBypasses('client.get(url).send().await?;').length, 1)
   assert.equal(nativeNetworkBypasses('client.get(url).send_logged("test").await?;').length, 0)
 })

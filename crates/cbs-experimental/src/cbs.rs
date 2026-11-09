@@ -1,23 +1,4 @@
-mod array_ops;
-mod aggregates;
-pub mod compat;
-pub mod history;
-pub mod program;
-mod deterministic_hash;
-mod scalar;
-mod calc;
-mod families;
-mod host;
-mod local_time;
-#[cfg(test)]
-mod fixtures;
-pub mod parser;
-pub mod processor;
-mod text;
-pub use calc::{calc_string, js_string};
-pub use deterministic_hash::{pick_hash_rand, Sfc32};
-
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -41,29 +22,22 @@ fn trim(s: &[u16]) -> &[u16] {
     &s[a..b]
 }
 fn split(s: &[u16], sep: &[u16]) -> Vec<Units> {
-    split_with(s, sep, <[u16]>::to_vec)
-}
-// `split` without copying the parts.
-fn split_slices<'a>(s: &'a [u16], sep: &[u16]) -> Vec<&'a [u16]> {
-    split_with(s, sep, |part| part)
-}
-fn split_with<'a, T>(s: &'a [u16], sep: &[u16], mut part: impl FnMut(&'a [u16]) -> T) -> Vec<T> {
     if sep.is_empty() {
-        return s.chunks(1).map(part).collect();
+        return s.iter().map(|&c| vec![c]).collect();
     }
     let mut start = 0;
     let mut out = Vec::new();
     let mut p = 0;
     while p + sep.len() <= s.len() {
         if &s[p..p + sep.len()] == sep {
-            out.push(part(&s[start..p]));
+            out.push(s[start..p].to_vec());
             p += sep.len();
             start = p
         } else {
             p += 1
         }
     }
-    out.push(part(&s[start..]));
+    out.push(s[start..].to_vec());
     out
 }
 fn join(a: &[Units], sep: &[u16]) -> Units {
@@ -77,153 +51,7 @@ fn join(a: &[Units], sep: &[u16]) -> Units {
     o
 }
 fn replace_literal(s: &[u16], from: &[u16], to: &[u16]) -> Units {
-    if from.is_empty() {
-        return join(&split(s, from), to);
-    }
-    let mut o = Vec::with_capacity(s.len());
-    let (mut start, mut p) = (0, 0);
-    while p + from.len() <= s.len() {
-        if &s[p..p + from.len()] == from {
-            o.extend_from_slice(&s[start..p]);
-            o.extend_from_slice(to);
-            p += from.len();
-            start = p;
-        } else {
-            p += 1;
-        }
-    }
-    o.extend_from_slice(&s[start..]);
-    o
-}
-fn append_replacement(
-    out: &mut Units,
-    value: &[u16],
-    limit: usize,
-    b: &mut Budget,
-    capacity_limit: Option<usize>,
-) -> Result<(), String> {
-    if value.len() > limit.saturating_sub(out.len()) {
-        return Err("output-limit".into());
-    }
-    if let Some(capacity_limit) = capacity_limit {
-        out.try_reserve_exact(value.len()).map_err(|_| "program-allocation")?;
-        if out.capacity() > capacity_limit { return Err("program-retained-limit".into()); }
-    }
-    for chunk in value.chunks(1024) {
-        b.tick()?;
-        out.extend_from_slice(chunk);
-    }
-    Ok(())
-}
-fn replacement_work(work: &mut usize, b: &mut Budget) -> Result<(), String> {
-    if *work % 1024 == 0 {
-        b.tick()?;
-    }
-    *work += 1;
-    Ok(())
-}
-fn replace_all(
-    input: &[u16],
-    search: &[u16],
-    replacement: &[u16],
-    limit: usize,
-    b: &mut Budget,
-    capacity_limit: Option<usize>,
-) -> Result<Units, String> {
-    fn substitute(
-        out: &mut Units,
-        input: &[u16],
-        start: usize,
-        end: usize,
-        replacement: &[u16],
-        limit: usize,
-        b: &mut Budget,
-        capacity_limit: Option<usize>,
-    ) -> Result<(), String> {
-        let mut literal = 0;
-        let mut at = 0;
-        let mut work = 0;
-        while at < replacement.len() {
-            replacement_work(&mut work, b)?;
-            let value = if replacement[at] == 36 {
-                match replacement.get(at + 1) {
-                    Some(36) => Some(&replacement[at..at + 1]),
-                    Some(38) => Some(&input[start..end]),
-                    Some(96) => Some(&input[..start]),
-                    Some(39) => Some(&input[end..]),
-                    _ => None,
-                }
-            } else {
-                None
-            };
-            if let Some(value) = value {
-                append_replacement(out, &replacement[literal..at], limit, b, capacity_limit)?;
-                append_replacement(out, value, limit, b, capacity_limit)?;
-                at += 2;
-                literal = at;
-            } else {
-                at += 1;
-            }
-        }
-        append_replacement(out, &replacement[literal..], limit, b, capacity_limit)
-    }
-    let mut out = Vec::new();
-    if search.is_empty() {
-        for at in 0..=input.len() {
-            b.tick()?;
-            substitute(&mut out, input, at, at, replacement, limit, b, capacity_limit)?;
-            if at < input.len() {
-                append_replacement(&mut out, &input[at..at + 1], limit, b, capacity_limit)?;
-            }
-        }
-        return Ok(out);
-    }
-    if search.len() > input.len() {
-        append_replacement(&mut out, input, limit, b, capacity_limit)?;
-        return Ok(out);
-    }
-    // Prefix links keep repeated partial matches linear without changing UTF-16 boundaries.
-    let mut prefix = if capacity_limit.is_some() {
-        let mut prefix = Vec::new();
-        prefix.try_reserve_exact(search.len()).map_err(|_| "program-allocation")?;
-        prefix.resize(search.len(), 0);
-        prefix
-    } else { vec![0; search.len()] };
-    let mut matched = 0;
-    let mut work = 0;
-    for at in 1..search.len() {
-        replacement_work(&mut work, b)?;
-        while matched > 0 && search[at] != search[matched] {
-            replacement_work(&mut work, b)?;
-            matched = prefix[matched - 1];
-        }
-        if search[at] == search[matched] {
-            matched += 1;
-        }
-        prefix[at] = matched;
-    }
-    matched = 0;
-    let mut tail = 0;
-    for (at, &unit) in input.iter().enumerate() {
-        replacement_work(&mut work, b)?;
-        while matched > 0 && unit != search[matched] {
-            replacement_work(&mut work, b)?;
-            matched = prefix[matched - 1];
-        }
-        if unit == search[matched] {
-            matched += 1;
-        }
-        if matched == search.len() {
-            let end = at + 1;
-            let start = end - search.len();
-            append_replacement(&mut out, &input[tail..start], limit, b, capacity_limit)?;
-            substitute(&mut out, input, start, end, replacement, limit, b, capacity_limit)?;
-            tail = end;
-            matched = 0;
-        }
-    }
-    append_replacement(&mut out, &input[tail..], limit, b, capacity_limit)?;
-    Ok(out)
+    join(&split(s, from), to)
 }
 fn truth(s: &[u16]) -> bool {
     s == units("1") || s == units("true")
@@ -232,9 +60,44 @@ pub fn number_string(n: f64) -> Units {
     units(ryu_js::Buffer::new().format(n))
 }
 fn number(s: Option<&Units>) -> Result<f64, String> {
-    scalar::number(s, None)
+    let Some(s) = s else { return Ok(f64::NAN) };
+    let s = trim(s);
+    if s.is_empty() {
+        return Ok(0.0);
+    }
+    let Ok(s) = ascii(s) else { return Ok(f64::NAN) };
+    for (p, b) in [
+        ("0x", 16),
+        ("0X", 16),
+        ("0b", 2),
+        ("0B", 2),
+        ("0o", 8),
+        ("0O", 8),
+    ] {
+        if let Some(v) = s.strip_prefix(p) {
+            if v.is_empty() || v.chars().any(|c| c.to_digit(b).is_none()) {
+                return Ok(f64::NAN);
+            }
+            let n = u64::from_str_radix(v, b).map_err(|_| "number-radix-range")?;
+            if n > 9_007_199_254_740_991 {
+                return Err("number-radix-range".into());
+            }
+            return Ok(n as f64);
+        }
+    }
+    match s.as_str() {
+        "Infinity" | "+Infinity" => Ok(f64::INFINITY),
+        "-Infinity" => Ok(f64::NEG_INFINITY),
+        _ => {
+            if s.bytes()
+                .any(|c| !c.is_ascii_digit() && !b"+-.eE".contains(&c))
+            {
+                return Ok(f64::NAN);
+            }
+            Ok(s.parse().unwrap_or(f64::NAN))
+        }
+    }
 }
-
 fn float(s: &[u16]) -> f64 {
     let s = trim(s);
     let s: String = s
@@ -271,14 +134,14 @@ pub enum Node {
     },
 }
 // Function calls can execute even inside a false if block in the original parser.
-fn lazy_body_admitted(nodes: &[Node], writers: bool, history: bool) -> bool {
+fn lazy_body_admitted(nodes: &[Node]) -> bool {
     nodes.iter().all(|node| match node {
         Node::Text(_) => true,
         Node::Block {
             condition, body, ..
-        } => lazy_body_admitted(condition, writers, history) && lazy_body_admitted(body, writers, history),
+        } => lazy_body_admitted(condition) && lazy_body_admitted(body),
         Node::Macro(children) => {
-            if !lazy_body_admitted(children, writers, history) {
+            if !lazy_body_admitted(children) {
                 return false;
             }
             let Some(Node::Text(first)) = children.first() else {
@@ -300,14 +163,8 @@ fn lazy_body_admitted(nodes: &[Node], writers: bool, history: bool) -> bool {
             let Ok(name) = ascii(&name) else {
                 return false;
             };
-            callback_admitted(&name.to_ascii_lowercase(), writers, history)
-        }
-    })
-}
-fn callback_admitted(name: &str, writers: bool, history: bool) -> bool {
-            (history && matches!(name, "lastmessage" | "lastmessageid" | "lastmessageindex" | "previouschatlog" | "role")) ||
-            (writers && matches!(name, "setvar" | "addvar" | "setdefaultvar")) || matches!(
-                name,
+            matches!(
+                name.to_ascii_lowercase().as_str(),
                 "getvar"
                     | "getglobalvar"
                     | "chatindex"
@@ -329,7 +186,6 @@ fn callback_admitted(name: &str, writers: bool, history: bool) -> bool {
                     | "contains"
                     | "startswith"
                     | "endswith"
-                    | "replace"
                     | "split"
                     | "makearray"
                     | "array"
@@ -337,36 +193,15 @@ fn callback_admitted(name: &str, writers: bool, history: bool) -> bool {
                     | "spread"
                     | "arraylength"
                     | "arrayelement"
-                    | "arrayshift"
-                    | "arraypop"
-                    | "arraypush"
-                    | "arraysplice"
-                    | "min" | "max" | "sum" | "average"
                     | "calc"
-                    | "hash"
-                    | "round"
-                    | "floor"
-                    | "ceil"
-                    | "abs"
-                    | "remaind"
-                    | "tonumber"
-                    | "fixnum"
-                    | "fixnumber"
-                    | "unicodeencode"
-                    | "unicodedecode"
-                    | "u"
-                    | "ue"
-                    | "unicodedecodefromhex"
-                    | "unicodeencodefromhex"
                     | "random"
                     | "blank"
                     | "br"
             )
+        }
+    })
 }
 pub fn compile(text: &[u16]) -> Result<Vec<Node>, String> {
-    compile_mode(text, false, false)
-}
-fn source_domain(text: &[u16]) -> Result<(), String> {
     if text.len() > 2_097_152 {
         return Err("source-limit".into());
     }
@@ -384,11 +219,7 @@ fn source_domain(text: &[u16]) -> Result<(), String> {
     {
         return Err("legacy".into());
     }
-    Ok(())
-}
-fn compile_mode(text: &[u16], writers: bool, history: bool) -> Result<Vec<Node>, String> {
-    source_domain(text)?;
-    fn seq(s: &[u16], p: &mut usize, end: u8, depth: usize, writers: bool, history: bool) -> Result<Vec<Node>, String> {
+    fn seq(s: &[u16], p: &mut usize, end: u8, depth: usize) -> Result<Vec<Node>, String> {
         if depth > 128 {
             return Err("depth-limit".into());
         }
@@ -415,7 +246,7 @@ fn compile_mode(text: &[u16], writers: bool, history: bool) -> Result<Vec<Node>,
             }
             if s[*p..].starts_with(&[123, 123]) {
                 *p += 2;
-                let mut v = seq(s, p, 1, depth + 1, writers, history)?;
+                let mut v = seq(s, p, 1, depth + 1)?;
                 let mut block = None;
                 if let Some(Node::Text(first)) = v.first_mut() {
                     for (prefix, kind) in
@@ -433,8 +264,8 @@ fn compile_mode(text: &[u16], writers: bool, history: bool) -> Result<Vec<Node>,
                     }
                 }
                 if let Some(kind) = block {
-                    let body = seq(s, p, 2, depth + 1, writers, history)?;
-                    if kind < 2 && !lazy_body_admitted(&body, writers, history) {
+                    let body = seq(s, p, 2, depth + 1)?;
+                    if kind < 2 && !lazy_body_admitted(&body) {
                         return Err("lazy-body-domain".into());
                     }
                     out.push(Node::Block {
@@ -462,7 +293,7 @@ fn compile_mode(text: &[u16], writers: bool, history: bool) -> Result<Vec<Node>,
         }
         Ok(out)
     }
-    seq(text, &mut 0, 0, 0, writers, history)
+    seq(text, &mut 0, 0, 0)
 }
 #[derive(Clone, Default)]
 pub struct ChoiceTape {
@@ -473,10 +304,6 @@ pub struct ChoiceTape {
 #[derive(Clone, Default)]
 pub struct Context {
     pub variables: HashMap<Units, Units>,
-    // Keys whose stored value getChatVar's `toString()` throws on: a read declines, and a write replaces the value.
-    pub unreadable: HashSet<Units>,
-    // The getChatVar defaults for a key `variables` does not hold.
-    pub defaults: HashMap<Units, Units>,
     pub globals: HashMap<Units, Units>,
     pub temp: HashMap<Units, Units>,
     pub index: i64,
@@ -484,10 +311,6 @@ pub struct Context {
     pub state: u32,
     pub draws: usize,
     pub choices: Option<ChoiceTape>,
-    // The captured database the host registrations read; None declines them.
-    pub host: Option<Box<host::Host>>,
-    // Registry ids the caller declines.
-    pub declined: Vec<&'static str>,
 }
 fn finite_choice(c: &mut Context, arity: usize) -> Result<usize, String> {
     if arity == 0 {
@@ -575,9 +398,6 @@ pub struct Budget {
     pub remaining: usize,
     pub max_output: usize,
     pub cancel: Arc<AtomicBool>,
-    // A stage budget this evaluation also charges, one work unit per tick in chunks of SHARED_CHUNK.
-    pub(crate) shared: Option<risunest_ir::Budget>,
-    pub(crate) pending: usize,
     #[cfg(test)]
     pub progress: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -587,28 +407,12 @@ impl Default for Budget {
             remaining: 1_000_000,
             max_output: 4_194_304,
             cancel: Arc::new(AtomicBool::new(false)),
-            shared: None,
-            pending: 0,
             #[cfg(test)]
             progress: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 }
-const SHARED_CHUNK: usize = 256;
-// An ir budget or random-source failure as an evaluation reason that keeps the limit or invariant name.
-fn shared_error(error: risunest_ir::Error) -> String {
-    match error {
-        risunest_ir::Error::Cancelled => "cancelled".into(),
-        risunest_ir::Error::Limit(name) => format!("limit:{name}"),
-        risunest_ir::Error::Invariant(name) => format!("invalid:{name}"),
-        other => format!("invalid:{other:?}"),
-    }
-}
 impl Budget {
-    // An evaluation bounded by a stage budget: its work limit, cancellation and text-unit limit.
-    pub fn shared(shared: &risunest_ir::Budget) -> Self {
-        Self { remaining: usize::MAX, max_output: shared.limits().max_text_units, shared: Some(shared.clone()), ..Self::default() }
-    }
     fn tick(&mut self) -> Result<(), String> {
         if self.cancel.load(Ordering::Relaxed) {
             return Err("cancelled".into());
@@ -619,22 +423,7 @@ impl Budget {
         self.remaining -= 1;
         #[cfg(test)]
         self.progress.fetch_add(1, Ordering::Relaxed);
-        if let Some(shared) = &self.shared {
-            self.pending += 1;
-            if self.pending == SHARED_CHUNK {
-                self.pending = 0;
-                shared.work(SHARED_CHUNK).map_err(shared_error)?;
-            }
-        }
         Ok(())
-    }
-    // Charges the ticks not yet passed to the stage budget.
-    pub(crate) fn settle(&mut self) -> Result<(), String> {
-        let pending = std::mem::take(&mut self.pending);
-        match &self.shared {
-            Some(shared) => shared.work(pending).map_err(shared_error),
-            None => Ok(()),
-        }
     }
 }
 #[derive(Clone, Debug)]
@@ -687,9 +476,6 @@ fn json_parse(s: &[u16]) -> Option<Json> {
                         117 => {
                             let h = s.get(*p..*p + 4)?;
                             let t = ascii(h).ok()?;
-                            if !t.bytes().all(|c| c.is_ascii_hexdigit()) {
-                                return None;
-                            }
                             *p += 4;
                             u16::from_str_radix(&t, 16).ok()?
                         }
@@ -755,12 +541,13 @@ fn json_parse(s: &[u16]) -> Option<Json> {
             _ => {
                 *p -= 1;
                 for (word, v) in [
-                    (&[110, 117, 108, 108][..], Json::Null),
-                    (&[116, 114, 117, 101][..], Json::Bool(true)),
-                    (&[102, 97, 108, 115, 101][..], Json::Bool(false)),
+                    ("null", Json::Null),
+                    ("true", Json::Bool(true)),
+                    ("false", Json::Bool(false)),
                 ] {
-                    if s[*p..].starts_with(word) {
-                        *p += word.len();
+                    let w = units(word);
+                    if s[*p..].starts_with(&w) {
+                        *p += w.len();
                         return Some(v);
                     }
                 }
@@ -814,64 +601,53 @@ fn json_parse(s: &[u16]) -> Option<Json> {
         None
     }
 }
-// JSON.stringify of a string, appended to `o`.
-fn quote_into(o: &mut Units, s: &[u16]) {
-    fn escape(o: &mut Units, c: u16) {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        o.extend_from_slice(&[92, 117]);
-        o.extend([12, 8, 4, 0].map(|shift| u16::from(HEX[usize::from((c >> shift) & 15)])));
-    }
-    o.push(34);
+fn quote(s: &[u16]) -> Units {
+    let mut o = vec![34];
     let mut i = 0;
     while i < s.len() {
         let c = s[i];
         match c {
-            34 | 92 => o.extend_from_slice(&[92, c]),
-            8 => o.extend_from_slice(&[92, 98]),
-            12 => o.extend_from_slice(&[92, 102]),
-            10 => o.extend_from_slice(&[92, 110]),
-            13 => o.extend_from_slice(&[92, 114]),
-            9 => o.extend_from_slice(&[92, 116]),
-            0..=31 => escape(o, c),
+            34 => o.extend(units("\\\"")),
+            92 => o.extend(units("\\\\")),
+            8 => o.extend(units("\\b")),
+            12 => o.extend(units("\\f")),
+            10 => o.extend(units("\\n")),
+            13 => o.extend(units("\\r")),
+            9 => o.extend(units("\\t")),
+            0..=31 => o.extend(units(&format!("\\u{c:04x}"))),
             0xd800..=0xdbff if s.get(i + 1).is_some_and(|c| (0xdc00..=0xdfff).contains(c)) => {
                 o.push(c);
                 i += 1;
                 o.push(s[i]);
             }
-            0xd800..=0xdfff => escape(o, c),
+            0xd800..=0xdfff => o.extend(units(&format!("\\u{c:04x}"))),
             _ => o.push(c),
         }
         i += 1
     }
     o.push(34);
-}
-fn json_string(v: &Json) -> Units {
-    let mut o = Vec::new();
-    json_into(&mut o, v);
     o
 }
-// JSON.stringify(v), appended to `o`.
-fn json_into(o: &mut Units, v: &Json) {
+fn json_string(v: &Json) -> Units {
     match v {
-        Json::Null => o.extend_from_slice(&[110, 117, 108, 108]),
-        Json::Bool(b) => o.extend((if *b { "true" } else { "false" }).encode_utf16()),
+        Json::Null => units("null"),
+        Json::Bool(b) => units(if *b { "true" } else { "false" }),
         Json::Num(n) => {
             if n.is_finite() {
-                o.extend(ryu_js::Buffer::new().format(*n).encode_utf16())
+                number_string(*n)
             } else {
-                o.extend_from_slice(&[110, 117, 108, 108])
+                units("null")
             }
         }
-        Json::Str(s) => quote_into(o, s),
+        Json::Str(s) => quote(s),
         Json::Arr(a) => {
-            o.push(91);
-            for (i, value) in a.iter().enumerate() {
-                if i > 0 {
-                    o.push(44);
-                }
-                json_into(o, value);
-            }
+            let mut o = units("[");
+            o.extend(join(
+                &a.iter().map(json_string).collect::<Vec<_>>(),
+                &units(","),
+            ));
             o.push(93);
+            o
         }
         Json::Obj(a) => {
             let mut order: Vec<_> = (0..a.len()).collect();
@@ -885,16 +661,19 @@ fn json_into(o: &mut Units, v: &Json) {
                 }
             };
             order.sort_by_key(|&i| key(i).map(|n| (0, n as usize)).unwrap_or((1, i)));
-            o.push(123);
-            for (n, i) in order.into_iter().enumerate() {
-                if n > 0 {
-                    o.push(44);
-                }
-                quote_into(o, &a[i].0);
-                o.push(58);
-                json_into(o, &a[i].1);
-            }
+            let pairs = order
+                .into_iter()
+                .map(|i| {
+                    let mut p = quote(&a[i].0);
+                    p.push(58);
+                    p.extend(json_string(&a[i].1));
+                    p
+                })
+                .collect::<Vec<_>>();
+            let mut o = units("{");
+            o.extend(join(&pairs, &units(",")));
             o.push(125);
+            o
         }
     }
 }
@@ -929,12 +708,16 @@ fn array_join(a: &[Json], sep: &[u16]) -> Units {
     )
 }
 fn make_array(a: Vec<Units>) -> Units {
-    array_ops::make_array(a.into_iter().map(Json::Str).collect())
+    json_string(&Json::Arr(
+        a.into_iter()
+            .map(|s| Json::Str(replace_literal(&s, &units("::"), &units("\\u003A\\u003A"))))
+            .collect(),
+    ))
 }
 fn variable(map: &HashMap<Units, Units>, key: &[u16]) -> Units {
     map.get(key).cloned().unwrap_or_else(|| units("null"))
 }
-fn when(value: &[u16], kind: u8, c: &Context, effects: &mut Option<compat::State<'_>>, budget: &mut Budget) -> Result<(bool, bool), String> {
+fn when(value: &[u16], kind: u8, c: &Context) -> Result<(bool, bool), String> {
     if kind == 2 {
         return Ok((truth(&split(value, &[32])[0]), false));
     }
@@ -970,14 +753,9 @@ fn when(value: &[u16], kind: u8, c: &Context, effects: &mut Option<compat::State
                 {
                     return Err("variable-prototype-key".into());
                 }
-                if let Some(state) = effects {
-                    truth(&state.read(Some(&b), false, budget)?.expect("conditional reads propagate errors"))
-                } else {
-                    truth(&variable(&c.variables, &b))
-                }
+                truth(&variable(&c.variables, &b))
             }
             "toggle" => {
-                if let Some(state) = effects { state.untracked = true; }
                 let mut key = units("toggle_");
                 key.extend(b);
                 truth(&variable(&c.globals, &key))
@@ -1034,9 +812,6 @@ fn block_output(body: &[u16], yes: bool, keep: bool) -> Units {
     join(&lines, &[10])
 }
 pub fn evaluate(nodes: &[Node], c: &mut Context, b: &mut Budget) -> Result<Units, String> {
-    evaluate_inner(nodes, c, b, &mut None)
-}
-fn evaluate_inner(nodes: &[Node], c: &mut Context, b: &mut Budget, effects: &mut Option<compat::State<'_>>) -> Result<Units, String> {
     let mut out = Vec::new();
     for node in nodes {
         b.tick()?;
@@ -1047,10 +822,10 @@ fn evaluate_inner(nodes: &[Node], c: &mut Context, b: &mut Budget, effects: &mut
                 condition,
                 body,
             } => {
-                let v = evaluate_inner(condition, c, b, effects)?;
+                let v = evaluate(condition, c, b)?;
                 if *kind < 2 {
                     if truth(&split(&v, &[32])[0]) {
-                        let body = evaluate_inner(body, c, b, effects)?;
+                        let body = evaluate(body, c, b)?;
                         if *kind == 0 {
                             out.extend(body)
                         } else {
@@ -1065,17 +840,217 @@ fn evaluate_inner(nodes: &[Node], c: &mut Context, b: &mut Budget, effects: &mut
                         }
                     }
                 } else {
-                    let (yes, keep) = when(&v, *kind, c, effects, b)?;
-                    let body = evaluate_inner(body, c, b, effects)?;
+                    let (yes, keep) = when(&v, *kind, c)?;
+                    let body = evaluate(body, c, b)?;
                     out.extend(block_output(&body, yes, keep))
                 }
             }
             Node::Macro(nodes) => {
-                let value = evaluate_inner(nodes, c, b, effects)?;
-                let output_limit = b.max_output.saturating_sub(out.len());
-                let result = evaluate_callback(&value, c, b, effects, output_limit)?;
+                let value = evaluate(nodes, c, b)?;
+                if value.first().is_some_and(|c| [35, 47, 58].contains(c)) {
+                    return Err("dynamic-block".into());
+                }
+                if value.starts_with(&units("? ")) {
+                    let s = ascii(&value[2..])?;
+                    out.extend(units(&super::arithmetic::evaluate(&s)?));
+                    continue;
+                }
+                let first_colon = value.iter().position(|&c| c == 58);
+                let sep = if first_colon.is_some_and(|i| value.get(i + 1) == Some(&58)) {
+                    units("::")
+                } else {
+                    units(":")
+                };
+                let parts = split(&value, &sep);
+                let name_units: Units = parts[0]
+                    .iter()
+                    .copied()
+                    .filter(|&c| !ws(c) && c != 95 && c != 45)
+                    .collect();
+                let name = ascii(&name_units)?.to_ascii_lowercase();
+                let a = &parts[1..];
+                let undefined = units("undefined");
+                let get = |i: usize| a.get(i).unwrap_or(&undefined);
+                let bit = |v: bool| units(if v { "1" } else { "0" });
+                if matches!(
+                    name.as_str(),
+                    "join" | "spread" | "arraylength" | "arrayelement" | "random"
+                ) && a.first().is_some_and(|s| json_depth_exceeds(s, 64))
+                {
+                    return Err("json-depth".into());
+                }
+                if matches!(name.as_str(), "getvar" | "getglobalvar")
+                    && [
+                        "__proto__",
+                        "constructor",
+                        "toString",
+                        "valueOf",
+                        "toLocaleString",
+                        "hasOwnProperty",
+                        "isPrototypeOf",
+                        "propertyIsEnumerable",
+                        "__defineGetter__",
+                        "__defineSetter__",
+                        "__lookupGetter__",
+                        "__lookupSetter__",
+                    ]
+                    .iter()
+                    .any(|s| get(0) == &units(s))
+                {
+                    return Err("variable-prototype-key".into());
+                }
+                let preserve = || {
+                    let mut s = units("{{");
+                    s.extend(&value);
+                    s.extend(units("}}"));
+                    s
+                };
+                let needs_first = matches!(
+                    name.as_str(),
+                    "length"
+                        | "trim"
+                        | "startswith"
+                        | "endswith"
+                        | "contains"
+                        | "split"
+                        | "join"
+                        | "arraylength"
+                        | "arrayelement"
+                        | "replace"
+                        | "spread"
+                        | "calc"
+                );
+                let result = if needs_first && a.is_empty() {
+                    preserve()
+                } else {
+                    match name.as_str() {
+                        "getvar" => variable(&c.variables, get(0)),
+                        "getglobalvar" => variable(&c.globals, get(0)),
+                        "chatindex" => units(&c.index.to_string()),
+                        "user" => c.user.clone(),
+                        "tempvar" | "gettempvar" | "settempvar" => {
+                            if [
+                                "__proto__",
+                                "constructor",
+                                "prototype",
+                                "__force_return__",
+                                "__return__",
+                                "__defineGetter__",
+                                "__defineSetter__",
+                                "__lookupGetter__",
+                                "__lookupSetter__",
+                                "hasOwnProperty",
+                                "isPrototypeOf",
+                                "propertyIsEnumerable",
+                                "toLocaleString",
+                                "toString",
+                                "valueOf",
+                            ]
+                            .iter()
+                            .any(|s| get(0) == &units(s))
+                            {
+                                return Err("temp-reserved-key".into());
+                            }
+                            if name == "settempvar" {
+                                if let Some(v) = a.get(1) {
+                                    c.temp.insert(get(0).clone(), v.clone());
+                                } else {
+                                    c.temp.remove(get(0));
+                                }
+                                vec![]
+                            } else {
+                                c.temp.get(get(0)).cloned().unwrap_or_default()
+                            }
+                        }
+                        "equal" => bit(a.first() == a.get(1)),
+                        "notequal" => bit(a.first() != a.get(1)),
+                        "greater" => bit(number(a.first())? > number(a.get(1))?),
+                        "less" => bit(number(a.first())? < number(a.get(1))?),
+                        "greaterequal" => bit(number(a.first())? >= number(a.get(1))?),
+                        "lessequal" => bit(number(a.first())? <= number(a.get(1))?),
+                        "and" => bit(get(0) == &units("1") && get(1) == &units("1")),
+                        "or" => bit(get(0) == &units("1") || get(1) == &units("1")),
+                        "not" => bit(get(0) != &units("1")),
+                        "length" => units(&get(0).len().to_string()),
+                        "trim" => trim(get(0)).to_vec(),
+                        "contains" => {
+                            bit(get(1).is_empty()
+                                || get(0).windows(get(1).len()).any(|s| s == get(1)))
+                        }
+                        "startswith" => bit(get(0).starts_with(get(1))),
+                        "endswith" => bit(get(0).ends_with(get(1))),
+                        "split" => make_array(if a.len() < 2 {
+                            vec![get(0).clone()]
+                        } else {
+                            split(get(0), get(1))
+                        }),
+                        "array" | "makearray" => make_array(a.to_vec()),
+                        "join" | "spread" => array_join(
+                            &array(get(0)),
+                            if name == "spread" {
+                                &[58, 58]
+                            } else if a.len() < 2 {
+                                &[44]
+                            } else {
+                                get(1)
+                            },
+                        ),
+                        "arraylength" => units(&array(get(0)).len().to_string()),
+                        "arrayelement" => {
+                            let ar = array(get(0));
+                            let n = number(a.get(1))?;
+                            let n = if n.is_nan() { 0.0 } else { n.trunc() };
+                            let at = if n < 0.0 { ar.len() as f64 + n } else { n };
+                            if at < 0.0 || at >= ar.len() as f64 {
+                                units("null")
+                            } else {
+                                match &ar[at as usize] {
+                                    Json::Null => units("null"),
+                                    v @ Json::Arr(_) | v @ Json::Obj(_) => json_string(v),
+                                    v => to_string(v),
+                                }
+                            }
+                        }
+                        "calc" => units(&super::arithmetic::evaluate(&ascii(get(0))?)?),
+                        "random" => {
+                            let rand = if c.choices.is_none() {
+                                c.state = c.state.wrapping_mul(1664525).wrapping_add(1013904223);
+                                c.draws += 1;
+                                Some(c.state as f64 / 4294967296.0)
+                            } else {
+                                None
+                            };
+                            if a.is_empty() {
+                                number_string(rand.ok_or("rng-continuous-domain")?)
+                            } else {
+                                let ar = if a.len() > 1 {
+                                    a.iter().cloned().map(Json::Str).collect::<Vec<_>>()
+                                } else if get(0).starts_with(&[91]) && get(0).ends_with(&[93]) {
+                                    array(get(0))
+                                } else {
+                                    let v = replace_literal(get(0), &units("\\,"), &units("§X"));
+                                    let v = replace_literal(&v, &[58], &[44]);
+                                    split(&v, &[44]).into_iter().map(Json::Str).collect()
+                                };
+                                let at = match rand {
+                                    Some(r) => (r * ar.len() as f64) as usize,
+                                    None => finite_choice(c, ar.len())?,
+                                };
+                                match ar.get(at) {
+                                    Some(Json::Str(s)) => replace_literal(s, &units("§X"), &[44]),
+                                    Some(v) => json_string(v),
+                                    None => vec![],
+                                }
+                            }
+                        }
+                        "randint" | "dice" | "roll" => finite_rng(&name, a, c)?,
+                        "blank" => vec![],
+                        "br" => vec![10],
+                        "replace" => return Err("replace-substitution".into()),
+                        _ => return Err("unsupported-operator".into()),
+                    }
+                };
                 out.extend(result);
-                if value.starts_with(&units("? ")) { continue; }
             }
         }
         if out.len() > b.max_output {
@@ -1084,240 +1059,6 @@ fn evaluate_inner(nodes: &[Node], c: &mut Context, b: &mut Budget, effects: &mut
     }
     b.tick()?;
     Ok(out)
-}
-
-fn evaluate_callback(value: &[u16], c: &mut Context, b: &mut Budget, effects: &mut Option<compat::State<'_>>, output_limit: usize) -> Result<Units, String> {
-    if value.first().is_some_and(|c| [35, 47, 58].contains(c)) {
-        return Err("dynamic-block".into());
-    }
-    if value.starts_with(&units("? ")) {
-        let s = ascii(&value[2..])?;
-        return Ok(units(&super::arithmetic::evaluate(&s)?));
-    }
-    let first_colon = value.iter().position(|&c| c == 58);
-    let sep = if first_colon.is_some_and(|i| value.get(i + 1) == Some(&58)) {
-        units("::")
-    } else {
-        units(":")
-    };
-    let parts = split(&value, &sep);
-    let name_units: Units = parts[0]
-        .iter()
-        .copied()
-        .filter(|&c| !ws(c) && c != 95 && c != 45)
-        .collect();
-    let name = ascii(&name_units)?.to_ascii_lowercase();
-    let a = &parts[1..];
-    let undefined = units("undefined");
-    let get = |i: usize| a.get(i).unwrap_or(&undefined);
-    let bit = |v: bool| units(if v { "1" } else { "0" });
-    if matches!(
-        name.as_str(),
-        "join" | "spread" | "arraylength" | "arrayelement" | "random"
-            | "arrayshift" | "arraypop" | "arraypush" | "arraysplice"
-    ) && a.first().is_some_and(|s| json_depth_exceeds(s, 64))
-    {
-        return Err("json-depth".into());
-    }
-    if matches!(name.as_str(), "getvar" | "getglobalvar")
-        && [
-            "__proto__",
-            "constructor",
-            "toString",
-            "valueOf",
-            "toLocaleString",
-            "hasOwnProperty",
-            "isPrototypeOf",
-            "propertyIsEnumerable",
-            "__defineGetter__",
-            "__defineSetter__",
-            "__lookupGetter__",
-            "__lookupSetter__",
-        ]
-        .iter()
-        .any(|s| get(0) == &units(s))
-    {
-        return Err("variable-prototype-key".into());
-    }
-    let preserve = || {
-        let mut s = units("{{");
-        s.extend(value);
-        s.extend(units("}}"));
-        s
-    };
-    let needs_first = matches!(
-        name.as_str(),
-        "length"
-            | "trim"
-            | "startswith"
-            | "endswith"
-            | "contains"
-            | "split"
-            | "join"
-            | "arraylength"
-            | "arrayelement"
-            | "arrayshift"
-            | "arraypop"
-            | "arraypush"
-            | "arraysplice"
-            | "replace"
-            | "spread"
-            | "hash"
-            | "tonumber"
-            | "unicodeencode"
-            | "calc"
-    );
-    let handled = effects.as_mut().and_then(|state| state.callback(&name, a, b));
-    let result = if let Some(result) = handled {
-        result?.unwrap_or_else(preserve)
-    } else if needs_first && a.is_empty() {
-        preserve()
-    } else {
-        match name.as_str() {
-            "getvar" => variable(&c.variables, get(0)),
-            "getglobalvar" => {
-                if let Some(state) = effects { state.untracked = true; }
-                variable(&c.globals, get(0))
-            }
-            "chatindex" => units(&c.index.to_string()),
-            "user" => c.user.clone(),
-            "tempvar" | "gettempvar" | "settempvar" => {
-                if [
-                    "__proto__",
-                    "constructor",
-                    "prototype",
-                    "__force_return__",
-                    "__return__",
-                    "__defineGetter__",
-                    "__defineSetter__",
-                    "__lookupGetter__",
-                    "__lookupSetter__",
-                    "hasOwnProperty",
-                    "isPrototypeOf",
-                    "propertyIsEnumerable",
-                    "toLocaleString",
-                    "toString",
-                    "valueOf",
-                ]
-                .iter()
-                .any(|s| get(0) == &units(s))
-                {
-                    return Err("temp-reserved-key".into());
-                }
-                if name == "settempvar" {
-                    if let Some(v) = a.get(1) {
-                        c.temp.insert(get(0).clone(), v.clone());
-                    } else {
-                        c.temp.remove(get(0));
-                    }
-                    vec![]
-                } else {
-                    c.temp.get(get(0)).cloned().unwrap_or_default()
-                }
-            }
-            "equal" => bit(a.first() == a.get(1)),
-            "notequal" => bit(a.first() != a.get(1)),
-            "greater" => bit(number(a.first())? > number(a.get(1))?),
-            "less" => bit(number(a.first())? < number(a.get(1))?),
-            "greaterequal" => bit(number(a.first())? >= number(a.get(1))?),
-            "lessequal" => bit(number(a.first())? <= number(a.get(1))?),
-            "and" => bit(get(0) == &units("1") && get(1) == &units("1")),
-            "or" => bit(get(0) == &units("1") || get(1) == &units("1")),
-            "not" => bit(get(0) != &units("1")),
-            "length" => units(&get(0).len().to_string()),
-            "trim" => trim(get(0)).to_vec(),
-            "contains" => {
-                bit(get(1).is_empty()
-                    || get(0).windows(get(1).len()).any(|s| s == get(1)))
-            }
-            "startswith" => bit(get(0).starts_with(get(1))),
-            "endswith" => bit(get(0).ends_with(get(1))),
-            "split" => make_array(if a.len() < 2 {
-                vec![get(0).clone()]
-            } else {
-                split(get(0), get(1))
-            }),
-            "array" | "makearray" => make_array(a.to_vec()),
-            "arrayshift" | "arraypop" | "arraypush" | "arraysplice" => {
-                array_ops::evaluate(&name, a)?
-            }
-            "join" | "spread" => array_join(
-                &array(get(0)),
-                if name == "spread" {
-                    &[58, 58]
-                } else if a.len() < 2 {
-                    &[44]
-                } else {
-                    get(1)
-                },
-            ),
-            "arraylength" => units(&array(get(0)).len().to_string()),
-            "arrayelement" => {
-                let ar = array(get(0));
-                let n = number(a.get(1))?;
-                let n = if n.is_nan() { 0.0 } else { n.trunc() };
-                let at = if n < 0.0 { ar.len() as f64 + n } else { n };
-                if at < 0.0 || at >= ar.len() as f64 {
-                    units("null")
-                } else {
-                    match &ar[at as usize] {
-                        Json::Null => units("null"),
-                        v @ Json::Arr(_) | v @ Json::Obj(_) => json_string(v),
-                        v => to_string(v),
-                    }
-                }
-            }
-            "calc" => units(&super::arithmetic::evaluate(&ascii(get(0))?)?),
-            "random" => {
-                let rand = if c.choices.is_none() {
-                    c.state = c.state.wrapping_mul(1664525).wrapping_add(1013904223);
-                    c.draws += 1;
-                    Some(c.state as f64 / 4294967296.0)
-                } else {
-                    None
-                };
-                if a.is_empty() {
-                    number_string(rand.ok_or("rng-continuous-domain")?)
-                } else {
-                    let ar = if a.len() > 1 {
-                        a.iter().cloned().map(Json::Str).collect::<Vec<_>>()
-                    } else if get(0).starts_with(&[91]) && get(0).ends_with(&[93]) {
-                        array(get(0))
-                    } else {
-                        let v = replace_literal(get(0), &units("\\,"), &units("§X"));
-                        let v = replace_literal(&v, &[58], &[44]);
-                        split(&v, &[44]).into_iter().map(Json::Str).collect()
-                    };
-                    let at = match rand {
-                        Some(r) => (r * ar.len() as f64) as usize,
-                        None => finite_choice(c, ar.len())?,
-                    };
-                    match ar.get(at) {
-                        Some(Json::Str(s)) => replace_literal(s, &units("§X"), &[44]),
-                        Some(v) => json_string(v),
-                        None => vec![],
-                    }
-                }
-            }
-            "randint" | "dice" | "roll" => finite_rng(&name, a, c)?,
-            "min" | "max" | "sum" | "average" => {
-                aggregates::evaluate(&name, a, b)?.unwrap_or_else(preserve)
-            }
-            "hash" => deterministic_hash::evaluate(get(0), b)?,
-            "round" | "floor" | "ceil" | "abs" | "remaind" | "tonumber"
-            | "fixnum" | "fixnumber" | "unicodeencode" | "unicodedecode"
-            | "u" | "ue" | "unicodedecodefromhex" | "unicodeencodefromhex" => {
-                scalar::evaluate(&name, a, b)?.unwrap_or_else(preserve)
-            }
-            "blank" => vec![],
-            "br" => vec![10],
-            "replace" => replace_all(
-                get(0), get(1), get(2), output_limit, b, None,
-            )?,
-            _ => return Err("unsupported-operator".into()),
-        }
-    };
-    Ok(result)
 }
 
 pub fn retained_bytes(nodes: &Vec<Node>) -> usize {
@@ -1387,7 +1128,6 @@ pub fn fold_constants(nodes: &mut Vec<Node>) -> usize {
                     | "contains"
                     | "startswith"
                     | "endswith"
-                    | "replace"
                     | "split"
                     | "array"
                     | "makearray"
@@ -1395,26 +1135,6 @@ pub fn fold_constants(nodes: &mut Vec<Node>) -> usize {
                     | "spread"
                     | "arraylength"
                     | "arrayelement"
-                    | "arrayshift"
-                    | "arraypop"
-                    | "arraypush"
-                    | "arraysplice"
-                    | "min" | "max" | "sum" | "average"
-                    | "hash"
-                    | "round"
-                    | "floor"
-                    | "ceil"
-                    | "abs"
-                    | "remaind"
-                    | "tonumber"
-                    | "fixnum"
-                    | "fixnumber"
-                    | "unicodeencode"
-                    | "unicodedecode"
-                    | "u"
-                    | "ue"
-                    | "unicodedecodefromhex"
-                    | "unicodeencodefromhex"
                     | "blank"
                     | "br"
             )

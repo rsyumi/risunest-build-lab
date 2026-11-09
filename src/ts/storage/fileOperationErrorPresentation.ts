@@ -29,3 +29,18 @@ export function presentFileOperationError(kind: NativeFileOperationKind, error: 
         : options.fallbackMessage ?? text.actionFailed
     alertError(hasPartialDestinationWarning(error) ? `${message} ${language.screenshotPartialDestinationMayRemain}` : message)
 }
+
+/** Copy for an export refused while another operation holds the library; other failures keep their own message. */
+export function contentExportBusyMessage(error: unknown): string | undefined {
+    if (error instanceof NativeFileOperationBusyError) return language.risuNest.backup.fileBusy
+    const code = error && typeof error === 'object' && 'code' in error ? error.code : error instanceof Error ? error.message : undefined
+    return ['server-sync-busy', 'library-operation-busy', 'library-file-operation-busy'].includes(String(code))
+        ? language.risuNest.importDialog.reasonBusy : undefined
+}
+
+/** A content export's dialog reports how it ended; the caller reports refusals and failures before it opened. */
+export function presentContentExportError(error: unknown, callStartedAt: number): void {
+    if (fileOperationErrorWasPresented('export', callStartedAt)) return
+    if (error instanceof DOMException && error.name === 'AbortError') return
+    alertError(contentExportBusyMessage(error) ?? error as Error)
+}

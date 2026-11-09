@@ -268,11 +268,12 @@ describe('external storage production integration', () => {
         })
     })
 
-    it('restores the original plugins and binding after proven unchanged pause admission failure', async () => {
+    it.each([false, true])('restores the original plugins and binding after proven unchanged pause admission failure (plugin restart fails: %s)', async restartFails => {
         const production = await import('./production')
         await production.installExternalStorageProduction()
         Object.assign(mocks.persistentRuntime, { withPausedPersistentWrites: async () => { throw new Error('Pause unavailable') } })
-        await expect(production.requestExternalStorageRestore('old-sync', 'snapshot', ['library'])).rejects.toThrow('Pause unavailable')
+        if (restartFails) mocks.reloadPlugins.mockRejectedValueOnce(new Error('Plugin restart failed'))
+        await expect(production.requestExternalStorageRestore('old-sync', 'snapshot', ['library'])).rejects.toThrow(restartFails ? 'Plugin restart failed' : 'Pause unavailable')
         expect(mocks.bindingAssert).toHaveBeenCalledOnce()
         expect(mocks.reloadPlugins).toHaveBeenCalledOnce()
         expect(mocks.bindingResume).toHaveBeenCalledOnce()
@@ -803,6 +804,29 @@ describe('external storage production integration', () => {
         expect(mocks.refreshWorkingSet).not.toHaveBeenCalled()
     })
 
+    it('resumes the binding when the plugin restart after an unchanged restore fails, and settles on retry', async () => {
+        vi.useFakeTimers()
+        try {
+            const { installExternalStorageProduction, requestExternalStorageRestore } = await import('./production')
+            const recovery = await import('./applicationRecovery')
+            await installExternalStorageProduction()
+            mocks.bridge.startJob.mockImplementation(async (request, id) => request.kind === 'restore' ? ({
+                ...succeeded('old-sync', '8'), id, kind: 'restore', state: 'failed', applicationStarted: false, result: undefined,
+            }) : succeeded(request.connectionId, request.targetRevision ?? '0'))
+            mocks.reloadPlugins.mockRejectedValueOnce(new Error('Plugin restart failed'))
+            await expect(requestExternalStorageRestore('old-sync', 'snapshot-1', ['library'])).rejects.toThrow('Plugin restart failed')
+            expect(mocks.bindingResume).toHaveBeenCalledOnce()
+            expect(recovery.hasPendingExternalApplication()).toBe(true)
+            await expect(recovery.retryExternalApplication()).rejects.toThrow('External storage restore failed')
+            expect(mocks.reloadPlugins).toHaveBeenCalledTimes(2)
+            expect(recovery.hasPendingExternalApplication()).toBe(false)
+            mocks.listener?.(8)
+            await vi.advanceTimersByTimeAsync(60_000)
+            expect(mocks.bridge.startJob).toHaveBeenLastCalledWith(expect.objectContaining({ kind: 'backup', targetRevision: '8' }))
+        } finally {
+            vi.useRealTimers()
+        }
+    })
     it('unlocks an unfinished restore once it is stopped', async () => {
         const { installExternalStorageProduction, requestExternalStorageRestore } = await import('./production')
         const recovery = await import('./applicationRecovery')

@@ -1,6 +1,6 @@
 [package]
 name = "risunest"
-version = "1.1.0"
+version = "1.3.0"
 description = "RisuNest"
 authors = ["Yumi"]
 license = ""
@@ -10,7 +10,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [build-dependencies]
-tauri-build = { version = "2.7.1", features = [] }
+tauri-build = { version = "2.7.4", features = [] }
 cc = "1"
 risunest-release-update = { path = "../crates/release-update" }
 
@@ -25,32 +25,17 @@ risunest-sync-wire = { path = "../crates/sync-wire", features = ["body-codec"] }
 risunest-sync-connect = { path = "../crates/sync-connect" }
 risunest-external-storage-format = { path = "../crates/external-storage-format" }
 risunest-small-object-store = { path = "../crates/small-object-store" }
-risunest-ir = { path = "../crates/core/ir" }
-risunest-records = { path = "../crates/core/records" }
-risunest-prompt = { path = "../crates/core/prompt" }
-risunest-lorebook = { path = "../crates/core/lorebook" }
-risunest-regex = { path = "../crates/core/regex" }
-risunest-tokenizer = { path = "../crates/core/tokenizer", features = ["huggingface"] }
-risunest-formats = { path = "../crates/core/formats" }
-risunest-render = { path = "../crates/core/render" }
-risunest-cbs-experimental = { path = "../crates/cbs-experimental" }
-risunest-triggers = { path = "../crates/core/triggers" }
-risunest-native-lua-experimental = { path = "../crates/native-lua-experimental" }
-risunest-providers = { path = "../crates/core/providers" }
-risunest-memory = { path = "../crates/core/memory" }
 zeroize = "1"
 aes = "0.8.4"
 ghash = "0.5.1"
 subtle = "2.6"
-tauri = { version = "2.12.1", features = ["protocol-asset", "devtools"] }
-rusqlite = { version = "0.40.2", features = ["bundled", "backup", "blob"] }
-ryu-js = "1.0.3"
-encoding_rs = "0.8.35"
-async-compression = { version = "=0.4.50", default-features = false, features = ["gzip", "zlib", "brotli", "zstd"] }
-hyper = { version = "1.11", default-features = false, features = ["http1"] }
+tauri = { version = "2.12.5", features = ["protocol-asset", "devtools"] }
+rusqlite = { version = "0.40.2", features = ["bundled", "backup", "blob", "hooks"] }
+ryu-js = { version = "1.0.3", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order", "raw_value", "unbounded_depth"] }
 sha2 = "0.11.0"
+tiktoken-rs = "=0.12.1"
 base64 = "0.23.1"
 cap-primitives = "4.0.3"
 zip = "0.6.6"
@@ -59,12 +44,12 @@ async-trait = "0.1"
 url = "2.2"
 uuid = { version = "1.9.1", features = [ "v4" ] }
 tauri-plugin-deep-link = "2.4.10"
-tauri-plugin-fs = "2.6.0"
+tauri-plugin-fs = "2.7.0"
 tauri-plugin-os = "2.3.2"
-tauri-plugin-dialog = "2.7.3"
+tauri-plugin-dialog = "2.8.2"
 tauri-plugin-process = "2.3.1"
 tauri-plugin-shell = "2.3.6"
-tauri-plugin-opener = "2.5.5"
+tauri-plugin-opener = "2.7.1"
 # Native callers may supply Cookie, Origin, Referer and other HTTP headers.
 # There is no cookie jar, so a request carries only the cookies its caller sets.
 # The plugin takes its TLS from `platform_tls`, so it enables no TLS feature.
@@ -75,7 +60,7 @@ hmac = "0.13.0"
 quick-xml = { version = "0.41", features = ["serialize"] }
 percent-encoding = "2"
 httpdate = "1"
-tokio = { version = "1.47.1", features = ["macros", "net", "rt", "time", "fs", "io-util", "sync"] }
+tokio = { version = "1.47.1", features = ["macros", "net", "rt", "rt-multi-thread", "time", "fs", "io-util", "sync"] }
 tokio-util = { version = "0.7.19", features = ["io"] }
 libc = { version = "0.2", optional = true }
 hex = "0.4.3"
@@ -102,6 +87,7 @@ native-official-publication = [
 ]
 official-publication-upload-pilot = ["native-official-publication"]
 native-kei-upload-pilot = [
+    "dep:ryu-js",
     "reqwest/stream",
     "tokio/fs",
     "tokio/io-util",
@@ -155,6 +141,8 @@ libc = "0.2"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 security-framework = "3.7.0"
+# Reads the WebKit termination reason inside the web content process handler.
+wry = "=0.57.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
@@ -195,12 +183,6 @@ tokio-tungstenite = { version = "0.29.0", features = ["native-tls"] }
 reqwest = { version = "0.12.28", features = ["blocking", "json", "native-tls", "stream"] }
 
 [dev-dependencies]
-bytes = "1.12.1"
-# The native Lua values tests format JS numbers without the optional feature.
-ryu-js = "1.0.3"
-# Commit hooks let a test count durable transactions from outside the code
-# under test. Development only, so no shipped build gains the callback.
-rusqlite = { version = "0.40.2", features = ["hooks"] }
 wry = "=0.57.0"
 tao = "0.37.1"
 rcgen = "0.14"
@@ -208,15 +190,13 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 tiny_http = "0.12.0"
 risunest-sync-server = { path = "../server/sync" }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "test-util"] }
-tauri = { version = "2.12.1", features = ["test"] }
+tauri = { version = "2.12.5", features = ["test"] }
 regex = "1.13.1"
 
 [patch.crates-io]
-mlua = { path = "../crates/mlua-terminal" }
-mlua-sys = { path = "../crates/mlua-sys-terminal" }
-lua-src = { path = "../crates/lua-src-terminal" }
-# On Android, run main-frame-only scripts in the top frame and stream large
-# custom-protocol responses instead of copying them into one Java array.
+# On Android, run main-frame-only scripts in the top frame, stream large
+# custom-protocol responses instead of copying them into one Java array, and
+# hand a WebView whose renderer exited to the app's recovery.
 wry = { path = "../crates/wry" }
 # Keep failed desktop updates from closing or discarding the installed app.
 tauri-plugin-updater = { path = "../crates/tauri-plugin-updater" }
@@ -227,5 +207,3 @@ tauri-plugin-window-state = { path = "../crates/tauri-plugin-window-state" }
 tauri-plugin-http = { path = "../crates/tauri-plugin-http" }
 # Key each launch profile's single instance separately on every desktop platform.
 tauri-plugin-single-instance = { path = "../crates/tauri-plugin-single-instance" }
-
-compression-codecs = { path = "../crates/compression-codecs" }

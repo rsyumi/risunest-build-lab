@@ -2,8 +2,8 @@
 //! embedding round, so a library of chunks costs one transaction instead of one
 //! per chunk.
 use super::{begin_mutation, finish_mutation, invalid, issue_write_clock, DeviceStore, Section};
-use crate::persistent_store::{StoreError, StoreResult};
-use rusqlite::params;
+use crate::persistent_store::StoreResult;
+use rusqlite::{params, OptionalExtension};
 
 /// Float32 little endian. The renderer frames vectors with the same width.
 pub(crate) const VECTOR_ELEMENT_BYTES: usize = 4;
@@ -92,52 +92,45 @@ impl DeviceStore {
 
     /// Answers in request order. A missing or tombstoned key reports no vector,
     /// so the caller can recompute exactly the gaps.
-    pub(crate) fn visit_hypa_embeddings<E: From<StoreError>>(
-        &self,
-        keys: &[String],
-        mut visit: impl FnMut(usize, Option<(i64, &[u8])>) -> Result<(), E>,
-    ) -> Result<(), E> {
-        if keys.len() > MAX_BATCH_ENTRIES {
-            return Err(invalid("embedding read batch is too large").into());
-        }
-        for key in keys { validate_key(key)?; }
-        let mut statement = self.connection.prepare(
-            "SELECT dimensions,vector FROM hypa_embeddings
-                WHERE cache_key=?1 AND tombstone=0 AND vector IS NOT NULL",
-        ).map_err(StoreError::from)?;
-        for (index, key) in keys.iter().enumerate() {
-            let mut rows = statement.query([key]).map_err(StoreError::from)?;
-            match rows.next().map_err(StoreError::from)? {
-                Some(row) => {
-                    let dimensions = row.get::<_, i64>(0).map_err(StoreError::from)?;
-                    let value = row.get_ref(1).map_err(StoreError::from)?;
-                    let bytes = value.as_blob().map_err(|_| StoreError::from(
-                        rusqlite::Error::InvalidColumnType(1, "vector".into(), value.data_type()),
-                    ))?;
-                    visit(index, Some((dimensions, bytes)))?;
-                }
-                None => visit(index, None)?,
-            }
-        }
-        Ok(())
-    }
-
     pub(crate) fn read_hypa_embeddings(
         &self,
         keys: &[String],
     ) -> StoreResult<Vec<HypaEmbeddingRead>> {
-        let mut results = Vec::new();
-        self.visit_hypa_embeddings::<StoreError>(keys, |index, row| {
-            let (dimensions, vector) = match row {
-                Some((dimensions, bytes)) => (dimensions, Some(bytes.to_vec())),
-                None => (0, None),
-            };
-            results.push(HypaEmbeddingRead { cache_key: keys[index].clone(), dimensions, vector });
-            Ok(())
-        })?;
+        if keys.len() > MAX_BATCH_ENTRIES {
+            return Err(invalid("embedding read batch is too large"));
+        }
+        for key in keys {
+            validate_key(key)?;
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT dimensions,vector FROM hypa_embeddings
+                WHERE cache_key=?1 AND tombstone=0 AND vector IS NOT NULL",
+        )?;
+        let mut results = Vec::with_capacity(keys.len());
+        for key in keys {
+            let row = statement
+                .query_row([key], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })
+                .optional()?;
+            results.push(match row {
+                Some((dimensions, vector)) => HypaEmbeddingRead {
+                    cache_key: key.clone(),
+                    dimensions,
+                    vector: Some(vector),
+                },
+                None => HypaEmbeddingRead {
+                    cache_key: key.clone(),
+                    dimensions: 0,
+                    vector: None,
+                },
+            });
+        }
         Ok(results)
     }
 
+    /// Commits the whole batch or nothing. Every row takes its own write clock
+    /// so a later publication can resume at a record boundary.
     pub(crate) fn write_hypa_embeddings(
         &mut self,
         entries: &[HypaEmbeddingWrite],

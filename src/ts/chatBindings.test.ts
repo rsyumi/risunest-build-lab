@@ -13,7 +13,7 @@ const state = vi.hoisted(() => ({
     promotions: 0,
     released: 0,
     flushes: [] as string[],
-    bindings: [] as { characterId: string; conversationId: string; patch: unknown }[],
+    bindings: [] as { characterId: string; conversationId: string; patch: unknown; expected?: unknown }[],
     bindingGate: null as Promise<void> | null,
     toast: vi.fn(),
 }))
@@ -45,15 +45,17 @@ vi.mock('./storage/persistentDataRuntime.svelte', () => ({
             conversationId: string,
             patch: ConversationBindingPatch,
             publish: (committedPatch: ConversationBindingPatch) => void,
+            expected?: ConversationBindingPatch,
         ) => {
             const committedPatch = structuredClone(patch)
-            state.bindings.push({ characterId, conversationId, patch: committedPatch })
+            state.bindings.push({ characterId, conversationId, patch: committedPatch, ...(expected ? { expected: structuredClone(expected) } : {}) })
             if (state.bindingGate) await state.bindingGate
             publish(committedPatch)
         },
     }),
 }))
-import { bindPersona, captureChatBindingTarget, captureOnboardingTarget, chatBindingBlockedByGeneration, conversationMutationBlockedByGeneration, finishOnboarding, updateChatBinding } from './chatBindings.svelte'
+import { bindPersona, captureChatBindingTarget, captureOnboardingTarget, chatBindingBlockedByGeneration, conversationMutationBlockedByGeneration, finishOnboarding, refreshAuthorNoteCopy, updateChatBinding } from './chatBindings.svelte'
+import { authorNoteFingerprint } from './authorNotePresets'
 import { doingChat } from './process/generationState'
 import { activeRerollConversations } from './durableReroll'
 import { DisplayReadRecord, registerDisplayRow } from './process/scriptVariableReads'
@@ -105,6 +107,30 @@ it('blocks row mutations for generation and the matching reroll until ownership 
     doingChat.set(false)
     expect(conversationMutationBlockedByGeneration('chat')).toBe(false)
     expect(state.toast).toHaveBeenCalledTimes(2)
+})
+it('rewrites a stale author note copy of the selected chat outside generation only while it is linked', async () => {
+    state.db.authorNotePresets = [{ id: 'preset', name: 'Preset', text: 'Current' }]
+    const chat = state.db.characters[0].chats[0]
+    chat.note = 'stale'
+    chat.authorNotePreset = { id: 'preset', fingerprint: authorNoteFingerprint('stale') }
+    doingChat.set(true)
+    await refreshAuthorNoteCopy()
+    expect(state.bindings).toEqual([])
+    doingChat.set(false)
+    await refreshAuthorNoteCopy()
+    await refreshAuthorNoteCopy()
+    expect(state.bindings).toEqual([{
+        characterId: 'character',
+        conversationId: 'chat',
+        patch: { note: 'Current', authorNotePreset: { id: 'preset', fingerprint: authorNoteFingerprint('Current') } },
+        // The coordinator drops the copy if a write queued before it changed the note or link.
+        expected: { note: 'stale', authorNotePreset: { id: 'preset', fingerprint: authorNoteFingerprint('stale') } },
+    }])
+    expect(state.flushes).toEqual(['chat-binding'])
+    chat.note = 'edited by a script'
+    state.db.authorNotePresets[0].text = 'Later'
+    await refreshAuthorNoteCopy()
+    expect(state.bindings).toHaveLength(1)
 })
 it('commits persona and toggle metadata through the coordinator without reading message bodies or changing the global persona', async () => {
     const target = captureChatBindingTarget()!

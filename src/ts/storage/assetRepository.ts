@@ -1,6 +1,7 @@
 import {
     inferBlobMime,
     validateBlobReadRange,
+    type BlobReadOptions,
     type BlobReadRange,
     type BlobMetadata,
     type BlobStore,
@@ -38,7 +39,7 @@ export type AssetAliasPayloadSource = 'cas' | 'remote' | 'missing'
 export interface RemoteAssetReader {
     statObject(hash: string): Promise<number | null>
     statObjects?(hashes: readonly string[]): Promise<(number | null)[]>
-    readObject(hash: string, range?: BlobReadRange): Promise<Uint8Array | null>
+    readObject(hash: string, range?: BlobReadRange, options?: BlobReadOptions): Promise<Uint8Array | null>
 }
 
 export interface AssetAliasRead {
@@ -66,6 +67,7 @@ interface TypedAssetRepositoryReader {
     read(
         identity: AssetAliasIdentity,
         range?: BlobReadRange,
+        options?: BlobReadOptions,
     ): Promise<Versioned<AssetAliasRead> | null>
     stat(identity: AssetAliasIdentity): Promise<Versioned<AssetAliasStat> | null>
 }
@@ -109,7 +111,7 @@ function createTypedAssetRepositoryReader(
 ): TypedAssetRepositoryReader {
     const { reader, cas } = options
     return {
-        async read(identity, range) {
+        async read(identity, range, readOptions) {
             validateAssetAliasIdentity(identity)
             const { key } = identity
             if (range) validateBlobReadRange(range)
@@ -128,7 +130,7 @@ function createTypedAssetRepositoryReader(
                     throw error
                 }
                 if (range) {
-                    const data = await cas.readObjectRange(alias.objectHash, range, alias.size)
+                    const data = await cas.readObjectRange(alias.objectHash, range, alias.size, readOptions)
                         .catch(mismatch)
                     if (data !== null) {
                         const expectedSize = Math.max(
@@ -145,7 +147,7 @@ function createTypedAssetRepositoryReader(
                         }
                     }
                 } else {
-                    const data = await cas.readObject(alias.objectHash, alias.size).catch(mismatch)
+                    const data = await cas.readObject(alias.objectHash, alias.size, readOptions).catch(mismatch)
                     if (data !== null) {
                         if (data.byteLength !== alias.size) {
                             throw new Error(`Asset alias size mismatch for ${key}`)
@@ -158,7 +160,7 @@ function createTypedAssetRepositoryReader(
                 }
             }
             if (alias.objectHash !== null && options.remote) {
-                const data = await options.remote.readObject(alias.objectHash, range)
+                const data = await options.remote.readObject(alias.objectHash, range, readOptions)
                     .catch((error: unknown) => {
                         if (error instanceof PayloadSizeMismatchError) {
                             throw new Error(`Remote asset identity mismatch for ${key}`)
@@ -336,7 +338,7 @@ export interface CompleteTypedAssetRepository {
         data: Uint8Array,
         input: { name: string, options?: InlayEncodeOptions, metadata?: Record<string, unknown> },
     ): Promise<InlayBlobMetadata>
-    read(identity: AssetAliasIdentity, range?: BlobReadRange): Promise<Uint8Array | null>
+    read(identity: AssetAliasIdentity, range?: BlobReadRange, options?: BlobReadOptions): Promise<Uint8Array | null>
     stat(identity: AssetAliasIdentity): Promise<BlobMetadata | null>
     list(query?: Parameters<BlobStore['list']>[0]): Promise<BlobMetadata[]>
     remove(identity: AssetAliasIdentity): Promise<void>
@@ -537,8 +539,8 @@ export function createCompleteTypedAssetRepository(
             const prepared = await prepareNewInlayImage(identity, data.slice(), input)
             return await prepared.activate() as InlayBlobMetadata
         },
-        async read(identity, range) {
-            return (await repository.read(identity, range))?.value.data ?? null
+        async read(identity, range, readOptions) {
+            return (await repository.read(identity, range, readOptions))?.value.data ?? null
         },
         async stat(identity) {
             const result = await repository.stat(identity)
@@ -694,7 +696,7 @@ export function createCompleteAssetRepositoryBlobStore(
                 input,
             )
         },
-        read: (key, range) => repository.read(requireNamespacedBlobIdentity(key), range),
+        read: (key, range, readOptions) => repository.read(requireNamespacedBlobIdentity(key), range, readOptions),
         stat: (key) => repository.stat(requireNamespacedBlobIdentity(key)),
         async statMany(keys) {
             if (!options.store.readAssetAliasesByKeys) {

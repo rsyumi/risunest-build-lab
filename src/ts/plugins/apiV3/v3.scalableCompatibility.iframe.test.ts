@@ -25,13 +25,16 @@ const fixture = vi.hoisted(() => {
                 select: isConversation ? 'conversation' : 'character',
                 value: new ReadableStream({
                     start(controller) {
-                        controller.enqueue({ type: 'arrayStart', key: 'characters' })
+                        const chunks: unknown[] = [{ type: 'arrayStart', key: 'characters' }]
                         const { chats, ...detail } = isConversation ? { chats: [value] } : value
-                        controller.enqueue({ type: 'characterStart', key: 'characters', value: detail })
+                        chunks.push({ type: 'characterStart', key: 'characters', value: detail })
                         for (const chat of chats) {
                             const { message, ...metadata } = chat
-                            controller.enqueue({ type: 'conversationStart', key: 'characters', value: metadata })
-                            for (const value of message) controller.enqueue({ type: 'message', key: 'characters', value })
+                            chunks.push({ type: 'conversationStart', key: 'characters', value: metadata })
+                            for (const value of message) chunks.push({ type: 'message', key: 'characters', value })
+                        }
+                        for (let offset = 0; offset < chunks.length; offset += 2) {
+                            controller.enqueue({ type: 'batch', chunks: chunks.slice(offset, offset + 2) })
                         }
                         controller.close()
                     },
@@ -225,6 +228,8 @@ window.acceptance = (async () => {
     return {
         characterId: character.chaId,
         chatId: chat.id,
+        characterMessages: character.chats[0].message,
+        chatMessages: chat.message,
         invalidCharacter: await risuai.getCharacterFromIndex(999),
         invalidChat: await risuai.getChatFromIndex(999, 999),
     }
@@ -250,6 +255,8 @@ window.acceptance = (async () => {
         expect(result).toEqual({
             characterId: 'trash-character',
             chatId: 'trash-chat',
+            characterMessages: [{ role: 'char', data: 'before output' }],
+            chatMessages: [{ role: 'char', data: 'before output' }],
             invalidCharacter: null,
             invalidChat: null,
         })

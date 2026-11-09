@@ -1,5 +1,7 @@
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
 import { describe, expect, it, vi } from 'vitest'
+import * as mobileTasks from '../../mobileBackgroundTask'
+import { unprotectedMobileTask } from '../../mobileBackgroundTask.testSupport'
 import {
     coldStorageHeader,
     listCharacterResources,
@@ -25,6 +27,7 @@ import {
     createOfficialAssociationMarkers,
     type OfficialAccountSnapshotDependencies,
     type OfficialAssociationMarkers,
+    type OfficialNativeAssetPublisher,
     type OfficialNativeDatabasePublisher,
     type OfficialSyncConflictBackupInput,
     type OfficialSyncConflictContext,
@@ -114,14 +117,16 @@ function metadata(key: string, size: number): BlobMetadata {
     }
 }
 
-function makeBlobStore(values: ReadonlyMap<string, Uint8Array>): BlobStore {
+function makeBlobStore(values: ReadonlyMap<string, Uint8Array>, batched = true): BlobStore {
+    const stat = async (key: string) => {
+        const value = values.get(key)
+        return value ? metadata(key, value.byteLength) : null
+    }
     return {
         put: vi.fn(),
         read: vi.fn(async (key) => values.get(key)?.slice() ?? null),
-        stat: vi.fn(async (key) => {
-            const value = values.get(key)
-            return value ? metadata(key, value.byteLength) : null
-        }),
+        stat: vi.fn(stat),
+        ...(batched ? { statMany: vi.fn(async (keys: readonly string[]) => Promise.all(keys.map(stat))) } : {}),
         list: vi.fn(),
         remove: vi.fn(),
         resolveUrl: vi.fn(),
@@ -132,6 +137,7 @@ interface HarnessOptions {
     database?: Database
     accountId?: string
     blobs?: Map<string, Uint8Array>
+    batchedStat?: boolean
     remoteAssets?: Map<string, Uint8Array>
     remoteCold?: Map<string, unknown>
     databaseRead?: AccountReadResult
@@ -141,6 +147,7 @@ interface HarnessOptions {
     conflict?: OfficialSyncConflictHandler
     now?: () => number
     nativeDatabasePublisher?: OfficialNativeDatabasePublisher
+    nativeAssetPublisher?: OfficialNativeAssetPublisher
     getAccountId?: () => string | null
     flushPublicationMetadata?: () => Promise<void>
     restoreCandidate?: OfficialAccountSnapshotDependencies['restoreCandidate']
@@ -172,7 +179,7 @@ async function makeHarness(options: HarnessOptions = {}) {
     const localBlobs = options.blobs ?? new Map(
         resources(database).map((key, index) => [key, Uint8Array.of(index + 1)]),
     )
-    const blobStore = makeBlobStore(localBlobs)
+    const blobStore = makeBlobStore(localBlobs, options.batchedStat)
     const remoteAssets = options.remoteAssets ?? new Map<string, Uint8Array>()
     const remoteCold = options.remoteCold ?? new Map<string, unknown>()
     const events = options.events ?? []
@@ -214,6 +221,7 @@ async function makeHarness(options: HarnessOptions = {}) {
         conflict: options.conflict,
         now: options.now,
         nativeDatabasePublisher: options.nativeDatabasePublisher,
+        nativeAssetPublisher: options.nativeAssetPublisher,
         getAccountId: options.getAccountId,
         flushPublicationMetadata: options.flushPublicationMetadata,
         restoreCandidate: options.restoreCandidate,
@@ -396,6 +404,126 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
         ])
     })
 
+    it('records native asset writes before the database write and resumes with only the unwritten assets', async () => {
+        const nativeDatabasePublisher = vi.fn<OfficialNativeDatabasePublisher>(async () => ({
+            databaseFingerprint: 'f'.repeat(64), acknowledge: vi.fn(async () => {}), completeReload: vi.fn(async () => {}),
+        }))
+        let interrupt = true
+        const nativeAssetPublisher = vi.fn<OfficialNativeAssetPublisher>(async (input) => {
+            for (const asset of input.assets) {
+                input.written(asset.key, `native/${asset.key}`)
+                if (interrupt) {
+                    interrupt = false
+                    throw new Error('synthetic asset write failure')
+                }
+            }
+            return true
+        })
+        const harness = await makeHarness({
+            accountId: 'account-1', nativeDatabasePublisher, nativeAssetPublisher,
+            flushPublicationMetadata: vi.fn(async () => {}),
+        })
+        const publication = await harness.adapter.pin(harness.imported.revision)
+
+        await expect(publication.publish()).rejects.toThrow('synthetic asset write failure')
+        const [first] = nativeAssetPublisher.mock.calls[0][0].assets
+        expect(harness.ledger.publishedAs(first.key)).toBe(`native/${first.key}`)
+        expect(nativeDatabasePublisher).not.toHaveBeenCalled()
+        await publication.publish()
+
+        const [interrupted, resumed] = nativeAssetPublisher.mock.calls.map(([input]) => input.assets)
+        expect(resumed).toEqual(interrupted.slice(1))
+        expect(harness.blobStore.read).not.toHaveBeenCalled()
+        expect(nativeDatabasePublisher.mock.calls[0][0].resourceReplacements).toEqual(
+            Object.fromEntries(interrupted.map(asset => [asset.key, `native/${asset.key}`])),
+        )
+        expect(harness.writeItem).not.toHaveBeenCalled()
+        await publication.dispose()
+    })
+
+    it('holds one background task for the assets and the database, at once when the user starts it and otherwise once the app leaves the screen', async () => {
+        const deferredHold = vi.spyOn(mobileTasks, 'runWithDeferredMobileBackgroundTask')
+        const immediateHold = vi.spyOn(mobileTasks, 'runWithMobileBackgroundTask')
+        const publishers = () => ({
+            nativeDatabasePublisher: vi.fn<OfficialNativeDatabasePublisher>(async () => ({
+                databaseFingerprint: 'f'.repeat(64), acknowledge: vi.fn(async () => {}), completeReload: vi.fn(async () => {}),
+            })),
+            nativeAssetPublisher: vi.fn<OfficialNativeAssetPublisher>(async (input) => {
+                for (const asset of input.assets) input.written(asset.key, `native/${asset.key}`)
+                return true
+            }),
+        })
+        const progress = vi.fn()
+        try {
+            deferredHold.mockImplementationOnce(async (_kind, operation, signal) => operation({ ...unprotectedMobileTask(signal), progress }))
+            for (const userInitiated of [false, true]) {
+                deferredHold.mockClear()
+                immediateHold.mockClear()
+                const { nativeDatabasePublisher, nativeAssetPublisher } = publishers()
+                const harness = await makeHarness({
+                    accountId: 'account-1', nativeDatabasePublisher, nativeAssetPublisher,
+                    flushPublicationMetadata: vi.fn(async () => {}),
+                })
+                await (await harness.adapter.pin(harness.imported.revision, { userInitiated })).publish()
+
+                if (userInitiated) expect(immediateHold).toHaveBeenCalledExactlyOnceWith('sync', expect.any(Function), expect.any(AbortSignal), true)
+                else expect(deferredHold).toHaveBeenCalledExactlyOnceWith('sync', expect.any(Function), expect.any(AbortSignal))
+                expect(deferredHold.mock.calls.length + immediateHold.mock.calls.length).toBe(1)
+                expect(nativeDatabasePublisher.mock.calls[0][0].background).toBe(nativeAssetPublisher.mock.calls[0][0].background)
+                if (!userInitiated) {
+                    const { length } = nativeAssetPublisher.mock.calls[0][0].assets
+                    expect(progress.mock.calls).toEqual(Array.from({ length }, (_, index) => [Math.round((index + 1) * 100 / length)]))
+                }
+            }
+
+            // The platform ending the task stops the publication before the database write.
+            const expiry = new AbortController()
+            deferredHold.mockImplementationOnce(async (_kind, operation) => operation(unprotectedMobileTask(expiry.signal)))
+            const { nativeDatabasePublisher, nativeAssetPublisher } = publishers()
+            nativeAssetPublisher.mockImplementationOnce(async () => {
+                expiry.abort()
+                return false
+            })
+            const harness = await makeHarness({
+                accountId: 'account-1', nativeDatabasePublisher, nativeAssetPublisher,
+                flushPublicationMetadata: vi.fn(async () => {}),
+            })
+            await expect((await harness.adapter.pin(harness.imported.revision)).publish()).rejects.toMatchObject({ name: 'AbortError' })
+            expect(harness.writeItem).not.toHaveBeenCalled()
+            expect(nativeDatabasePublisher).not.toHaveBeenCalled()
+        } finally {
+            deferredHold.mockRestore()
+            immediateHold.mockRestore()
+        }
+    })
+
+    it('records no native asset write that settles after the signed-in account changes', async () => {
+        let accountId = 'account-1'
+        const nativeAssetPublisher = vi.fn<OfficialNativeAssetPublisher>(async (input) => {
+            accountId = 'account-2'
+            input.written(input.assets[0].key, `native/${input.assets[0].key}`)
+            return true
+        })
+        const ledger: OfficialAssetLedger = { publishedAs: () => null, record: vi.fn(), clear: vi.fn(), reset: vi.fn() }
+        const harness = await makeHarness({ getAccountId: () => accountId, nativeAssetPublisher, ledger })
+        const publication = await harness.adapter.pin(harness.imported.revision)
+
+        await expect(publication.publish()).rejects.toThrow('session changed')
+
+        expect(ledger.record).not.toHaveBeenCalled()
+        await publication.dispose()
+    })
+
+    it('leaves the assets to the web path when native asset publication is unavailable', async () => {
+        const nativeAssetPublisher = vi.fn<OfficialNativeAssetPublisher>(async () => false)
+        const harness = await makeHarness({ accountId: 'account-1', nativeAssetPublisher })
+
+        await (await harness.adapter.pin(harness.imported.revision)).publish()
+
+        const assets = nativeAssetPublisher.mock.calls[0][0].assets.map(asset => asset.key)
+        expect(harness.writeItem.mock.calls.map(([key]) => key)).toEqual([...assets, databaseKey])
+    })
+
     it('falls back before native job acceptance but never after a native publication failure', async () => {
         const unavailable = vi.fn<OfficialNativeDatabasePublisher>(async () => null)
         const fallback = await makeHarness({
@@ -529,7 +657,7 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
             finishCancellation = resolve
         })
         const aborted = new DOMException('native job cancelled', 'AbortError')
-        const nativeDatabasePublisher = vi.fn<OfficialNativeDatabasePublisher>(async ({ signal }) => {
+        const nativeDatabasePublisher = vi.fn<OfficialNativeDatabasePublisher>(async ({ background: { signal } }) => {
             await new Promise<void>((resolve) => {
                 if (signal?.aborted) return resolve()
                 signal?.addEventListener('abort', () => resolve(), { once: true })
@@ -551,7 +679,7 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
         await vi.waitFor(() => expect(nativeDatabasePublisher).toHaveBeenCalledOnce())
         const disposing = publication.dispose()
         await vi.waitFor(() => expect(
-            nativeDatabasePublisher.mock.calls[0][0].signal?.aborted,
+            nativeDatabasePublisher.mock.calls[0][0].background.signal?.aborted,
         ).toBe(true))
         expect(release).not.toHaveBeenCalled()
 
@@ -668,7 +796,7 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
         }
     })
 
-    it('pins a legacy backslash asset key and uploads its normalized local payload', async () => {
+    it.each([true, false])('pins a legacy backslash asset key and uploads its normalized local payload (batched stat: %s)', async (batchedStat) => {
         const database = makeDatabase() as any
         const legacyKey = 'assets\\windows.gif'
         database.characters[0].additionalAssets = [['legacy', legacyKey, 'gif']]
@@ -678,11 +806,13 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
                 .map((key, index): [string, Uint8Array] => [key, Uint8Array.of(index + 1)]),
         )
         localBlobs.set('assets/windows.gif', Uint8Array.of(77))
-        const harness = await makeHarness({ database, blobs: localBlobs })
+        const harness = await makeHarness({ database, blobs: localBlobs, batchedStat })
 
         const publication = await harness.adapter.pin(harness.imported.revision)
         await publication.publish()
 
+        // A store that answers in batches is never asked one key at a time.
+        if (batchedStat) expect(harness.blobStore.stat).not.toHaveBeenCalled()
         const upload = harness.writes.find((write) => write.key === legacyKey)
         expect(upload?.bytes).toEqual(Uint8Array.of(77))
         const databaseWrite = harness.writes.find((write) => write.key === databaseKey)
@@ -726,7 +856,7 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
             'C:\\app-data\\portrait.png',
         ]
         for (const key of excluded) {
-            expect(harness.blobStore.stat).not.toHaveBeenCalledWith(key)
+            expect(vi.mocked(harness.blobStore.statMany!).mock.calls.flat(2)).not.toContain(key)
             expect(harness.readItem).not.toHaveBeenCalledWith(key)
             expect(harness.writeItem.mock.calls.some(([written]) => written === key)).toBe(false)
         }
@@ -1227,9 +1357,9 @@ describe('OfficialAccountSnapshotAdapter pull', () => {
     it('stops pinning on cancellation and releases the revision without remote probes', async () => {
         const harness = await makeHarness()
         const controller = new AbortController()
-        vi.mocked(harness.blobStore.stat).mockImplementation(async () => {
+        vi.mocked(harness.blobStore.statMany!).mockImplementation(async (keys) => {
             controller.abort()
-            return null
+            return keys.map(() => null)
         })
         const acquire = vi.spyOn(harness.store, 'acquireRevision')
         await expect(harness.adapter.pin(harness.imported.revision, { signal: controller.signal }))

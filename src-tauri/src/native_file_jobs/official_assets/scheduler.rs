@@ -49,6 +49,8 @@ pub(crate) enum StopReason {
     Local,
     LibraryChanged,
     Service,
+    /// A write answered 403 with a warning instead of asking for a new sign-in.
+    AuthWarning,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

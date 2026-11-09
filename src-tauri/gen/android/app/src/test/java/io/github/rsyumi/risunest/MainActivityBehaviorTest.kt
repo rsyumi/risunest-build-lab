@@ -3,6 +3,7 @@ package io.github.rsyumi.risunest
 import android.content.ComponentCallbacks2
 import android.os.Build
 import androidx.core.view.WindowInsetsCompat
+import java.io.ByteArrayInputStream
 import java.util.concurrent.atomic.AtomicBoolean
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -44,14 +45,27 @@ class MainActivityBehaviorTest {
     }
     assertEquals(false, isNativeContentSource("database.risudat"))
     assertEquals(false, isNativeContentSource("program.exe"))
-    for (name in listOf("preset.json", "preset.PRESET", "preset.risupreset", "preset.RISUP")) {
-      assertTrue(name, isNativeContentSource(name, SafContentImportDestination.PRESET))
+  }
+
+  @Test
+  fun `a multi-file pick keeps the files of the picked kind and refuses each other file`() {
+    fun source(name: String) = object : SafInputSource {
+      override val displayName = name
+      override val totalBytes: Long? = null
+      override fun open() = ByteArrayInputStream(ByteArray(0))
     }
-    for (name in listOf("card.png", "module.risum", "card.charx", "preset.risup.txt")) {
-      assertFalse(name, isNativeContentSource(name, SafContentImportDestination.PRESET))
-    }
-    assertFalse(isNativeContentSource("preset.risup", SafContentImportDestination.CHARACTER))
-    assertFalse(isNativeContentSource("preset.risupreset", SafContentImportDestination.MODULE))
+    val picked = listOf(source("card.png"), source("notes.txt"), source("module.risum"), source("backup.bin"))
+
+    val (content, contentRefused) = partitionDocumentSources(picked, content = true)
+    assertEquals(listOf("card.png", "module.risum"), content.map { it.displayName })
+    assertEquals(
+      listOf(SafSpoolFailure("notes.txt", "unsupported-source"), SafSpoolFailure("backup.bin", "unsupported-source")),
+      contentRefused,
+    )
+
+    val (backup, backupRefused) = partitionDocumentSources(picked, content = false)
+    assertEquals(listOf("backup.bin"), backup.map { it.displayName })
+    assertEquals(listOf("card.png", "notes.txt", "module.risum"), backupRefused.map { it.displayName })
   }
 
   @Test
@@ -83,12 +97,6 @@ class MainActivityBehaviorTest {
 
   @Test
   fun `long native SAF candidate names preserve their persisted extension for dispatch`() {
-    for (suffix in listOf(".preset", ".risupreset", ".RISUP")) {
-      val preset = safeSafDisplayName("a".repeat(181) + suffix)
-      assertEquals(180, preset.length)
-      assertTrue(preset.endsWith(suffix))
-      assertTrue(isNativeContentSource(preset, SafContentImportDestination.PRESET))
-    }
     val character = safeSafDisplayName("a".repeat(181) + ".charx")
     val risuSave = safeSafDisplayName("b".repeat(181) + ".risudat")
     val png = safeSafDisplayName("p".repeat(181) + ".PNG")
@@ -392,43 +400,41 @@ class MainActivityBehaviorTest {
   }
 
   @Test
-  fun `activity stop requests a lifecycle flush`() {
-    val reasons = mutableListOf<String>()
-    val dispatcher = LifecycleFlushDispatcher(reasons::add)
+  fun `activity start and stop reach the page`() {
+    val events = mutableListOf<Pair<String, Int?>>()
+    val dispatcher = LifecycleFlushDispatcher { reason, trimLevel -> events.add(reason to trimLevel) }
 
     dispatcher.onStop()
+    dispatcher.onStart()
 
-    assertEquals(listOf("stop"), reasons)
+    assertEquals(listOf("stop" to null, "start" to null), events)
   }
 
   @Test
   fun `trim memory below UI hidden does not request a lifecycle flush`() {
-    val reasons = mutableListOf<String>()
-    val dispatcher = LifecycleFlushDispatcher(reasons::add)
+    val events = mutableListOf<Pair<String, Int?>>()
+    val dispatcher = LifecycleFlushDispatcher { reason, trimLevel -> events.add(reason to trimLevel) }
 
     dispatcher.onTrimMemory(ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN - 1)
 
-    assertEquals(emptyList<String>(), reasons)
+    assertEquals(emptyList<Pair<String, Int?>>(), events)
   }
 
   @Test
-  fun `trim memory at UI hidden requests a lifecycle flush`() {
-    val reasons = mutableListOf<String>()
-    val dispatcher = LifecycleFlushDispatcher(reasons::add)
+  fun `trim memory at or above UI hidden requests a lifecycle flush with its level`() {
+    val events = mutableListOf<Pair<String, Int?>>()
+    val dispatcher = LifecycleFlushDispatcher { reason, trimLevel -> events.add(reason to trimLevel) }
 
     dispatcher.onTrimMemory(ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN)
-
-    assertEquals(listOf("trim-memory"), reasons)
-  }
-
-  @Test
-  fun `trim memory above UI hidden requests a lifecycle flush`() {
-    val reasons = mutableListOf<String>()
-    val dispatcher = LifecycleFlushDispatcher(reasons::add)
-
     dispatcher.onTrimMemory(ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN + 1)
 
-    assertEquals(listOf("trim-memory"), reasons)
+    assertEquals(
+      listOf(
+        "trim-memory" to ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN,
+        "trim-memory" to ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN + 1,
+      ),
+      events,
+    )
   }
 
   @Test

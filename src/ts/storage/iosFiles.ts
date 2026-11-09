@@ -130,6 +130,33 @@ export async function pickIOSFile(
     })
 }
 
+export interface IOSPickedFiles {
+    files: IOSPickedFile[]
+    /** Picked files that could not be copied; the others are still returned. */
+    failures: { name: string; message: string }[]
+}
+
+/** Picks one or more files; each is a staged copy the caller discards. */
+export async function pickIOSFiles(
+    signal?: AbortSignal,
+): Promise<IOSPickedFiles | null> {
+    return withLibraryFileSelection(async () => {
+        await ensureDataRoot(signal)
+        const result = await invoke<{ cancelled: boolean } & Partial<IOSPickedFiles>>(
+            'plugin:ios-native|pick_files',
+            { multiple: true, partial: true },
+        )
+        if (result.cancelled) return null
+        const files = result.files ?? []
+        const failures = result.failures ?? []
+        if (signal?.aborted) {
+            for (const file of files) await discardIOSFile(file.path).catch(() => {})
+            throw cancelled()
+        }
+        return files.length || failures.length ? { files, failures } : null
+    })
+}
+
 export const discardIOSFile = (path: string) =>
     invoke<void>('plugin:ios-native|discard_file', { path })
 
@@ -199,3 +226,19 @@ export async function downloadIOSFile(
         await remove(folder, { recursive: true })
     }
 }
+
+/** Asks for a file the app can replace until another is picked. Resolves false when the picker is cancelled. */
+export async function pickRewritableIOSFile(suggestedName: string): Promise<boolean> {
+    return withLibraryFileSelection(async () => {
+        await ensureDataRoot()
+        const result = await invoke<{ cancelled: boolean }>(
+            'plugin:ios-native|pick_rewritable_file',
+            { suggestedName },
+        )
+        return !result.cancelled
+    })
+}
+
+/** Replaces the contents of the file `pickRewritableIOSFile` picked last. */
+export const rewriteIOSFile = (text: string) =>
+    invoke<void>('plugin:ios-native|rewrite_file', { text })

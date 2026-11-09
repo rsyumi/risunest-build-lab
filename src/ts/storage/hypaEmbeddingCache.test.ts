@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { setRuntimePerformanceProfile } from '../runtimePerformanceProfile'
 import {
     consistentEmbeddings,
@@ -26,22 +26,21 @@ function entry(key: string, values: number[]): HypaEmbeddingEntry {
 }
 
 /** Mirrors the native read frame so a fake invoke can answer one. */
-function readFrame(entries: { key: string; values: number[] | null; dimensions?: number; bytes?: number[] }[]): Uint8Array {
-    const vectors = entries.map(({ values, bytes }) => bytes === undefined
-        ? new Uint8Array(Float32Array.from(values ?? []).buffer) : Uint8Array.from(bytes))
+function readFrame(entries: { key: string; values: number[] | null }[]): Uint8Array {
     const header = {
-        entries: entries.map(({ key, values, dimensions }, index) => ({
+        entries: entries.map(({ key, values }) => ({
             key,
-            dimensions: dimensions ?? values?.length ?? 0,
-            byteLength: vectors[index].length,
+            dimensions: values?.length ?? 0,
+            byteLength: (values?.length ?? 0) * 4,
         })),
     }
     const encoded = new TextEncoder().encode(JSON.stringify(header))
-    const frame = new Uint8Array(4 + encoded.length + vectors.reduce((sum, vector) => sum + vector.length, 0))
+    const body = entries.flatMap(({ values }) => values ?? [])
+    const vectors = new Uint8Array(Float32Array.from(body).buffer)
+    const frame = new Uint8Array(4 + encoded.length + vectors.length)
     new DataView(frame.buffer).setUint32(0, encoded.length, true)
     frame.set(encoded, 4)
-    let offset = 4 + encoded.length
-    for (const vector of vectors) { frame.set(vector, offset); offset += vector.length }
+    frame.set(vectors, 4 + encoded.length)
     return frame
 }
 
@@ -247,90 +246,5 @@ describe('cache availability', () => {
             ),
         )
         expect((await cache.read(['a'])).size).toBe(1)
-    })
-})
-
-describe('native cache malformed reads and captured batches', () => {
-    afterEach(() => {
-        setRuntimePerformanceProfile('normal')
-        vi.restoreAllMocks()
-    })
-
-    it.each([
-        { bytes: [255], bits: [255, 0] },
-        { bytes: [0, 0, 128], bits: [8388608, 0] },
-        { bytes: [0, 0, 128, 63, 255], bits: [1065353216, 255] },
-        { bytes: [0, 0, 0, 128], bits: [2147483648, 0] },
-    ])('zero-fills partial byte vectors without discarding their bits: $bytes', ({ bytes, bits }) => {
-        const decoded = decodeHypaReadFrame(readFrame([{ key: 'partial', dimensions: 2, values: null, bytes }]))
-        expect(decoded.has('partial')).toBe(true)
-        const row = decoded.get('partial')!
-        expect(row.dimensions).toBe(2)
-        expect(Array.from(new Uint32Array(row.vector.buffer, row.vector.byteOffset, row.vector.length))).toEqual(bits)
-    })
-
-    it('discards every hit when an overlong vector follows valid rows and an earlier read batch', async () => {
-        setRuntimePerformanceProfile('low-spec')
-        vi.spyOn(console, 'warn').mockImplementation(() => undefined)
-        const keys = Array.from({ length: 129 }, (_, index) => `key-${index}`)
-        const batches: string[][] = []
-        const invoke = async <T>(_command: string, args?: unknown): Promise<T> => {
-            const batch = (args as { keys: string[] }).keys
-            batches.push(batch)
-            return readFrame(batch.map(key => key === keys[65]
-                ? { key, values: null, dimensions: 1, bytes: [0, 0, 128, 63, 255] }
-                : { key, values: [1] })) as T
-        }
-        const cache = resilientHypaEmbeddingCache(createNativeHypaEmbeddingCache(invoke, false))
-        expect([...await cache.read(keys)]).toEqual([])
-        expect(batches).toEqual([keys.slice(0, 64), keys.slice(64, 128)])
-    })
-
-    it.each([
-        { profile: 'normal' as const, next: 'low-spec' as const, count: 1153, first: [1024, 129], nextCount: 65, second: [64, 1] },
-        { profile: 'low-spec' as const, next: 'normal' as const, count: 129, first: [64, 64, 1], nextCount: 1025, second: [1024, 1] },
-    ])('captures each read batch limit before awaiting and refreshes on the next call: $profile', async ({ profile, next, count, first, nextCount, second }) => {
-        setRuntimePerformanceProfile(profile)
-        const sizes: number[] = []
-        const invoke = async <T>(_command: string, args?: unknown): Promise<T> => {
-            const keys = (args as { keys: string[] }).keys
-            sizes.push(keys.length)
-            if (sizes.length === 1) setRuntimePerformanceProfile(next)
-            return readFrame(keys.map(key => ({ key, values: [1] }))) as T
-        }
-        const cache = createNativeHypaEmbeddingCache(invoke, false)
-        const keys = Array.from({ length: count }, (_, index) => `key-${index}`)
-        expect([...await cache.read(keys)].map(([key]) => key)).toEqual(keys)
-        expect(sizes).toEqual(first)
-        sizes.length = 0
-        const later = Array.from({ length: nextCount }, (_, index) => `later-${index}`)
-        expect([...await cache.read(later)].map(([key]) => key)).toEqual(later)
-        expect(sizes).toEqual(second)
-    })
-
-    it.each([
-        { profile: 'normal' as const, next: 'low-spec' as const, count: 1153, first: [1024, 129], nextCount: 65, second: [64, 1] },
-        { profile: 'low-spec' as const, next: 'normal' as const, count: 129, first: [64, 64, 1], nextCount: 1025, second: [1024, 1] },
-    ])('captures each write batch limit before awaiting and refreshes on the next call: $profile', async ({ profile, next, count, first, nextCount, second }) => {
-        setRuntimePerformanceProfile(profile)
-        const sizes: number[] = []
-        const stored = new Map<string, HypaCachedEmbedding>()
-        const invoke = async <T>(_command: string, args?: unknown): Promise<T> => {
-            const decoded = decodeHypaReadFrame(args as Uint8Array)
-            sizes.push(decoded.size)
-            for (const [key, value] of decoded) stored.set(key, value)
-            if (sizes.length === 1) setRuntimePerformanceProfile(next)
-            return undefined as T
-        }
-        const cache = createNativeHypaEmbeddingCache(invoke, false)
-        const initial = Array.from({ length: count }, (_, index) => entry(`key-${index}`, [index, -index]))
-        await cache.write(initial)
-        expect(sizes).toEqual(first)
-        sizes.length = 0
-        const later = Array.from({ length: nextCount }, (_, index) => entry(`later-${index}`, [index + 1]))
-        await cache.write(later)
-        expect(sizes).toEqual(second)
-        expect([...stored.keys()]).toEqual([...initial, ...later].map(row => row.key))
-        for (const row of [...initial, ...later]) expect(stored.get(row.key)!.vector).toEqual(new Float32Array(row.vector))
     })
 })

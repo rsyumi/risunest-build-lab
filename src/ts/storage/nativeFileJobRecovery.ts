@@ -51,8 +51,6 @@ export const ANDROID_SAF_HANDOFF_ID_PATTERNS: Partial<
         /(?:^|[\\/])risu-module-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.risum$/,
     'export-gallery-file': /(?:^|[\\/])risu-download-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.bin$/,
     'export-gallery-zip': /(?:^|[\\/])risu-download-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.bin$/,
-    'export-preset':
-        /(?:^|[\\/])preset-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.(?:json|risup)$/,
     'export-dataset':
         /(?:^|[\\/])risu-dataset-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.json$/,
 }
@@ -138,11 +136,11 @@ async function reconcileExportInBackground(
             })
             retainNativeJob = false
         } else if (
-            (status.kind === 'export-risu-module' || status.kind === 'export-preset') &&
+            status.kind === 'export-risu-module' &&
             status.result?.handoffPath
         ) {
             retainNativeJob = true
-            await dependencies.invoke(status.kind === 'export-preset' ? 'native_preset_handoff_cleanup' : 'native_risu_module_handoff_cleanup', {
+            await dependencies.invoke('native_risu_module_handoff_cleanup', {
                 path: status.result.handoffPath,
             })
             retainNativeJob = false
@@ -245,7 +243,6 @@ export async function reconcileNativeFileJobsBeforeBootstrap(
             case 'export-character-charx':
             case 'export-character-card':
             case 'export-risu-module':
-            case 'export-preset':
             case 'export-gallery-file':
             case 'export-gallery-zip':
             case 'export-dataset':
@@ -260,9 +257,9 @@ export async function reconcileNativeFileJobsBeforeBootstrap(
                 )
                 break
             case 'prepare-content-import':
-            case 'prepare-preset-import':
             case 'import-jpeg-asset':
             case 'restore-official-account-assets':
+            case 'publish-official-account-assets':
                 await discardContentJob(job, dependencies)
                 break
             case 'official-publication-upload':

@@ -1216,15 +1216,6 @@ pub(crate) fn character_ids(connection: &Connection, generation: &str) -> StoreR
     Ok(ids)
 }
 
-pub(crate) fn pinned_preset_text(connection: &Connection, target: &ReadTarget, index: u64, id: &str, max_bytes: usize) -> StoreResult<Option<String>> {
-    let index = i64::try_from(index).map_err(|_| StoreError::Validation { message: "preset index is invalid".into() })?;
-    let row: Option<Option<String>> = connection.query_row(
-        "SELECT CASE WHEN length(CAST(value AS BLOB)) <= ?4 THEN value ELSE NULL END FROM bot_presets WHERE generation=?1 AND configured_index=?2 AND preset_id=?3",
-        params![target.generation, index, id, max_bytes as i64], |row| row.get(0),
-    ).optional()?;
-    row.ok_or_else(|| StoreError::Validation { message: "pinned preset identity changed".into() })
-}
-
 fn write_preset_array(
     connection: &Connection,
     generation: &str,

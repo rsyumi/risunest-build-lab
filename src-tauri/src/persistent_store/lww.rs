@@ -1,4 +1,3 @@
-use super::receive_evidence::{DevicePluginFence, NativeReceiveEvidence, ReceiveProvenance};
 use super::{
     active_generation, commit, current_revision, device_store, PersistentStore, RevisionResult,
     StoreError, StoreResult, WorkingSetCommit,
@@ -39,7 +38,7 @@ pub(super) use replacement_source::{clear as clear_replacement_source, insert as
 pub(super) use projection::validate_received;
 pub(super) use projection::{
     apply_mutations, capture_device_changes, capture_targets, is_device, preserve_local_root,
-    refresh_orders, archive_object_hashes, archive_value, reproject_archived_children,
+    refresh_orders, archive_object_hashes, archive_value,
 };
 
 pub(crate) fn lww_known_unit_key(key: &UnitKey) -> bool {
@@ -82,128 +81,6 @@ pub(super) fn error(message: impl ToString) -> StoreError {
         message: message.to_string(),
     }
 }
-
-fn admission_io(failure: impl std::fmt::Display) -> StoreError {
-    error(format!("intent-admission-file-io: {failure}"))
-}
-fn admission_failure(failure: &StoreError) -> bool {
-    matches!(failure, StoreError::Validation { message } if message.starts_with("intent-admission-"))
-}
-fn intent_can_complete<T>(result: &StoreResult<T>) -> bool {
-    result.is_ok() || matches!(result, Err(failure @ (StoreError::RevisionConflict { .. } | StoreError::Validation { .. }))
-        if !admission_failure(failure))
-}
-
-/// How long a caller that waits for device admission retries before it reports commit-busy, while a
-/// commit on another connection, such as a native generation saving its output, still holds it.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct AdmissionWait {
-    pub(crate) deadline: std::time::Duration,
-    pub(crate) first_pause: std::time::Duration,
-    pub(crate) max_pause: std::time::Duration,
-}
-
-impl AdmissionWait {
-    pub(crate) const DEFAULT: Self = Self {
-        deadline: std::time::Duration::from_secs(2),
-        first_pause: std::time::Duration::from_millis(10),
-        max_pause: std::time::Duration::from_millis(50),
-    };
-
-    pub(crate) fn start(self) -> AdmissionBackoff {
-        AdmissionBackoff { wait: self, started: std::time::Instant::now(), pause: self.first_pause }
-    }
-}
-
-pub(crate) struct AdmissionBackoff {
-    wait: AdmissionWait,
-    started: std::time::Instant,
-    pause: std::time::Duration,
-}
-
-impl AdmissionBackoff {
-    /// Sleeps before the next attempt, or returns `false` once the deadline has passed.
-    pub(crate) fn pause(&mut self) -> bool {
-        let remaining = self.wait.deadline.saturating_sub(self.started.elapsed());
-        if remaining.is_zero() { return false; }
-        std::thread::sleep(self.pause.min(remaining));
-        self.pause = (self.pause * 2).min(self.wait.max_pause);
-        true
-    }
-}
-
-pub(super) struct IntentAdmissionGuard {
-    file: std::fs::File,
-    path: std::path::PathBuf,
-    identity: crate::asset_repository::ExactFileIdentity,
-}
-
-impl IntentAdmissionGuard {
-    fn path(device: &Connection) -> StoreResult<std::path::PathBuf> {
-        let path = std::path::Path::new(device.path().filter(|value| !value.is_empty())
-            .ok_or_else(|| error("intent-admission-device-path"))?);
-        if path.file_name().and_then(|value| value.to_str()) != Some(device_store::DEVICE_DATABASE_FILE) {
-            return Err(error("intent-admission-device-path"));
-        }
-        Ok(std::fs::canonicalize(path).map_err(admission_io)?.with_file_name("device-admission.lock"))
-    }
-
-    #[cfg(test)]
-    pub(super) fn acquire(device: &Connection, library: &Connection) -> StoreResult<Self> {
-        Self::try_acquire(device, library)?.ok_or(StoreError::CommitBusy)
-    }
-
-    /// `None` when another connection holds the lock, the only refusal that clears once that commit ends.
-    fn try_acquire(device: &Connection, library: &Connection) -> StoreResult<Option<Self>> {
-        if !device.is_autocommit() || !library.is_autocommit() { return Err(StoreError::CommitBusy); }
-        let path = Self::path(device)?;
-        let mut options = std::fs::OpenOptions::new();
-        options.create(true).truncate(false).read(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW);
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt;
-            options.custom_flags(0x0020_0000).share_mode(0x0000_0001 | 0x0000_0002);
-        }
-        let file = options.open(&path).map_err(admission_io)?;
-        let metadata = file.metadata().map_err(admission_io)?;
-        if !metadata.is_file() || metadata.len() != 0 || crate::trust_boundary::is_link_like(&metadata) {
-            return Err(error("intent-admission-file-integrity"));
-        }
-        if let Err(failure) = fs2::FileExt::try_lock_exclusive(&file) {
-            if failure.kind() == std::io::ErrorKind::WouldBlock ||
-                failure.raw_os_error() == fs2::lock_contended_error().raw_os_error() {
-                return Ok(None);
-            }
-            return Err(admission_io(failure));
-        }
-        let identity = crate::asset_repository::exact_file_identity(&file).map_err(admission_io)?;
-        let guard = Self { file, path, identity };
-        guard.require(device)?;
-        Ok(Some(guard))
-    }
-
-    pub(super) fn require(&self, device: &Connection) -> StoreResult<()> {
-        if Self::path(device)? != self.path { return Err(error("intent-admission-file-changed")); }
-        self.require_identity()
-    }
-    pub(super) fn require_identity(&self) -> StoreResult<()> {
-        #[cfg(test)]
-        if FAIL_ADMISSION_PHASE.with(|failure| failure.replace(false)) { return Err(error("intent-admission-synthetic-phase")); }
-        if self.file.metadata().map_err(admission_io)?.len() != 0 ||
-            crate::asset_repository::exact_file_identity(&self.file).map_err(admission_io)? != self.identity ||
-            crate::asset_repository::exact_file_identity(&crate::trust_boundary::open_regular_source(&self.path).map_err(admission_io)?)
-                .map_err(admission_io)? != self.identity {
-            return Err(error("intent-admission-file-changed"));
-        }
-        Ok(())
-    }
-}
-
 fn wire<T>(result: risunest_sync_wire::Result<T>) -> StoreResult<T> {
     result.map_err(error)
 }
@@ -214,8 +91,11 @@ pub(super) fn inline(value: &Value) -> StoreResult<UnitValue> {
 /// content object. The choice depends only on the bytes, so equal values have
 /// equal units on every device.
 pub(super) fn unit_value(db: &Connection, value: &Value) -> StoreResult<UnitValue> {
+    canonical_unit_value(db, wire(risunest_sync_wire::payload_value::encode(value))?)
+}
+/// `unit_value` of the value whose `payload_value` encoding is `canonical`.
+pub(super) fn canonical_unit_value(db: &Connection, canonical: Vec<u8>) -> StoreResult<UnitValue> {
     use base64::Engine;
-    let canonical = wire(risunest_sync_wire::payload_value::encode(value))?;
     if canonical.len() <= MAX_INLINE_UNIT_BYTES {
         return Ok(UnitValue::Inline {
             bytes: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(canonical),
@@ -360,7 +240,7 @@ pub(crate) struct ApplyReceive {
     #[serde(default)]
     pub generating: Vec<MessageLocator>,
 }
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ApplyResult {
     pub revision: i64,
@@ -368,42 +248,7 @@ pub(crate) struct ApplyResult {
     pub plugin_storage_changed_keys: Vec<UnitKey>,
     pub held_keys: Vec<UnitKey>,
     pub deferred_keys: Vec<UnitKey>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub current_state_recovery_required: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_device_plugin_fence: Option<DevicePluginFence>,
 }
-pub(crate) const NATIVE_RECEIVE_RECEIPT_SETTING: &str = "native-server-receive-receipt.v1";
-const NATIVE_RECEIVE_LIBRARY_RECEIPT: &str = "native-server-receive-receipt.v1";
-
-#[derive(Serialize, Deserialize)]
-struct NativeReceivePartitionReceipt {
-    header: Header,
-    #[serde(default)]
-    archives: Vec<UnitKey>,
-    result: Option<ApplyResult>,
-}
-
-fn read_native_receive_receipt(db: &Connection, device: bool, header: &Header) -> StoreResult<Option<NativeReceivePartitionReceipt>> {
-    let (table, key) = if device { ("device_settings", NATIVE_RECEIVE_RECEIPT_SETTING) } else { ("app_kv", NATIVE_RECEIVE_LIBRARY_RECEIPT) };
-    let value: Option<String> = db.query_row(&format!("SELECT value FROM {table} WHERE key=?1"), [key], |row| row.get(0)).optional()?;
-    let receipt = value.map(|value| serde_json::from_str::<NativeReceivePartitionReceipt>(&value)).transpose()?;
-    Ok(receipt.filter(|receipt| receipt.header == *header))
-}
-
-fn write_native_receive_receipt(db: &Connection, device: bool, receipt: &NativeReceivePartitionReceipt) -> StoreResult<()> {
-    let (table, key) = if device { ("device_settings", NATIVE_RECEIVE_RECEIPT_SETTING) } else { ("app_kv", NATIVE_RECEIVE_LIBRARY_RECEIPT) };
-    db.execute(&format!("INSERT INTO {table}(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value"), params![key, serde_json::to_string(receipt)?])?;
-    Ok(())
-}
-
-fn merge_receive_result(target: &mut ApplyResult, source: ApplyResult) {
-    target.affected_keys.extend(source.affected_keys);
-    target.plugin_storage_changed_keys.extend(source.plugin_storage_changed_keys);
-    target.held_keys.extend(source.held_keys);
-    target.deferred_keys.extend(source.deferred_keys);
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ClockState {
@@ -541,7 +386,7 @@ fn quarantine_disposition(library: &Connection, device: &Connection, request_id:
 impl Intent<'_> {
     fn for_commit(input: &WorkingSetCommit, aliases: &[super::AssetAlias]) -> Self {
         // Older readers ignore unknown commit fields, so guarded deletes need a kind they reject.
-        if input.gallery_pending_fence.is_some() {
+        if input.gallery_pending_fence.is_some() || input.device_plugin_fence.is_some() {
             Self::GuardedGalleryDelete { commit: input.clone(), aliases: aliases.to_vec() }
         } else {
             Self::Commit { commit: input.clone(), aliases: aliases.to_vec() }
@@ -567,10 +412,6 @@ impl Intent<'_> {
     }
 }
 
-pub(super) fn commit_intent_digest(input: &WorkingSetCommit) -> StoreResult<String> {
-    Ok(risunest_sync_wire::hash(serde_json::to_string(&Intent::for_commit(input, &[]))?.as_bytes()))
-}
-
 #[cfg(test)]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -580,14 +421,7 @@ pub(crate) struct CommitIntentInput(Intent<'static>);
 std::thread_local! {
     static BACKUP_CAPTURE_PINNED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static BACKUP_CAPTURE_RELEASED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-    static FAIL_ADMISSION_PHASE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static BEFORE_COMMIT_ADMISSION: std::cell::RefCell<Option<Box<dyn FnOnce(&WorkingSetCommit)>>> = const { std::cell::RefCell::new(None) };
-    static BEFORE_REPLAY_PHASE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-    static AFTER_REPLACEMENT_INPUT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-    static AFTER_REPAIR_RESERVATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-    static AFTER_REPAIR_LIBRARY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-    static BEFORE_SWITCH_ADMISSION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-    pub(crate) static BEFORE_HELD_COMMIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub(super) static BEFORE_HELD_COMMIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 fn device_revision(db: &Connection) -> StoreResult<i64> {
@@ -708,7 +542,7 @@ pub(super) fn reserve_stamp(db: &Connection) -> StoreResult<Stamp> {
     )?;
     Ok(stamp)
 }
-pub(super) fn observe(db: &Connection, stamp: &Stamp) -> StoreResult<()> {
+fn observe(db: &Connection, stamp: &Stamp) -> StoreResult<()> {
     let state = clock_state(db)?;
     if state.accepted.as_ref().is_none_or(|old| old < stamp) {
         db.execute(
@@ -718,38 +552,6 @@ pub(super) fn observe(db: &Connection, stamp: &Stamp) -> StoreResult<()> {
     }
     Ok(())
 }
-pub(super) struct ReceiveProjection {
-    pub update_unit: bool,
-    pub project: bool,
-}
-pub(super) fn receive_projection(db: &Connection, change: &Change, was_unprojected: bool) -> StoreResult<ReceiveProjection> {
-    let decision = if let Some((stamp, value)) = read_unit(db, &change.key)? {
-        wire({
-            let result = compare_version(&stamp, &value, &change.stamp, &change.value);
-            #[cfg(test)]
-            crate::persistent_store::hash_work::comparison(&value, &change.value, &result);
-            result
-        })?
-    } else { LwwDecision::ApplyRemote };
-    let new_retirement = change.key.components()[0] == "exists" && matches!(change.value, UnitValue::Deleted)
-        && read_unit(db, &change.key)?.is_none_or(|(_, value)| !matches!(value, UnitValue::Deleted));
-    let update_unit = decision == LwwDecision::ApplyRemote || new_retirement;
-    Ok(ReceiveProjection { update_unit, project: update_unit || (was_unprojected && decision == LwwDecision::Identical) })
-}
-pub(super) fn apply_receive_projection(db: &Transaction<'_>, generation: &str, request_id: &str,
-    change: &Change, plan: &ReceiveProjection, binding: DecimalU64) -> StoreResult<bool> {
-    let changed = if plan.project { projection::apply_received(db, generation, &change.key, &change.value)? } else { false };
-    if plan.update_unit { put_unit(db, &change.key, &change.stamp, &change.value, &format!("receive:{request_id}"), None)?; }
-    let local_pending: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM lww_requests receipt JOIN lww_outbox pending ON pending.version=receipt.request_id WHERE receipt.request_id=?1 AND pending.key=?2 AND pending.stamp=?3 AND pending.value=?4)",
-        params![request_id,change.key.as_str(),serde_json::to_string(&change.stamp)?,serde_json::to_string(&change.value)?], |row| row.get(0))?;
-    if !local_pending { witness_received(db, change, binding)?; }
-    Ok(changed)
-}
-pub(super) fn refresh_received_orders(db: &Transaction<'_>, generation: &str, affected: &[UnitKey]) -> StoreResult<()> {
-    projection::refresh_orders(db, generation, affected)
-}
-
-
 pub(super) fn read_unit(db: &Connection, key: &UnitKey) -> StoreResult<Option<(Stamp, UnitValue)>> {
     let row: Option<(String, String)> = db
         .query_row(
@@ -769,6 +571,12 @@ pub(super) fn put_unit(
     version: &str,
     publish: Option<DecimalU64>,
 ) -> StoreResult<()> {
+    let superseded = superseded_objects(db, key, value)?;
+    if !superseded.is_empty() {
+        let since = super::commands::current_time_ms()?
+            .saturating_sub(super::ASSET_GC_PRODUCT_MINIMUM_GRACE_MS - super::SUPERSEDED_OBJECT_GRACE_MS);
+        super::message_pages::mark_unreferenced(db, superseded.iter().map(String::as_str), since)?;
+    }
     let identity = value_identity(value)?;
     let stamp = serde_json::to_string(stamp)?;
     let value = serde_json::to_string(value)?;
@@ -791,6 +599,25 @@ pub(super) fn put_unit(
         suppress_retired(db, key)?;
     }
     Ok(())
+}
+/// Objects the stored value of a plugin or messages key names and `value` does
+/// not. Plugin values are rewritten in whole, and a conversation's last page,
+/// manifest and descriptor on every message, so these wait a short grace
+/// instead of the one for objects whose last reference is unknown. Nothing is
+/// marked when the stored value or a tree node of either value cannot be read,
+/// since a sweep finds those objects later.
+fn superseded_objects(db: &Connection, key: &UnitKey, value: &UnitValue) -> StoreResult<Vec<String>> {
+    if !matches!(key.components()[0].as_str(), "plugin" | "plugin-local" | "messages") {
+        return Ok(Vec::new());
+    }
+    let Ok(Some((_, previous @ UnitValue::Object { .. }))) = read_unit(db, key) else {
+        return Ok(Vec::new());
+    };
+    let named = |value| super::message_pages::named_objects(db, value);
+    let (Some(previous), Some(current)) = (named(&previous)?, named(value)?) else {
+        return Ok(Vec::new());
+    };
+    Ok(previous.difference(&current).cloned().collect())
 }
 fn parent_keys(key: &UnitKey) -> StoreResult<Vec<UnitKey>> {
     let c = key.components();
@@ -1010,87 +837,98 @@ impl PersistentStore {
     pub(crate) fn lww_visit_backup_units(&self, lease: &str, probe: &dyn crate::local_backup::CancellationProbe,
         emit: &mut dyn FnMut(UnitKey, UnitValue) -> StoreResult<()>) -> StoreResult<()> {
         let reader = self.revision_leases.get(lease).ok_or(StoreError::SnapshotReleased)?;
-        if current_revision(&reader.connection)? != reader.target.revision
-            || active_generation(&reader.connection)? != reader.target.generation
-        { return Err(error("backup-lease-identity-changed")); }
-        let pinned: bool = reader.connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_database_list WHERE name='backup_device')", [], |row| row.get(0))?;
-        if !pinned { return Err(error("backup-capture-lease-required")); }
-        let authority: String = reader.connection.query_row("SELECT binding_authority FROM backup_device.lww_clock WHERE singleton=1", [], |row| row.get(0))?;
-        let authority: DecimalU64 = wire(authority.try_into())?;
-        let mut statement = reader.connection.prepare("SELECT key,stamp,value FROM lww_units ORDER BY key")?;
-        let rows = statement.query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)))?;
-        let scratch = crate::external_storage::leftovers::managed_scratch(&self.repository_root, "backup-units-")
-            .map_err(|error| StoreError::Store { message: error.to_string() })?;
-        let values = crate::sqlite_open::open(scratch.path().join("units.sqlite"))?;
-        values.execute_batch("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-4096; PRAGMA temp_store=FILE;
-            CREATE TABLE units(key TEXT PRIMARY KEY,stamp TEXT NOT NULL,value TEXT NOT NULL); BEGIN")?;
-        'units: for row in rows {
-            if probe.is_cancelled() { return Err(error("cancelled")); }
-            let (key,stamp,value) = row?;
-            let key: UnitKey = wire(key.try_into())?;
-            for parent in parent_keys(&key)? {
-                if is_retired(&reader.connection, &parent)? { continue 'units; }
-            }
-            let stamp: Stamp = serde_json::from_str(&stamp)?;
-            wire(stamp.validate())?;
-            let value: UnitValue = serde_json::from_str(&value)?;
-            wire({
-                let result = value.validate();
-                #[cfg(test)]
-                crate::persistent_store::hash_work::validation(&value);
-                result
-            })?;
-            if !projection::is_device(&key) { values.execute("INSERT INTO units VALUES(?1,?2,?3)",params![key.as_str(),serde_json::to_string(&stamp)?,serde_json::to_string(&value)?])?; }
-        }
-        let mut statement = reader.connection.prepare("SELECT rows.request_id,rows.key,rows.stamp,rows.value,proof.digest,proof.body FROM lww_receive_rows rows JOIN backup_device.lww_receive proof ON proof.request_id=rows.request_id WHERE rows.status IN ('held','deferred') AND proof.applied=1 AND proof.finished=1 AND proof.authority=?1 ORDER BY rows.request_id,rows.key")?;
-        let rows = statement.query_map([authority.0.to_string()], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,String>(4)?,row.get::<_,String>(5)?)))?;
-        let mut proof: Option<(String,StageReceive)> = None;
-        for row in rows {
-            if probe.is_cancelled() { return Err(error("cancelled")); }
-            let (request_id,key,stamp,value,digest,body) = row?;
-            if proof.as_ref().is_none_or(|(id,_)| id != &request_id) {
-                #[cfg(test)]
-                crate::persistent_store::hash_work::observe("native_backup_receive_proof", body.len());
-                if risunest_sync_wire::hash(body.as_bytes()) != digest { return Err(error("request-id-integrity")); }
-                let request: StageReceive = serde_json::from_str(&body)?;
-                if request.header.request_id != request_id || request.header.binding_authority != authority { return Err(error("request-id-integrity")); }
-                proof = Some((request_id.clone(),request));
-            }
-            let change = Change { key:wire(key.try_into())?, stamp:serde_json::from_str(&stamp)?, value:serde_json::from_str(&value)? };
-            let request = &proof.as_ref().unwrap().1;
-            if !request.changes.contains(&change) || change.stamp.physical_ms > request.admitted_time_upper_ms { return Err(error("request-id-integrity")); }
-            wire(change.stamp.validate())?;
-            wire({
-                let result = change.value.validate();
-                #[cfg(test)]
-                crate::persistent_store::hash_work::validation(&change.value);
-                result
-            })?;
-            projection::validate_received(&reader.connection,&change.key,&change.value)?;
-            if projection::is_device(&change.key) || parent_status(&reader.connection,&change.key)?=="retired" { continue; }
-            let previous: Option<(String,String)> = values.query_row("SELECT stamp,value FROM units WHERE key=?1",[change.key.as_str()],|row| Ok((row.get(0)?,row.get(1)?))).optional()?;
-            let decision = match previous {
-                Some((stamp,value)) => wire({
-                    let stamp: Stamp = serde_json::from_str(&stamp)?;
-                    let value: UnitValue = serde_json::from_str(&value)?;
-                    let result=compare_version(&stamp,&value,&change.stamp,&change.value);
-                    #[cfg(test)]
-                    crate::persistent_store::hash_work::comparison(&value,&change.value,&result);
-                    result
-                })?,
-                None => LwwDecision::ApplyRemote,
-            };
-            if decision==LwwDecision::ApplyRemote { values.execute("INSERT INTO units VALUES(?1,?2,?3) ON CONFLICT(key) DO UPDATE SET stamp=excluded.stamp,value=excluded.value",params![change.key.as_str(),serde_json::to_string(&change.stamp)?,serde_json::to_string(&change.value)?])?; }
-        }
-        values.execute_batch("COMMIT")?;
-        let mut query = values.prepare("SELECT key,value FROM units ORDER BY key")?;
-        let mut rows = query.query([])?;
-        while let Some(row) = rows.next()? {
-            if probe.is_cancelled() { return Err(error("cancelled")); }
-            emit(wire(row.get::<_,String>(0)?.try_into())?,serde_json::from_str(&row.get::<_,String>(1)?)?)?;
-        }
-        Ok(())
+        visit_backup_units(reader, &self.repository_root, probe, emit)
     }
+}
+
+/// Visits the units a backup of `reader`'s revision holds, in key order. The reader owns its
+/// connection, so a detached lease is visited without the store.
+pub(super) fn visit_backup_units(reader: &super::snapshot::RevisionReadLease, repository_root: &std::path::Path,
+    probe: &dyn crate::local_backup::CancellationProbe,
+    emit: &mut dyn FnMut(UnitKey, UnitValue) -> StoreResult<()>) -> StoreResult<()> {
+    if current_revision(&reader.connection)? != reader.target.revision
+        || active_generation(&reader.connection)? != reader.target.generation
+    { return Err(error("backup-lease-identity-changed")); }
+    let pinned: bool = reader.connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_database_list WHERE name='backup_device')", [], |row| row.get(0))?;
+    if !pinned { return Err(error("backup-capture-lease-required")); }
+    let authority: String = reader.connection.query_row("SELECT binding_authority FROM backup_device.lww_clock WHERE singleton=1", [], |row| row.get(0))?;
+    let authority: DecimalU64 = wire(authority.try_into())?;
+    let mut statement = reader.connection.prepare("SELECT key,stamp,value FROM lww_units ORDER BY key")?;
+    let rows = statement.query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)))?;
+    let scratch = crate::external_storage::leftovers::managed_scratch(repository_root, "backup-units-")
+        .map_err(|error| StoreError::Store { message: error.to_string() })?;
+    let values = crate::sqlite_open::open(scratch.path().join("units.sqlite"))?;
+    values.execute_batch("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-4096; PRAGMA temp_store=FILE;
+        CREATE TABLE units(key TEXT PRIMARY KEY,stamp TEXT NOT NULL,value TEXT NOT NULL); BEGIN")?;
+    'units: for row in rows {
+        if probe.is_cancelled() { return Err(error("cancelled")); }
+        let (key,stamp,value) = row?;
+        let key: UnitKey = wire(key.try_into())?;
+        for parent in parent_keys(&key)? {
+            if is_retired(&reader.connection, &parent)? { continue 'units; }
+        }
+        let stamp: Stamp = serde_json::from_str(&stamp)?;
+        wire(stamp.validate())?;
+        let value: UnitValue = serde_json::from_str(&value)?;
+        wire({
+            let result = value.validate();
+            #[cfg(test)]
+            crate::persistent_store::hash_work::validation(&value);
+            result
+        })?;
+        if !projection::is_device(&key) { values.execute("INSERT INTO units VALUES(?1,?2,?3)",params![key.as_str(),serde_json::to_string(&stamp)?,serde_json::to_string(&value)?])?; }
+    }
+    let mut statement = reader.connection.prepare("SELECT rows.request_id,rows.key,rows.stamp,rows.value,proof.digest,proof.body FROM lww_receive_rows rows JOIN backup_device.lww_receive proof ON proof.request_id=rows.request_id WHERE rows.status IN ('held','deferred') AND proof.applied=1 AND proof.finished=1 AND proof.authority=?1 ORDER BY rows.request_id,rows.key")?;
+    let rows = statement.query_map([authority.0.to_string()], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,String>(4)?,row.get::<_,String>(5)?)))?;
+    let mut proof: Option<(String,StageReceive)> = None;
+    for row in rows {
+        if probe.is_cancelled() { return Err(error("cancelled")); }
+        let (request_id,key,stamp,value,digest,body) = row?;
+        if proof.as_ref().is_none_or(|(id,_)| id != &request_id) {
+            #[cfg(test)]
+            crate::persistent_store::hash_work::observe("native_backup_receive_proof", body.len());
+            if risunest_sync_wire::hash(body.as_bytes()) != digest { return Err(error("request-id-integrity")); }
+            let request: StageReceive = serde_json::from_str(&body)?;
+            if request.header.request_id != request_id || request.header.binding_authority != authority { return Err(error("request-id-integrity")); }
+            proof = Some((request_id.clone(),request));
+        }
+        let change = Change { key:wire(key.try_into())?, stamp:serde_json::from_str(&stamp)?, value:serde_json::from_str(&value)? };
+        let request = &proof.as_ref().unwrap().1;
+        if !request.changes.contains(&change) || change.stamp.physical_ms > request.admitted_time_upper_ms { return Err(error("request-id-integrity")); }
+        wire(change.stamp.validate())?;
+        wire({
+            let result = change.value.validate();
+            #[cfg(test)]
+            crate::persistent_store::hash_work::validation(&change.value);
+            result
+        })?;
+        projection::validate_received(&reader.connection,&change.key,&change.value)?;
+        if projection::is_device(&change.key) || parent_status(&reader.connection,&change.key)?=="retired" { continue; }
+        let previous: Option<(String,String)> = values.query_row("SELECT stamp,value FROM units WHERE key=?1",[change.key.as_str()],|row| Ok((row.get(0)?,row.get(1)?))).optional()?;
+        let decision = match previous {
+            Some((stamp,value)) => wire({
+                let stamp: Stamp = serde_json::from_str(&stamp)?;
+                let value: UnitValue = serde_json::from_str(&value)?;
+                let result=compare_version(&stamp,&value,&change.stamp,&change.value);
+                #[cfg(test)]
+                crate::persistent_store::hash_work::comparison(&value,&change.value,&result);
+                result
+            })?,
+            None => LwwDecision::ApplyRemote,
+        };
+        if decision==LwwDecision::ApplyRemote { values.execute("INSERT INTO units VALUES(?1,?2,?3) ON CONFLICT(key) DO UPDATE SET stamp=excluded.stamp,value=excluded.value",params![change.key.as_str(),serde_json::to_string(&change.stamp)?,serde_json::to_string(&change.value)?])?; }
+    }
+    values.execute_batch("COMMIT")?;
+    let mut query = values.prepare("SELECT key,value FROM units ORDER BY key")?;
+    let mut rows = query.query([])?;
+    while let Some(row) = rows.next()? {
+        if probe.is_cancelled() { return Err(error("cancelled")); }
+        emit(wire(row.get::<_,String>(0)?.try_into())?,serde_json::from_str(&row.get::<_,String>(1)?)?)?;
+    }
+    Ok(())
+}
+
+impl PersistentStore {
     pub(crate) fn lww_backup_unit_values(&self, lease: &str) -> StoreResult<BTreeMap<UnitKey, UnitValue>> {
         let mut values = BTreeMap::new();
         self.lww_visit_backup_units(lease, &crate::local_backup::NeverCancelled, &mut |key,value| { values.insert(key,value); Ok(()) })?;
@@ -1114,7 +952,10 @@ impl PersistentStore {
         if stored_authority != authority || stage != staging_id || risunest_sync_wire::hash(body.as_bytes()) != digest {
             return Err(error("request-id-integrity"));
         }
-        let Some((revision, generation)) = activated else { return Err(error("restore-activation-pending")); };
+        // A complete intent without an activation receipt was closed without changes and is never replayed.
+        let Some((revision, generation)) = activated else {
+            return if complete { Ok(None) } else { Err(error("restore-activation-pending")) };
+        };
         let applied_digest: String = self.connection.query_row(
             "SELECT digest FROM lww_requests WHERE request_id=?1", [request_id], |row| row.get(0),
         )?;
@@ -1252,6 +1093,13 @@ impl PersistentStore {
     pub(crate) fn lww_verified_object_present(&self, hash: &str) -> StoreResult<bool> {
         super::message_pages::retained_object_present(&self.connection, hash)
     }
+    /// Like `lww_verified_object_present`, but a marked body that is still here
+    /// is kept instead of reported missing. A reused control catalog lists the
+    /// pages a later value replaced, which that write marked, and fetching them
+    /// again would store the same bytes.
+    pub(crate) fn lww_keep_verified_object(&self, hash: &str) -> StoreResult<bool> {
+        super::message_pages::keep_verified_object(&self.connection, hash)
+    }
     /// The bodies a new value of `key` most likely shares bytes with: the value
     /// this device holds and the one last published under `binding`.
     pub(crate) fn lww_unit_object_bases(&self, key: &UnitKey, binding: DecimalU64) -> StoreResult<Vec<String>> {
@@ -1264,13 +1112,42 @@ impl PersistentStore {
         Ok(rows.collect::<Result<_, _>>()?)
     }
     /// Device units are applied inside the device store, so their large bodies
-    /// are copied there from the library store where receive placed them.
-    fn copy_device_unit_bodies<'a>(&self, changes: impl IntoIterator<Item = &'a Change>) -> StoreResult<()> {
+    /// and the parts a plugin value names are copied there from the library
+    /// store where receive placed them. Returns the keys of values whose parts
+    /// are missing: those are left out, never applied without their parts,
+    /// while the rest of the page applies.
+    fn copy_device_unit_bodies<'a>(&self, changes: impl IntoIterator<Item = &'a Change>) -> StoreResult<BTreeSet<String>> {
         let device = self.device_store()?.connection();
-        for change in changes { copy_device_unit_body(&self.connection, device, change)?; }
-        Ok(())
+        let mut missing = BTreeSet::new();
+        'changes: for change in changes {
+            let UnitValue::Object { descriptor, .. } = &change.value else { continue };
+            if !projection::is_device(&change.key) { continue; }
+            for part in &descriptor.dependencies {
+                if !super::message_pages::retained_object_present(device, part)? {
+                    let Some(body) = super::message_pages::object_body(&self.connection, part)? else {
+                        missing.insert(change.key.as_str().to_owned());
+                        continue 'changes;
+                    };
+                    super::message_pages::put_object(device, part, &body)?;
+                }
+            }
+            if super::message_pages::retained_object_present(device, &descriptor.object_hash)? { continue; }
+            if change.key.components()[0] == "plugin-local"
+                && device_store::plugin_values::text_value::object_row(&self.connection, &descriptor.object_hash)?.1
+                    > device_store::plugin_values::text_value::PART_BYTES as u64
+            {
+                let info = device_store::plugin_values::text_value::inspect_object(&self.connection, &descriptor.object_hash)?;
+                let tx = device.unchecked_transaction()?;
+                device_store::plugin_values::text_value::copy_object(&self.connection, &tx, &info)?;
+                tx.commit()?;
+                continue;
+            }
+            let body = super::message_pages::object_body(&self.connection, &descriptor.object_hash)?
+                .ok_or_else(|| error("unit-object-body-required"))?;
+            super::message_pages::put_object(device, &descriptor.object_hash, &body)?;
+        }
+        Ok(missing)
     }
-
     pub(crate) fn lww_put_object(&self, hash: &str, body: &[u8]) -> StoreResult<()> {
         super::message_pages::put_object(&self.connection, hash, body)
     }
@@ -1371,6 +1248,13 @@ impl PersistentStore {
     pub(crate) fn lww_clock_state(&self) -> StoreResult<ClockState> {
         clock_state(self.device_store()?.connection())
     }
+    /// A stamp for a unit this device publishes outside its outbox.
+    pub(crate) fn lww_reserve_stamp(&mut self) -> StoreResult<Stamp> {
+        let tx = self.device_store_mut()?.transaction()?;
+        let stamp = reserve_stamp(&tx)?;
+        tx.commit()?;
+        Ok(stamp)
+    }
     fn intent_device_revision(&self, request_id: &str) -> StoreResult<i64> {
         let db = self.device_store()?.connection();
         let body: Option<String> = db.query_row("SELECT body FROM lww_intents WHERE request_id=?1", [request_id], |row| row.get(0)).optional()?;
@@ -1384,72 +1268,7 @@ impl PersistentStore {
         verify_device_intent_revision(self.device_store()?.connection(), request_id)
     }
 
-    pub(super) fn acquire_intent_admission(&self) -> StoreResult<IntentAdmissionGuard> {
-        let mut backoff = self.waiting_admission.map(AdmissionWait::start);
-        loop {
-            if let Some(admission) = IntentAdmissionGuard::try_acquire(self.device_store()?.connection(), &self.connection)? {
-                return Ok(admission);
-            }
-            if !backoff.as_mut().is_some_and(AdmissionBackoff::pause) { return Err(StoreError::CommitBusy); }
-        }
-    }
-
-    /// Runs `work` with each device admission it takes waiting, up to `admission_wait`, for a commit on
-    /// another connection to end instead of failing at once. Only work on a thread that holds no store
-    /// mutex may wait.
-    pub(crate) fn waiting_for_admission<T>(&mut self, work: impl FnOnce(&mut Self) -> T) -> T {
-        let outer = self.waiting_admission.replace(self.admission_wait);
-        let result = work(self);
-        self.waiting_admission = outer;
-        result
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_admission_wait(&mut self, wait: AdmissionWait) {
-        self.admission_wait = wait;
-    }
-
-    /// Holds device admission while `work` runs, as a commit on this connection does.
-    #[cfg(test)]
-    pub(crate) fn holding_admission<T>(&self, work: impl FnOnce() -> T) -> StoreResult<T> {
-        let _admission = self.acquire_intent_admission()?;
-        Ok(work())
-    }
-
-    fn require_unowned_intent_admission(&self, admission: &IntentAdmissionGuard) -> StoreResult<()> {
-        admission.require(self.device_store()?.connection())?;
-        let device = Transaction::new_unchecked(self.device_store()?.connection(), TransactionBehavior::Immediate)?;
-        let library = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
-        super::receive_batches::require_unowned_intent_admission(&device, &library)
-    }
-    fn observe_unowned_intent_admission(&self, admission: &IntentAdmissionGuard) -> StoreResult<()> {
-        admission.require(self.device_store()?.connection())?;
-        let device = Transaction::new_unchecked(self.device_store()?.connection(), TransactionBehavior::Deferred)?;
-        let library = Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)?;
-        super::receive_batches::observe_unowned_intent_admission(&device, &library)
-    }
-
-    pub(super) fn reserve_commit_only_stamp(&mut self, header: &Header) -> StoreResult<Stamp> {
-        validate_header(header)?;
-        if !self.lww_request_unreserved(&header.request_id)? {
-            return Err(error("request-id-integrity"));
-        }
-        let tx = self.device_store_mut()?.transaction()?;
-        verify(&tx, header.binding_authority)?;
-        let reserved: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM lww_intents WHERE request_id=?1)", [&header.request_id], |row| row.get(0))?;
-        if reserved { return Err(error("request-id-integrity")); }
-        let stamp = reserve_stamp(&tx)?;
-        tx.commit()?;
-        Ok(stamp)
-    }
-
-    #[cfg(test)]
     fn reserve_intent(&mut self, header: &Header, intent: &Intent) -> StoreResult<(Stamp, String)> {
-        let admission = self.acquire_intent_admission()?;
-        self.reserve_intent_holding(&admission, header, intent)
-    }
-    fn reserve_intent_holding(&mut self, admission: &IntentAdmissionGuard, header: &Header, intent: &Intent) -> StoreResult<(Stamp, String)> {
-        admission.require(self.device_store()?.connection())?;
         validate_header(header)?;
         let body = serde_json::to_string(intent)?;
         let digest = {
@@ -1461,11 +1280,7 @@ impl PersistentStore {
             }
             risunest_sync_wire::hash(hash_input)
         };
-        let library = &self.connection;
-        let device = self.device_store.as_mut().map_err(|failure| error(failure))?;
-        let tx = device.transaction()?;
-        let library = Transaction::new_unchecked(library, TransactionBehavior::Immediate)?;
-        super::receive_batches::require_unowned_intent_admission(&tx, &library)?;
+        let tx = self.device_store_mut()?.transaction()?;
         verify(&tx, header.binding_authority)?;
         let previous: Option<(String, String)> = tx
             .query_row(
@@ -1495,13 +1310,10 @@ impl PersistentStore {
             record_intent_identity(&tx, &header.request_id)?;
             stamp
         };
-        library.commit()?;
-        admission.require_identity()?;
         tx.commit()?;
         Ok((stamp, digest))
     }
-    fn complete_intent_holding(&mut self, admission: &IntentAdmissionGuard, header: &Header, keep: bool) -> StoreResult<()> {
-        admission.require(self.device_store()?.connection())?;
+    fn complete_intent(&mut self, header: &Header, keep: bool) -> StoreResult<()> {
         let tx = self.device_store_mut()?.transaction()?;
         verify(&tx, header.binding_authority)?;
         if keep {
@@ -1515,7 +1327,6 @@ impl PersistentStore {
         tx.execute("DELETE FROM lww_intent_rows WHERE request_id=?1", [&header.request_id])?;
         tx.execute("DELETE FROM lww_intent_failures WHERE request_id=?1", [&header.request_id])?;
         tx.execute("DELETE FROM lww_intent_proofs WHERE request_id=?1", [&header.request_id])?;
-        admission.require_identity()?;
         tx.commit()?;
         Ok(())
     }
@@ -1580,10 +1391,7 @@ impl PersistentStore {
         committed_revision: &mut Option<i64>,
         hold: impl FnOnce(&Self) -> StoreResult<G>,
     ) -> StoreResult<RevisionResult> {
-        #[cfg(test)]
-        BEFORE_COMMIT_ADMISSION.with(|hook| hook.borrow_mut().take()).map(|hook| hook(input));
-        let admission = self.acquire_intent_admission()?;
-        self.recover_intents_holding(false, &admission)?;
+        self.lww_recover_intents()?;
         let header = Header {
             binding_authority: input
                 .binding_authority
@@ -1594,25 +1402,33 @@ impl PersistentStore {
                 .unwrap_or_else(|| Uuid::new_v4().to_string()),
         };
         let intent = Intent::for_commit(input, aliases);
-        let (stamp, digest) = self.reserve_intent_holding(&admission,&header, &intent)?;
+        let (stamp, digest) = self.reserve_intent(&header, &intent)?;
         let held = match hold(self) {
             Ok(held) => held,
             Err(error) => {
-                if !admission_failure(&error) {
-                    self.complete_intent_holding(&admission,&header, intent.kept_after_completion())?;
-                }
+                self.complete_intent(&header, intent.kept_after_completion())?;
                 return Err(error);
             }
         };
         #[cfg(test)]
         BEFORE_HELD_COMMIT.with(|hook| hook.borrow_mut().take()).map(|hook| hook());
-        let result = admission.require(self.device_store()?.connection()).and_then(|()| commit::commit_lww(
-            &mut self.connection, input, aliases, &header, &stamp, &digest,
-        ));
+        let result = commit::commit_lww(
+            &mut self.connection,
+            input,
+            aliases,
+            &header,
+            &stamp,
+            &digest,
+        );
         drop(held);
         *committed_revision = result.as_ref().ok().map(|value| value.revision);
-        if intent_can_complete(&result) {
-            self.complete_intent_holding(&admission,&header, intent.kept_after_completion())?;
+        if result.is_ok()
+            || matches!(
+                result,
+                Err(StoreError::RevisionConflict { .. }) | Err(StoreError::Validation { .. })
+            )
+        {
+            self.complete_intent(&header, intent.kept_after_completion())?;
         }
         result
     }
@@ -1624,8 +1440,7 @@ impl PersistentStore {
         assigned_at: i64,
         expected_revision: i64,
     ) -> StoreResult<(Option<Value>, i64)> {
-        let admission = self.acquire_intent_admission()?;
-        self.recover_intents_holding(false, &admission)?;
+        self.lww_recover_intents()?;
         if commit::plugin_claim_source(&self.connection, owner, key, import_batch_id, expected_revision)?.is_none() {
             return Ok((None, expected_revision));
         }
@@ -1633,13 +1448,12 @@ impl PersistentStore {
         let intent = Intent::PluginClaim {
             owner: owner.into(), key: key.into(), import_batch_id: import_batch_id.into(), assigned_at, expected_revision,
         };
-        let (stamp, digest) = self.reserve_intent_holding(&admission,&header, &intent)?;
-        admission.require(self.device_store()?.connection())?;
+        let (stamp, digest) = self.reserve_intent(&header, &intent)?;
         let result = commit::claim_unowned_plugin_value(
             &mut self.connection, owner, key, import_batch_id, assigned_at, expected_revision, &header, &stamp, &digest,
         );
-        if intent_can_complete(&result) {
-            self.complete_intent_holding(&admission,&header, intent.kept_after_completion())?;
+        if result.is_ok() || matches!(result, Err(StoreError::RevisionConflict { .. }) | Err(StoreError::Validation { .. })) {
+            self.complete_intent(&header, intent.kept_after_completion())?;
         }
         result
     }
@@ -1651,8 +1465,7 @@ impl PersistentStore {
         assigned_at: i64,
         expected_revision: i64,
     ) -> StoreResult<(commit::AssignOutcome, i64)> {
-        let admission = self.acquire_intent_admission()?;
-        self.recover_intents_holding(false, &admission)?;
+        self.lww_recover_intents()?;
         commit::validate_assignment_owner(to_owner)?;
         if sources.is_empty() {
             return Ok((commit::AssignOutcome::default(), expected_revision));
@@ -1661,27 +1474,17 @@ impl PersistentStore {
         let intent = Intent::PluginAssign {
             sources: sources.to_vec(), to_owner: to_owner.into(), collision, assigned_at, expected_revision,
         };
-        let (stamp, digest) = self.reserve_intent_holding(&admission,&header, &intent)?;
-        admission.require(self.device_store()?.connection())?;
+        let (stamp, digest) = self.reserve_intent(&header, &intent)?;
         let result = commit::assign_plugin_storage(
             &mut self.connection, sources, to_owner, collision, assigned_at, expected_revision, &header, &stamp, &digest,
         );
-        if intent_can_complete(&result) {
-            self.complete_intent_holding(&admission,&header, intent.kept_after_completion())?;
+        if result.is_ok() || matches!(result, Err(StoreError::RevisionConflict { .. }) | Err(StoreError::Validation { .. })) {
+            self.complete_intent(&header, intent.kept_after_completion())?;
         }
         result
     }
     pub(crate) fn lww_recover_intents(&mut self) -> StoreResult<()> {
         self.recover_intents(false).map(|_| ())
-    }
-    /// `lww_recover_intents`, returning `false` instead of failing while another connection holds
-    /// device admission, so the caller can wait for that commit to end.
-    pub(crate) fn lww_try_recover_intents(&mut self) -> StoreResult<bool> {
-        let Some(admission) = IntentAdmissionGuard::try_acquire(self.device_store()?.connection(), &self.connection)? else {
-            return Ok(false);
-        };
-        self.recover_intents_holding(false, &admission)?;
-        Ok(true)
     }
     /// Replays unfinished intents while the store opens. A replay that fails is counted and
     /// waits for the next attempt instead of failing the open. Returns whether every intent
@@ -1690,29 +1493,16 @@ impl PersistentStore {
         self.recover_intents(true)
     }
     fn recover_intents(&mut self, opening: bool) -> StoreResult<bool> {
-        let admission = match self.acquire_intent_admission() {
-            Err(StoreError::CommitBusy) if opening => return Ok(false),
-            result => result?,
-        };
-        self.recover_intents_holding(opening, &admission)
-    }
-    fn recover_intents_holding(&mut self, opening: bool, admission: &IntentAdmissionGuard) -> StoreResult<bool> {
-        // Completion already removes settled rows, so most calls find nothing to prune or replay.
-        let (settled, pending): (bool, bool) = self.device_store()?.connection().query_row(
-            "SELECT EXISTS(SELECT 1 FROM lww_intent_rows WHERE request_id NOT IN (SELECT request_id FROM lww_intents WHERE complete=0))
-                OR EXISTS(SELECT 1 FROM lww_intent_proofs WHERE request_id NOT IN (SELECT request_id FROM lww_intents WHERE complete=0))
-                OR EXISTS(SELECT 1 FROM lww_intent_failures WHERE request_id NOT IN (SELECT request_id FROM lww_intents WHERE complete=0)),
-                EXISTS(SELECT 1 FROM lww_intents i WHERE complete=0 AND NOT EXISTS(SELECT 1 FROM lww_intent_failures f WHERE f.request_id=i.request_id AND f.quarantined=1))",
-            [], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        // Custody is still validated when nothing is pruned or replayed, without a write lock
-        // that another connection may hold for a long write.
-        let custody = if settled || pending { self.require_unowned_intent_admission(admission) } else { self.observe_unowned_intent_admission(admission) };
-        match custody {
-            Err(StoreError::CommitBusy) if opening => return Ok(false),
-            result => result?,
-        }
+        let authority = self.lww_binding_authority()?;
         let rows: Vec<(String, String, String, String, String)> = {
             let db = self.device_store()?.connection();
+            // Completion already removes these rows, so most calls find nothing to delete and
+            // take no write lock, which another connection may hold for a long write.
+            let settled: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM lww_intent_rows WHERE request_id NOT IN (SELECT request_id FROM lww_intents WHERE complete=0))
+                    OR EXISTS(SELECT 1 FROM lww_intent_proofs WHERE request_id NOT IN (SELECT request_id FROM lww_intents WHERE complete=0))
+                    OR EXISTS(SELECT 1 FROM lww_intent_failures WHERE request_id NOT IN (SELECT request_id FROM lww_intents WHERE complete=0))",
+                [], |r| r.get(0))?;
             if settled {
                 intent_rows::delete_settled(db)?;
                 db.execute("DELETE FROM lww_intent_proofs WHERE request_id NOT IN (SELECT request_id FROM lww_intents WHERE complete=0)", [])?;
@@ -1727,12 +1517,7 @@ impl PersistentStore {
             v
         };
         for (request_id, expected, stamp, body, digest) in rows {
-            match self.require_unowned_intent_admission(admission) {
-                Err(StoreError::CommitBusy) if opening => return Ok(false),
-                result => result?,
-            }
-            let authority = self.lww_binding_authority()?;
-            match self.recover_intent_admitted(admission, authority, &request_id, expected, &stamp, &body, &digest) {
+            match self.recover_intent(authority, &request_id, expected, &stamp, &body, &digest) {
                 Ok(()) => {}
                 // These pass on their own, so they do not count toward setting the intent aside.
                 Err(failure @ (StoreError::CommitBusy | StoreError::SnapshotReleased)) => {
@@ -1741,7 +1526,6 @@ impl PersistentStore {
                     }
                     return Err(failure);
                 }
-                Err(failure) if admission_failure(&failure) => return Err(failure),
                 Err(failure) => {
                     if self.record_intent_failure(&request_id, &failure)? {
                         crate::nlog!("warn", "unfinished intent {} set aside after repeated failures: {}", request_id, failure);
@@ -1757,43 +1541,8 @@ impl PersistentStore {
         }
         Ok(true)
     }
-    fn validate_completed_replay(&self, request_id: &str, body: &str, digest: &str) -> StoreResult<()> {
-        if risunest_sync_wire::hash(body.as_bytes()) != digest { return Err(error("request-id-integrity")); }
-        let intent: Intent = serde_json::from_str(body)?;
-        if !intent.kept_after_completion() { return Err(error("request-id-integrity")); }
-        if matches!(intent, Intent::Repair { .. }) { return Ok(()); }
-        let (committed, revision): (String, i64) = self.connection.query_row(
-            "SELECT digest,revision FROM lww_requests WHERE request_id=?1", [request_id],
-            |row| Ok((row.get(0)?, row.get(1)?))).optional()?.ok_or_else(|| error("request-receipt-missing"))?;
-        if committed != digest || matches!(intent, Intent::Replacement { base_revision, .. }
-            if base_revision.checked_add(1) != Some(revision)) { return Err(error("request-id-integrity")); }
-        Ok(())
-    }
     fn recover_intent(
         &mut self,
-        _authority: DecimalU64,
-        request_id: &str,
-        expected: String,
-        stamp: &str,
-        body: &str,
-        digest: &str,
-    ) -> StoreResult<()> {
-        let admission = self.acquire_intent_admission()?;
-        let current: Option<(String, String, String, String, bool)> = self.device_store()?.connection().query_row(
-            "SELECT authority,stamp,body,digest,complete FROM lww_intents WHERE request_id=?1", [request_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))).optional()?;
-        let Some((current_authority, current_stamp, current_body, current_digest, complete)) = current else {
-            return Err(error("intent-replay-evidence-unavailable"));
-        };
-        if current_authority != expected || current_stamp != stamp || current_body != body || current_digest != digest ||
-            risunest_sync_wire::hash(body.as_bytes()) != digest { return Err(error("request-id-integrity")); }
-        if complete { return self.validate_completed_replay(request_id, body, digest); }
-        self.require_unowned_intent_admission(&admission)?;
-        self.recover_intent_admitted(&admission, self.lww_binding_authority()?, request_id, expected, stamp, body, digest)
-    }
-    fn recover_intent_admitted(
-        &mut self,
-        admission: &IntentAdmissionGuard,
         authority: DecimalU64,
         request_id: &str,
         expected: String,
@@ -1801,13 +1550,6 @@ impl PersistentStore {
         body: &str,
         digest: &str,
     ) -> StoreResult<()> {
-        admission.require(self.device_store()?.connection())?;
-        let current: Option<(String, String, String, String, bool)> = self.device_store()?.connection().query_row(
-            "SELECT authority,stamp,body,digest,complete FROM lww_intents WHERE request_id=?1", [request_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))).optional()?;
-        let Some((a, s, b, d, complete)) = current else { return Err(error("intent-replay-evidence-unavailable")); };
-        if a != expected || s != stamp || b != body || d != digest { return Err(error("request-id-integrity")); }
-        if complete { return self.validate_completed_replay(request_id, body, digest); }
         let header = Header {
             binding_authority: wire(expected.try_into())?,
             request_id: request_id.to_owned(),
@@ -1826,7 +1568,7 @@ impl PersistentStore {
             ..
         } = &intent
         {
-            return self.finish_lww_new_device(admission,
+            return self.finish_lww_new_device(
                 &header,
                 staging_id,
                 changes,
@@ -1844,7 +1586,7 @@ impl PersistentStore {
             ..
         } = intent
         {
-            return self.finish_lww_switch(admission,&header, &change, new_authority, digest);
+            return self.finish_lww_switch(&header, &change, new_authority, digest);
         }
         if header.binding_authority != authority {
             return Err(error("unfinished-intent-authority-changed"));
@@ -1853,11 +1595,10 @@ impl PersistentStore {
         // call closes it, unless part of it already committed or its frozen
         // inputs no longer match.
         let closable = !matches!(&intent, Intent::Repair { .. });
-        match self.replay_intent(admission,&header, &stamp, digest, intent) {
+        match self.replay_intent(&header, &stamp, digest, intent) {
             Ok(()) => {}
             Err(failure @ (StoreError::Validation { .. } | StoreError::RevisionConflict { .. }))
                 if closable
-                    && !admission_failure(&failure)
                     && !breaks_intent_integrity(&failure)
                     && !self.lww_request_recorded(&header.request_id)? =>
             {
@@ -1865,7 +1606,7 @@ impl PersistentStore {
             }
             Err(failure) => return Err(failure),
         }
-        self.complete_intent_holding(admission,&header, keep)
+        self.complete_intent(&header, keep)
     }
     /// Counts a failed replay and sets the intent aside once it has failed
     /// `INTENT_QUARANTINE_FAILURES` times. Returns whether it is now set aside.
@@ -1913,8 +1654,6 @@ impl PersistentStore {
         Ok(intents)
     }
     pub(crate) fn lww_discard_quarantined_intent(&mut self, request_id: &str, expected_token: &str, expected_revision: i64) -> StoreResult<bool> {
-        let admission = self.acquire_intent_admission()?;
-        self.require_unowned_intent_admission(&admission)?;
         let actual = current_revision(&self.connection)?;
         if actual != expected_revision { return Err(StoreError::RevisionConflict { expected: expected_revision, actual }); }
         let library = &self.connection;
@@ -1951,10 +1690,7 @@ impl PersistentStore {
             |row| row.get(0),
         )?)
     }
-    fn replay_intent(&mut self, admission: &IntentAdmissionGuard, header: &Header, stamp: &Stamp, digest: &str, intent: Intent) -> StoreResult<()> {
-        #[cfg(test)]
-        BEFORE_REPLAY_PHASE.with(|hook| hook.borrow_mut().take()).map(|hook| hook());
-        admission.require(self.device_store()?.connection())?;
+    fn replay_intent(&mut self, header: &Header, stamp: &Stamp, digest: &str, intent: Intent) -> StoreResult<()> {
         let (header, stamp, digest) = (header.clone(), stamp.clone(), digest.to_owned());
         if matches!(&intent, Intent::Replacement { .. } | Intent::PluginClaim { .. } | Intent::PluginAssign { .. }) {
             self.completed_intent(&header, &intent)?;
@@ -1962,6 +1698,20 @@ impl PersistentStore {
         match intent {
             Intent::Commit { commit: input, aliases }
             | Intent::GuardedGalleryDelete { commit: input, aliases } => {
+                // The device plugin values the interrupted call checked must still be current,
+                // and their writers stay out until the commit ends, as they did for that call.
+                let _barrier = match &input.device_plugin_fence {
+                    Some(fence) => {
+                        if !self.device_store()?.plugin_gc_fence_is_current(fence)? {
+                            return Err(StoreError::RevisionConflict {
+                                expected: input.expected_revision,
+                                actual: current_revision(&self.connection)?,
+                            });
+                        }
+                        Some(self.device_store()?.acquire_plugin_gc_barrier(fence)?)
+                    }
+                    None => None,
+                };
                 commit::commit_lww(
                     &mut self.connection,
                     &input,
@@ -1993,9 +1743,9 @@ impl PersistentStore {
                 let changes =
                     intent_rows::read_replacement(self.device_store()?.connection(), &self.repository_root, &header.request_id, &changes)?;
                 if let Some(sections) = device_sections {
-                    self.finish_lww_device_replacement(&admission,&header, &staging_id, &changes, &sections, &device_changes, &stamp, &digest)?;
+                    self.finish_lww_device_replacement(&header, &staging_id, &changes, &sections, &device_changes, &stamp, &digest)?;
                 } else {
-                    self.finish_lww_replacement(&admission,&header, &staging_id, &changes, &stamp, &digest, false)?;
+                    self.finish_lww_replacement(&header, &staging_id, &changes, &stamp, &digest, false)?;
                 }
             }
             Intent::Target {
@@ -2004,7 +1754,7 @@ impl PersistentStore {
                 ..
             } => {
                 let changes = intent_rows::read_target(self.device_store()?.connection(), &self.repository_root, &header.request_id, &changes)?;
-                self.finish_lww_replacement(&admission,
+                self.finish_lww_replacement(
                     &header,
                     &staging_id,
                     &changes,
@@ -2020,7 +1770,7 @@ impl PersistentStore {
                 restore,
                 incoming,
             } => {
-                self.finish_lww_archive(&admission,
+                self.finish_lww_archive(
                     &header,
                     &stamp,
                     &digest,
@@ -2033,7 +1783,7 @@ impl PersistentStore {
                 )?;
             }
             Intent::Repair { entries } => {
-                self.finish_lww_repair(&admission,&header, &stamp, &entries)?;
+                self.finish_lww_repair(&header, &stamp, &entries)?;
             }
             Intent::Switch { .. } => unreachable!(),
             Intent::NewDevice { .. } => unreachable!(),
@@ -2052,8 +1802,6 @@ impl PersistentStore {
         self.lww_recover_intents()?;
         // A body fetched here is in place before the intent exists, so a replay never fetches.
         super::archive::fetch_operation_body(&self.connection, &self.repository_root, char_id, restore, cancel, cancellation)?;
-        let admission = self.acquire_intent_admission()?;
-        self.recover_intents_holding(false, &admission)?;
         let header = Header {
             binding_authority: self.lww_binding_authority()?,
             request_id: Uuid::new_v4().to_string(),
@@ -2065,8 +1813,8 @@ impl PersistentStore {
             restore,
             incoming: None,
         };
-        let (stamp, digest) = self.reserve_intent_holding(&admission,&header, &intent)?;
-        let result = self.finish_lww_archive(&admission,
+        let (stamp, digest) = self.reserve_intent(&header, &intent)?;
+        let result = self.finish_lww_archive(
             &header,
             &stamp,
             &digest,
@@ -2077,17 +1825,22 @@ impl PersistentStore {
             None,
             cancel,
         );
-        if !result.as_ref().is_err_and(|failure| admission_failure(failure)) &&
-            (result.as_ref().is_err_and(|error| error.to_string().contains("character archive operation cancelled")) ||
-                intent_can_complete(&result))
+        if result.as_ref().is_err_and(|error| {
+            error
+                .to_string()
+                .contains("character archive operation cancelled")
+        }) || result.is_ok()
+            || matches!(
+                result,
+                Err(StoreError::Validation { .. }) | Err(StoreError::RevisionConflict { .. })
+            )
         {
-            self.complete_intent_holding(&admission,&header, intent.kept_after_completion())?;
+            self.complete_intent(&header, intent.kept_after_completion())?;
         }
         result
     }
     fn finish_lww_archive(
         &mut self,
-        admission: &IntentAdmissionGuard,
         header: &Header,
         stamp: &Stamp,
         digest: &str,
@@ -2098,7 +1851,6 @@ impl PersistentStore {
         incoming: Option<&Change>,
         cancel: &dyn Fn() -> bool,
     ) -> StoreResult<RevisionResult> {
-        admission.require(self.device_store()?.connection())?;
         let cas = crate::asset_repository::PayloadCas::new(&self.repository_root)?;
         let context = ArchiveContext {
             header,
@@ -2128,10 +1880,8 @@ impl PersistentStore {
         };
         if result.is_ok() {
             if let Some(incoming) = incoming {
-                admission.require(self.device_store()?.connection())?;
                 let tx = self.device_store_mut()?.transaction()?;
                 observe(&tx, &incoming.stamp)?;
-                admission.require_identity()?;
                 tx.commit()?;
             }
         }
@@ -2157,20 +1907,12 @@ impl PersistentStore {
         if self.completed_intent(header, &intent)?.is_some() {
             return Ok(new_authority);
         }
-        #[cfg(test)]
-        BEFORE_SWITCH_ADMISSION.with(|hook| hook.borrow_mut().take()).map(|hook| hook());
-        let admission = self.acquire_intent_admission()?;
-        self.recover_intents_holding(false, &admission)?;
-        let intent = Intent::Switch {
-            device_revision: self.intent_device_revision(&header.request_id)?,
-            change: change.clone(),
-            new_authority,
-        };
+        self.lww_recover_intents()?;
         if self.completed_intent(header, &intent)?.is_some() {
             return Ok(new_authority);
         }
-        let (_, digest) = self.reserve_intent_holding(&admission,header, &intent)?;
-        self.finish_lww_switch(&admission,header, change, new_authority, &digest)?;
+        let (_, digest) = self.reserve_intent(header, &intent)?;
+        self.finish_lww_switch(header, change, new_authority, &digest)?;
         Ok(new_authority)
     }
     #[cfg(test)]
@@ -2186,13 +1928,11 @@ impl PersistentStore {
     }
     fn finish_lww_switch(
         &mut self,
-        admission: &IntentAdmissionGuard,
         header: &Header,
         change: &super::sync_selection::BindingSelectionChange,
         new: DecimalU64,
         digest: &str,
     ) -> StoreResult<()> {
-        admission.require(self.device_store()?.connection())?;
         self.verify_intent_device_revision(&header.request_id)?;
         let current = self.lww_binding_authority()?;
         if current != header.binding_authority && current != new {
@@ -2235,16 +1975,13 @@ impl PersistentStore {
             // Only edits made after the recorded reset remain in this outbox.
             tx.execute("UPDATE lww_outbox SET authority=?2 WHERE authority=?1", params![header.binding_authority.0.to_string(), new.0.to_string()])?;
         }
-        admission.require_identity()?;
         tx.commit()?;
         #[cfg(test)]
         if SWITCH_LIBRARY_COMMITTED.with(|stop| stop.replace(false)) {
             return Err(error("switch-stopped-after-library-commit"));
         }
-        admission.require(self.device_store()?.connection())?;
         crate::server_sync::carry_operation_log(&self.repository_root, header.binding_authority, new, retain)
             .map_err(|failure| error(failure.code))?;
-        admission.require(self.device_store()?.connection())?;
         let tx = self.device_store_mut()?.transaction()?;
         let active = authority(&tx)?;
         if active != header.binding_authority && active != new {
@@ -2272,7 +2009,6 @@ impl PersistentStore {
         )?;
         tx.execute("DELETE FROM lww_intent_failures WHERE request_id=?1", [&header.request_id])?;
         tx.execute("DELETE FROM lww_intent_proofs WHERE request_id=?1", [&header.request_id])?;
-        admission.require_identity()?;
         tx.commit()?;
         Ok(())
     }
@@ -2294,7 +2030,7 @@ impl PersistentStore {
                     vars.insert(p[1].clone(), value);
                 }
             }
-            if !projection::known(&key) && !projection::is_device(&key) {
+            if !projection::known(&key) && !projection::is_device(&key) && !risunest_sync_wire::library_format::is_key(&key) {
                 count += 1;
             }
         }
@@ -2503,7 +2239,7 @@ impl PersistentStore {
         Ok(())
     }
     fn stage_receive_rows(&mut self, request: &StageReceive) -> StoreResult<()> {
-        self.copy_device_unit_bodies(&request.changes)?;
+        let missing = self.copy_device_unit_bodies(&request.changes)?;
         for db in [
             &mut self.connection,
             &mut self.device_store.as_mut().map_err(|e| error(e))?.connection,
@@ -2513,7 +2249,7 @@ impl PersistentStore {
                 .is_some_and(|p| p.ends_with(device_store::DEVICE_DATABASE_FILE));
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             for change in &request.changes {
-                if projection::is_device(&change.key) != device {
+                if projection::is_device(&change.key) != device || missing.contains(change.key.as_str()) {
                     continue;
                 }
                 tx.execute(
@@ -2531,34 +2267,6 @@ impl PersistentStore {
         Ok(())
     }
     pub(crate) fn lww_apply_receive(&mut self, request: &ApplyReceive) -> StoreResult<ApplyResult> {
-        self.apply_receive(request, false, None)
-    }
-
-    pub(crate) fn lww_apply_receive_recorded(&mut self, request: &ApplyReceive) -> StoreResult<ApplyResult> {
-        self.apply_receive(request, true, None)
-    }
-
-    pub(crate) fn lww_apply_receive_recorded_with_baseline(&mut self, request: &ApplyReceive, baseline: Option<&NativeReceiveEvidence>) -> StoreResult<ApplyResult> {
-        self.apply_receive(request, true, baseline)
-    }
-    pub(crate) fn clear_native_receive_receipt(&self, header: &Header) -> StoreResult<()> {
-        for (db, device) in [(&self.connection, false), (self.device_store()?.connection(), true)] {
-            let tx = db.unchecked_transaction()?;
-            if read_native_receive_receipt(&tx, device, header)?.is_some() {
-                let (table, key) = if device { ("device_settings", NATIVE_RECEIVE_RECEIPT_SETTING) } else { ("app_kv", NATIVE_RECEIVE_LIBRARY_RECEIPT) };
-                tx.execute(&format!("DELETE FROM {table} WHERE key=?1"), [key])?;
-            }
-            tx.commit()?;
-        }
-        Ok(())
-    }
-
-    fn apply_receive(&mut self, request: &ApplyReceive, recorded: bool, baseline: Option<&NativeReceiveEvidence>) -> StoreResult<ApplyResult> {
-        let mut provenance = recorded.then(|| ReceiveProvenance::new(baseline, &request.header));
-        if let Some(provenance) = &mut provenance {
-            provenance.check_library(&self.connection)?;
-            provenance.check_device(self.device_store()?.connection())?;
-        }
         verify(
             self.device_store()?.connection(),
             request.header.binding_authority,
@@ -2573,43 +2281,19 @@ impl PersistentStore {
         )?;
         let staged: StageReceive = serde_json::from_str(&body)?;
         if finished {
-            if recorded {
-                let library = read_native_receive_receipt(&self.connection, false, &request.header)?.and_then(|receipt| receipt.result);
-                let device = read_native_receive_receipt(self.device_store()?.connection(), true, &request.header)?.and_then(|receipt| receipt.result);
-                if let (Some(mut library), Some(device)) = (library, device) {
-                    library.current_state_recovery_required = true;
-                    library.native_device_plugin_fence = Some(super::receive_evidence::device_fence(self.device_store()?.connection())?);
-                    merge_receive_result(&mut library, device);
-                    return Ok(library);
-                }
-            }
-            return Ok(ApplyResult { revision: self.revision()?, current_state_recovery_required: recorded,
-                native_device_plugin_fence: if recorded { Some(super::receive_evidence::device_fence(self.device_store()?.connection())?) } else { None },
-                ..Default::default() });
+            return Ok(ApplyResult {
+                revision: self.revision()?,
+                ..Default::default()
+            });
         }
-        let admission = self.acquire_intent_admission()?;
-        self.recover_intents_holding(false, &admission)?;
-        verify(self.device_store()?.connection(), request.header.binding_authority)?;
         self.stage_receive_rows(&staged)?;
-        if recorded && read_native_receive_receipt(&self.connection, false, &request.header)?.is_none() {
-            self.recover_intents_holding(false, &admission)?;
-            let mut archives = Vec::new();
-            for change in &staged.changes {
-                if self.incoming_archive_transition(change)?.is_some() { archives.push(change.key.clone()); }
-            }
-            // Archive transitions have their own durable commits. Remember their keys before
-            // starting them so a retry still reports transitions that already finished.
-            write_native_receive_receipt(&self.connection, false, &NativeReceivePartitionReceipt {
-                header: request.header.clone(), archives, result: None,
-            })?;
-        }
-        let library_complete = recorded && read_native_receive_receipt(&self.connection, false, &request.header)?.is_some_and(|receipt| receipt.result.is_some());
-        let archived = if library_complete { Vec::new() } else { self.restore_incoming_archives(&admission,&staged, provenance.as_mut())? };
-        let mut result = self.apply_receive_rows(&admission,&request.generating, false, recorded.then_some(&request.header), provenance.as_mut())?;
-        if library_complete { result.current_state_recovery_required = true; }
-        if !recorded { result.affected_keys.extend(archived); }
+        let archived = self.restore_incoming_archives(
+            request.header.binding_authority,
+            Some(&request.header.request_id),
+        )?;
+        let mut result = self.apply_receive_rows(&request.generating, false)?;
+        result.affected_keys.extend(archived);
         let tx = self.device_store_mut()?.transaction()?;
-        if let Some(provenance) = &mut provenance { provenance.check_device(&tx)?; }
         verify(&tx, request.header.binding_authority)?;
         for change in staged.changes {
             observe(&tx, &change.stamp)?;
@@ -2618,12 +2302,10 @@ impl PersistentStore {
             "UPDATE lww_receive SET applied=1 WHERE request_id=?1",
             [&request.header.request_id],
         )?;
-        if let Some(provenance) = &mut provenance {
-            provenance.committed_device(&tx)?;
-            result.current_state_recovery_required |= !provenance.exact;
-            result.native_device_plugin_fence = provenance.post_device.clone();
-        }
         tx.commit()?;
+        if finished {
+            result.revision = self.revision()?;
+        }
         Ok(result)
     }
     /// Whether an incoming `archive` change restores (`Some(true)`) or archives (`Some(false)`)
@@ -2679,45 +2361,66 @@ impl PersistentStore {
         }
         Ok(missing.into_iter().collect())
     }
-    fn restore_incoming_archives(&mut self, admission: &IntentAdmissionGuard, staged: &StageReceive, mut provenance: Option<&mut ReceiveProvenance>) -> StoreResult<Vec<UnitKey>> {
-        if let Some(provenance) = &mut provenance { provenance.check_library(&self.connection)?; }
-        self.recover_intents_holding(false, admission)?;
-        let mut affected = Vec::new();
-        for change in &staged.changes {
-            if let Some(provenance) = &mut provenance {
-                if change.key.components()[0] == "archive" {
-                    let id = format!("archive-transition:{}:{}", staged.header.request_id, risunest_sync_wire::hash(change.key.as_str().as_bytes()));
-                    let replayed: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM lww_requests WHERE request_id=?1)", [id], |row| row.get(0))?;
-                    provenance.exact &= !replayed;
-                }
+    /// Archives or restores, as this device does itself, every character a pending received
+    /// row flips here, whichever receive staged it, before any row is projected.
+    fn restore_incoming_archives(
+        &mut self,
+        binding_authority: DecimalU64,
+        own_request: Option<&str>,
+    ) -> StoreResult<Vec<UnitKey>> {
+        self.lww_recover_intents()?;
+        let pending = {
+            let mut statement = self.connection.prepare(
+                "SELECT request_id,key,stamp,value FROM lww_receive_rows WHERE status IN ('staged','held') AND json_extract(key,'$[0]')='archive' ORDER BY key",
+            )?;
+            let rows = statement.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+            })?;
+            let mut pending = Vec::new();
+            for row in rows {
+                let (id, key, stamp, value) = row?;
+                pending.push((id, Change {
+                    key: wire(key.try_into())?,
+                    stamp: serde_json::from_str(&stamp)?,
+                    value: serde_json::from_str(&value)?,
+                }));
             }
+            pending
+        };
+        let mut affected = Vec::new();
+        for (request_id, change) in &pending {
             let Some(restore) = self.incoming_archive_transition(change)? else {
                 continue;
             };
             let p = change.key.components();
             // A receive brings these bodies here before it is applied, so one that is still
-            // missing fails the apply before anything changes.
+            // missing fails the apply before anything changes. Another receive's row waits
+            // for that receive, which brings its bodies again.
+            let missing = |code: &str| if own_request == Some(request_id.as_str()) { Err(error(code)) } else { Ok(()) };
             let cas = crate::asset_repository::PayloadCas::new(&self.repository_root)?;
             if restore {
                 let generation = active_generation(&self.connection)?;
-                let archived =
-                    super::archive::read_archived_object(&self.connection, &generation, &p[1])?
-                        .ok_or_else(|| error("archive-object-missing"))?;
-                if cas.stat_object(&archived.object_hash)?.is_none() {
-                    return Err(error("archive-object-missing"));
+                let body = match super::archive::read_archived_object(&self.connection, &generation, &p[1])? {
+                    Some(archived) => cas.stat_object(&archived.object_hash)?,
+                    None => None,
+                };
+                if body.is_none() {
+                    missing("archive-object-missing")?;
+                    continue;
                 }
             } else if let Some(manifest) =
                 super::archive::owner_manifest_hash(&self.connection, &p[1])?
             {
                 if cas.stat_object(&manifest)?.is_none() {
-                    return Err(error("archive-manifest-missing"));
+                    missing("archive-manifest-missing")?;
+                    continue;
                 }
             }
             let header = Header {
-                binding_authority: staged.header.binding_authority,
+                binding_authority,
                 request_id: format!(
                     "archive-transition:{}:{}",
-                    staged.header.request_id,
+                    request_id,
                     {
                         let hash_input = change.key.as_str().as_bytes();
                         #[cfg(test)]
@@ -2727,7 +2430,6 @@ impl PersistentStore {
                 ),
             };
             let expected_revision = self.revision()?;
-            if let Some(provenance) = &mut provenance { provenance.check_library(&self.connection)?; }
             let at_ms = if restore {
                 0
             } else {
@@ -2740,8 +2442,8 @@ impl PersistentStore {
                 restore,
                 incoming: Some(change.clone()),
             };
-            let (stamp, digest) = self.reserve_intent_holding(admission,&header, &intent)?;
-            let committed = self.finish_lww_archive(&admission,
+            let (stamp, digest) = self.reserve_intent(&header, &intent)?;
+            self.finish_lww_archive(
                 &header,
                 &stamp,
                 &digest,
@@ -2752,10 +2454,7 @@ impl PersistentStore {
                 Some(change),
                 &|| false,
             )?;
-            if let Some(provenance) = &mut provenance { provenance.committed_library(committed.revision); }
-            self.complete_intent_holding(admission,&header, intent.kept_after_completion())?;
-            #[cfg(test)]
-            if provenance.is_some() { super::receive_evidence::test_hooks::after_archive(); }
+            self.complete_intent(&header, intent.kept_after_completion())?;
             affected.push(change.key.clone());
         }
         Ok(affected)
@@ -2763,15 +2462,11 @@ impl PersistentStore {
 
     fn apply_receive_rows(
         &mut self,
-        admission: &IntentAdmissionGuard,
         generating: &[MessageLocator],
         drain: bool,
-        receipt_header: Option<&Header>,
-        mut provenance: Option<&mut ReceiveProvenance>,
     ) -> StoreResult<ApplyResult> {
-        self.require_unowned_intent_admission(admission)?;
         let current_authority = self.lww_binding_authority()?;
-        let mut combined = ApplyResult::default();
+        let mut result = ApplyResult::default();
         for db in [
             &mut self.connection,
             &mut self.device_store.as_mut().map_err(|e| error(e))?.connection,
@@ -2780,18 +2475,6 @@ impl PersistentStore {
                 .path()
                 .is_some_and(|p| p.ends_with(device_store::DEVICE_DATABASE_FILE));
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            if let Some(provenance) = &mut provenance {
-                if device { provenance.check_device(&tx)?; } else { provenance.check_library(&tx)?; }
-            }
-            let prior = receipt_header.map(|header| read_native_receive_receipt(&tx, device, header)).transpose()?.flatten();
-            if let Some(result) = prior.as_ref().and_then(|receipt| receipt.result.clone()) {
-                if let Some(provenance) = &mut provenance { provenance.exact = false; }
-                if !device { combined.revision = result.revision; }
-                merge_receive_result(&mut combined, result);
-                continue;
-            }
-            let mut result = ApplyResult::default();
-            if receipt_header.is_some() { tx.execute_batch("SAVEPOINT native_receive_partition")?; }
             let generation = if device {
                 String::new()
             } else {
@@ -2830,6 +2513,17 @@ impl PersistentStore {
                     1
                 }
             });
+            // A character that was here before this apply is archived or restored only by
+            // `restore_incoming_archives`, which keeps what this device holds, so a flip it
+            // has not made waits. One this apply brings in has nothing here to keep.
+            let mut ready_archives = BTreeSet::new();
+            if !device {
+                for (_, change, _) in &changes {
+                    if change.key.components()[0] == "archive" && parent_status(&tx, &change.key)? == "ready" {
+                        ready_archives.insert(change.key.as_str().to_owned());
+                    }
+                }
+            }
             let revision = if device {
                 device_store::begin_mutation_remote(&tx)?
             } else {
@@ -2859,11 +2553,52 @@ impl PersistentStore {
                 };
                 let hard_delete = c[0] == "exists" && matches!(change.value, UnitValue::Deleted);
                 if status == "done" && (!retired || hard_delete) {
-                    let plan = receive_projection(&tx, &change, was_unprojected)?;
-                    if apply_receive_projection(&tx, &generation, &id, &change, &plan, current_authority)? {
-                        result.plugin_storage_changed_keys.push(change.key.clone());
+                    let decision = if let Some((stamp, value)) = read_unit(&tx, &change.key)? {
+                        wire({
+                            let result = compare_version(
+                                &stamp,
+                                &value,
+                                &change.stamp,
+                                &change.value,
+                            );
+                            #[cfg(test)]
+                            crate::persistent_store::hash_work::comparison(&value, &change.value, &result);
+                            result
+                        })?
+                    } else {
+                        LwwDecision::ApplyRemote
+                    };
+                    if decision == LwwDecision::ApplyRemote
+                        && ready_archives.contains(change.key.as_str())
+                        && matches!(change.value, UnitValue::Deleted)
+                            == super::archive::is_archived(&tx, &generation, &c[1])?
+                    {
+                        continue;
                     }
-                    if plan.project { result.affected_keys.push(change.key.clone()); }
+                    let new_retirement = hard_delete
+                        && read_unit(&tx, &change.key)?
+                            .is_none_or(|(_, v)| !matches!(v, UnitValue::Deleted));
+                    if decision == LwwDecision::ApplyRemote || new_retirement {
+                        if projection::apply_received(&tx, &generation, &change.key, &change.value)? {
+                            result.plugin_storage_changed_keys.push(change.key.clone());
+                        }
+                        put_unit(
+                            &tx,
+                            &change.key,
+                            &change.stamp,
+                            &change.value,
+                            &format!("receive:{id}"),
+                            None,
+                        )?;
+                        result.affected_keys.push(change.key.clone());
+                    } else if was_unprojected && decision == LwwDecision::Identical {
+                        if projection::apply_received(&tx, &generation, &change.key, &change.value)? {
+                            result.plugin_storage_changed_keys.push(change.key.clone());
+                        }
+                        result.affected_keys.push(change.key.clone());
+                    }
+                    let local_pending: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM lww_requests receipt JOIN lww_outbox pending ON pending.version=receipt.request_id WHERE receipt.request_id=?1 AND pending.key=?2 AND pending.stamp=?3 AND pending.value=?4)",params![id,change.key.as_str(),serde_json::to_string(&change.stamp)?,serde_json::to_string(&change.value)?],|row|row.get(0))?;
+                    if !local_pending { witness_received(&tx, &change, current_authority)?; }
                 }
                 if status != previous_status {
                     worked = true;
@@ -2879,10 +2614,10 @@ impl PersistentStore {
                 }
             }
             // Rows that stay held or deferred change nothing, so the revision stays.
-            if !worked && receipt_header.is_none() { merge_receive_result(&mut combined, result); continue; }
             if !worked {
-                tx.execute_batch("ROLLBACK TO native_receive_partition; RELEASE native_receive_partition")?;
-            } else if device {
+                continue;
+            }
+            if device {
                 device_store::finish_mutation_remote(&tx)?;
             } else if result.affected_keys.len() == affected_before {
                 // Only row status moved (an echo of this device's own writes, or
@@ -2893,44 +2628,22 @@ impl PersistentStore {
                 super::content_change_index::finish_mutation(&tx)?;
                 commit::set_active(&tx, revision, &generation)?;
             }
-            if let Some(header) = receipt_header {
-                if worked { tx.execute_batch("RELEASE native_receive_partition")?; }
-                if !device {
-                    result.revision = current_revision(&tx)?;
-                    for key in prior.map(|receipt| receipt.archives).unwrap_or_default() {
-                        let archive_request = format!("archive-transition:{}:{}", header.request_id, risunest_sync_wire::hash(key.as_str().as_bytes()));
-                        let committed: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM lww_requests WHERE request_id=?1)", [archive_request], |row| row.get(0))?;
-                        if committed { result.affected_keys.push(key); }
-                    }
-                }
-                write_native_receive_receipt(&tx, device, &NativeReceivePartitionReceipt {
-                    header: header.clone(), archives: Vec::new(), result: Some(result.clone()),
-                })?;
-            }
-            if !device { combined.revision = result.revision; }
-            if let Some(provenance) = &mut provenance {
-                if device { provenance.committed_device(&tx)?; } else { provenance.committed_library(result.revision); }
-            }
             tx.commit()?;
-            #[cfg(test)]
-            if device && receipt_header.is_some() { super::receive_evidence::test_hooks::after_device(); }
-            merge_receive_result(&mut combined, result);
         }
-        if receipt_header.is_none() { combined.revision = self.revision()?; }
-        Ok(combined)
+        result.revision = self.revision()?;
+        Ok(result)
     }
     pub(crate) fn lww_finish_receive(&mut self, header: &Header) -> StoreResult<()> {
         let tx = self.device_store_mut()?.transaction()?;
         verify(&tx, header.binding_authority)?;
-        let (rowid, body, applied): (i64, String, bool) = tx.query_row(
-            "SELECT rowid,body,applied FROM lww_receive WHERE request_id=?1",
+        let (body, applied): (String, bool) = tx.query_row(
+            "SELECT body,applied FROM lww_receive WHERE request_id=?1",
             [&header.request_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         if !applied {
             return Err(error("receive-not-applied"));
         }
-        super::receive_batches::witness_native_finish(&tx, rowid)?;
         let request: StageReceive = serde_json::from_str(&body)?;
         let writer = request.progress.writer_id.unwrap_or_default();
         let old: Option<String> = tx
@@ -3008,13 +2721,13 @@ impl PersistentStore {
         &mut self,
         request: &ApplyReceive,
     ) -> StoreResult<ApplyResult> {
-        let admission = self.acquire_intent_admission()?;
-        self.recover_intents_holding(false, &admission)?;
         verify(
             self.device_store()?.connection(),
             request.header.binding_authority,
         )?;
-        let result = self.apply_receive_rows(&admission,&request.generating, true, None, None)?;
+        let archived = self.restore_incoming_archives(request.header.binding_authority, None)?;
+        let mut result = self.apply_receive_rows(&request.generating, true)?;
+        result.affected_keys.extend(archived);
         self.prune_receive_history()?;
         Ok(result)
     }
@@ -3050,9 +2763,6 @@ impl PersistentStore {
         proof_id: &str,
         corrected: DecimalU64,
     ) -> StoreResult<ApplyResult> {
-        let completed: bool = self.device_store()?.connection().query_row(
-            "SELECT EXISTS(SELECT 1 FROM lww_intents WHERE request_id=?1 AND complete=1)", [&header.request_id], |row| row.get(0))?;
-        let admission = if completed { None } else { Some(self.acquire_intent_admission()?) };
         let existing: Option<(String, String, bool)> = self
             .device_store()?
             .connection()
@@ -3071,7 +2781,7 @@ impl PersistentStore {
                 return Err(error("request-id-integrity"));
             };
             if !complete {
-                self.recover_intents_holding(false, admission.as_ref().ok_or_else(|| error("intent-replay-evidence-unavailable"))?)?;
+                self.lww_recover_intents()?;
                 let settled: bool = self.device_store()?.connection().query_row(
                     "SELECT complete FROM lww_intents WHERE request_id=?1",
                     [&header.request_id],
@@ -3087,8 +2797,7 @@ impl PersistentStore {
                 ..Default::default()
             });
         }
-        self.recover_intents_holding(false, admission.as_ref().ok_or_else(|| error("intent-replay-evidence-unavailable"))?)?;
-        let admission = admission.as_ref().ok_or_else(|| error("intent-replay-evidence-unavailable"))?;
+        self.lww_recover_intents()?;
         verify(self.device_store()?.connection(), header.binding_authority)?;
         validate_header(header)?;
         let body: String = self.device_store()?.connection().query_row(
@@ -3139,12 +2848,7 @@ impl PersistentStore {
             crate::persistent_store::hash_work::observe("native_retry_intent", hash_input.len());
             risunest_sync_wire::hash(hash_input)
         };
-        admission.require(self.device_store()?.connection())?;
-        let library = &self.connection;
-        let device = self.device_store.as_mut().map_err(|failure| error(failure))?;
-        let tx = device.transaction()?;
-        let library = Transaction::new_unchecked(library, TransactionBehavior::Immediate)?;
-        super::receive_batches::require_unowned_intent_admission(&tx, &library)?;
+        let tx = self.device_store_mut()?.transaction()?;
         verify(&tx, header.binding_authority)?;
         let stamp = wire(issue_stamp(
             corrected.0,
@@ -3167,12 +2871,9 @@ impl PersistentStore {
             ],
         )?;
         record_intent_identity(&tx, &header.request_id)?;
-        library.commit()?;
         tx.commit()?;
-        #[cfg(test)]
-        AFTER_REPAIR_RESERVATION.with(|hook| hook.borrow_mut().take()).map(|hook| hook());
-        self.finish_lww_repair(&admission,header, &stamp, &entries)?;
-        self.complete_intent_holding(admission,header, intent.kept_after_completion())?;
+        self.finish_lww_repair(header, &stamp, &entries)?;
+        self.complete_intent(header, intent.kept_after_completion())?;
         Ok(ApplyResult {
             revision: self.revision()?,
             affected_keys: entries.into_iter().map(|e| e.key).collect(),
@@ -3207,12 +2908,10 @@ impl PersistentStore {
     }
     fn finish_lww_repair(
         &mut self,
-        admission: &IntentAdmissionGuard,
         header: &Header,
         stamp: &Stamp,
         entries: &[OutboxEntry],
     ) -> StoreResult<()> {
-        admission.require(self.device_store()?.connection())?;
         for db in [
             &mut self.connection,
             &mut self.device_store.as_mut().map_err(|e| error(e))?.connection,
@@ -3258,10 +2957,7 @@ impl PersistentStore {
                     Some(header.binding_authority),
                 )?;
             }
-            admission.require_identity()?;
             tx.commit()?;
-            #[cfg(test)]
-            if !device { AFTER_REPAIR_LIBRARY.with(|hook| hook.borrow_mut().take()).map(|hook| hook()); }
         }
         Ok(())
     }
@@ -3384,9 +3080,6 @@ impl PersistentStore {
             return Err(error("replacement-library-source-contains-device-units"));
         }
         let source = staged_source.then(|| replacement_source::digest(&self.connection, staging_id)).transpose()?;
-        let completed: bool = self.device_store()?.connection().query_row(
-            "SELECT EXISTS(SELECT 1 FROM lww_intents WHERE request_id=?1 AND complete=1)", [&header.request_id], |row| row.get(0))?;
-        let admission = if completed { None } else { Some(self.acquire_intent_admission()?) };
         let existing: Option<(String, String, bool)> = self
             .device_store()?
             .connection()
@@ -3406,20 +3099,18 @@ impl PersistentStore {
                 return Err(error("request-id-integrity"));
             }
             if !complete {
-                self.recover_intents_holding(false, admission.as_ref().ok_or_else(|| error("intent-replay-evidence-unavailable"))?)?;
+                self.lww_recover_intents()?;
             }
             return self
                 .completed_intent(header, &intent)?
                 .ok_or_else(|| error("replacement-intent-incomplete"));
         }
-        self.recover_intents_holding(false, admission.as_ref().ok_or_else(|| error("intent-replay-evidence-unavailable"))?)?;
-        let admission = admission.as_ref().ok_or_else(|| error("intent-replay-evidence-unavailable"))?;
+        self.lww_recover_intents()?;
         verify(self.device_store()?.connection(), header.binding_authority)?;
         if binding_stage::is_binding_stage(&self.connection, staging_id)? {
             return Err(error("binding-stage-not-replacement"));
         }
         let base_revision = super::current_revision(&self.connection)?;
-        admission.require(self.device_store()?.connection())?;
         let layer = self.remap_retired_staging(staging_id, staged_source)?;
         let effective_source = layer.map(|layer| SourceLayer { generation: staging_id, layer });
         if let Some(source) = effective_source {
@@ -3447,16 +3138,13 @@ impl PersistentStore {
             (changes, Some(settings_digest))
         } else { (vec![], None) };
         let staging_digest = binding_stage::catalog_digest(&self.connection, staging_id)?;
-        admission.require(self.device_store()?.connection())?;
         let rows = intent_rows::write(
             &mut self.device_store_mut()?.connection,
             &header.request_id,
             "changes",
             changes.texts(),
         )?;
-        #[cfg(test)]
-        AFTER_REPLACEMENT_INPUT.with(|hook| hook.borrow_mut().take()).map(|hook| hook());
-        let (stamp, digest) = self.reserve_intent_holding(admission,
+        let (stamp, digest) = self.reserve_intent(
             header,
             &Intent::Replacement {
                 device_revision: device_revision(self.device_store()?.connection())?,
@@ -3471,17 +3159,16 @@ impl PersistentStore {
             },
         )?;
         let result = if let Some(sections) = device_sections {
-            self.finish_lww_device_replacement(&admission,header, staging_id, &changes, sections, &device_changes, &stamp, &digest)?
+            self.finish_lww_device_replacement(header, staging_id, &changes, sections, &device_changes, &stamp, &digest)?
         } else {
-            let result = self.finish_lww_replacement(&admission,header, staging_id, &changes, &stamp, &digest, false)?;
-            self.complete_intent_holding(admission,header, true)?;
+            let result = self.finish_lww_replacement(header, staging_id, &changes, &stamp, &digest, false)?;
+            self.complete_intent(header, true)?;
             result
         };
         Ok(result)
     }
     fn finish_lww_device_replacement(
         &mut self,
-        admission: &IntentAdmissionGuard,
         header: &Header,
         staging_id: &str,
         changes: &FrozenRows,
@@ -3490,11 +3177,9 @@ impl PersistentStore {
         stamp: &Stamp,
         digest: &str,
     ) -> StoreResult<RevisionResult> {
-        admission.require(self.device_store()?.connection())?;
         self.verify_intent_device_revision(&header.request_id)?;
         verify(self.device_store()?.connection(), header.binding_authority)?;
-        let result = self.finish_lww_replacement(&admission,header, staging_id, changes, stamp, digest, false)?;
-        admission.require(self.device_store()?.connection())?;
+        let result = self.finish_lww_replacement(header, staging_id, changes, stamp, digest, false)?;
         let tx = self.device_store_mut()?.transaction()?;
         verify(&tx, header.binding_authority)?;
         verify_device_intent_revision(&tx, &header.request_id)?;
@@ -3508,7 +3193,6 @@ impl PersistentStore {
         tx.execute("DELETE FROM lww_intent_rows WHERE request_id=?1", [&header.request_id])?;
         tx.execute("DELETE FROM lww_intent_failures WHERE request_id=?1", [&header.request_id])?;
         tx.execute("DELETE FROM lww_intent_proofs WHERE request_id=?1", [&header.request_id])?;
-        admission.require_identity()?;
         tx.commit()?;
         Ok(result)
     }
@@ -3525,9 +3209,6 @@ impl PersistentStore {
     pub(super) fn lww_replace_target_rows(
         &mut self, header: &Header, staging_id: &str, changes: &FrozenRows,
     ) -> StoreResult<RevisionResult> {
-        let completed: bool = self.device_store()?.connection().query_row(
-            "SELECT EXISTS(SELECT 1 FROM lww_intents WHERE request_id=?1 AND complete=1)", [&header.request_id], |row| row.get(0))?;
-        let admission = if completed { None } else { Some(self.acquire_intent_admission()?) };
         let issued: bool = self.device_store()?.connection().query_row(
             "SELECT EXISTS(SELECT 1 FROM lww_intents WHERE request_id=?1)", [&header.request_id], |row| row.get(0),
         )?;
@@ -3541,14 +3222,13 @@ impl PersistentStore {
             if let Some(result) = self.completed_intent(header, &intent)? {
                 return Ok(result);
             }
-            self.recover_intents_holding(false, admission.as_ref().ok_or_else(|| error("intent-replay-evidence-unavailable"))?)?;
+            self.lww_recover_intents()?;
             if let Some(result) = self.completed_intent(header, &intent)? {
                 return Ok(result);
             }
         } else {
-            self.recover_intents_holding(false, admission.as_ref().ok_or_else(|| error("intent-replay-evidence-unavailable"))?)?;
+            self.lww_recover_intents()?;
         }
-        let admission = admission.as_ref().ok_or_else(|| error("intent-replay-evidence-unavailable"))?;
         verify(self.device_store()?.connection(), header.binding_authority)?;
         changes.visit(false, |key, stamp, value, _| {
             wire(value.validate())?;
@@ -3556,26 +3236,22 @@ impl PersistentStore {
             projection::validate_received(&self.connection, &key, &value)
         })?;
         binding_stage::validate_binding_source_rows(&self.connection, &self.repository_root, staging_id, header, changes)?;
-        admission.require(self.device_store()?.connection())?;
         let rows = intent_rows::write(
             &mut self.device_store_mut()?.connection,
             &header.request_id,
             "target",
             changes.texts(),
         )?;
-        #[cfg(test)]
-        AFTER_REPLACEMENT_INPUT.with(|hook| hook.borrow_mut().take()).map(|hook| hook());
         let intent = Intent::Target { device_revision: device_revision(self.device_store()?.connection())?, staging_id: staging_id.into(), changes: rows };
-        let (stamp, digest) = self.reserve_intent_holding(admission,header, &intent)?;
-        let result = self.finish_lww_replacement(&admission,
+        let (stamp, digest) = self.reserve_intent(header, &intent)?;
+        let result = self.finish_lww_replacement(
             header, staging_id, changes, &stamp, &digest, true,
         )?;
-        self.complete_intent_holding(admission,header, intent.kept_after_completion())?;
+        self.complete_intent(header, intent.kept_after_completion())?;
         Ok(result)
     }
     fn finish_lww_replacement(
         &mut self,
-        admission: &IntentAdmissionGuard,
         header: &Header,
         staging_id: &str,
         changes: &FrozenRows,
@@ -3583,7 +3259,6 @@ impl PersistentStore {
         digest: &str,
         target: bool,
     ) -> StoreResult<RevisionResult> {
-        admission.require(self.device_store()?.connection())?;
         if target { self.verify_intent_device_revision(&header.request_id)?; }
         let proof = if target { None } else {
             let body: String = self.device_store()?.connection().query_row(
@@ -3613,20 +3288,20 @@ impl PersistentStore {
             }),
         )?;
         if target {
+            let mut missing = BTreeSet::new();
             changes.visit(false, |key, stamp, value, _| {
                 let change = Change { key, stamp: stamp.ok_or_else(|| error("request-id-integrity"))?, value };
-                self.copy_device_unit_bodies(std::iter::once(&change))
+                missing.extend(self.copy_device_unit_bodies(std::iter::once(&change))?);
+                Ok(())
             })?;
-            admission.require(self.device_store()?.connection())?;
             let tx = self.device_store_mut()?.transaction()?;
             verify(&tx, header.binding_authority)?;
             verify_device_intent_revision(&tx, &header.request_id)?;
-            reset_target_device_rows(&tx, header, changes, header.binding_authority)?;
+            reset_target_device_rows(&tx, header, changes, header.binding_authority, &missing)?;
             tx.execute("UPDATE lww_intents SET complete=1 WHERE request_id=?1", [&header.request_id])?;
             tx.execute("DELETE FROM lww_intent_rows WHERE request_id=?1", [&header.request_id])?;
             tx.execute("DELETE FROM lww_intent_failures WHERE request_id=?1", [&header.request_id])?;
             tx.execute("DELETE FROM lww_intent_proofs WHERE request_id=?1", [&header.request_id])?;
-            admission.require_identity()?;
             tx.commit()?;
         }
         Ok(result)
@@ -3712,6 +3387,10 @@ fn replacement_changes(
     drop(captured);
     for unit in source.into_iter().flat_map(|source| replacement_source::units(tx, source)) {
         let (key, _) = unit?;
+        // The format level belongs to the library, so a backup never sets it.
+        if risunest_sync_wire::library_format::is_key(&key) {
+            continue;
+        }
         let captured: bool = changes.db.query_row("SELECT EXISTS(SELECT 1 FROM captured WHERE key=?1)", [key.as_str()], |row| row.get(0))?;
         if !captured {
             let skip = archived_character(&key).map(|id| archived(&id)).transpose()?.unwrap_or(false);
@@ -3808,34 +3487,6 @@ pub(crate) fn completed_device_replacement_receipt(
     Ok(Some(RevisionResult { revision }))
 }
 
-pub(super) fn is_device_unit(key: &UnitKey) -> bool { projection::is_device(key) }
-
-pub(super) fn copy_device_unit_body(library: &Connection, device: &Connection, change: &Change) -> StoreResult<()> {
-    let UnitValue::Object { descriptor, .. } = &change.value else { return Ok(()); };
-    if !projection::is_device(&change.key)
-        || super::message_pages::retained_object_present(device, &descriptor.object_hash)? {
-        return Ok(());
-    }
-    if change.key.components()[0] == "plugin-local"
-        && device_store::plugin_values::text_value::object_row(library, &descriptor.object_hash)?.1
-            > device_store::plugin_values::text_value::PART_BYTES as u64 {
-        let info = device_store::plugin_values::text_value::inspect_object(library, &descriptor.object_hash)?;
-        if device.is_autocommit() {
-            let tx = device.unchecked_transaction()?;
-            device_store::plugin_values::text_value::copy_object(library, &tx, &info)?;
-            tx.commit()?;
-        } else {
-            device_store::plugin_values::text_value::copy_object(library, device, &info)?;
-        }
-    } else {
-        let body = super::message_pages::object_body(library, &descriptor.object_hash)?
-            .ok_or_else(|| error("unit-object-body-required"))?;
-        super::message_pages::put_object(device, &descriptor.object_hash, &body)?;
-    }
-    Ok(())
-}
-
-
 fn carry_units(db: &Connection, old: DecimalU64, new: DecimalU64) -> StoreResult<()> {
     let (old, new) = (old.0.to_string(), new.0.to_string());
     db.execute("UPDATE lww_outbox SET authority=?2 WHERE authority=?1", params![old, new])?;
@@ -3884,12 +3535,15 @@ fn reset_target_device(
     header: &Header,
     received: &[Change],
     binding: DecimalU64,
+    missing: &BTreeSet<String>,
 ) -> StoreResult<()> {
     let rows = FrozenRows::new(root)?;
     for change in received { rows.insert(intent_rows::target_row(change)?)?; }
-    reset_target_device_rows(tx, header, &rows, binding)
+    reset_target_device_rows(tx, header, &rows, binding, missing)
 }
-fn reset_target_device_rows(tx: &Transaction<'_>, header: &Header, received: &FrozenRows, binding: DecimalU64) -> StoreResult<()> {
+/// Replaces the device rows with `received`, leaving out the values in
+/// `missing` whose parts this device could not find.
+fn reset_target_device_rows(tx: &Transaction<'_>, header: &Header, received: &FrozenRows, binding: DecimalU64, missing: &BTreeSet<String>) -> StoreResult<()> {
     tx.execute("DELETE FROM hypa_embeddings", [])?;
     tx.execute("DELETE FROM plugin_device_storage", [])?;
     tx.execute("DELETE FROM lww_units", [])?;
@@ -3898,7 +3552,7 @@ fn reset_target_device_rows(tx: &Transaction<'_>, header: &Header, received: &Fr
     received.visit(false, |key, stamp, value, _| {
         let c = Change { key, stamp: stamp.ok_or_else(|| error("request-id-integrity"))?, value };
         observe(tx, &c.stamp)?;
-        if projection::is_device(&c.key) {
+        if projection::is_device(&c.key) && !missing.contains(c.key.as_str()) {
             projection::apply(tx, "", &c.key, &c.value)?;
             put_unit(tx, &c.key, &c.stamp, &c.value, &header.request_id, None)?;
             witness_received(tx, &c, binding)?;

@@ -1,13 +1,4 @@
-import {
-    advancePluginStorageRemoteChanges,
-    beginPluginStorageReloadScope,
-    fenceUnknownPluginStorageDrain,
-    PluginStorageObservation,
-    observePluginRemoteChanges,
-    requestPluginStorageReload,
-    setPluginStorageReloadHandler,
-    type PluginStorageWriteCheck,
-} from './pluginStorageProtection'
+import { advancePluginStorageRemoteChanges, setPluginStorageReloadHandler, type PluginStorageWriteCheck } from './pluginStorageProtection'
 import { deletePluginDataItems } from './pluginDataInventory'
 import { pluginStorageStore } from './plugins.svelte'
 vi.mock('./plugins.svelte', () => ({ pluginStorageStore: { forOwner: vi.fn() } }))
@@ -20,8 +11,10 @@ import {
     type PluginStorageValueQuery,
 } from '../storage/persistentDataStore'
 import { createLeaseStub, createStoreStub } from '../storage/persistentDataStore.testSupport'
+import { UNOWNED_PLUGIN_OWNER } from './pluginOwner'
 import {
     createPluginStorageStore,
+    dropStaleColdPluginReferences,
     observePluginStorageValue,
     notifyPluginStorageAuthorityReplacement,
     registerPluginStorageLifecycle,
@@ -466,12 +459,14 @@ describe('plugin storage V3 residency', () => {
             zero: { byteSize: 1, value: 0 },
             memory: { byteSize: 8, value: { ok: true } },
         }, 1)
+        store.readRevision = vi.fn(async () => 4)
 
         await expect(storage.forOwner(OWNER).snapshot()).resolves.toEqual({
             memory: { ok: true },
             zero: 0,
         })
         expect(store.acquireRevision).toHaveBeenCalledWith(4)
+        expect(store.readRoot).not.toHaveBeenCalled()
     })
 
     it('retries a transient pinned snapshot release without duplicating successful cleanup', async () => {
@@ -619,102 +614,17 @@ it.each([false, true])('disposes an inventory deletion observer even after failu
     setPluginStorageReloadHandler(() => {})
 })
 
-
-it('fences a repeated remote key observed between steps while deferring its reload', async () => {
-    const entries = { key: { value: 'original', byteSize: 8 } }
-    const { storage } = harness(entries)
-    const guest = storage.forOwner(OWNER)
-    const unit = JSON.stringify(['plugin', OWNER, 'key'])
-    const notifications: Array<readonly string[]> = []
-    const stopObserving = observePluginRemoteChanges(keys => { notifications.push(keys); return false })
-    const reload = vi.fn()
-    setPluginStorageReloadHandler(reload)
-    const release = beginPluginStorageReloadScope()
-    try {
-        await expect(guest.getItem('key')).resolves.toBe('original')
-        entries.key.value = 'first remote'
-        storage.invalidateOwner(OWNER)
-        advancePluginStorageRemoteChanges([unit])
-        expect(notifications).toEqual([[unit]])
-        await expect(guest.getItem('key')).resolves.toBe('first remote')
-        entries.key.value = 'second remote'
-        storage.invalidateOwner(OWNER)
-        advancePluginStorageRemoteChanges([unit])
-        expect(notifications).toEqual([[unit], [unit]])
-        await expect(guest.setItem('key', 'stale between steps')).rejects.toThrow('PLUGIN_STORAGE_STALE')
-        expect(entries.key.value).toBe('second remote')
-        expect(reload).not.toHaveBeenCalled()
-        release()
-        expect(reload).toHaveBeenCalledOnce()
-    } finally {
-        release()
-        stopObserving()
-        guest.dispose()
-        setPluginStorageReloadHandler(() => {})
-    }
-})
-
-it.each(['remote', 'snapshot', 'request'] as const)('defers %s reloads until every scope releases', entrypoint => {
-    const observation = new PluginStorageObservation(`reload-scope-${entrypoint}`)
-    const unit = JSON.stringify(['plugin', observation.owner, 'key'])
-    const reload = vi.fn()
-    setPluginStorageReloadHandler(reload)
-    const releaseOuter = beginPluginStorageReloadScope()
-    const releaseInner = beginPluginStorageReloadScope()
-    try {
-        if (entrypoint === 'remote') {
-            observation.observe('key')
-            advancePluginStorageRemoteChanges([unit])
-        } else if (entrypoint === 'snapshot') {
-            const completeSnapshot = observation.beginSnapshot()
-            advancePluginStorageRemoteChanges([unit])
-            completeSnapshot(['key'])
-        } else {
-            requestPluginStorageReload()
-        }
-        expect(reload).not.toHaveBeenCalled()
-        releaseOuter()
-        releaseOuter()
-        expect(reload).not.toHaveBeenCalled()
-        releaseInner()
-        releaseInner()
-        expect(reload).toHaveBeenCalledOnce()
-        requestPluginStorageReload()
-        expect(reload).toHaveBeenCalledTimes(2)
-    } finally {
-        releaseOuter()
-        releaseInner()
-        observation.dispose()
-        setPluginStorageReloadHandler(() => {})
-    }
-})
-
-it('releases a pending reload after unknown fencing in an error finally block', async () => {
-    const observation = new PluginStorageObservation('reload-scope-error')
-    observation.observe('key')
-    const reload = vi.fn()
-    setPluginStorageReloadHandler(reload)
-    try {
-        const receive = async () => {
-            const release = beginPluginStorageReloadScope()
-            try {
-                throw new Error('receive interrupted')
-            } catch (error) {
-                fenceUnknownPluginStorageDrain()
-                expect(reload).not.toHaveBeenCalled()
-                throw error
-            } finally {
-                release()
-                release()
-            }
-        }
-        await expect(receive()).rejects.toThrow('receive interrupted')
-        expect(reload).toHaveBeenCalledOnce()
-        const releaseEmpty = beginPluginStorageReloadScope()
-        releaseEmpty()
-        expect(reload).toHaveBeenCalledOnce()
-    } finally {
-        observation.dispose()
-        setPluginStorageReloadHandler(() => {})
-    }
+it('drops stale unowned cold plugin storage references once and keeps every other value', async () => {
+    const { storage, store, mutate } = harness({
+        _coldpluginIndex: { value: 'cold-index', byteSize: 12 },
+        _coldplugin: { value: { memory: 'cold-memory' }, byteSize: 25 },
+        memory: { value: 'kept', byteSize: 6 },
+    })
+    await dropStaleColdPluginReferences(store, storage)
+    await dropStaleColdPluginReferences(store, storage)
+    expect(mutate.mock.calls.map(([mutations]) => mutations)).toEqual([[
+        { type: 'delete', owner: UNOWNED_PLUGIN_OWNER, key: '_coldpluginIndex' },
+        { type: 'delete', owner: UNOWNED_PLUGIN_OWNER, key: '_coldplugin' },
+    ]])
+    expect((await store.readPluginStorage(UNOWNED_PLUGIN_OWNER, 'memory'))?.value).toBe('kept')
 })

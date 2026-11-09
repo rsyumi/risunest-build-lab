@@ -37,7 +37,7 @@ impl restore::ReplacementSink for StoreSink {
             .unwrap()
             .replace_add_characters(id, expanded.as_deref().unwrap_or(characters))
     }
-    fn commit(&self, id: &str, revision: i64) -> StoreResult<RevisionResult> {
+    fn commit(&self, id: &str, revision: i64, _binding_authority: Option<&str>) -> StoreResult<RevisionResult> {
         let mut store = self.store.lock().unwrap();
         store.replace_put_asset_aliases(id, &self.payloads.asset_aliases)?;
         self.durable
@@ -551,6 +551,41 @@ fn extensionless_inlays_preserve_base64_signature_and_raw_sidecar_bytes() {
         let alias = payloads.asset_aliases.iter().find(|alias| alias.key == id).unwrap();
         assert_eq!(alias.object_hash.as_deref(), Some(hex::encode(Sha256::digest(bytes)).as_str()), "{id}");
         assert_eq!(alias.size, bytes.len() as i64, "{id}");
+    }
+    for metadata_kind in ["inlay_sidecar", "inlay_info"] {
+        for (metadata, ext, kind, mime, name, dimensions) in [
+            (serde_json::json!({"type":"audio","name":"External","width":2}), "mp3", "audio", "audio/mpeg", "External", (Some(2), None)),
+            (serde_json::json!({"ext":"mp3"}), "mp3", "audio", "audio/mpeg", "voice", (None, None)),
+            (serde_json::json!({}), "mp3", "audio", "audio/mpeg", "voice", (None, None)),
+            (serde_json::json!({"ext":"mp4","type":"video","name":"External","width":2,"height":3}), "mp4", "video", "video/mp4", "External", (Some(2), Some(3))),
+            (serde_json::json!({"ext":"mp3","type":null}), "mp3", "image", "audio/mpeg", "voice", (None, None)),
+        ] {
+            let mut entries = vec![
+                archive_entry("inlay/voice", br#"{"ext":"mp3","type":"audio","name":"Own","width":10,"height":20,"data":"AAEC"}"#),
+                archive_entry(&format!("{metadata_kind}/voice"), &serde_json::to_vec(&metadata).unwrap()),
+            ];
+            if metadata_kind == "inlay_sidecar" {
+                entries.push(archive_entry("inlay_info/voice", br#"{"ext":"gif","type":"image","name":"Legacy","width":7,"height":8}"#));
+            }
+            let payloads = plan(entries.concat(), &NeverCancelled).unwrap();
+            assert!(payloads.invalid_inlays.is_empty());
+            assert_eq!(payloads.skipped_inlays, 0);
+            assert_eq!(payloads.asset_aliases.len(), 1);
+            let alias = &payloads.asset_aliases[0];
+            assert_eq!(alias.ext, ext, "{metadata_kind}: {metadata}");
+            assert_eq!(alias.inlay_type.as_deref(), Some(kind), "{metadata_kind}: {metadata}");
+            assert_eq!(alias.mime, mime);
+            assert_eq!(alias.name, name);
+            assert_eq!((alias.width, alias.height), dimensions);
+            assert_eq!(alias.object_hash.as_deref(), Some(hex::encode(Sha256::digest([0, 1, 2])).as_str()));
+            assert_eq!(alias.size, 3);
+        }
+        let unsupported = plan([
+            archive_entry("inlay/voice", br#"{"ext":"mp3","type":"audio","data":"AAEC"}"#),
+            archive_entry(&format!("{metadata_kind}/voice"), br#"{"ext":"unknown","type":"audio"}"#),
+        ].concat(), &NeverCancelled).unwrap();
+        assert!(unsupported.asset_aliases.is_empty());
+        assert_eq!(unsupported.skipped_inlays, 1);
     }
 }
 

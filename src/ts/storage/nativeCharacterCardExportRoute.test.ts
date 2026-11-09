@@ -6,9 +6,39 @@ vi.mock('./persistentDataRuntime.svelte', () => ({
     getPersistentDataRuntime: vi.fn(),
 }))
 
+import { get } from 'svelte/store'
 import { exportNativeCharacterCardFromPicker } from './nativeCharacterCardExportRoute'
+import { isLibraryFileOperationReserved, registerLibraryFileOperationGate } from './libraryFileOperation'
+import { nativeFileOperation, nativeFileOperationOutcome } from './nativeFileJobManager'
+import type { NativeFileJobResult } from './nativeFileJobs'
 
 describe('native character card export route', () => {
+    it('waits for sync and backups to settle before opening the picker', async () => {
+        const calls: string[] = []
+        let settle!: () => void
+        const unregister = registerLibraryFileOperationGate(() => new Promise<void>(resolve => { settle = resolve }))
+        try {
+            const exporting = exportNativeCharacterCardFromPicker({
+                characterId: 'json-character', suggestedName: 'JSON.json', format: 'json-card', projectCharacter: () => ({}),
+            }, {}, {
+                isDesktop: () => true,
+                isAndroid: () => false,
+                chooseDestination: async () => { calls.push('pick'); return '/chosen/JSON.json' },
+                runtime: () => ({ revision: 5, flushPendingData: async () => { calls.push('flush') } }),
+                readCharacter: async () => { calls.push('read'); return {} as never },
+                runExport: async () => { calls.push('export'); return { revision: 5 } as NativeFileJobResult },
+            })
+            await vi.waitFor(() => expect(get(nativeFileOperation)?.waitingForSync).toBe(true))
+            expect(isLibraryFileOperationReserved()).toBe(true)
+            expect(calls).toEqual([])
+            settle()
+            await expect(exporting).resolves.toEqual({ revision: 5 })
+        } finally { unregister() }
+        expect(calls).toEqual(['pick', 'flush', 'read', 'export'])
+        expect(get(nativeFileOperationOutcome)).toMatchObject({ kind: 'export', state: 'succeeded' })
+        expect(isLibraryFileOperationReserved()).toBe(false)
+    })
+
     it('projects JSON metadata from the exact leased revision after destination selection', async () => {
         const calls: unknown[] = []
         const leasedCharacter = {

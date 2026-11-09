@@ -390,6 +390,44 @@ fn characters_staged_in_pieces_match_characters_staged_whole() {
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(recency, [("conv-long".to_owned(), 1_700_000_000_129), ("conv-short".to_owned(), 0)]);
+
+    // A whole character stores the exact text of its object without `chats`,
+    // wherever `chats` sits and whether or not it is present.
+    let ordered = store.replace_begin().unwrap().staging_id;
+    let extra = [
+        json!({ "type": "character", "chaId": "chats-last", "name": "Last", "desc": "", "chats": [] }),
+        json!({ "type": "character", "chaId": "no-chats", "name": "None", "desc": "" }),
+    ];
+    store.replace_add_characters(&ordered, &extra).unwrap();
+    let staged = characters.iter().map(|character| (&whole, character));
+    for (generation, character) in staged.chain(extra.iter().map(|character| (&ordered, character))) {
+        let mut detail = character.as_object().unwrap().clone();
+        detail.shift_remove("chats");
+        let stored: String = store
+            .connection
+            .query_row(
+                "SELECT detail FROM characters WHERE generation = ?1 AND character_id = ?2",
+                params![generation, character["chaId"].as_str().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, serde_json::to_string(&detail).unwrap(), "{}", character["chaId"]);
+    }
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let many = store.replace_begin().unwrap().staging_id;
+    let mut steps = Vec::new();
+    for index in 0..256 {
+        let counted = Arc::new(AtomicUsize::new(0));
+        let counter = counted.clone();
+        store.connection.progress_handler(1, Some(move || { counter.fetch_add(1, Ordering::Relaxed); false })).unwrap();
+        store
+            .replace_put_character_detail(&many, &json!({ "chaId": format!("many-{index}"), "name": "Many", "type": "character" }), 0)
+            .unwrap();
+        store.connection.progress_handler(1, None::<fn() -> bool>).unwrap();
+        steps.push(counted.load(Ordering::Relaxed));
+    }
+    assert!(steps[255] <= steps[0] * 2, "{steps:?}");
 }
 
 #[test]
@@ -482,4 +520,148 @@ fn appended_plugin_storage_batches_stage_like_the_whole_root() {
         ("root", "generation"),
         ("plugin_storage", "ordinal"),
     ]);
+}
+
+#[test]
+fn database_only_replacement_drops_forwarded_aliases_that_no_staged_value_names() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    let aliases = [
+        ("asset", "assets/root.bin"), ("asset", "assets/preset.bin"), ("asset", "assets/character.bin"),
+        ("asset", "assets/conversation.bin"), ("inlay", "message-inlay"), ("asset", "assets/key-only.bin"),
+        ("asset", "assets/unnamed.bin"),
+    ]
+    .map(|(kind, key)| AssetAlias {
+        key: key.to_owned(),
+        object_hash: Some("ab".repeat(32)),
+        kind: kind.to_owned(),
+        size: 1,
+        mime: "application/octet-stream".to_owned(),
+        name: key.to_owned(),
+        ext: "bin".to_owned(),
+        inlay_type: (kind == "inlay").then(|| "image".to_owned()),
+        width: None,
+        height: None,
+        metadata: json!({}),
+    });
+    let initial = store.replace_begin().unwrap().staging_id;
+    store.replace_put_root(&initial, &json!({})).unwrap();
+    store.replace_put_asset_aliases(&initial, &aliases).unwrap();
+    store.replace_commit(&initial, Some(0)).unwrap();
+    let character = json!({
+        "type": "character", "chaId": "named", "name": "Synthetic",
+        "emotionImages": [["happy", "assets/character.bin"]],
+        "notes": { "assets/key-only.bin": true },
+        "chats": [{
+            "id": "chat", "name": "Chat", "extra": { "background": "assets/conversation.bin" },
+            "message": [{ "role": "user", "data": "see {{inlay::message-inlay}}", "chatId": "m1" }]
+        }]
+    });
+    let all = aliases.iter().map(|alias| alias.key.as_str()).collect::<Vec<_>>();
+    // A character whose additionalAssets is not an array, or a module or an
+    // embedded module whose assets is not, leaves the scan incomplete.
+    let listed = json!({ "modules": [{ "id": "module", "assets": [] }], "personas": [{ "id": "persona", "embeddedModule": { "id": "embedded" } }] });
+    let module = json!({ "modules": [{ "id": "module", "assets": {} }] });
+    let persona = json!({ "personas": [{ "id": "persona", "embeddedModule": { "id": "embedded", "assets": {} } }] });
+    let no_module = json!({ "personas": [{ "id": "persona", "embeddedModule": null }] });
+    for (additional_assets, root, kept) in [
+        (json!({}), listed.clone(), all.clone()),
+        (json!([]), module, all.clone()),
+        (json!([]), persona, all.clone()),
+        (json!([]), no_module, all.clone()),
+        (json!([]), listed, all[..5].to_vec()),
+    ] {
+        let revision = store.revision().unwrap();
+        let stage = store.replace_begin().unwrap().staging_id;
+        let mut root = root;
+        root["activeAsset"] = json!("assets/root.bin");
+        store.replace_put_root(&stage, &root).unwrap();
+        store.replace_put_presets(&stage, &[json!({ "id": "preset", "name": "Preset", "mainPrompt": "assets/preset.bin" })]).unwrap();
+        let mut character = character.clone();
+        character["additionalAssets"] = additional_assets;
+        store.replace_add_characters(&stage, &[character]).unwrap();
+        store.replace_preserve_repositories(&stage, Some(revision)).unwrap();
+        store.replace_commit(&stage, Some(revision)).unwrap();
+        let surviving = aliases
+            .iter()
+            .filter(|alias| store.read_asset_alias(&alias.kind, &alias.key, None).unwrap().is_some())
+            .map(|alias| alias.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(surviving, kept);
+    }
+}
+
+#[test]
+fn database_only_replacement_keeps_character_owner_heads_only_for_unchanged_assets() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    let character = |id: &str, assets: Option<Value>| {
+        let mut character = json!({ "type": "character", "chaId": id, "name": id, "chats": [] });
+        if let Some(assets) = assets { character["additionalAssets"] = assets; }
+        character
+    };
+    let owner = |id: &str| AssetOwnerLocator::CharacterAdditionalAssets { character_id: id.to_owned() };
+    let module = |id: &str| AssetOwnerLocator::RootModuleAssets { module_id: id.to_owned() };
+    let embedded = |persona: &str, id: &str| AssetOwnerLocator::PersonaEmbeddedModuleAssets { persona_id: persona.to_owned(), module_id: id.to_owned() };
+    let heads = [
+        ("kept", AssetOwnerHead::present(owner("kept"), "11".repeat(32), 1)),
+        ("changed", AssetOwnerHead::present(owner("changed"), "22".repeat(32), 1)),
+        ("absent", AssetOwnerHead::absent(owner("absent"))),
+        ("malformed", AssetOwnerHead::absent(owner("malformed"))),
+        ("kept-module", AssetOwnerHead::present(module("kept-module"), "33".repeat(32), 1)),
+        ("changed-module", AssetOwnerHead::present(module("changed-module"), "44".repeat(32), 1)),
+        ("kept-embedded", AssetOwnerHead::absent(embedded("kept-persona", "kept-embedded"))),
+        ("changed-embedded", AssetOwnerHead::present(embedded("changed-persona", "changed-embedded"), "55".repeat(32), 1)),
+    ];
+    let root = |changed: &str| json!({
+        "modules": [
+            { "id": "kept-module", "assets": [["k", "assets/k", "bin"]] },
+            { "id": "changed-module", "assets": [[changed, "assets/m", "bin"]] }
+        ],
+        "personas": [
+            { "id": "kept-persona", "embeddedModule": { "id": "kept-embedded" } },
+            { "id": "changed-persona", "embeddedModule": { "id": "changed-embedded", "assets": [[changed, "assets/p", "bin"]] } }
+        ]
+    });
+    let initial = store.replace_begin().unwrap().staging_id;
+    store.replace_put_root(&initial, &root("before")).unwrap();
+    store.replace_add_characters(&initial, &[
+        character("kept", Some(json!([["a", "assets/a", "bin"]]))),
+        character("changed", Some(json!([["b", "assets/b", "bin"]]))),
+        character("absent", None),
+        character("malformed", None),
+    ]).unwrap();
+    store.replace_put_asset_owner_heads(&initial, &heads.clone().map(|(_, head)| head)).unwrap();
+    store.replace_commit(&initial, Some(0)).unwrap();
+    // Stored text that another writer left with repeated keys is read like a
+    // parse, which keeps the last value of each.
+    let active = crate::persistent_store::active_generation(&store.connection).unwrap();
+    store.connection.execute(
+        r#"UPDATE root SET value = replace(replace(value, '{"id":"kept-module"', '{"id":"stale","id":"kept-module"'),
+            '"embeddedModule":{"id":"kept-embedded"}', '"embeddedModule":{"id":"stale","id":"kept-embedded"}')
+         WHERE generation = ?1"#,
+        [&active],
+    ).unwrap();
+    let repeated: i64 = store.connection.query_row(
+        r#"SELECT (length(value) - length(replace(value, '"stale"', ''))) / 7 FROM root WHERE generation = ?1"#,
+        [&active], |row| row.get(0)).unwrap();
+    assert_eq!(repeated, 2);
+    let stage = store.replace_begin().unwrap().staging_id;
+    store.replace_put_root(&stage, &root("after")).unwrap();
+    let mut kept = character("kept", Some(json!([["a", "assets/a", "bin"]])));
+    kept["name"] = json!("Renamed");
+    store.replace_add_characters(&stage, &[
+        kept,
+        character("changed", Some(json!([["c", "assets/c", "bin"]]))),
+        character("absent", None),
+        character("malformed", Some(json!({}))),
+    ]).unwrap();
+    store.replace_preserve_repositories(&stage, Some(1)).unwrap();
+    store.replace_commit(&stage, Some(1)).unwrap();
+    let retained = heads
+        .iter()
+        .filter(|(_, head)| store.read_asset_owner_head(&head.owner, None).unwrap().is_some_and(|stored| stored.value == *head))
+        .map(|(id, _)| *id)
+        .collect::<Vec<_>>();
+    assert_eq!(retained, ["kept", "absent", "kept-module", "kept-embedded"]);
 }

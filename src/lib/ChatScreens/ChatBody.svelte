@@ -90,7 +90,6 @@
     let lastParsed = ''
     let lastCharArg:string|simpleCharacterArgument = null
     let lastChatId = -10
-    let renderRoot = $state<HTMLElement | undefined>(undefined)
     let thoughtOpenStates: boolean[] = []
     let previewThoughtOpen: boolean | undefined
 
@@ -260,6 +259,9 @@
               }
             : pendingPreview,
     )
+    // Rendered markup stays a direct child of the parent text root, as upstream
+    // renders it. While a preview is shown, no rendered markup is mounted there.
+    let renderRoot = $derived(displayedPreview ? undefined : (bodyRoot ?? undefined))
 
     function trackLiveParseDependencies(
         charArg: string | simpleCharacterArgument,
@@ -833,9 +835,7 @@
         <span class="whitespace-pre-wrap">{displayedPreview.source}</span>
     {/if}
 {:else}
-    <span style="display:contents" bind:this={renderRoot}>
-        {#key displayEpoch}
-            {@html displayedHtml}
-        {/key}
-    </span>
+    {#key displayEpoch}
+        {@html displayedHtml}
+    {/key}
 {/if}

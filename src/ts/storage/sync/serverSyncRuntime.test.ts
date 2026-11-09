@@ -27,7 +27,7 @@ vi.mock('../persistentDataRuntime.svelte', () => ({
     withPausedPersistentWrites: (reason: string, operation: (token: never) => Promise<unknown>) => h.runtime.withPausedPersistentWrites(reason, operation),
     beginActivatedLibraryGuard: (token: never) => h.runtime.beginActivatedLibraryGuard(token),
     refreshActivatedLibraryUnderPause: async () => ({ projection: 'applied' }),
-    applyPersistentStoredLwwReceive: (...args: Parameters<PersistentDataRuntime['applyStoredLwwReceive']>) => h.runtime.applyStoredLwwReceive(...args),
+    applyPersistentLwwReceive: (request: never) => h.runtime.applyLwwReceive(request),
     flushPendingDataLocally: (reason: string) => h.runtime.flushPendingData(reason),
 }))
 
@@ -103,8 +103,10 @@ beforeEach(async () => {
     h.invoke.mockImplementation(async (command: string) => {
         if (command === 'pds_lww_binding_state') return structuredClone(binding)
         if (command === 'server_sync_status') return { configured: true, writerId: 'writer', bindingAuthority: binding.targetAuthority, libraryId: 'library', deviceId: 'device' }
-        if (command === 'server_sync_lww_pull') return { bindingAuthority: binding.targetAuthority, requestId: `pull-${pulls()}`, incomingKeys: h.receivedChange === undefined ? [] : [notesKey], receivedUnits: h.receivedChange === undefined ? 0 : 1, more: false, progress: {kind: 'server', cursor: '0'}, hasBodyReferences: false, hasRepresentativeReferences: false }
-        if (command === 'server_sync_lww_apply_receive') {
+        if (command === 'server_sync_lww_pull') return { bindingAuthority: binding.targetAuthority, requestId: `pull-${pulls()}`, changes: h.receivedChange === undefined ? [] : [
+            { key: notesKey, stamp: { physicalMs: '1', logical: '0', writerId: 'remote' }, value: { kind: 'inline', bytes: 'InJlbW90ZSI=' } },
+        ] }
+        if (command === 'pds_lww_apply_receive') {
             // Native errors cross the IPC boundary as plain objects.
             if (h.applyError) throw h.applyError
             if (h.receivedChange !== undefined) {
@@ -124,9 +126,7 @@ beforeEach(async () => {
 afterEach(() => { vi.useRealTimers(); production?.disposeNativeSyncBindings() })
 
 it('pulls when the bound library opens, and not again for local saves that renew the open conversation', async () => {
-    await production.installServerSyncProduction()
-    await vi.waitFor(() => expect(h.invoke.mock.calls.some(([command]) => command === 'server_sync_lww_ack')).toBe(true))
-    await settle()
+    await production.installServerSyncProduction(); await settle()
     const opened = pulls()
     expect(opened).toBeGreaterThan(0)
     const revision = h.runtime.revision
@@ -137,19 +137,19 @@ it('pulls when the bound library opens, and not again for local saves that renew
 })
 
 it('stops on a local validation failure from the native store and ignores remote hints until retry', async () => {
-    h.applyError = { code: 'validation', message: 'lww page changes a unit outside the library', receiveNotApplied: true }
-    await production.installServerSyncProduction()
-    await vi.waitFor(() => expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: true, error: 'local-validation' }))
+    h.applyError = { code: 'validation', message: 'lww page changes a unit outside the library' }
+    await production.installServerSyncProduction(); await settle()
     const stopped = pulls()
+    expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: true, error: 'local-validation' })
     h.events.get('risu-server-sync-remote-hint')!()
     await edit('edit after the failure'); await settle()
     expect(pulls()).toBe(stopped)
 })
 
 it('tries again after a native storage failure instead of stopping', async () => {
-    h.applyError = { code: 'store-error', message: 'database is locked', receiveNotApplied: true }
-    await production.installServerSyncProduction()
-    await vi.waitFor(() => expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: false, error: 'local-storage' }))
+    h.applyError = { code: 'store-error', message: 'database is locked' }
+    await production.installServerSyncProduction(); await settle()
+    expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: false, error: 'local-storage' })
 })
 
 it('sends a change committed under a replacement fence, as archiving and restoring a character commit, once', async () => {

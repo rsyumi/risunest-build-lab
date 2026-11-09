@@ -12,13 +12,15 @@ private struct ProgressArgs: Decodable { let id: String; let completed: Int64; l
 private struct TaskProgress { let completed: Int64; let total: Int64 }
 private struct OpenedArgs: Decodable { let urls: [String] }
 private struct PathArgs: Decodable { let path: String }
-private struct PickFilesArgs: Decodable { let multiple: Bool }
+private struct PickFilesArgs: Decodable { let multiple: Bool; let partial: Bool? }
 private struct PortableSourceArgs: Decodable { let token: String; let jobId: String? }
 private struct BackupSourceCopyArgs: Decodable { let token: String; let onProgress: Channel? }
 private struct PortableSourceFormatArgs: Decodable { let token: String; let format: String }
 private struct PortableSourceProbeArgs: Decodable { let token: String; let probeId: String }
 private struct DataRootArgs: Decodable { let dataRoot: String }
 private struct ExportArgs: Decodable { let sourcePath: String; let suggestedName: String; let requestId: String }
+private struct RewritableArgs: Decodable { let suggestedName: String }
+private struct RewriteArgs: Decodable { let text: String }
 private struct NotificationArgs: Decodable { let body: String }
 private struct WebAuthenticationArgs: Decodable {
     let authorizationUrl: String
@@ -35,15 +37,21 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
     private let fileQueue = DispatchQueue(label: "io.github.rsyumi.risunest.files", qos: .userInitiated)
     private var stagingSweepStarted = false
     private var openedFiles: [[String: String]] = []
+    private var openedFilesStaging = 0
     private var pickerCall: Invoke?
     private var portablePicker = false
     private var fileBatchPicker = false
+    /// Reports each file that cannot be staged instead of failing the whole pick.
+    private var filePartialPicker = false
     private let portableSources = PortableSourceCustody.shared
     private var sourceOwner = UUID().uuidString
     private var sourceOwnerLoaded = false
     private var exportCopy: URL?
     private var exporting = false
     private var publicationId: String?
+    private var rewritablePicker = false
+    // The destination of the last move-mode export, which stays writable through its security scope.
+    private var rewritableFile: URL?
     private var continued: [String: BGTask] = [:]
     private var continuedPending: String?
     // User actions that asked for continued processing, oldest first, with their subtitles.
@@ -492,20 +500,26 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
 
     @objc func receiveOpenedFiles(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(OpenedArgs.self)
+        // Enqueued before the staging below, so the main queue counts this delivery before it finishes.
+        DispatchQueue.main.async { self.openedFilesStaging += 1 }
         fileQueue.async {
+            var entries: [[String: String]] = []
             for text in args.urls {
                 guard let url = URL(string: text), url.isFileURL,
                       ["risum", "risup", "charx", "risunest", "risudat"].contains(url.pathExtension.lowercased()) else { continue }
-                let entry: [String: String]
                 do {
                     let staged = try self.stageFile(url)
-                    entry = ["path": staged["path"] as! String]
+                    entries.append(["path": staged["path"] as! String])
                     if let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
                         try? NativeFileState.removeStagedInboxSource(url, inbox: documents.appendingPathComponent("Inbox", isDirectory: true))
                     }
-                } catch { entry = ["error": "The selected file could not be prepared for import"] }
-                DispatchQueue.main.async {
-                    self.openedFiles.append(entry)
+                } catch { entries.append(["error": "The selected file could not be prepared for import"]) }
+            }
+            DispatchQueue.main.async {
+                self.openedFiles.append(contentsOf: entries)
+                self.openedFilesStaging -= 1
+                // Files opened while others are still staged reach the web app together and import in one batch.
+                if self.openedFilesStaging == 0 && !self.openedFiles.isEmpty {
                     self.webView?.evaluateJavaScript("window.dispatchEvent(new Event('risunest-ios-opened-files'))")
                 }
             }
@@ -515,6 +529,8 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
 
     @objc func takeOpenedFiles(_ invoke: Invoke) {
         DispatchQueue.main.async {
+            // Files still being staged arrive with the event that follows them.
+            guard self.openedFilesStaging == 0 else { return invoke.resolve(["files": [[String: String]]()]) }
             let files = self.openedFiles
             self.openedFiles.removeAll()
             invoke.resolve(["files": files])
@@ -530,10 +546,11 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
         publicationId = nil
         exportCopy = nil
         exporting = false
+        rewritablePicker = false
         invoke.reject(error.localizedDescription)
     }
 
-    private func present(_ picker: UIDocumentPickerViewController, invoke: Invoke, multiple: Bool = false, batch: Bool = false) {
+    private func present(_ picker: UIDocumentPickerViewController, invoke: Invoke, multiple: Bool = false, batch: Bool = false, partial: Bool = false) {
         guard pickerCall == nil else { invoke.reject("A file picker is already open"); return }
         guard let controller = webView?.window?.rootViewController else {
             failPreparation(invoke, folder: exportCopy?.deletingLastPathComponent(), error: CocoaError(.featureUnsupported)); return
@@ -542,6 +559,7 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
         while let child = presenter.presentedViewController { presenter = child }
         pickerCall = invoke
         fileBatchPicker = batch
+        filePartialPicker = partial
         picker.delegate = self
         picker.allowsMultipleSelection = multiple
         presenter.present(picker, animated: true)
@@ -551,6 +569,7 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
         DispatchQueue.main.async {
             guard self.pickerCall == nil else { invoke.reject("A file picker is already open"); return }
             self.exporting = false
+            self.rewritablePicker = false
             self.portablePicker = false
             self.present(UIDocumentPickerViewController(forOpeningContentTypes: [.data], asCopy: false), invoke: invoke)
         }
@@ -561,9 +580,10 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
         DispatchQueue.main.async {
             guard self.pickerCall == nil else { invoke.reject("A file picker is already open"); return }
             self.exporting = false
+            self.rewritablePicker = false
             self.portablePicker = false
             self.present(UIDocumentPickerViewController(forOpeningContentTypes: [.data], asCopy: false),
-                         invoke: invoke, multiple: args.multiple, batch: true)
+                         invoke: invoke, multiple: args.multiple, batch: true, partial: args.partial ?? false)
         }
     }
 
@@ -571,6 +591,7 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
         DispatchQueue.main.async {
             guard self.pickerCall == nil else { invoke.reject("A file picker is already open"); return }
             self.exporting = false
+            self.rewritablePicker = false
             self.portablePicker = true
             self.present(UIDocumentPickerViewController(forOpeningContentTypes: [.data], asCopy: false), invoke: invoke)
         }
@@ -701,6 +722,7 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
                             self.pickerCall = nil
                             self.exportCopy = copy
                             self.exporting = true
+                            self.rewritablePicker = false
                             self.present(UIDocumentPickerViewController(forExporting: [copy], asCopy: true), invoke: invoke)
                         }
                     } catch {
@@ -708,6 +730,54 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
                     }
                 }
             } catch { invoke.reject(error.localizedDescription) }
+        }
+    }
+
+    @objc func pickRewritableFile(_ invoke: Invoke) throws {
+        let args = try invoke.parseArgs(RewritableArgs.self)
+        DispatchQueue.main.async {
+            guard self.pickerCall == nil else { invoke.reject("A file picker is already open"); return }
+            guard !args.suggestedName.isEmpty, args.suggestedName != ".", args.suggestedName != "..",
+                  !args.suggestedName.contains("/"), !args.suggestedName.contains("\\"),
+                  args.suggestedName.utf8.count <= 240 else {
+                invoke.reject("Invalid export filename"); return
+            }
+            guard let staging = self.staging else { invoke.reject(self.rootUnavailable().localizedDescription); return }
+            let folder = staging.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            do {
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                let placeholder = folder.appendingPathComponent(args.suggestedName)
+                try Data().write(to: placeholder)
+                self.exportCopy = placeholder
+                self.exporting = false
+                self.portablePicker = false
+                self.rewritablePicker = true
+                // Moving the placeholder, unlike exporting a copy, returns a security-scoped destination the app can write again.
+                self.present(UIDocumentPickerViewController(forExporting: [placeholder], asCopy: false), invoke: invoke)
+            } catch {
+                try? FileManager.default.removeItem(at: folder)
+                invoke.reject(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func rewriteFile(_ invoke: Invoke) throws {
+        let args = try invoke.parseArgs(RewriteArgs.self)
+        DispatchQueue.main.async {
+            guard let url = self.rewritableFile else { invoke.reject("No rewritable file was picked"); return }
+            self.fileQueue.async {
+                let access = url.startAccessingSecurityScopedResource()
+                defer { if access { url.stopAccessingSecurityScopedResource() } }
+                var coordinationError: NSError?
+                var writeError: Error?
+                NSFileCoordinator().coordinate(writingItemAt: url, options: .forReplacing, error: &coordinationError) { target in
+                    do { try Data(args.text.utf8).write(to: target) }
+                    catch { writeError = error }
+                }
+                if let error = coordinationError { invoke.reject(error.localizedDescription); return }
+                if let error = writeError { invoke.reject(error.localizedDescription); return }
+                invoke.resolve()
+            }
         }
     }
 
@@ -744,6 +814,11 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
             call.reject("The file picker returned no document")
             return
         }
+        if rewritablePicker {
+            rewritableFile = url
+            finishPicker(["cancelled": false])
+            return
+        }
         if exporting {
             let size = (try? exportCopy?.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
             finishPicker(["cancelled": false, "bytes": size])
@@ -761,13 +836,18 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
             return
         }
         let batch = fileBatchPicker
+        let partial = filePartialPicker
         fileQueue.async {
             var staged: [[String: Any]] = []
+            var failures: [[String: Any]] = []
             do {
                 for source in batch ? urls : [url] {
-                    staged.append(try self.stageFile(source))
+                    do { staged.append(try self.stageFile(source)) }
+                    catch let error where partial {
+                        failures.append(["name": source.lastPathComponent, "message": error.localizedDescription])
+                    }
                 }
-                let result: [String: Any] = batch ? ["cancelled": false, "files": staged] : staged[0]
+                let result: [String: Any] = batch ? ["cancelled": false, "files": staged, "failures": failures] : staged[0]
                 DispatchQueue.main.async { self.finishPicker(result) }
             } catch {
                 var message = error.localizedDescription
@@ -810,6 +890,7 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
         if let copy = exportCopy { try? FileManager.default.removeItem(at: copy.deletingLastPathComponent()) }
         exportCopy = nil
         exporting = false
+        rewritablePicker = false
         call?.resolve(result)
     }
 
@@ -820,4 +901,4 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
 }
 
 @_cdecl("init_plugin_ios_native")
-func initPlugin() -> Plugin { IosNativePlugin() }
+public func initPlugin() -> Plugin { IosNativePlugin() }

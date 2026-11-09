@@ -45,8 +45,6 @@ pub mod native_file_jobs;
 pub(crate) mod native_log;
 mod diagnostics;
 mod generation_diagnostics;
-mod native_generation;
-mod native_script;
 mod network_log;
 mod native_media;
 mod native_tokenizer;
@@ -70,10 +68,11 @@ mod publication_upload;
     target_os = "macos"
 ))]
 mod regex_shadow;
-mod render_display;
 #[cfg(not(target_os = "android"))]
 mod renderer_recovery;
 mod server_sync;
+mod async_worker;
+mod slow_log;
 mod sqlite_open;
 mod trust_boundary;
 #[cfg(test)]
@@ -399,7 +398,9 @@ fn builder_with_main_window(
         builder = builder.on_web_content_process_terminate(|webview| {
             if webview.label() == "main" {
                 crate::nlog!("error", "WebKit web content process ended");
-                generation_diagnostics::renderer_exit(generation_diagnostics::RendererExit::Apple { reason: "unknown" });
+                generation_diagnostics::renderer_exit(generation_diagnostics::RendererExit::apple(
+                    wry::web_content_process_termination_reason(),
+                ));
                 generation_diagnostics::reload_result("requested");
                 renderer_recovery::renderer_exited(webview.app_handle());
                 // A quit that arrives before the reloaded document is ready no longer waits for it.
@@ -421,9 +422,6 @@ fn builder_with_main_window(
                     && matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
                 {
                     generation_diagnostics::document_started();
-                    if let Some(state) = webview.try_state::<render_display::RenderDisplaySessions>() {
-                        state.reset_renderer_session();
-                    }
                     if let Some(state) =
                         webview.try_state::<persistent_store::PersistentStoreState>()
                     {
@@ -478,9 +476,6 @@ fn builder_with_main_window(
                 && matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
             {
                 generation_diagnostics::document_started();
-                if let Some(state) = webview.try_state::<render_display::RenderDisplaySessions>() {
-                    state.reset_renderer_session();
-                }
                 renderer_recovery::document_started(webview.app_handle());
                 if let Some(state) = webview.try_state::<persistent_store::PersistentStoreState>() {
                     if let Err(error) = state.reset_renderer_session() {
@@ -531,9 +526,6 @@ fn builder_with_main_window(
                 && matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
             {
                 generation_diagnostics::document_started();
-                if let Some(state) = webview.try_state::<render_display::RenderDisplaySessions>() {
-                    state.reset_renderer_session();
-                }
                 #[cfg(target_os = "ios")]
                 ios_lifecycle::main_document_started(webview.app_handle());
                 #[cfg(target_os = "macos")]
@@ -610,8 +602,10 @@ fn builder_with_main_window(
                 "network_log_initialize",
                 network_log::initialize(&app.state::<app_paths::AppPaths>()),
             );
-            setup_native_log_state.configure_file_path(&app_data_dir);
+            setup_native_log_state
+                .configure_file_path_for_run(&app_data_dir, &app.package_info().version.to_string());
             app.manage(setup_native_log_state.clone());
+            slow_log::start_stall_watch();
             app.manage(app_cleanup::CleanupState::initialize(app.handle())?);
             app.manage(native_file_jobs::NativeFileJobState::initialize(
                 app_data_dir.join("native-file-jobs"),
@@ -707,6 +701,11 @@ fn builder_with_main_window(
                     device_backup
                         .attach_maintenance_guard(guard)
                         .map_err(|error| format!("device maintenance guard failed: {error}"))?;
+                } else {
+                    external_storage::content_store::move_flat_files_later(
+                        app.handle(),
+                        app_data_dir.join("external-storage"),
+                    );
                 }
                 app.state::<native_media::ipc::NativeMediaIpcState>()
                     .configure(app_data_dir.join("native-media-ipc"))?;
@@ -753,7 +752,6 @@ fn builder_with_main_window(
         .manage(persistent_store::PersistentStoreState::default())
         .manage(persistent_store::commands::data_health::DataHealthState::default())
         .manage(server_sync::commands::ServerSyncCommandState::default())
-        .manage(render_display::RenderDisplaySessions::default())
         .manage(external_storage::connection_commands::ConnectionCommandState::default())
         .manage(external_storage::job_store::JobCommandState::default())
         .plugin(tauri_plugin_http::init_with_client_builder(platform_tls::apply))
@@ -795,6 +793,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         external_storage::lww_commands::external_lww_inspect,
         external_storage::lww_commands::external_lww_stage_binding,
         external_storage::lww_commands::external_lww_publish,
+        external_storage::lww_commands::external_lww_check_format,
+        external_storage::lww_commands::external_lww_switch_format,
         external_storage::lww_commands::external_lww_receive,
         external_storage::lww_commands::external_lww_maintenance,
         external_storage::lww_commands::external_lww_fence,
@@ -850,7 +850,6 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         server_sync::commands::server_sync_configure,
         server_sync::commands::server_sync_lww_push,
         server_sync::commands::server_sync_lww_pull,
-        server_sync::commands::server_sync_lww_apply_receive,
         server_sync::commands::server_sync_lww_ack,
         server_sync::commands::server_sync_lww_fence,
         server_sync::commands::server_sync_lww_activate,
@@ -864,6 +863,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         server_sync::commands::server_sync_lww_prepare_fresh_writer,
         server_sync::commands::server_sync_lww_activate_new_device,
         server_sync::commands::server_sync_lww_retry,
+        server_sync::commands::server_sync_lww_check_format,
+        server_sync::commands::server_sync_lww_switch_format,
         server_sync::commands::server_sync_lww_drain,
         server_sync::commands::server_sync_cancel,
         server_sync::commands::server_sync_claim_offline_notice,
@@ -886,6 +887,9 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         #[cfg(desktop)]
         appimage_integration::appimage_integration_register,
         persistent_store::commands::pds_storage_stats,
+        persistent_store::commands::pds_store_compaction_at_start,
+        persistent_store::commands::pds_store_compaction_request,
+        persistent_store::commands::pds_store_compaction_offer,
         persistent_store::commands::pds_snapshot_delete,
         persistent_store::commands::pds_asset_gc_preview,
         persistent_store::commands::pds_asset_gc_execute,
@@ -907,21 +911,14 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         diagnostics::diagnostic_device_info,
         native_log::native_log_error,
         generation_diagnostics::native_generation_diagnostic,
-        native_generation::commands::native_generation_host_init,
-        native_generation::commands::native_generation_reserve_ollama,
-        native_generation::commands::native_generation_execute,
-        native_generation::commands::native_generation_cancel,
-        native_generation::commands::native_generation_status,
-        native_generation::commands::native_generation_active,
-        native_generation::commands::native_generation_capture_witness,
-        native_generation::commands::native_generation_proof,
         native_log::native_log_file_path,
+        native_log::file_page::native_log_file_read,
+        native_log::file_export::native_log_file_export,
         native_log::native_log_set_file_enabled,
         native_tokenizer::tokenize_batch,
-        render_display::render_display_start,
-        render_display::render_display_resume,
-        render_display::render_display_cancel,
         native_media::native_media_encode_inlay_image,
+        native_media::ipc::native_media_encode_canvas_webp,
+        native_media::ipc::native_media_encode_canvas_webp_finish,
         native_media::ipc::native_media_inlay_input_open,
         native_media::ipc::native_media_inlay_input_chunk,
         native_media::ipc::native_media_inlay_input_chunk_raw,
@@ -954,9 +951,6 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         native_file_jobs::native_content_source_metadata,
         native_file_jobs::native_file_job_status,
         native_file_jobs::native_file_job_prepared_content,
-        native_file_jobs::native_file_job_prepared_preset,
-        native_file_jobs::native_file_job_preset_source,
-        native_file_jobs::native_preset_handoff_cleanup,
         native_file_jobs::native_file_job_stage_inline_asset,
         native_file_jobs::native_file_job_list,
         native_file_jobs::native_file_job_finalize,
@@ -965,6 +959,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         native_file_jobs::native_file_job_forget,
         native_file_jobs::official_assets::native_official_asset_restore_enqueue,
         native_file_jobs::official_assets::native_official_asset_restore_settled,
+        native_file_jobs::official_assets::upload::native_official_asset_publication_settled,
         native_file_jobs::native_portable_handoff_cleanup,
         native_file_jobs::native_raw_recovery_handoff_cleanup,
         native_file_jobs::native_portable_select_sections,
@@ -1005,10 +1000,10 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_query_characters,
         persistent_store::commands::pds_read_character,
         persistent_store::commands::pds_query_conversations,
+        persistent_store::commands::pds_query_author_note_preset_usage,
         persistent_store::commands::pds_read_conversation,
         persistent_store::commands::pds_read_conversation_metadata,
         persistent_store::commands::pds_read_conversation_window,
-        persistent_store::commands::pds_rebase_conversation_history,
         persistent_store::commands::pds_read_conversation_message_metadata_window,
         persistent_store::commands::pds_query_plugin_storage,
         persistent_store::commands::pds_list_plugin_storage,
@@ -1071,10 +1066,6 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_archive_preview,
         persistent_store::commands::pds_archive_character,
         persistent_store::commands::pds_restore_character,
-        persistent_store::commands::pds_hydrate_archive_reconcile,
-        persistent_store::commands::pds_reconcile_archived_character,
-        persistent_store::commands::pds_archive_reconcile_histories,
-        persistent_store::commands::pds_read_native_receive_evidence,
         persistent_store::commands::pds_cancel_character_archive_operation,
         persistent_store::commands::pds_replace_begin,
         persistent_store::commands::pds_replace_put_root,
@@ -1120,6 +1111,12 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_open_plugin_device_write,
         persistent_store::commands::pds_append_plugin_device_write,
         persistent_store::commands::pds_abort_plugin_device_write,
+        persistent_store::commands::pds_open_plugin_device_part,
+        persistent_store::commands::pds_append_plugin_device_part,
+        persistent_store::commands::pds_append_plugin_device_part_raw,
+        persistent_store::commands::pds_finish_plugin_device_part,
+        persistent_store::commands::pds_abort_plugin_device_part,
+        persistent_store::commands::pds_read_plugin_device_part,
         persistent_store::commands::pds_list_plugin_device_keys,
         persistent_store::commands::pds_list_plugin_device_storage,
         persistent_store::commands::pds_write_plugin_device_values,
@@ -1162,17 +1159,11 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_working_set_change_page,
         persistent_store::commands::pds_commit_working_set_change_cursor,
     ]);
-    #[cfg(all(test, target_os = "windows"))]
-    let verification_handler = ollama_ui_verification::controller::handler();
     move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
         if app_cleanup::pending(invoke.message.webview_ref().app_handle())
             && !invoke.message.command().starts_with("app_cleanup_") {
             invoke.resolver.reject("cleanup-pending");
             return true;
-        }
-        #[cfg(all(test, target_os = "windows"))]
-        if invoke.message.command().starts_with("ollama_ui_") {
-            return verification_handler(invoke);
         }
         handler(invoke)
     }
@@ -1218,32 +1209,11 @@ fn cancel_incomplete_boot(app: &tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    #[cfg(desktop)]
-    let arguments = std::env::args_os().skip(1);
-    #[cfg(not(desktop))]
-    let arguments = std::iter::empty();
-    run_with_arguments(
-        arguments,
-        #[cfg(all(test, target_os = "windows"))]
-        false,
-    );
-}
-
-#[cfg(all(test, target_os = "windows"))]
-#[path = "../../tests/native/ollama-route/native/entry.rs"]
-mod ollama_ui_verification;
-
-fn run_with_arguments(
-    arguments: impl IntoIterator<Item = std::ffi::OsString>,
-    #[cfg(all(test, target_os = "windows"))] verification: bool,
-) {
-    #[cfg(not(desktop))]
-    let _ = arguments;
     native_log::install_panic_hook();
     // The profile decides every root and identity, so it is settled before any
     // of them is resolved. A malformed option never falls back to the default.
     #[cfg(desktop)]
-    let (profile, arguments) = match launch_profile::split(arguments) {
+    let (profile, arguments) = match launch_profile::split(std::env::args_os().skip(1)) {
         Ok(selection) => selection,
         Err(error) => {
             launch_profile::report_rejected_option(&error);
@@ -1253,11 +1223,6 @@ fn run_with_arguments(
     let mut context = tauri::generate_context!();
     #[cfg(desktop)]
     let profiles = app_paths::DesktopProfiles::new(context.config());
-    #[cfg(all(test, target_os = "windows"))]
-    if verification {
-        ollama_ui_verification::validate_startup(&profiles, profile.as_ref(), cfg!(feature = "custom-protocol"))
-            .expect("native UI verification startup refused");
-    }
     #[cfg(desktop)]
     if let Some(window) = context.config_mut().app.windows.iter_mut().find(|window| window.label == "main") {
         window.visible = false;
@@ -1296,10 +1261,6 @@ fn run_with_arguments(
         builder = builder
             .manage(paths.prepared().expect("application data root unavailable"))
             .manage(launch_profile::LaunchProfile(profile));
-    }
-    #[cfg(all(test, target_os = "windows"))]
-    if verification {
-        builder = builder.any_thread().manage(ollama_ui_verification::controller::Controller::default());
     }
     match builder.build(context) {
         Ok(app) => app.run(handle_run_event),

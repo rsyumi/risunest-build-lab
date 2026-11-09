@@ -11,7 +11,7 @@ import {
     planChatParserHistory,
     type ChatParserUnsafeHistoryDependency,
 } from './chatParserHistory'
-import { captureResidentCbsHistory, prepareCbsHistory } from './prepareCbsHistory'
+import { captureResidentCbsHistory, prepareCbsHistory, type CbsHistoryReader } from './prepareCbsHistory'
 import { CbsHistoryDependencies, hasCbsHistoryChanges } from './cbsHistoryAccess'
 import { forkChatParserContext } from './chatParserContextSeed.svelte'
 import type { ConversationViewportRow } from './conversationViewportSource'
@@ -152,22 +152,32 @@ export function createSelectedConversationLiveParserProjectionResolver(
                 const historyVersion = source?.snapshot().historyVersion
                 const historyDependencies = input.dependencies ?? new CbsHistoryDependencies()
                 const historyChanged = () => !!source && hasCbsHistoryChanges(source.snapshot(), historyVersion, historyDependencies)
+                const revisionAdvanced = captureRevisionAdvance(dependencies.runtime, target)
                 const assertCurrent = () => {
                     assertConversationStartCurrent(input)
                     captureExactCurrent(dependencies, target)
                     if (source?.snapshot().version !== version || historyChanged()) throw new ChatParserHistoryProjectionStaleError()
                 }
-                const historyAccess = authority ? await prepareCbsHistory({
-                    dependencies: historyDependencies,
-                    characterId: target.characterId, conversationId: target.conversationId,
-                    totalMessages: input.totalMessages, chatID: -1, plan: classification,
-                    signal: input.signal, assertCurrent,
-                    reader: { revision: target.storeRevision,
-                        readResidentMessage: (index) => source?.snapshot().rowAt(index)?.message,
-                        readConversationWindow: (query) => dependencies.runtime.store.readConversationWindow(query) },
-                }) : captureResidentCbsHistory(current.conversation.message, classification, -1, historyDependencies)
-                assertCurrent()
-                context.parserContext.historyAccess = historyAccess
+                const reader: CbsHistoryReader = { revision: target.storeRevision,
+                    readResidentMessage: (index) => source?.snapshot().rowAt(index)?.message,
+                    readConversationWindow: async (query) => {
+                        const result = await dependencies.runtime.store.readConversationWindow(query)
+                        return result ? { ...result, value: { ...result.value, totalMessages: input.totalMessages,
+                            hasMoreAfter: result.value.endIndex < input.totalMessages } } : null
+                    } }
+                try {
+                    const historyAccess = authority ? await prepareCbsHistory({
+                        dependencies: historyDependencies,
+                        characterId: target.characterId, conversationId: target.conversationId,
+                        totalMessages: input.totalMessages, chatID: -1, plan: classification,
+                        signal: input.signal, assertCurrent, reader,
+                    }) : captureResidentCbsHistory(current.conversation.message, classification, -1, historyDependencies)
+                    assertCurrent()
+                    context.parserContext.historyAccess = historyAccess
+                } catch (error) {
+                    if (!input.signal?.aborted && input.isCurrent?.() !== false && (historyChanged() || revisionAdvanced())) input.onStale?.()
+                    throw error
+                }
                 context.parserContext.prepareHistory = async (text, chatID, complete) => {
                     try {
                         assertCurrent()
@@ -177,10 +187,7 @@ export function createSelectedConversationLiveParserProjectionResolver(
                         return authority ? await prepareCbsHistory({
                             dependencies: historyDependencies,
                             characterId: target.characterId, conversationId: target.conversationId,
-                            totalMessages: input.totalMessages, chatID, plan, signal: input.signal, assertCurrent,
-                            reader: { revision: target.storeRevision,
-                                readResidentMessage: (index) => source?.snapshot().rowAt(index)?.message,
-                                readConversationWindow: (query) => dependencies.runtime.store.readConversationWindow(query) },
+                            totalMessages: input.totalMessages, chatID, plan, signal: input.signal, assertCurrent, reader,
                         }) : captureResidentCbsHistory(current.conversation.message, plan, chatID, historyDependencies)
                     } catch (error) {
                         // A later pass can depend on a row that changed before it was read,
@@ -188,7 +195,7 @@ export function createSelectedConversationLiveParserProjectionResolver(
                         // the revision without changing a row, so the greeting has to prepare
                         // again. Notify after this parse call stack, which may be inside a derived.
                         const requested = () => !input.signal?.aborted && input.isCurrent?.() !== false
-                        if (requested() && (historyChanged() || error instanceof ChatParserHistoryProjectionStaleError)) queueMicrotask(() => {
+                        if (requested() && (historyChanged() || revisionAdvanced() || error instanceof ChatParserHistoryProjectionStaleError)) queueMicrotask(() => {
                             if (requested()) input.onStale?.()
                         })
                         throw error
@@ -249,6 +256,7 @@ export function createSelectedConversationLiveParserProjectionResolver(
                 || authority.totalMessages !== input.totalMessages
             ) throw new ChatParserHistoryProjectionStaleError()
 
+            const revisionAdvanced = captureRevisionAdvance(dependencies.runtime, target)
             let resident = captureResidentParserRows(dependencies, target, input)
             try {
                 const projection = await createChatParserHistoryProjection({
@@ -319,15 +327,33 @@ export function createSelectedConversationLiveParserProjectionResolver(
                         // predates the edit, so only cancellation stops the notification.
                         // Being past an await, this already runs outside the parse call
                         // stack, which may be inside a derived.
-                        if (!input.signal?.aborted && (historyChanged?.() || error instanceof ChatParserHistoryProjectionStaleError)) input.onStale?.()
+                        if (!input.signal?.aborted && (historyChanged?.() || revisionAdvanced() || error instanceof ChatParserHistoryProjectionStaleError)) input.onStale?.()
                         throw error
                     }
                 }
                 return projection
+            } catch (error) {
+                if (!input.signal?.aborted && revisionAdvanced()) input.onStale?.()
+                throw error
             } finally {
                 resident?.release()
             }
         },
+    }
+}
+
+export function captureRevisionAdvance(
+    runtime: Pick<LiveParserRuntime, 'captureSelectedConversationTarget' | 'getActiveConversationViewportSource'>,
+    target: SelectedConversationTarget,
+): () => boolean {
+    const source = runtime.getActiveConversationViewportSource?.()
+    const sourceToken = source?.snapshot().sourceToken
+    return () => {
+        const current = runtime.captureSelectedConversationTarget()
+        return !!source && runtime.getActiveConversationViewportSource?.() === source
+            && source.snapshot().sourceToken === sourceToken
+            && current?.characterId === target.characterId && current.conversationId === target.conversationId
+            && current.navigationGeneration === target.navigationGeneration && current.storeRevision > target.storeRevision
     }
 }
 

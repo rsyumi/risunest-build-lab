@@ -58,6 +58,10 @@ pub(crate) enum ErrorKind {
     RecoveryKeyMismatch,
     /// The location holds a repository other than the one expected.
     RepositoryMismatch,
+    /// The library is at a lower format level than this app writes.
+    LibraryFormatSwitchRequired,
+    /// The library is at a higher format level than this app reads.
+    AppUpdateRequired,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -670,6 +674,15 @@ pub(crate) trait Provider: Send + Sync {
         head: &'a HeadBytes,
         cancel: &'a Cancellation,
     ) -> ProviderFuture<'a, HeadReceipt>;
+    /// Overwrites the descriptor object at `locator` in one write attempt.
+    /// Only the services a repository can sync through implement it.
+    fn replace_descriptor<'a>(
+        &'a self,
+        _repository: &'a RepositoryHandle,
+        _locator: &'a RemoteLocator,
+        _bytes: &'a HeadBytes,
+        _cancel: &'a Cancellation,
+    ) -> ProviderFuture<'a, HeadReceipt> { Box::pin(async { Err(ProviderError::new(ErrorKind::Unsupported)) }) }
     fn list_objects<'a>(
         &'a self,
         repository: &'a RepositoryHandle,

@@ -62,3 +62,11 @@ it('keeps external storage working between receive turns while changes remain', 
     syncStatus.set({ ...source, catchingUp: false }); await tick()
     expect(button().getAttribute('data-sync-status')).toBe('connected')
 })
+it('names an external format level stop as the shared settings badge does', async () => {
+    component = mount(SyncStatusButton, { target: document.body, props: { variant: 'slot' } })
+    const connection = { id: 'webdav-1', purpose: 'sync', status: 'ready' } as Partial<ExternalConnectionSummary> as ExternalConnectionSummary
+    syncStatus.set({ target: 'external', connection, failure: { kind: 'appUpdateRequired' }, syncStopped: false, refresh: () => {}, syncNow: async () => {} }); await tick()
+    const button = document.querySelector<HTMLButtonElement>('button[data-sync-status]')!
+    expect(button.getAttribute('data-sync-status')).toBe('attention')
+    expect(button.getAttribute('aria-label')).toBe(`${language.risuNest.tabs.sync}: ${language.lwwSync.appUpdateRequired}`)
+})

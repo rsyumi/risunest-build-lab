@@ -134,6 +134,12 @@ export function deviceSettingsModule(startup: BootstrapTestState) {
     } satisfies Partial<DeviceSettings>
 }
 
+export function storeCompactionModule() {
+    return {
+        compactRequestedStoreAtStart: vi.fn(async () => null), showStoreCompactionNotice: vi.fn(async () => {}),
+    } satisfies Partial<typeof import('./storage/storeCompaction')>
+}
+
 export function persistentStorageRuntimeModule() {
     return {
         initializePersistentStorage: vi.fn(),
@@ -152,7 +158,7 @@ export function nativeFileJobRecoveryModule() {
 }
 
 export function persistentBootstrapModule(startup: BootstrapTestState) {
-    return { bootstrapPersistentDatabase: async () => ({ database: startup.database, revision: 1, source: 'persistent' }) } satisfies Partial<typeof import('./storage/persistentBootstrap')>
+    return { bootstrapPersistentDatabase: vi.fn(async () => ({ database: startup.database, revision: 1, source: 'persistent' })) } satisfies Partial<typeof import('./storage/persistentBootstrap')>
 }
 
 export function databaseModule(startup: BootstrapTestState) {
@@ -187,9 +193,8 @@ export function workingSetResidencyModule() {
 export function persistentDataRuntimeModule() {
     type Runtime = ReturnType<typeof import('./storage/persistentDataRuntime.svelte')['getPersistentDataRuntime']>
     return {
-        getPersistentDataRuntime: vi.fn(() => stub<Runtime>({ store: {}, revision: 1, flushPendingData: vi.fn(), expirePersistentTrash: vi.fn(async () => {}),
-            closeNativeGenerations: vi.fn(async () => ({ released: [], fenced: [] })), flushPendingDataLocally: vi.fn(async () => {}),
-            capturePersistentMutationToken: vi.fn(async () => ({ revision: 5 })), acquireDestructiveReplacementFence: vi.fn(async () => ({ revision: 5 })) })),
+        getPersistentDataRuntime: () => stub<Runtime>({ store: {}, revision: 1, flushPendingData: vi.fn(), expirePersistentTrash: vi.fn(async () => {}),
+            capturePersistentMutationToken: vi.fn(async () => ({ revision: 5 })), acquireDestructiveReplacementFence: vi.fn(async () => ({ revision: 5 })) }),
         initializeActiveWorkingSet: vi.fn(), configurePersistentDataRuntime: vi.fn(),
         hasPendingOfficialPublication: vi.fn(() => false), publishCurrentOfficialRevision: vi.fn(),
     } satisfies Partial<typeof import('./storage/persistentDataRuntime.svelte')>
@@ -267,6 +272,7 @@ export function nativeOfficialAccountFlowModule() {
 export function nativeOfficialPublicationJobModule() {
     return {
         createNativeOfficialPublicationJobPublisher: vi.fn(() => stub<ReturnType<typeof import('./storage/sync/nativeOfficialPublicationJob')['createNativeOfficialPublicationJobPublisher']>>({})),
+        createNativeOfficialAssetPublisher: vi.fn(() => stub<ReturnType<typeof import('./storage/sync/nativeOfficialPublicationJob')['createNativeOfficialAssetPublisher']>>({})),
     } satisfies Partial<typeof import('./storage/sync/nativeOfficialPublicationJob')>
 }
 

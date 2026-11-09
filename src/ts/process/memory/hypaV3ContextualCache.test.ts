@@ -214,6 +214,31 @@ describe('HypaProcesserEx repeated contextual text', () => {
         expect(warm.summaryChunkVectors.map(({ vector }) => vector.embedding[0])).toEqual([1, 2, 3, 10, 11])
     })
 
+    it('keys a HypaProcessorV2 group with repeated text by position and keeps the keys of other groups', async () => {
+        state.positional = true
+        const contextSuffix = getContextProvider('voyageContext3').getCacheKeySuffix(plain)
+        const plainKeys = await Promise.all(plain.map((content) => hypaCacheKey({
+            producer: 'hypa-v2', content, identity: hypaEmbeddingIdentity('voyageContext3'), contextSuffix,
+        })))
+        const recorder = recordingCache(new Map(plainKeys.map((key, index) => [
+            key, { vector: new Float32Array(4).fill(index + 10), dimensions: 4 },
+        ])))
+        state.cache = recorder.cache
+        const items = chunksOf([repeated, plain]).map((chunk, index) => (
+            { id: String(index), content: chunk.text, metadata: chunk.summary }
+        ))
+
+        await new HypaProcessorV2().addTexts(items)
+        expect(state.groups).toEqual([[repeated]])
+        expect(new Set(recorder.writes.flat().map((entry) => entry.key)).size).toBe(3)
+
+        state.groups = []
+        const warm = new HypaProcessorV2()
+        await warm.addTexts(items)
+        expect(state.groups).toEqual([])
+        expect(items.map(({ id }) => warm.vectors.get(id).embedding[0])).toEqual([1, 2, 3, 10, 11])
+    })
+
     it('rejects a provider response with a missing embedding before caching any vector', async () => {
         const recorder = recordingCache()
         state.cache = recorder.cache

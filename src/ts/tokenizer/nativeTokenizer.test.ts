@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
-    NATIVE_MODEL_TOKENIZER_FINGERPRINTS,
     NATIVE_TOKENIZER_FINGERPRINTS,
     NATIVE_TOKENIZER_PRODUCTION_ENABLED,
     invokeNativeTokenizerBatch,
@@ -27,23 +26,9 @@ describe('native tokenizer candidate routing', () => {
         },
     )
 
-    it.each(['mistral', 'novellist', 'claude', 'gemma', 'deepseek-v4', 'glm5'] as const)(
-        'selects the %s model artifact only for an explicit Tauri candidate run',
-        (tokenizerId) => {
-            expect(resolveNativeTokenizerRoute(tokenizerId, true)).toEqual({ kind: 'existing', tokenizerId })
-            expect(resolveNativeTokenizerRoute(tokenizerId, true, true)).toEqual({
-                kind: 'native-model',
-                tokenizerId,
-                fingerprint: NATIVE_MODEL_TOKENIZER_FINGERPRINTS[tokenizerId],
-            })
-        },
-    )
-
     it.each([
         ['cl100k_base', false],
         ['o200k_base', false],
-        ['claude', false],
-        ['toString', true],
         ['google-remote', true],
         ['plugin-custom', true],
         ['gguf', true],
@@ -83,31 +68,6 @@ describe('native tokenizer batch boundary', () => {
                 artifact_fingerprint: NATIVE_TOKENIZER_FINGERPRINTS.cl100k_base,
                 mode: 'ids',
                 texts: ['hello', '�', 'a\ud83d\ude00\ufffdb'],
-            },
-        })
-    })
-
-    it('keeps a model family batch with a lone surrogate off the native command', async () => {
-        const invoke = vi.fn(async (_command: string, args: Record<string, unknown>) => {
-            const request = args.request as { artifact_fingerprint: string; texts: string[] }
-            return { mode: 'count', artifact_fingerprint: request.artifact_fingerprint, counts: request.texts.map(() => 1) }
-        })
-        const route = resolveNativeTokenizerRoute('llama', true, true)
-        if (route.kind !== 'native-model') throw new Error('candidate route was not selected')
-
-        for (const lone of ['a\ud800b', 'a\ude00', '\ud83d']) {
-            await expect(invokeNativeTokenizerBatch(route, ['hello', lone], 'count', invoke)).rejects.toMatchObject({
-                code: 'lone_surrogate',
-            })
-        }
-        expect(invoke).not.toHaveBeenCalled()
-        await invokeNativeTokenizerBatch(route, ['hello', 'a\ud83d\ude00b'], 'count', invoke)
-        expect(invoke).toHaveBeenCalledWith('tokenize_batch', {
-            request: {
-                tokenizer_id: 'llama',
-                artifact_fingerprint: NATIVE_MODEL_TOKENIZER_FINGERPRINTS.llama,
-                mode: 'count',
-                texts: ['hello', 'a\ud83d\ude00b'],
             },
         })
     })

@@ -41,7 +41,7 @@ export async function downloadThroughAndroidSaf(
 }
 
 /** Opens the Android picker for a download written later. Resolves null when the picker is cancelled. */
-export async function reserveAndroidSafDownload(
+async function reserveAndroidSafDownload(
     name: string,
     dependencies: AndroidSafDownloadDependencies = productionDependencies,
 ): Promise<AndroidSafDestinationReservation | null> {
@@ -53,7 +53,7 @@ export async function reserveAndroidSafDownload(
 }
 
 /** Writes a download to a reserved destination and releases the reservation. */
-export function publishAndroidSafDownload(
+function publishAndroidSafDownload(
     reservation: AndroidSafDestinationReservation,
     name: string,
     data: Uint8Array,

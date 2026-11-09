@@ -52,6 +52,36 @@ fn opaque(value: &str) -> String {
         format!("{}••••••{}", &value[..2], &value[value.len() - 6..])
     }
 }
+pub fn url(value: &str, hide: bool) -> String {
+    let Some((head, rest)) = value.split_once('?') else {
+        return value.to_owned();
+    };
+    if !hide {
+        return value.to_owned();
+    }
+    let (query, fragment) = match rest.split_once('#') {
+        Some((query, fragment)) => (query, Some(fragment)),
+        None => (rest, None),
+    };
+    let query = query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((name, key))
+                if ["key", "api_key", "apikey"]
+                    .iter()
+                    .any(|known| name.eq_ignore_ascii_case(known)) =>
+            {
+                format!("{name}={}", opaque(key))
+            }
+            _ => pair.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    match fragment {
+        Some(fragment) => format!("{head}?{query}#{fragment}"),
+        None => format!("{head}?{query}"),
+    }
+}
 pub fn mask(name: &str, bytes: &[u8]) -> Option<String> {
     let name = name.to_ascii_lowercase();
     match name.as_str() {

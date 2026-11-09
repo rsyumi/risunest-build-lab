@@ -73,6 +73,13 @@ class RustWebViewClient(webView: RustWebView, context: Context): WebViewClient()
         return Rust.onPageLoading((view as RustWebView).id, url)
     }
 
+    // RisuNest: hands a WebView whose renderer exited to the app's recovery.
+    @androidx.annotation.RequiresApi(26)
+    override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+        val host = view.context as? RendererRecoveryHost ?: return false
+        return host.recoverRenderer(view, detail.didCrash())
+    }
+
     override fun onPageFinished(view: WebView, url: String) {
         Rust.onPageLoaded((view as RustWebView).id, url)
     }

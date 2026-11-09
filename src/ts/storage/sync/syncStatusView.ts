@@ -3,7 +3,7 @@ import { externalErrorKind, externalErrorMessage, type ExternalStorageStrings } 
 import { externalJobIsActive, externalJobIsPaused } from './external/connection'
 import type { ExternalOperationProgress } from './external/progress'
 import type { ExternalConnectionSummary, ExternalJobSummary } from './external/types'
-import { registrationCodes, serverSyncErrorMessage } from './serverSyncErrorMessage'
+import { formatLevelLabel, registrationCodes, serverSyncErrorMessage } from './serverSyncErrorMessage'
 import type { getServerSyncController } from './serverSyncProduction'
 import type { SyncStatusSource } from './syncStatus'
 
@@ -23,11 +23,18 @@ export function serverSyncStatusView(view: ServerSyncView): SyncStatusView {
     if (view.progress || (connected && view.running)) return { label: copy.running, tone: 'working', stopped: false }
     if (!connected) return { label: copy.disconnected, tone: view.bindingIncomplete ? 'attention' : 'idle', stopped: false }
     if (registrationCodes.includes(view.error)) return { label: copy.registrationRequired, tone: 'attention', stopped: true }
+    const format = view.paused ? formatLevelLabel(view.error) : undefined
+    if (format) return { label: format, tone: 'attention', stopped: true }
     // An error that is still being retried is not a stop.
     if (view.error) return view.paused ? { label: copy.blocked, tone: 'attention', stopped: true } : { label: copy.failed, tone: 'failed', stopped: false }
     if (view.paused) return { label: copy.paused, tone: 'paused', stopped: false }
     return { label: copy.ready, tone: 'connected', stopped: false }
 }
+
+// External storage names the format level stops by error kind; the server codes name their label.
+const externalFormatCodes: Record<string, string> = { libraryFormatSwitchRequired: 'library-format-switch-required', appUpdateRequired: 'app-update-required' }
+/** The server code of the format level stop a failed external sync attempt reports. */
+export const externalFormatCode = (failure: unknown): string | undefined => externalFormatCodes[externalErrorKind(failure) ?? '']
 
 /** The external storage card's badge for one connection, shared with the status button, which passes every running attempt. */
 export function externalSyncStatusView(
@@ -37,6 +44,7 @@ export function externalSyncStatusView(
     operation: ExternalOperationProgress | undefined,
     syncStopped: boolean,
     catchingUp = false,
+    failure?: unknown,
 ): SyncStatusView {
     const usable = connection.status === 'ready' || connection.status === 'paused'
     if (!usable) {
@@ -50,6 +58,8 @@ export function externalSyncStatusView(
         return { label: operation.kind === 'binding' ? strings.transfer.connecting : strings.transfer.syncing, tone: 'working', stopped: false }
     }
     if (job && externalJobIsActive(job)) return { label: strings.jobActive[job.kind], tone: 'working', stopped: false }
+    const format = formatLevelLabel(externalFormatCode(failure) ?? '')
+    if (format) return { label: format, tone: 'attention', stopped: true }
     // Between receive turns while changes remain, so the badge does not read as caught up.
     if (catchingUp) return { label: strings.transfer.syncing, tone: 'working', stopped: false }
     if (syncStopped) return { label: strings.statusPaused, tone: 'paused', stopped: false }
@@ -97,13 +107,13 @@ export function syncStatusDisplay(source: SyncStatusSource, strings: ExternalSto
         }
     } else {
         const { connection } = source
-        const status = externalSyncStatusView(strings, connection, source.job, source.operation, source.syncStopped, source.catchingUp)
+        const status = externalSyncStatusView(strings, connection, source.job, source.operation, source.syncStopped, source.catchingUp, source.failure)
         display = {
             ...status,
             title: strings.title,
             error: connection.lastError ? externalErrorLabel(strings, connection.lastError)
                 : source.failure !== undefined ? externalSyncFailureText(strings, source.failure) : '',
-            stopKey: status.stopped ? `external:${connection.id}:${connection.status}:${connection.lastError?.code ?? ''}` : '',
+            stopKey: status.stopped ? `external:${connection.id}:${connection.status}:${connection.lastError?.code ?? externalFormatCode(source.failure) ?? ''}` : '',
             lastSuccessAt: connection.lastSyncAtMs ? Number(connection.lastSyncAtMs) : undefined,
         }
     }

@@ -7,6 +7,7 @@ import { createConversationOperationContext } from './conversationOperationConte
 import { createChatParserDependencyStamp } from '../chatRenderIdentity'
 import { DisplayReadRecord, recordAmbientChatVariableReads, registerDisplayRow } from './scriptVariableReads'
 import { StallingWorker } from '../../../tests/support/regexWorker'
+import { authorNoteFingerprint, effectiveAuthorNote } from '../authorNotePresets'
 
 const runtime = vi.hoisted(() => ({
     unexpectedNativeRuntimeAccess: () => {
@@ -25,7 +26,7 @@ vi.mock('./modules', async (importOriginal) => ({
     ...await importOriginal<typeof import('./modules')>(),
     getModuleTriggers: () => [],
 }))
-vi.mock('../tokenizer', async () => (await import('./tests/scriptingsTestHarness')).tokenizerModule({ tokenize: vi.fn(async () => 0) }))
+vi.mock('../tokenizer', () => ({ tokenize: vi.fn(async () => 0) }))
 vi.mock('../parser/parser.svelte', async () => (await import('src/ts/parser/parser.testSupport')).parserStubModule())
 vi.mock('./command', () => ({ processMultiCommand: vi.fn() }))
 vi.mock('./request/request', () => ({ requestChatData: vi.fn() }))
@@ -34,7 +35,6 @@ vi.mock('./files/inlays', () => ({ writeInlayImage: vi.fn() }))
 vi.mock('./memory/hypamemory', async () => (await import('./tests/scriptingsTestHarness')).hypamemoryModule())
 
 const { runTrigger } = await import('./triggers')
-const { encodeCounts } = await import('../tokenizer')
 const { requestChatData } = await import('./request/request')
 const { generateAIImage } = await import('./stableDiff')
 const { HypaProcesser } = await import('./memory/hypamemory')
@@ -121,6 +121,70 @@ test('skips a stalled regex condition and replacement and continues the trigger'
         const nextGeneration = await runTrigger(char, 'start', { chat: nextChat, regexGeneration: {} })
         expect(nextGeneration?.chat.scriptstate.$replacement).toBe('<bad>')
     } finally { vi.stubGlobal('Worker', originalWorker); vi.useRealTimers() }
+})
+
+test('skips a display trigger regex that timed out on other text in a later display run', async () => {
+    vi.useFakeTimers()
+    const originalWorker = globalThis.Worker
+    vi.stubGlobal('Worker', StallingWorker)
+    try {
+        const { chat, char, session } = fixture()
+        char.triggerscript = [{
+            comment: 'display test', type: 'display', conditions: [], effect: [{
+                type: 'v2RegexTest', value: 'source', valueType: 'var', regex: 'SLOW-display-trigger|text', regexType: 'value',
+                flags: '', flagsType: 'value', outputVar: 'matched', indent: 0,
+            }],
+        }] as character['triggerscript']
+        runtime.session = session
+        DBState.db = { characters: [char], templateDefaultVariables: '' } as never
+        chat.scriptstate = { $source: '<text>' }
+        const first = runTrigger(char, 'display', { chat, displayMode: true, displayData: 'row' })
+        await vi.advanceTimersByTimeAsync(10_000)
+        await first
+        chat.scriptstate.$source = '<edited text>'
+        let finished = false
+        const edited = runTrigger(char, 'display', { chat, displayMode: true, displayData: 'row' })
+            .finally(() => { finished = true })
+        await vi.advanceTimersByTimeAsync(1)
+        expect(finished).toBe(true)
+        await edited
+    } finally { vi.stubGlobal('Worker', originalWorker); vi.useRealTimers() }
+})
+
+test('keeps lorebook name matches before a stalled comment, skips the rest, and later skips only that comment', async () => {
+    vi.useFakeTimers()
+    const originalWorker = globalThis.Worker
+    vi.stubGlobal('Worker', StallingWorker)
+    const posted = vi.spyOn(StallingWorker.prototype, 'postMessage')
+    try {
+        const { chat, char } = fixture()
+        const lookup = (name: string) => [{ comment: 'lookup', type: 'start', conditions: [], effect: [{
+            type: 'v2GetLorebookByName', name, nameType: 'value', outputVar: 'found', indent: 0,
+        }] }] as character['triggerscript']
+        const late = Array.from({ length: 70 }, (_, index) => ({ comment: `alpha ${index}` }))
+        char.globalLore = [{ comment: 'Alpha' }, { comment: 'SLOW beta' }, {}, ...late] as character['globalLore']
+        char.triggerscript = lookup('alpha')
+        DBState.db = { characters: [char], templateDefaultVariables: '' } as never
+        const requests = () => {
+            const count = posted.mock.calls.filter(([message]) => message.type === 'testEach').length
+            posted.mockClear()
+            return count
+        }
+        const first = runTrigger(char, 'start', { chat, regexGeneration: {} })
+        await vi.advanceTimersByTimeAsync(10_000)
+        expect((await first)?.chat.scriptstate.$found).toBe('[0]')
+        expect(requests()).toBe(1)
+        const second = await runTrigger(char, 'start', { chat, regexGeneration: {} })
+        expect(second?.chat.scriptstate.$found).toBe(JSON.stringify([0, ...late.map((_, index) => index + 3)]))
+        expect(requests()).toBe(2)
+
+        char.triggerscript = lookup('(')
+        await expect(runTrigger(char, 'start', { chat, regexGeneration: {} })).rejects.toThrow(/Invalid regular expression/)
+        char.globalLore = [{}] as character['globalLore']
+        posted.mockClear()
+        expect((await runTrigger(char, 'start', { chat, regexGeneration: {} }))?.chat.scriptstate.$found).toBe('[]')
+        expect(requests()).toBe(0)
+    } finally { posted.mockRestore(); vi.stubGlobal('Worker', originalWorker); vi.useRealTimers() }
 })
 
 test('keeps stored trigger permissions and parser identity stable during display', async () => {
@@ -300,11 +364,17 @@ test('CAS-applies Trigger chat variables and note metadata', async () => {
     const { chat, char, session } = fixture()
     char.triggerscript[0].effect = [
         { type: 'setvar', var: 'state', value: '', operator: '=' },
+        { type: 'v2GetAuthorNote', outputVar: 'before' },
         { type: 'v2SetAuthorNote', value: 'operation note', valueType: 'value' },
     ] as never
     runtime.session = session
+    // The stored copy already equals the written value, so only the dropped link shows the write.
+    chat.note = 'operation note'
+    chat.authorNotePreset = { id: 'preset', fingerprint: authorNoteFingerprint('operation note') }
+    const presets = [{ id: 'preset', name: 'Preset', text: 'Preset note' }]
     DBState.db = {
         characters: [char],
+        authorNotePresets: presets,
         templateDefaultVariables: '',
     } as never
 
@@ -313,8 +383,9 @@ test('CAS-applies Trigger chat variables and note metadata', async () => {
         manualName: 'ordered',
     })
 
-    expect(chat.scriptstate).toEqual({ '$state': '' })
-    expect(chat.note).toBe('operation note')
+    expect(chat.scriptstate).toEqual({ '$state': '', '$before': 'Preset note' })
+    expect(effectiveAuthorNote(presets, chat)).toBe('operation note')
+    expect(chat.authorNotePreset).toBeUndefined()
     expect(session.version).toBe(1)
 })
 
@@ -889,32 +960,4 @@ test('pins display history for the full awaited trigger lifetime', async () => {
     expect(session.pinCount('compatibility')).toBe(1)
     await pending
     expect(session.pinCount('compatibility')).toBe(0)
-})
-
-test('counts the system prompts together', async () => {
-    const { chat, char, session } = fixture()
-    char.triggerscript[0].type = 'display'
-    char.triggerscript[0].effect = [
-        { type: 'v2Comment', value: '' },
-    ] as never
-    runtime.session = session
-    DBState.db = {
-        characters: [char],
-        templateDefaultVariables: '',
-    } as never
-    vi.mocked(encodeCounts).mockClear().mockImplementationOnce(async (texts) => texts.map((text) => text.length))
-
-    const result = await runTrigger(char, 'display', {
-        chat,
-        displayMode: true,
-        displayData: 'display',
-        additonalSysPrompt: {
-            start: 'opening',
-            historyend: '',
-            promptend: 'closing note',
-        },
-    })
-
-    expect(vi.mocked(encodeCounts).mock.calls).toEqual([[['opening', 'closing note']]])
-    expect(result?.tokens).toBe(19)
 })

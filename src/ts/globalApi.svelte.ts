@@ -4,7 +4,6 @@ import {
     writeFile,
     open as openFile,
     type FileHandle,
-    BaseDirectory,
     readFile,
     exists,
     mkdir,
@@ -26,7 +25,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { MobileGUI, botMakerMode, selectedCharID, loadedStore, DBState, LoadingStatusState, selIdState, ReloadGUIPointer, bodyIntercepterStore } from "./stores.svelte";
 import { loadPlugins } from "./plugins/plugins.svelte";
 import { alertConfirm, alertError, alertMd, alertNormal, alertNormalWait, alertSelect, alertToast, alertTOS, waitAlert } from "./alert";
-import { doingChat, isNativeGenerationNavigationAllowed } from "./process/generationState";
+import { doingChat } from "./process/generationState";
 import { hasher } from "./parser/parser.svelte";
 import { characterURLImport, hubURL, realmHubURL } from "./characterCards";
 import { defaultJailbreak, defaultMainPrompt, oldJailbreak, oldMainPrompt } from "./storage/defaultPrompts";
@@ -82,8 +81,9 @@ import {
 import { observePersistentSaveChanges } from './storage/persistentSaveObserver.svelte';
 import { backgroundErrorMessage } from './storage/backgroundErrorMessage';
 import { configureBlobStoreStorageProvider, readBlobForFacade, resolveBlobStore, subscribeNativeMediaEndpointChanges } from "./storage/platformBlobStore";
-import { inferBlobMime } from "./storage/blobStore";
+import { inferBlobMime, type BlobReadOptions } from "./storage/blobStore";
 import { selectAssetSourceRoute } from "./storage/assetSourceRoute";
+import { noteMissingAssetBody, trackAssetBodyArrival } from "./storage/assetBodyArrival.svelte";
 import { readActiveAsset, storeActiveAsset } from "./storage/accountAssetAccess";
 import { AppendableBuffer } from "./appendableBuffer"
 import { beginNavigationActivity } from './ui/navigationActivity'
@@ -115,7 +115,7 @@ let fetchLog: fetchLog[] = []
 
 import { normalizeDownloadFileName } from "./downloadFileName"
 
-export async function downloadFile(name: string, dat: Uint8Array | ArrayBuffer | string, options: { saveDialog?: boolean } = {}): Promise<boolean> {
+export async function downloadFile(name: string, dat: Uint8Array | ArrayBuffer | string): Promise<boolean> {
     name = normalizeDownloadFileName(name)
     if (typeof (dat) === 'string') {
         dat = Buffer.from(dat, 'utf-8')
@@ -138,13 +138,9 @@ export async function downloadFile(name: string, dat: Uint8Array | ArrayBuffer |
         return downloadThroughAndroidSaf(name, data)
     }
     else if (isTauri) {
-        if (options.saveDialog) {
-            const destination = await save({ defaultPath: name })
-            if (!destination) return false
-            await writeFile(destination, data)
-        } else {
-            await writeFile(name, data, { baseDir: BaseDirectory.Download })
-        }
+        const destination = await save({ defaultPath: name })
+        if (!destination) return false
+        await writeFile(destination, data)
     }
     else {
         const blob = new Blob([data], { type: 'application/octet-stream' })
@@ -300,8 +296,12 @@ export async function getFileSrc(loc: string) {
         return realmHubURL + `/rs/` + loc
     }
     if (route === 'tauri-asset') {
+        const arrival = trackAssetBodyArrival(loc)
         const url = await resolveTauriAssetUrl(loc)
-        if (!url) console.error(new Error(`Missing asset: ${loc}`))
+        if (!url) {
+            console.error(new Error(`Missing asset: ${loc}`))
+            if (arrival !== undefined) noteMissingAssetBody(loc, arrival)
+        }
         return url ?? ''
     }
     if (route === 'tauri-path') {
@@ -365,16 +365,17 @@ export async function getFileSrc(loc: string) {
  * Reads an image file and returns its data.
  * 
  * @param {string} data - The path to the image file.
+ * @param {BlobReadOptions} [options] - How a stored asset is read.
  * @returns {Promise<Uint8Array>} - A promise that resolves to the data of the image file.
  */
-export async function readImage(data: string) {
+export async function readImage(data: string, options?: BlobReadOptions) {
     if (!isTauri) await forageStorage.Init()
     const isAsset = data.startsWith('assets/') && data.length > 'assets/'.length
     if (isAsset) {
         return await readActiveAsset(await resolveBlobStore(), data, {
             officialAccount: forageStorage.isAccount,
             tauri: isTauri,
-        })
+        }, options)
     }
     if (isTauri) {
         if (data.startsWith('assets')) {
@@ -1855,8 +1856,8 @@ export async function changeChatTo(IdOrIndex: string | number): Promise<boolean>
         selected.conversationId === chatId &&
         chats[character.chatPage]?.id === chatId
     ) return true
-    // JS response application still belongs to the selected conversation.
-    if(get(doingChat) && !isNativeGenerationNavigationAllowed()){
+    // The navigation fence would orphan the running response, so refuse first.
+    if(get(doingChat)){
         alertToast(language.navigationBlockedWhileGenerating)
         return false
     }

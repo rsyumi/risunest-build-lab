@@ -4,6 +4,7 @@ import { nativeAssetByteSender, type NativeByteInvoke } from './nativeAssetByteT
 import {
     defaultInlayEncodeOptions,
     normalizeInlayEncodeOptions,
+    type BlobReadOptions,
     type InlayBlobMetadata,
     type InlayEncodeOptions,
 } from './blobStore'
@@ -207,20 +208,21 @@ export interface NativeCasReadBudgetOptions {
 }
 
 export interface NativeCasReadBudget {
-    run(length: number, read: () => Promise<unknown>): Promise<unknown>
+    run(length: number, read: () => Promise<unknown>, options?: BlobReadOptions): Promise<unknown>
 }
 
 /**
  * Bounds the read responses a document has in flight. An invoke settles only
  * after the page has received its body, so holding weight until then also
- * covers bodies still waiting for delivery. Waiters are served in order.
+ * covers bodies still waiting for delivery. Waiting foreground reads are
+ * served before waiting background reads, each class in order.
  */
 export function createNativeCasReadBudget(options: NativeCasReadBudgetOptions = {}): NativeCasReadBudget {
     const capacity = options.capacityBytes ?? 8 * 1024 * 1024
     const minimumWeight = options.minimumWeightBytes ?? 256 * 1024
     const stallMs = options.stallMs ?? 30_000
     let available = capacity
-    const waiting: { weight: number, admit: () => void }[] = []
+    const waiting: { weight: number, background: boolean, admit: () => void }[] = []
     const admitWaiting = () => {
         while (waiting.length > 0 && waiting[0].weight <= available) {
             const next = waiting.shift()!
@@ -229,10 +231,12 @@ export function createNativeCasReadBudget(options: NativeCasReadBudgetOptions = 
         }
     }
     return {
-        async run(length, read) {
+        async run(length, read, readOptions) {
             const weight = Math.min(capacity, Math.max(length, minimumWeight))
+            const background = readOptions?.background === true
             await new Promise<void>((admit) => {
-                waiting.push({ weight, admit })
+                const firstBackground = background ? -1 : waiting.findIndex(entry => entry.background)
+                waiting.splice(firstBackground === -1 ? waiting.length : firstBackground, 0, { weight, background, admit })
                 admitWaiting()
             })
             let released = false
@@ -278,12 +282,13 @@ async function readCasPart(
     start: number,
     endExclusive: number,
     expectedSize: number,
+    options: BlobReadOptions | undefined,
 ): Promise<Uint8Array | null> {
     let result: unknown
     try {
         result = await budget.run(endExclusive - start, () => invokeCommand('asset_cas_read_bytes', {
             contentHash, start, endExclusive, expectedSize,
-        }))
+        }), options)
     } catch (error) {
         if (error === 'cas-object-missing') return null
         if (error === 'cas-object-size-mismatch') throw new PayloadSizeMismatchError()
@@ -304,19 +309,20 @@ async function readCasObjectRange(
     requestedStart: number,
     requestedEnd: number,
     expectedSize: number,
+    options: BlobReadOptions | undefined,
 ): Promise<Uint8Array | null> {
     const start = Math.min(requestedStart, expectedSize)
     const end = Math.min(requestedEnd, expectedSize)
     const firstEnd = Math.min(end, start + NATIVE_CAS_READ_PART_BYTES)
     // An empty range still makes one call, which reports absence.
-    const first = await readCasPart(invokeCommand, budget, contentHash, start, firstEnd, expectedSize)
+    const first = await readCasPart(invokeCommand, budget, contentHash, start, firstEnd, expectedSize, options)
     if (first === null || firstEnd === end) return first
     // The first part has confirmed the object and its size before the result is reserved.
     const combined = new Uint8Array(end - start)
     combined.set(first)
     for (let offset = firstEnd; offset < end;) {
         const partEnd = Math.min(end, offset + NATIVE_CAS_READ_PART_BYTES)
-        const part = await readCasPart(invokeCommand, budget, contentHash, offset, partEnd, expectedSize)
+        const part = await readCasPart(invokeCommand, budget, contentHash, offset, partEnd, expectedSize, options)
         if (part === null) return null
         combined.set(part, offset - start)
         offset = partEnd
@@ -423,12 +429,12 @@ export function createNativeImmutablePayloadCas(
             void data
             throw new Error('Native CAS writes require a durable ownership session')
         },
-        async readObject(contentHash, expectedSize) {
+        async readObject(contentHash, expectedSize, options) {
             const size = await objectSize(contentHash, expectedSize)
             if (size === null) return null
-            return readCasObjectRange(invokeCommand, budget, contentHash, 0, size, size)
+            return readCasObjectRange(invokeCommand, budget, contentHash, 0, size, size, options)
         },
-        async readObjectRange(contentHash, range, expectedSize) {
+        async readObjectRange(contentHash, range, expectedSize, options) {
             validateBlobReadRange(range)
             const size = await objectSize(contentHash, expectedSize)
             if (size === null) return null
@@ -439,6 +445,7 @@ export function createNativeImmutablePayloadCas(
                 range.start,
                 range.endExclusive,
                 size,
+                options,
             )
         },
         async statObject(contentHash) {
@@ -472,7 +479,7 @@ export function createNativeRemoteAssetReader(
                 ? null
                 : safeSize(result, 'Native remote asset stat')
         },
-        async readObject(contentHash, range) {
+        async readObject(contentHash, range, options) {
             objectPhysicalKey(contentHash)
             if (range) validateBlobReadRange(range)
             const hydrated = await invokeCommand('asset_remote_hydrate_object', { contentHash })
@@ -485,6 +492,7 @@ export function createNativeRemoteAssetReader(
                 range?.start ?? 0,
                 range?.endExclusive ?? size,
                 size,
+                options,
             )
         },
     }

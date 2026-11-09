@@ -44,12 +44,8 @@
     let open = $derived(isOpen)
 
     async function getTokens(data:string){
-        const count = await tokenizeAccurate(data)
-        // A count that resolves after the prompt changed again is dropped.
-        if(data === value.content){
-            tokens = count
-        }
-        return count
+        tokens = await tokenizeAccurate(data)
+        return tokens
     }
     let tokens = $state(0)
 

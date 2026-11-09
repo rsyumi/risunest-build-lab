@@ -1,7 +1,6 @@
 import {isTauriDesktop, isTauriAndroid, isTauriIOS} from '../platform'
 import {save} from '../storage/fileSelection'
-import {prepareNativeContentExportFromPicker, withNativeContentExportDestination,
-    type NativeContentExportPickerDependencies} from '../storage/nativeContentExportPicker'
+import {runNativeContentExport, type NativeContentExportPickerDependencies} from '../storage/nativeContentExportPicker'
 import type {NativeGalleryExportInput, NativeFileJobOptions, NativeFileJobResult} from '../storage/nativeFileJobs'
 import {getBlobStore} from '../storage/platformBlobStore'
 import type {GalleryItem} from './types'
@@ -91,16 +90,10 @@ export async function downloadGallery(input: GalleryDownloadInput, options: Gall
         if (options.signal?.aborted) return cancelled
         const suggestedName = !input.archive && input.item
             ? galleryDownloadName(input.item.name, input.item.key, input.item.ext) : input.suggestedName
-        const flow = await prepareNativeContentExportFromPicker({suggestedName, flushReason: 'gallery-download',
-            androidSourceKind: 'download', chooseDestination: () => deps.chooseDestination(suggestedName)}, options, deps)
-        if (flow.kind === 'cancelled') return cancelled
-        if (flow.kind === 'unsupported') {
-            if (input.archive || !input.item) throw new Error('Gallery download is unavailable')
-            await deps.downloadWeb(input.item)
-            return {cancelled: false, skipped: 0}
-        }
         // The retry keeps the destination the user already picked.
-        return await withNativeContentExportDestination(flow.destination, async () => {
+        const downloaded = await runNativeContentExport({suggestedName, flushReason: 'gallery-download',
+            androidSourceKind: 'download', chooseDestination: () => deps.chooseDestination(suggestedName)},
+        {signal: options.signal}, deps, 'inline', async (flow, jobOptions) => {
             let revision = flow.expectedRevision
             for (let attempt = 0; attempt < 2; attempt++) {
                 try {
@@ -108,9 +101,11 @@ export async function downloadGallery(input: GalleryDownloadInput, options: Gall
                         ? {kind: 'asset', entries: input.captureEntries ? await input.captureEntries(revision) : input.entries ?? []}
                         : {kind: 'inlay', keys: input.keys ?? []}
                     const result = await deps.runExport({destination: flow.destination, expectedRevision: revision,
-                        archive: input.archive, selection}, {signal: options.signal,
-                        onStatus: status => options.onProgress?.({done: status.progress.completedItems,
-                            total: status.progress.totalItems ?? 0})})
+                        archive: input.archive, selection}, {signal: jobOptions.signal,
+                        onStatus: status => {
+                            jobOptions.onStatus?.(status)
+                            options.onProgress?.({done: status.progress.completedItems, total: status.progress.totalItems ?? 0})
+                        }})
                     const skipped = Number(result.warningCodes.find(code => code.startsWith('gallery-skipped:'))?.split(':')[1] ?? 0)
                     return {cancelled: false, skipped}
                 } catch (error) {
@@ -123,6 +118,13 @@ export async function downloadGallery(input: GalleryDownloadInput, options: Gall
             }
             throw new Error('Gallery download failed')
         })
+        if (downloaded === null) return cancelled
+        if (downloaded === undefined) {
+            if (input.archive || !input.item) throw new Error('Gallery download is unavailable')
+            await deps.downloadWeb(input.item)
+            return {cancelled: false, skipped: 0}
+        }
+        return downloaded
     } catch (error) {
         if (options.signal?.aborted || error instanceof Error && error.name === 'AbortError') return cancelled
         throw error

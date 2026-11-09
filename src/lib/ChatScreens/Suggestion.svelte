@@ -37,6 +37,7 @@
         readConversationSuggestions(DBState.db.characters[$selectedCharID]),
     )
     let suggestMessagesTranslated:string[] = $state()
+    let suggestionRoots:HTMLElement[] = $state([])
     let toggleTranslate:boolean = $state(DBState.db.autoTranslate)
     let progress:boolean = $state();
     let progressChatPage=-1;
@@ -228,8 +229,8 @@
                     suggestMessages = []
                     messageInput(suggest)
                     send()
-                }}>
-                <DeferredMarkdown data={(DBState.db.translator !== '' && toggleTranslate && suggestMessagesTranslated && suggestMessagesTranslated.length > 0) ? suggestMessagesTranslated[i]??suggest : suggest} />
+                }} bind:this={suggestionRoots[i]}>
+                <DeferredMarkdown data={(DBState.db.translator !== '' && toggleTranslate && suggestMessagesTranslated && suggestMessagesTranslated.length > 0) ? suggestMessagesTranslated[i]??suggest : suggest} root={suggestionRoots[i]} />
                 </button>
                 <button class="bg-textcolor2 hover:bg-darkbutton text-textcolor font-bold py-2 px-4 rounded-sm ml-1" onclick={() => {
                     messageInput(suggest)

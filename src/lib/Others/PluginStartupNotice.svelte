@@ -18,16 +18,17 @@
 
     let { inline = false }: { inline?: boolean } = $props()
     let elapsed = $state(false)
-    // Closing holds for the current wait or failure; the next one shows again.
-    let dismissed = $state<{ phase: string; since: number }>()
+    // Closing holds for the current wait, stop or failure; the next one shows again.
+    let dismissed = $state<{ phase: string; since: number; stop?: string }>()
     const failed = $derived($pluginStartupState.phase === 'failed')
     const stopped = $derived.by(() => {
         const display = $syncStatus && syncStatusDisplay($syncStatus, externalStorageStrings(DBState.db.language), false)
         return display?.stopped ? display : undefined
     })
-    const shown = $derived(!dismissed || dismissed.phase !== $pluginStartupState.phase || dismissed.since !== $pluginStartupState.since)
-    // With the sync UI turned off, only plugins that did not load are reported.
-    const visible = $derived($pluginStartupState.phase !== 'released' && (inline || ($inlineShown === 0 && shown && (failed || (elapsed && (DBState.db.risunestSyncStatusUi ?? true))))))
+    const shown = $derived(!dismissed || dismissed.phase !== $pluginStartupState.phase || dismissed.since !== $pluginStartupState.since
+        || (!!stopped && dismissed.stop !== stopped.stopKey))
+    // With the sync UI turned off, only a failure or stop that holds plugins is reported.
+    const visible = $derived($pluginStartupState.phase !== 'released' && (inline || ($inlineShown === 0 && shown && (failed || !!stopped || (elapsed && (DBState.db.risunestSyncStatusUi ?? true))))))
     const error = $derived.by(() => {
         const value = $pluginStartupState.error
         const unavailable = value instanceof Error && value.message === 'Sync is unavailable'
@@ -54,7 +55,7 @@
         $settingsOpen = true
     }
     function dismiss() {
-        dismissed = { phase: $pluginStartupState.phase, since: $pluginStartupState.since }
+        dismissed = { phase: $pluginStartupState.phase, since: $pluginStartupState.since, stop: stopped?.stopKey }
     }
 </script>
 
@@ -69,14 +70,14 @@
                         {#if error}<p class="mt-1 whitespace-pre-wrap text-sm text-textcolor/70">{error}</p>{/if}
                     </div>
                     {#if !($settingsOpen && $SettingsMenuIndex === 17 && $activeRisuNestSettingsTab === 'sync')}
-                        <button type="button" class="-my-2 min-h-11 text-sm text-textcolor2 underline hover:text-textcolor" onclick={settings}>{language.risuNest.tabs.sync}</button>
+                        <button type="button" class="-my-2 min-h-11 text-sm text-subtext underline hover:text-textcolor" onclick={settings}>{language.risuNest.tabs.sync}</button>
                     {/if}
                 </div>
             {:else}
                 <p role="status" class="min-w-0 flex-1">{language.risuNest.pluginStartup.waiting}</p>
             {/if}
             {#if !inline}
-                <button type="button" class="-mr-2 -mt-2 flex size-10 shrink-0 items-center justify-center rounded-md text-textcolor2 transition-colors hover:bg-selected hover:text-textcolor" aria-label={language.close} title={language.close} onclick={dismiss}><XIcon size={18} aria-hidden="true" /></button>
+                <button type="button" class="-mr-2 -mt-2 flex size-10 shrink-0 items-center justify-center rounded-md text-subtext transition-colors hover:bg-selected hover:text-textcolor" aria-label={language.close} title={language.close} onclick={dismiss}><XIcon size={18} aria-hidden="true" /></button>
             {/if}
         </div>
         {#if failed || stopped}

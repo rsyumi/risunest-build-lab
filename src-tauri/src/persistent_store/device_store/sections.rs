@@ -6,14 +6,14 @@ use crate::persistent_store::StoreResult;
 use risunest_external_storage_format::section::{
     decode_local_plugin_entry_key, hypa_entry_key, local_plugin_entry_key, HypaValue,
     InlineOrObject, LocalPluginValue, LocalSettingValue, ObjectReference, PluginSpace, PluginValue,
-    SectionEntry, SectionEntryVersion, SectionKind, SectionValue, ValueOrObject,
-    MAX_INLINE_VALUE_BYTES,
+    SectionEntry, SectionEntryVersion, SectionKind, SectionValue, StructureText,
+    StructuredPluginValue, UnknownPluginEntry, ValueOrObject, MAX_INLINE_VALUE_BYTES,
 };
 use risunest_sync_wire::Sequence;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use super::plugin_values::{self, text_value};
+use super::plugin_values::{self, structure, text_value};
 
 mod large_plugin;
 
@@ -75,6 +75,9 @@ pub(crate) enum SectionValueRow {
         space: String,
         object: text_value::TextInfo,
         parts: Vec<ObjectReference>,
+        /// The byte parts a structure-form text names; plain text has none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        structure: Option<Vec<ObjectReference>>,
     },
     Setting {
         value: String,
@@ -145,10 +148,11 @@ impl SectionValueRow {
     }
 }
 
+/// Structure-form text is not JSON; it is the same value only byte for byte.
 fn same_json(a: &str, b: &str) -> bool {
     match (serde_json::from_str::<serde_json::Value>(a), serde_json::from_str::<serde_json::Value>(b)) {
         (Ok(a), Ok(b)) => a == b,
-        _ => false,
+        _ => a == b && a.as_bytes().starts_with(structure::MARKER),
     }
 }
 
@@ -355,6 +359,42 @@ fn json_value(text: &str) -> StoreResult<ValueOrObject> {
     Ok(ValueOrObject::Object(object_reference(text.as_bytes())))
 }
 
+/// The parts a structure prefix names, as a backup entry references them.
+fn part_references(prefix: &structure::StructurePrefix) -> StoreResult<Vec<ObjectReference>> {
+    prefix.parts.iter().enumerate().map(|(index, hash)| Ok(ObjectReference {
+        content_sha256: hex::decode(hash).ok().and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(|| invalid("plugin structure part is invalid"))?,
+        byte_length: prefix.part_length(index),
+    })).collect()
+}
+
+/// The part references of JSON-space text in structure form, or `None` for
+/// plain JSON text.
+fn structure_references(text: &str) -> StoreResult<Option<Vec<ObjectReference>>> {
+    structure::read_prefix(text.as_bytes())?.as_ref().map(part_references).transpose()
+}
+
+/// Copies the parts a captured row names into the spool, so the spool holds
+/// every byte its entries name after the device snapshot is released.
+fn capture_structure_parts(device: &Connection, spool: &Connection, row: &SectionValueRow) -> StoreResult<()> {
+    let references = match row {
+        SectionValueRow::Plugin { space, value } if space == "json" => structure_references(value)?,
+        SectionValueRow::PluginObject { structure, .. } => structure.clone(),
+        _ => None,
+    };
+    for reference in references.iter().flatten() {
+        let hash = hex::encode(reference.content_sha256);
+        let present: bool = spool.query_row("SELECT EXISTS(SELECT 1 FROM section_objects WHERE hash=?1)", [&hash], |row| row.get(0))?;
+        if present { continue; }
+        let bytes: Vec<u8> = device.query_row(
+            "SELECT o.body FROM message_page_objects o JOIN message_page_verified_objects v ON v.hash=o.hash WHERE o.hash=?1",
+            [&hash], |row| row.get(0)).optional()?.ok_or_else(|| invalid("plugin structure part is missing"))?;
+        if bytes.len() as u64 != reference.byte_length { return Err(invalid("plugin structure part is invalid")); }
+        spool.execute("INSERT INTO section_objects(hash,bytes) VALUES(?1,?2)", params![hash, bytes])?;
+    }
+    Ok(())
+}
+
 fn read_object(
     reference: &ObjectReference,
     object: &mut impl FnMut(&ObjectReference) -> StoreResult<Vec<u8>>,
@@ -422,10 +462,12 @@ fn row_from_sql(db: &Connection, section: Section, row: &rusqlite::Row<'_>, obje
             Section::LocalPlugins => {
                 let size: i64 = row.get("byte_size")?;
                 let space: String = row.get("space")?;
-                if size > text_value::PART_BYTES as i64 {
+                let value = if size > text_value::PART_BYTES as i64 {
                     let rowid = row.get("value_rowid")?;
                     large_plugin::capture(objects, &space, || Ok(db.blob_open(rusqlite::MAIN_DB, "plugin_device_storage", "value", rowid, true)?))?
-                } else { SectionValueRow::Plugin { space, value: row.get("value")? } }
+                } else { SectionValueRow::Plugin { space, value: row.get("value")? } };
+                if let Some(spool) = objects { capture_structure_parts(db, spool, &value)?; }
+                value
             }
         }
     };
@@ -537,19 +579,36 @@ impl SectionRow {
                 }
                 let (space, value) = match space.as_str() {
                     "string" if rides_as_object(value.as_bytes()) => {
-                        (PluginSpace::String, ValueOrObject::Object(object_reference(value.as_bytes())))
+                        (PluginSpace::String, PluginValue::Object(object_reference(value.as_bytes())))
                     }
-                    "string" => (PluginSpace::String, ValueOrObject::Inline(serde_json::Value::String(value.clone()))),
-                    "json" => (PluginSpace::Json, json_value(value)?),
+                    "string" => (PluginSpace::String, PluginValue::Inline(serde_json::Value::String(value.clone()))),
+                    "json" => match structure_references(value)? {
+                        Some(parts) => (PluginSpace::Json, PluginValue::Structured(StructuredPluginValue {
+                            text: if rides_as_object(value.as_bytes()) {
+                                StructureText::Object(object_reference(value.as_bytes()))
+                            } else {
+                                StructureText::Inline(value.clone())
+                            },
+                            parts,
+                        })),
+                        None => (PluginSpace::Json, json_value(value)?.into()),
+                    },
                     _ => return Err(invalid("Plugin device space is invalid")),
                 };
-                SectionValue::LocalPlugin(LocalPluginValue { space, value: value.into() })
+                SectionValue::LocalPlugin(LocalPluginValue { space, value })
             }
-            (SectionValueRow::PluginObject { space, parts, .. }, SectionKind::LocalPlugins) => {
+            (SectionValueRow::PluginObject { space, parts, structure, .. }, SectionKind::LocalPlugins) => {
                 if space != &self.key2 { return Err(invalid("Plugin value names another space")); }
                 let space = match space.as_str() { "string" => PluginSpace::String, "json" => PluginSpace::Json,
                     _ => return Err(invalid("Plugin device space is invalid")) };
-                let value = if parts.len() == 1 { PluginValue::Object(parts[0].clone()) } else { PluginValue::Objects(parts.clone()) };
+                let value = match structure {
+                    Some(references) => PluginValue::Structured(StructuredPluginValue {
+                        text: if parts.len() == 1 { StructureText::Object(parts[0].clone()) } else { StructureText::Objects(parts.clone()) },
+                        parts: references.clone(),
+                    }),
+                    None if parts.len() == 1 => PluginValue::Object(parts[0].clone()),
+                    None => PluginValue::Objects(parts.clone()),
+                };
                 SectionValue::LocalPlugin(LocalPluginValue { space, value })
             }
             (SectionValueRow::Setting { value }, SectionKind::LocalSettings) => {
@@ -614,7 +673,7 @@ impl SectionRow {
                     (PluginSpace::String, PluginValue::Object(reference)) => object_text(&reference, &mut object, false)?,
                     (PluginSpace::Json, PluginValue::Inline(value)) => json_text(ValueOrObject::Inline(value), &mut object)?,
                     (PluginSpace::Json, PluginValue::Object(reference)) => json_text(ValueOrObject::Object(reference), &mut object)?,
-                    (_, PluginValue::Objects(_)) => return Err(invalid("Multipart plugin value requires a section spool")),
+                    (_, PluginValue::Objects(_) | PluginValue::Structured(_)) => return Err(invalid("Multipart plugin value requires a section spool")),
                 };
                 if text_value::encoded_length(&text) > text_value::MAX_VALUE_BYTES { return Err(invalid("plugin device value is too large")); }
                 SectionValueRow::Plugin { space: space.to_owned(), value: text }
@@ -644,6 +703,7 @@ pub(crate) struct SectionSpoolBuilder {
     kind: SectionKind,
     versioned: bool,
     count: i64,
+    skipped: u64,
 }
 
 pub(crate) struct PreparedSectionRows {
@@ -653,6 +713,7 @@ pub(crate) struct PreparedSectionRows {
     kind: SectionKind,
     versioned: bool,
     count: i64,
+    skipped: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -814,6 +875,7 @@ impl SectionSpoolBuilder {
              CREATE TABLE message_page_verified_objects(hash TEXT PRIMARY KEY);
              CREATE TABLE message_page_object_marks(hash TEXT PRIMARY KEY,unreferenced_since INTEGER NOT NULL);
              CREATE TABLE row_values(id INTEGER PRIMARY KEY,metadata TEXT NOT NULL,vector_hash TEXT);
+             CREATE TABLE skipped_entries(entry_key TEXT PRIMARY KEY,entry_hash BLOB NOT NULL) WITHOUT ROWID;
              CREATE TABLE row_index(
                 key1 TEXT NOT NULL,key2 TEXT NOT NULL,key3 TEXT NOT NULL,
                 body_id INTEGER NOT NULL,write_clock TEXT NOT NULL,writer_id TEXT NOT NULL,
@@ -822,7 +884,7 @@ impl SectionSpoolBuilder {
              ) WITHOUT ROWID;
              BEGIN IMMEDIATE;",
         )?;
-        Ok(Self { connection, directory, kind, versioned, count: 0 })
+        Ok(Self { connection, directory, kind, versioned, count: 0, skipped: 0 })
     }
 
     pub(crate) fn push(&mut self, row: SectionRow, entry_key: &str, entry_hash: &[u8; 32]) -> StoreResult<()> {
@@ -846,6 +908,18 @@ impl SectionSpoolBuilder {
         let row = self.decode_entry(entry, false, object)?;
         if row.value.is_tombstone() { return Err(invalid("Backup section entry is a removal")); }
         self.push_row(row, &entry_key, &entry_hash)
+    }
+
+    /// A backup entry in a value form a later build writes. It installs nothing
+    /// but still counts toward the section fingerprint.
+    pub(crate) fn skip_backup_entry(&mut self, entry: &UnknownPluginEntry, entry_hash: &[u8; 32]) -> StoreResult<()> {
+        if self.versioned || self.kind != SectionKind::LocalPlugins || entry.version.is_some() {
+            return Err(invalid("Backup section entry has the wrong identity"));
+        }
+        self.connection.execute("INSERT INTO skipped_entries(entry_key,entry_hash) VALUES(?1,?2)",
+            params![entry.key, entry_hash.as_slice()])?;
+        self.skipped += 1;
+        Ok(())
     }
 
     pub(super) fn push_backup_row(&mut self, row: SectionRow) -> StoreResult<()> {
@@ -902,7 +976,9 @@ impl SectionSpoolBuilder {
             &self.kind.fingerprint_domain(),
         );
         {
-            let mut statement = self.connection.prepare("SELECT entry_key,entry_hash FROM row_index ORDER BY entry_key")?;
+            let mut statement = self.connection.prepare(
+                "SELECT entry_key,entry_hash FROM row_index UNION ALL SELECT entry_key,entry_hash FROM skipped_entries ORDER BY entry_key",
+            )?;
             let mut rows = statement.query([])?;
             while let Some(row) = rows.next()? {
                 let key: String = row.get(0)?;
@@ -924,7 +1000,7 @@ impl SectionSpoolBuilder {
         let count: i64 = connection.query_row("SELECT count(*) FROM row_index", [], |row| row.get(0))?;
         if count != self.count { return Err(invalid("Section spool is incomplete")); }
         Ok(PreparedSectionRows { connection, _directory: self.directory,
-            kind: self.kind, versioned: self.versioned, count })
+            kind: self.kind, versioned: self.versioned, count, skipped: self.skipped })
     }
 
     pub(super) fn finish_captured(self) -> StoreResult<PreparedSectionRows> {
@@ -952,6 +1028,8 @@ impl PreparedSectionRows {
     pub(crate) fn kind(&self) -> SectionKind { self.kind }
     pub(crate) fn len(&self) -> u64 { self.count as u64 }
     pub(crate) fn is_empty(&self) -> bool { self.count == 0 }
+    /// Entries in a value form this build cannot read, left out of the rows.
+    pub(crate) fn skipped(&self) -> u64 { self.skipped }
 
     fn row(&self, key: &SectionKey) -> StoreResult<Option<SectionRow>> {
         let stored: Option<(String, Option<Vec<u8>>)> = self.connection.query_row(
@@ -1033,14 +1111,20 @@ impl PreparedSectionRows {
                 let entry = row.to_entry(self.kind, self.versioned).map_err(&mut map_error)?;
                 let mut object = row.value.take_object_body();
                 visitor(&entry, &mut |reference| {
+                    // The row's own body answers only its own reference; a
+                    // structured value's parts come from the spool.
                     let bytes = match object.take() {
-                        Some(bytes) => bytes,
-                        None => self.connection.query_row("SELECT bytes FROM section_objects WHERE hash=?1",
-                            [hex::encode(reference.content_sha256)], |row| row.get(0))?,
+                        Some(bytes) if object_reference(&bytes) == *reference => bytes,
+                        held => {
+                            object = held;
+                            let bytes: Vec<u8> = self.connection.query_row("SELECT bytes FROM section_objects WHERE hash=?1",
+                                [hex::encode(reference.content_sha256)], |row| row.get(0))?;
+                            if object_reference(&bytes) != *reference {
+                                return Err(invalid("Section object does not match its reference"));
+                            }
+                            bytes
+                        }
                     };
-                    if bytes.len() as u64 != reference.byte_length || object_reference(&bytes) != *reference {
-                        return Err(invalid("Section object does not match its reference"));
-                    }
                     #[cfg(test)]
                     SECTION_TEST_MAX_VALUE_BYTES.fetch_max(bytes.len(), Ordering::Relaxed);
                     Ok(bytes)
@@ -1092,7 +1176,7 @@ fn validate_sync_row(section: Section, row: &SectionRow) -> StoreResult<()> {
             if space != &row.key2 || !matches!(space.as_str(), "string" | "json") {
                 return Err(invalid("Plugin value names another space"));
             }
-            if space == "json" { serde_json::from_str::<serde::de::IgnoredAny>(value)?; }
+            if space == "json" && !value.as_bytes().starts_with(structure::MARKER) { serde_json::from_str::<serde::de::IgnoredAny>(value)?; }
             if text_value::encoded_length(value) > text_value::MAX_VALUE_BYTES { return Err(invalid("plugin device value is too large")); }
         }
         (Section::LocalPlugins, SectionValueRow::PluginObject { space, object, .. }) => {
@@ -1603,6 +1687,7 @@ fn write_row(
                     published_clock
                 ],
             )?;
+            plugin_values::admit_structure_row(tx, &row.key1, &row.key2, &row.key3, text_value::MAX_VALUE_BYTES)?;
         }
         (Section::LocalPlugins, SectionValueRow::PluginObject { space, object, .. }) => {
             if *space != row.key2 { return Err(invalid("received plugin value names another space")); }
@@ -1618,6 +1703,7 @@ fn write_row(
             })?;
             tx.execute("UPDATE plugin_device_storage SET published_clock=?4 WHERE owner=?1 AND space=?2 AND key=?3",
                 params![row.key1, row.key2, row.key3, published_clock])?;
+            plugin_values::admit_structure_row(tx, &row.key1, &row.key2, &row.key3, text_value::MAX_VALUE_BYTES)?;
         }
         _ => return Err(invalid("received section row belongs to another section")),
     }

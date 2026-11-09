@@ -9,5 +9,3 @@ license-file = "../../LICENSE"
 serde = { version = "=1.0.229", features = ["derive"] }
 ryu-js = "=1.0.3"
 getrandom = "=0.3.4"
-risunest-ir = { path = "../core/ir" }
-risunest-records = { path = "../core/records" }

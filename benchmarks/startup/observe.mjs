@@ -1,53 +1,6 @@
 import ts from 'typescript'
 import { execFileSync } from 'node:child_process'
 import path from 'node:path'
-import { readFile } from 'node:fs/promises'
-import { createHash } from 'node:crypto'
-import { SDK_VERSION, IPC_BOUNDARY, SEMANTIC_BOUNDARY, OBSERVATION_MANIFEST,
-    OBSERVER_INPUTS, IPC_COMMANDS, sanitizeObservationManifest } from './metrics.mjs'
-
-const digest = value => createHash('sha256').update(value).digest('hex')
-const sdkSuffix = '/@tauri-apps/api/core.js'
-const storeSuffix = '/src/ts/storage/sqlitePersistentDataStore.ts'
-
-export async function readObservationInputs(repository, platform, diagnosticStages = process.env.STARTUP_DIAGNOSTIC_STAGES === 'true') {
-    if (!['windows', 'android', 'linux', 'macos', 'ios'].includes(platform))
-        throw new Error('Explicit native startup platform required')
-    if (typeof diagnosticStages !== 'boolean') throw new Error('Explicit observer diagnostic option required')
-    const sdkDirectory = path.join(repository, 'node_modules/@tauri-apps/api')
-    const version = JSON.parse(await readFile(path.join(sdkDirectory, 'package.json'), 'utf8')).version
-    if (version !== SDK_VERSION) throw new Error('Unsupported startup SDK version')
-    const observerInputs = {}
-    for (const relative of OBSERVER_INPUTS) observerInputs[relative] = digest(await readFile(path.join(repository, relative)))
-    const sdkSource = await readFile(path.join(sdkDirectory, 'core.js'), 'utf8')
-    const storeFile = path.join(repository, 'src/ts/storage/sqlitePersistentDataStore.ts')
-    const storeSource = await readFile(storeFile, 'utf8')
-    const base = {
-        schema: 1, boundary: IPC_BOUNDARY, semanticBoundary: SEMANTIC_BOUNDARY, platform,
-        sourceRevision: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repository, encoding: 'utf8' }).trim(),
-        diagnosticStages,
-        sdk: { version, sourceSha256: digest(sdkSource),
-            transformedSha256: digest(instrumentSource(sdkSource, path.join(sdkDirectory, 'core.js'), platform, version)) },
-        store: { sourceSha256: digest(storeSource),
-            transformedSha256: digest(instrumentSource(storeSource, storeFile, platform)) },
-        observerInputs, selectedCommands: [...IPC_COMMANDS],
-    }
-    return { ...base, inputFingerprint: digest(JSON.stringify(base)) }
-}
-
-export function verifyObservationManifest(manifest, inputs) {
-    const verified = sanitizeObservationManifest(manifest)
-    if (!verified || verified.inputFingerprint !== inputs.inputFingerprint
-        || verified.platform !== inputs.platform || verified.sourceRevision !== inputs.sourceRevision
-        || verified.diagnosticStages !== inputs.diagnosticStages
-        || verified.sdk.sourceSha256 !== inputs.sdk.sourceSha256
-        || verified.store.sourceSha256 !== inputs.store.sourceSha256
-        || verified.sdk.transformedSha256 !== inputs.sdk.transformedSha256
-        || verified.store.transformedSha256 !== inputs.store.transformedSha256
-        || JSON.stringify(verified.observerInputs) !== JSON.stringify(inputs.observerInputs))
-        throw new Error('Startup observer inputs differ from built artifact')
-    return verified
-}
 
 // Build-only timing. No runtime source file or user-data accessor is installed.
 const observed = {
@@ -67,39 +20,37 @@ const observed = {
     '/src/ts/globalApi.svelte.ts': { saveDb: 'save-observer' },
 }
 
-export function instrumentSource(source, id, platform, sdkVersion = SDK_VERSION) {
+export function instrumentSource(source, id, platform) {
     const normalizedId = id.replaceAll('\\', '/').split('?')[0]
-    if (normalizedId.endsWith(sdkSuffix) || normalizedId.endsWith(storeSuffix)) {
-        const sdk = normalizedId.endsWith(sdkSuffix)
-        if (sdk && sdkVersion !== SDK_VERSION) throw new Error('Unsupported startup SDK version')
+    if (
+        platform === 'android' &&
+        normalizedId.endsWith('/src/ts/storage/sqlitePersistentDataStore.ts')
+    ) {
         const file = ts.createSourceFile(id, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
-        const bodies = []
+        const edits = []
+        const found = new Set()
         const visit = (node) => {
-            if (sdk && ts.isFunctionDeclaration(node) && node.name?.text === 'invoke') {
-                const statement = node.body?.statements[0]
-                const call = statement && ts.isReturnStatement(statement) ? statement.expression : null
-                if (!node.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.AsyncKeyword)
-                    || node.parameters.map(parameter => parameter.getText(file).replace(/\s/g, '')).join(',') !== 'cmd,args={},options'
-                    || node.body?.statements.length !== 1 || !call || !ts.isCallExpression(call)
-                    || call.expression.getText(file).replace(/\s/g, '') !== 'window.__TAURI_INTERNALS__.invoke'
-                    || call.arguments.map(argument => argument.getText(file)).join(',') !== 'cmd,args,options')
-                    throw new Error('Unexpected startup SDK invoke AST')
-                bodies.push(node.body)
-            } else if (!sdk && ts.isMethodDeclaration(node) && node.name?.getText(file) === 'commit'
-                && ts.isClassDeclaration(node.parent) && node.parent.name?.text === 'SqlitePersistentDataStore' && node.body) {
-                bodies.push(node.body)
+            const isInvoke = ts.isFunctionDeclaration(node) && node.name?.text === 'invokeStore'
+            const isCommit =
+                ts.isMethodDeclaration(node) &&
+                node.name?.getText(file) === 'commit' &&
+                node.parent.name?.text === 'SqlitePersistentDataStore'
+            if ((isInvoke || isCommit) && node.body) {
+                found.add(isInvoke ? 'invokeStore' : 'commit')
+                edits.push({
+                    at: node.body.getStart(file) + 1,
+                    text: `return window.__startupObserveCall(${isInvoke ? 'command' : "'pds_commit'"}, ${isInvoke ? 'async ' : ''}() => {`,
+                })
+                edits.push({ at: node.body.end - 1, text: '});' })
             }
             ts.forEachChild(node, visit)
         }
         visit(file)
-        const exported = file.statements.some(statement => ts.isExportDeclaration(statement)
-            && statement.exportClause && ts.isNamedExports(statement.exportClause)
-            && statement.exportClause.elements.some(element => element.name.text === 'invoke' && !element.propertyName))
-        if (bodies.length !== 1 || sdk && !exported) throw new Error('Missing or duplicate startup invocation boundary')
-        const body = bodies[0]
-        const wrapper = sdk ? '__startupObserveCall(cmd' : "__startupObserveOperation('store-commit'"
-        return source.slice(0, body.getStart(file) + 1) + `return window.${wrapper}, () => {`
-            + source.slice(body.getStart(file) + 1, body.end - 1) + '});' + source.slice(body.end - 1)
+        if (found.size !== 2) throw new Error('Missing Android native store observation boundary')
+        for (const edit of edits.sort((a, b) => b.at - a.at)) {
+            source = source.slice(0, edit.at) + edit.text + source.slice(edit.at)
+        }
+        return source
     }
     const suffix = Object.keys(observed).find((key) => normalizedId.endsWith(key))
     if (!suffix) return null
@@ -196,34 +147,11 @@ export function instrumentSource(source, id, platform, sdkVersion = SDK_VERSION)
     return source
 }
 
-export function startupObservationPlugin(platform, repository = process.cwd()) {
-    let inputs
-    const transformed = new Map()
+export function startupObservationPlugin(platform) {
     return {
         name: 'synthetic-startup-observation',
         enforce: 'pre',
-        async buildStart() { inputs = await readObservationInputs(repository, platform) },
-        transform(source, id) {
-            const normalized = id.replaceAll('\\', '/').split('?')[0]
-            const key = normalized.endsWith(sdkSuffix) ? 'sdk' : normalized.endsWith(storeSuffix) ? 'store' : null
-            if (key && (!inputs || digest(source) !== inputs[key].sourceSha256 || transformed.has(key)))
-                throw new Error('Unexpected or duplicate startup SDK/store module')
-            const output = instrumentSource(source, id, platform, inputs?.sdk.version)
-            if (key) transformed.set(key, digest(output))
-            return output
-        },
-        buildEnd(error) {
-            if (!error && (!inputs || transformed.size !== 2)) throw new Error('Missing startup SDK/store module')
-        },
-        generateBundle() {
-            const manifest = {
-                ...inputs,
-                sdk: { ...inputs.sdk, transformedSha256: transformed.get('sdk') },
-                store: { ...inputs.store, transformedSha256: transformed.get('store') },
-            }
-            verifyObservationManifest(manifest, inputs)
-            this.emitFile({ type: 'asset', fileName: OBSERVATION_MANIFEST, source: JSON.stringify(manifest) })
-        },
+        transform: (source, id) => instrumentSource(source, id, platform),
     }
 }
 

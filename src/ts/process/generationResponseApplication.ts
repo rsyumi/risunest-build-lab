@@ -19,7 +19,8 @@ import { consumeStreamingDisplayStream } from './streamingDisplayStream'
 import { beginDisplayWork } from '../displayRecovery.svelte'
 import { historyLength } from './historyWindowIndex'
 import type { ConversationCommitObserver } from './conversationOperationContext'
-import type { GenerationDiagnosticTrace, GenerationDiagnosticPhase, GenerationDiagnosticOutcome } from '../generationDiagnostics'
+import type { GenerationDiagnosticTrace, GenerationDiagnosticPhase, GenerationDiagnosticOutcome, GenerationFailureReason } from '../generationDiagnostics'
+import { createGenerationCheckpoints, type GenerationCheckpointPersistence } from './generationCheckpoints'
 
 export interface GenerationResponseProcessingOptions {
     onConversationCommit?: ConversationCommitObserver
@@ -80,6 +81,8 @@ export interface ApplyGenerationResponseOptions {
     ttsAutoSpeech(): boolean
     operation: GenerationResponseOperationContext
     callbacks: GenerationResponseCallbacks
+    /** Saves the applied output locally before later output stages; without it nothing is checkpointed. */
+    checkpoint?: GenerationCheckpointPersistence
 }
 
 export interface GenerationResponseApplication {
@@ -120,6 +123,9 @@ export async function applyGenerationResponse(
         return message !== null && target.commitMessage(update(message))
     }
     const hasOutputOwnership = () => getOutputTarget()?.isOwned() ?? false
+    const checkpoints = options.checkpoint
+        ? createGenerationCheckpoints({ ...options.checkpoint, isOwned: hasOutputOwnership, diagnostics: options.diagnostics })
+        : null
     const onConversationCommit: ConversationCommitObserver = (commit) => {
         // The receipt proves that this callback committed from our captured version.
         // An unrelated mutation still leaves the old locator invalid.
@@ -147,11 +153,16 @@ export async function applyGenerationResponse(
         openPhases.add(phase)
         options.diagnostics?.phase(phase, 'enter')
     }
-    const endPhase = (phase: GenerationDiagnosticPhase, outcome: GenerationDiagnosticOutcome = options.abortSignal.aborted ? 'aborted' : 'ok') => {
+    const endPhase = (
+        phase: GenerationDiagnosticPhase,
+        outcome: GenerationDiagnosticOutcome = options.abortSignal.aborted ? 'aborted' : 'ok',
+        reason?: GenerationFailureReason,
+    ) => {
         if (!openPhases.delete(phase)) return
-        options.diagnostics?.phase(phase, 'exit', { outcome })
+        options.diagnostics?.phase(phase, 'exit', { outcome, reason })
     }
     let responseFailed = false
+    let streamFailed = false
     let handedOff = false
     let result = ''
     let emoChanged = false
@@ -165,7 +176,14 @@ export async function applyGenerationResponse(
         }
 
         if (options.response.type === 'streaming') {
-            const reader = options.response.result.getReader()
+            const streamReader = options.response.result.getReader()
+            const reader = {
+                read: () => streamReader.read().catch((error: unknown) => {
+                    streamFailed = true
+                    throw error
+                }),
+                cancel: () => streamReader.cancel(),
+            }
             const targetChat = options.operation.getTargetChat()
             if (!targetChat) return null
             outputTarget = captureGenerationConversationOperation({
@@ -192,10 +210,6 @@ export async function applyGenerationResponse(
             const prefix = options.continueGeneration ? initialOutput.data : ''
             const outputMessageId = outputTarget.messageId
             const performanceMode = options.streamingDisplayOptimizationMode()
-            if (targetChat.id) setStreamingConversation(targetChat.id, performanceMode)
-            targetChat.isStreaming = true
-            targetChat.activeStreamingDisplayOptimizationMode = performanceMode
-            options.operation.incrementReloadKeys()
             const processStreamingSnapshot = async (
                 snapshot: string,
                 cache: 'normal' | 'bypass',
@@ -227,6 +241,13 @@ export async function applyGenerationResponse(
                 : null)
             let streamCompleted = false
             try {
+                if (targetChat.id) setStreamingConversation(targetChat.id, performanceMode)
+                // The session records the flags, so a save before the first streamed edit covers the response.
+                outputTarget.commitMetadata({
+                    isStreaming: true,
+                    activeStreamingDisplayOptimizationMode: performanceMode,
+                })
+                options.operation.incrementReloadKeys()
                 if (displayWork.ready) await displayWork.ready
                 const streamResult = await consumeStreamingDisplayStream({
                     mode: performanceMode,
@@ -255,6 +276,7 @@ export async function applyGenerationResponse(
                         options.callbacks.markResponseApplied()
                         emoChanged = processed.emoChanged
                         options.operation.incrementReloadKeys()
+                        checkpoints?.applied()
                     },
                     processPreview: async ({ value }, context) => {
                         if (!context.canCommit()) return
@@ -263,14 +285,19 @@ export async function applyGenerationResponse(
                         )) return
                         options.callbacks.markResponseApplied()
                         options.operation.incrementReloadKeys()
+                        checkpoints?.applied()
                     },
+                    beforeCompletion: checkpoints ? () => checkpoints.checkpoint() : undefined,
                 })
                 streamCompleted = streamResult.completed
             } finally {
+                checkpoints?.stop()
                 displayWork.release()
                 if (targetChat.id) clearStreamingConversation(targetChat.id)
-                targetChat.isStreaming = false
-                targetChat.activeStreamingDisplayOptimizationMode = undefined
+                outputTarget.commitMetadata({
+                    isStreaming: false,
+                    activeStreamingDisplayOptimizationMode: undefined,
+                })
                 options.operation.incrementReloadKeys()
             }
 
@@ -469,6 +496,8 @@ export async function applyGenerationResponse(
                     )
                         return null
                     options.callbacks.markResponseApplied()
+                    await checkpoints?.checkpoint()
+                    if (!outputTarget.isOwned()) return null
                     if (inlay.promise) {
                         const inlayData = await inlay.promise
                         if (!outputTarget.commitData(inlayData)) return null
@@ -499,6 +528,8 @@ export async function applyGenerationResponse(
                     generationHadOperation = true
                     if (!outputTarget.isOwned()) return null
                     options.callbacks.markResponseApplied()
+                    await checkpoints?.checkpoint()
+                    if (!outputTarget.isOwned()) return null
                     if (inlay.promise) {
                         const inlayData = await inlay.promise
                         if (!outputTarget.commitData(inlayData)) return null
@@ -590,9 +621,13 @@ export async function applyGenerationResponse(
         const outcome: GenerationDiagnosticOutcome = options.abortSignal.aborted ? 'aborted'
             : responseFailed || options.response.type === 'fail' ? 'failed'
             : handedOff ? 'ok' : 'stale'
-        for (const phase of openPhases) endPhase(phase, outcome)
+        const reason = outcome !== 'failed' ? undefined : streamFailed ? 'stream-error' : 'error'
+        for (const phase of openPhases) endPhase(phase, outcome, reason)
         for (const phase of phases) {
-            if (!startedPhases.has(phase)) options.diagnostics?.phase(phase, 'exit', { outcome: 'skipped' })
+            if (startedPhases.has(phase)) continue
+            // A stream cut before its first snapshot still fails the output it carried.
+            if (reason === 'stream-error' && phase === 'semantic-output') options.diagnostics?.phase(phase, 'exit', { outcome, reason })
+            else options.diagnostics?.phase(phase, 'exit', { outcome: 'skipped' })
         }
         if (!handedOff) release()
     }

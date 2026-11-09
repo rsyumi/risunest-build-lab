@@ -5,20 +5,23 @@ import { createPluginStartupGate } from '../../plugins/pluginStartupGate'
 afterEach(() => vi.useRealTimers())
 function fixture() {
     vi.useFakeTimers()
-    const dependencies = { push: vi.fn(async () => {}), pull: vi.fn(async () => {}), connect: vi.fn(async (_operationId: string) => {}), disconnect: vi.fn(async () => {}), stopNotifications: vi.fn(async () => {}), retryClock: vi.fn(async () => {}), failed: vi.fn(), recovered: vi.fn() }
+    const dependencies = { push: vi.fn(async () => {}), pull: vi.fn(async () => {}), connect: vi.fn(async (_operationId: string) => {}), disconnect: vi.fn(async () => {}), stopNotifications: vi.fn(async () => {}), retryClock: vi.fn(async () => {}), checkFormat: vi.fn(async () => {}), failed: vi.fn(), recovered: vi.fn() }
     return { ...dependencies, scheduler: createServerSyncScheduler(dependencies) }
 }
 describe('server LWW foreground scheduler', () => {
     it('classifies tunnel outages and timeouts without masking authentication or local failures', () => {
         for (const status of [502, 503, 504, 530]) expect(isServerSyncUnavailable({ code: 'server-response-error', status })).toBe(true)
         for (const code of ['server-timeout', 'server-updating', 'incomplete-response', 'sync-retry-budget-exhausted']) expect(isServerSyncUnavailable({ code })).toBe(true)
-        for (const error of [{ code: 'server-response-error', status: 401 }, { code: 'local-storage', status: 503 }, { code: 'server-unreachable', status: 409, retryable: false }, new TypeError('Load failed')]) {
+        // An activation's server check marks its failures with startupLocalReady.
+        for (const status of [429, 500, 503]) expect(isServerSyncUnavailable({ code: 'worker-unavailable', status, retryable: true, startupLocalReady: false })).toBe(true)
+        for (const error of [{ code: 'server-response-error', status: 401 }, { code: 'local-storage', status: 503 }, { code: 'server-unreachable', status: 409, retryable: false }, new TypeError('Load failed'),
+            { code: 'device-busy', status: 429, retryable: true }, { code: 'worker-unavailable', status: 503, retryable: true }, { code: 'server-response-error', status: 409, retryable: false, startupLocalReady: true }]) {
             expect(isServerSyncUnavailable(error)).toBe(false)
         }
     })
-    it.each(['timer', 'edit', 'foreground'])('retries a settled cancelled publication on %s despite its nonretryable 409', async trigger => {
+    it.each(['timer', 'edit', 'foreground'])('retries a cancelled publication that failed with a retryable server reply on %s', async trigger => {
         const f = fixture()
-        const failure = { code: 'server-unreachable', status: 409, retryable: false }
+        const failure = { code: 'worker-unavailable', status: 503, retryable: true }
         f.push.mockRejectedValueOnce(failure)
         await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0)
         expect(f.failed).toHaveBeenCalledWith(failure)
@@ -78,6 +81,18 @@ describe('server LWW foreground scheduler', () => {
         await vi.advanceTimersByTimeAsync(1)
         expect(f.scheduler.isWaiting()).toBe(false)
         expect(f.recovered).toHaveBeenCalledOnce()
+        f.scheduler.dispose()
+    })
+    it('ends an outage delay on time after the device clock is set back', async () => {
+        const f = fixture()
+        f.pull.mockRejectedValueOnce({ code: 'server-unreachable', retryable: true })
+        await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0)
+        expect(f.scheduler.isWaiting()).toBe(true)
+        // A clock that ran an hour fast is corrected.
+        vi.setSystemTime(Date.now() - 3_600_000)
+        await vi.advanceTimersByTimeAsync(5000)
+        expect(f.pull).toHaveBeenCalledTimes(2)
+        expect(f.scheduler.isWaiting()).toBe(false)
         f.scheduler.dispose()
     })
     it('correlates notification retries until the socket connects or a fresh session starts', async () => {
@@ -399,6 +414,28 @@ describe('server LWW foreground scheduler', () => {
         f.pull.mockClear()
         await f.scheduler.conversationOpened(); await vi.advanceTimersByTimeAsync(0)
         expect(f.retryClock).toHaveBeenCalledTimes(2); expect(f.pull).toHaveBeenCalled(); expect(f.scheduler.isBlocked()).toBe(false)
+        f.scheduler.dispose()
+    })
+    it('rechecks a library format block on each trigger, follows the code it reports, and resumes once the level matches', async () => {
+        const f = fixture(); f.pull.mockRejectedValueOnce({ code: 'library-format-switch-required', retryable: false })
+        await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0)
+        expect(f.scheduler.blockedCode()).toBe('library-format-switch-required')
+        await vi.advanceTimersByTimeAsync(120_000); expect(f.checkFormat).not.toHaveBeenCalled()
+        f.checkFormat.mockRejectedValueOnce({ code: 'sync-server-update-required', retryable: false })
+        await f.scheduler.conversationOpened(); await vi.advanceTimersByTimeAsync(0)
+        expect(f.scheduler.blockedCode()).toBe('sync-server-update-required'); expect(f.retryClock).not.toHaveBeenCalled()
+        // A check that cannot reach the server keeps the stop it already reports.
+        f.failed.mockClear(); f.checkFormat.mockRejectedValueOnce({ code: 'server-unreachable', retryable: true })
+        await f.scheduler.conversationOpened(); await vi.advanceTimersByTimeAsync(0)
+        expect(f.scheduler.blockedCode()).toBe('sync-server-update-required'); expect(f.failed).not.toHaveBeenCalled()
+        // Edits check again once they settle.
+        f.checkFormat.mockRejectedValueOnce({ code: 'sync-server-update-required', retryable: false })
+        f.scheduler.localChange(); await vi.advanceTimersByTimeAsync(1_000); f.scheduler.localChange(); await vi.advanceTimersByTimeAsync(2_000)
+        expect(f.checkFormat).toHaveBeenCalledTimes(3); expect(f.scheduler.isBlocked()).toBe(true)
+        f.push.mockClear(); f.pull.mockClear()
+        await f.scheduler.foreground(false); await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0)
+        expect(f.checkFormat).toHaveBeenCalledTimes(4); expect(f.scheduler.isBlocked()).toBe(false)
+        expect(f.pull).toHaveBeenCalled(); expect(f.push).toHaveBeenCalled()
         f.scheduler.dispose()
     })
     it.each(['accepted-clock-correction-required', 'writer-collision', 'equal-stamp-integrity'])('never automatically clears %s', async code => {

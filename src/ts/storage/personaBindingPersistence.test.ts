@@ -2,6 +2,7 @@ import { expect, it, vi } from 'vitest'
 import { captureRoot, deferred, makeDatabase, SaveCoordinator } from './saveCoordinator.testSupport'
 import { applyConversationBindingPatch, type ConversationBindingPatch } from './conversationBinding'
 import { createStoreStub } from './persistentDataStore.testSupport'
+import { RevisionConflictError } from './persistentDataStore'
 import type { Chat } from './database.svelte'
 import { createConversationSummaryStub } from './conversationResidency'
 
@@ -146,4 +147,43 @@ it('stores toggle bindings as metadata and drops the field again when the bindin
     expect(committed[0]).toEqual([{ key: JSON.stringify(['conversation', character.chaId, 'other', 'savedToggleValues']), type: 'set', value: { toggle_a: '1' } }])
     expect(committed[1]).toEqual([{ key: JSON.stringify(['conversation', character.chaId, 'other', 'savedToggleValues']), type: 'delete' }])
     expect(other).not.toHaveProperty('savedToggleValues')
+})
+
+it('drops a binding whose expected fields an earlier queued write changed and commits one whose fields still hold', async () => {
+    const { character, other, coordinator, store } = setup()
+    const publish = (patch: ConversationBindingPatch) => { applyConversationBindingPatch(other, patch) }
+    const stored = async () => (await store.readConversationMetadata(character.chaId, 'other'))!.value.conversation
+    const link = (id: string) => ({ id, fingerprint: `${id} fingerprint` })
+    await coordinator.mutateConversationBinding(character.chaId, 'other', { authorNotePreset: link('first') }, publish)
+    const expected: ConversationBindingPatch = { note: '', authorNotePreset: link('first') }
+    const external = coordinator.mutateConversationBinding(character.chaId, 'other', { authorNotePreset: link('second') }, publish)
+    const copy = coordinator.mutateConversationBinding(character.chaId, 'other', { note: 'Preset copy' }, publish, expected)
+    expected.authorNotePreset = link('second')
+    await Promise.all([external, copy])
+    expect(await stored()).toMatchObject({ note: '', authorNotePreset: link('second') })
+    expect(other.authorNotePreset).toEqual(link('second'))
+
+    await coordinator.mutateConversationBinding(character.chaId, 'other', { note: 'Preset copy' }, publish, { note: '', authorNotePreset: link('second') })
+    expect((await stored()).note).toBe('Preset copy')
+})
+
+it('checks a conditional binding again against a write another tab commits first', async () => {
+    const { character, other, coordinator, store, commit } = setup()
+    const publish = (patch: ConversationBindingPatch) => { applyConversationBindingPatch(other, patch) }
+    const stored = async () => (await store.readConversationMetadata(character.chaId, 'other'))!.value.conversation
+    const write = commit.getMockImplementation()!
+    const otherTabWrites = (field: string, value: string) => commit.mockImplementationOnce(async (input) => {
+        const { revision } = await write({ expectedRevision: input.expectedRevision, unitMutations: [
+            { key: JSON.stringify(['conversation', character.chaId, 'other', field]), type: 'set', value },
+        ] })
+        throw new RevisionConflictError(input.expectedRevision, revision)
+    })
+
+    otherTabWrites('note', 'Other tab note')
+    await coordinator.mutateConversationBinding(character.chaId, 'other', { note: 'Preset copy' }, publish, { note: '' })
+    expect((await stored()).note).toBe('Other tab note')
+
+    otherTabWrites('name', 'Renamed in another tab')
+    await coordinator.mutateConversationBinding(character.chaId, 'other', { note: 'Preset copy' }, publish, { note: 'Other tab note' })
+    expect(await stored()).toMatchObject({ name: 'Renamed in another tab', note: 'Preset copy' })
 })

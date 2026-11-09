@@ -1,5 +1,5 @@
 import { userScriptConsole } from '../userScriptConsole'
-import { RegexExecutor } from './regexExecutor'
+import { RegexExecutor, REGEX_TEST_BATCH_SIZE } from './regexExecutor'
 import { replaceRegexMatches, type RegexOperationResults } from './regexOperations'
 import { createRegexTimeoutScope, generationRegexTimeoutScope, type RegexTimeoutScope } from './regexTimeoutScope'
 import { getDisplayRegexTimeoutScope, noticeRegexTimeout } from './scriptTimeoutNotice'
@@ -8,7 +8,7 @@ import { v4 } from "uuid";
 import { risuChatParser as risuChatParserGlobal } from "../parser/parser.svelte";
 import type { ActiveConversationPin } from "../storage/activeConversationSession";
 import { getCurrentCharacter, getDatabase, setCharacterByIndex, setDatabase, type Chat, type character } from "../storage/database.svelte";
-import { encodeCounts, tokenize } from "../tokenizer";
+import { tokenize } from "../tokenizer";
 import { getModuleTriggers } from "./modules";
 import { get } from "svelte/store";
 import { ReloadGUIPointer, CurrentTriggerIdStore, DBState } from "../stores.svelte";
@@ -29,6 +29,7 @@ import {
 import { createScriptConversationAccess, type ScriptConversationAccess } from './scriptConversationAccess';
 import { rebuildScriptDisplayRow, requestScriptDisplayRefresh } from './scriptDisplayRefresh';
 import { noteChatVariableRead } from './scriptVariableReads';
+import { effectiveAuthorNote } from '../authorNotePresets';
 import { peekActiveConversationSession } from "../storage/persistentDataRuntime.svelte";
 import { runSerializedUserTrigger } from './conversationUserTrigger';
 import { getHistoryMessage, historyLength, inheritHistoryWindow, sliceHistory } from './historyWindowIndex';
@@ -1144,7 +1145,7 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
     const generation = arg.regexGeneration ?? arg.generation?.signal
     arg.regexScope ??= generation ? generationRegexTimeoutScope(generation) : createRegexTimeoutScope()
     const regexExecutor = new RegexExecutor({ scope: arg.regexScope, onTimeout: noticeRegexTimeout,
-        invocationTimeoutMs: Number.POSITIVE_INFINITY })
+        invocationTimeoutMs: Number.POSITIVE_INFINITY, skipTimedOutRules: arg.displayMode === true })
     let regexRule: unknown
     let regexTrigger: string
     const regexOperation = <K extends keyof RegexOperationResults>(kind: K, pattern: string, flags: string, input: string) =>
@@ -2662,11 +2663,20 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                     char.globalLore = char.globalLore ?? []
                     const name = effect.nameType === 'value' ? risuChatParser(effect.name,{chara:char}) : getVar(risuChatParser(effect.name,{chara:char}))
                     const matchingIndices: number[] = []
-                    for (let i = 0; i < char.globalLore.length; i++) {
-                        const lore = char.globalLore[i]
-                        if (lore && lore.comment !== undefined && await regexOperation('test', name, 'i', lore.comment)) {
-                            matchingIndices.push(i)
+                    const key = JSON.stringify(['trigger', char.chaId, regexTrigger, 'test', regexRule])
+                    // A batch reads the lorebook when it starts, so it sees changes made while earlier batches ran.
+                    for (let start = 0; start < char.globalLore.length; start += REGEX_TEST_BATCH_SIZE) {
+                        const indices: number[] = []
+                        const comments: string[] = []
+                        for (let i = start; i < Math.min(start + REGEX_TEST_BATCH_SIZE, char.globalLore.length); i++) {
+                            const lore = char.globalLore[i]
+                            if (lore && lore.comment !== undefined) {
+                                indices.push(i)
+                                comments.push(lore.comment)
+                            }
                         }
+                        const matches = await regexExecutor.testEach(name, 'i', comments, key)
+                        matchingIndices.push(...indices.filter((_, index) => matches[index]))
                     }
                     setVar(risuChatParser(effect.outputVar, {chara:char}), JSON.stringify(matchingIndices))
                     break
@@ -2791,13 +2801,18 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
                     break
                 }
                 case 'v2GetAuthorNote':{
-                    setVar(risuChatParser(effect.outputVar, {chara:char}), chat.note ?? '')
+                    setVar(risuChatParser(effect.outputVar, {chara:char}), effectiveAuthorNote(db.authorNotePresets, chat))
                     break
                 }
                 case 'v2SetAuthorNote':{
                     const value = effect.valueType === 'value' ? risuChatParser(effect.value,{chara:char}) : getVar(risuChatParser(effect.value,{chara:char}))
-                    writableChat().note = value
-                    if (!conversationOperation && !access && !arg.displayMode) arg.chat.note = value
+                    const target = writableChat()
+                    target.note = value
+                    delete target.authorNotePreset
+                    if (!conversationOperation && !access && !arg.displayMode) {
+                        arg.chat.note = value
+                        delete arg.chat.authorNotePreset
+                    }
                     break
                 }
                 case 'v2MakeDictVar':{
@@ -2973,12 +2988,14 @@ async function runTriggerImpl(char: character, mode: triggerMode, arg: RunTrigge
     }
     
     let caculatedTokens = 0
-    // The system prompts are counted together, in one request where counts run natively.
-    const sysPrompts = [additonalSysPrompt.start, additonalSysPrompt.historyend, additonalSysPrompt.promptend].filter((prompt) => prompt)
-    if(sysPrompts.length > 0){
-        for(const tokens of await encodeCounts(sysPrompts)){
-            caculatedTokens += tokens
-        }
+    if(additonalSysPrompt.start){
+        caculatedTokens += await tokenize(additonalSysPrompt.start)
+    }
+    if(additonalSysPrompt.historyend){
+        caculatedTokens += await tokenize(additonalSysPrompt.historyend)
+    }
+    if(additonalSysPrompt.promptend){
+        caculatedTokens += await tokenize(additonalSysPrompt.promptend)
     }
     if (shouldSetTriggerId && mode !== 'manual') {
         CurrentTriggerIdStore.set(previousTriggerId)

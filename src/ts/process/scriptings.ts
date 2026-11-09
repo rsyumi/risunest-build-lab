@@ -21,10 +21,11 @@ import { requestChatData, type StreamResponseChunk } from "./request/request";
 import { v4 } from "uuid";
 import { getModuleLorebooks, getModuleTriggers } from "./modules";
 import { Mutex } from "../mutex";
-import { tokenCounter, tokenize } from "../tokenizer";
+import { tokenize } from "../tokenizer";
 import { fetchNative, readImage } from "../globalApi.svelte";
 import { loadLoreBookV3PromptFromCompatibilitySnapshot } from './lorebook.svelte';
 import { getPersonaPrompt, getUserName, getUserIcon } from '../util';
+import { effectiveAuthorNote } from '../authorNotePresets';
 import { isTauriMobile } from '../platform';
 import { getRuntimePerformanceBudgets, subscribeRuntimePerformanceProfile } from '../runtimePerformanceProfile';
 import { createLuaFactory, runLuaSource } from './luaRuntime';
@@ -368,6 +369,13 @@ export async function runScripted(code:string, arg:{
                 const db = getScriptingDatabase()
                 return db.characters[getScriptingCharacterIndex(db)]
             }
+            // CBS in script API results reads this invocation's database and its buffered variable writes.
+            const scriptingParserOptions = (db: Database | undefined) => ({
+                db,
+                selectedCharacterId: ScriptingEngineState.selectedCharacterId,
+                getChatVar: ScriptingEngineState.getVar,
+                setChatVar: ScriptingEngineState.setVar,
+            })
             const updateCapturedCharacterField = (
                 field: CapturedCharacterField,
                 value: string,
@@ -590,10 +598,7 @@ export async function runScripted(code:string, arg:{
                     : operationCharacter ?? getScriptingCharacter()
                 return risuChatParser(value, {
                     chara: parserCharacter,
-                    db: ScriptingEngineState.access ? database : ScriptingEngineState.operationDatabase,
-                    selectedCharacterId: ScriptingEngineState.selectedCharacterId,
-                    getChatVar: ScriptingEngineState.getVar,
-                    setChatVar: ScriptingEngineState.setVar,
+                    ...scriptingParserOptions(ScriptingEngineState.access ? database : ScriptingEngineState.operationDatabase),
                 })
             })
             
@@ -1079,11 +1084,12 @@ export async function runScripted(code:string, arg:{
                 const selectedChar = getScriptingCharacterIndex(db)
                 const char = db.characters[selectedChar]
 
-                return risuChatParser(getPersonaPrompt(), { chara: char })
+                return risuChatParser(getPersonaPrompt(), { chara: char, ...scriptingParserOptions(db) })
             })
 
             declareAPI('getAuthorsNote', (id:string) => {
-                return readScriptingChat()?.note ?? ''
+                const chat = readScriptingChat()
+                return chat ? effectiveAuthorNote(getScriptingDatabase().authorNotePresets, chat) : ''
             })
 
             declareAPI('getBackgroundEmbedding', (id:string) => {
@@ -1122,7 +1128,7 @@ export async function runScripted(code:string, arg:{
                 for (const source of loreSources) {
                     for (const b of source) {
                         if (b.comment === search) {
-                            found.push({ ...b, content: risuChatParser(b.content, { chara: selectedChar }) })
+                            found.push({ ...b, content: risuChatParser(b.content, { chara: selectedChar, ...scriptingParserOptions(db) }) })
                         }
                     }
                 }
@@ -1161,12 +1167,14 @@ export async function runScripted(code:string, arg:{
                     return
                 }
 
+                // A Lua nil name is stored as '', which also names the entry it replaces.
+                const comment = name ?? ''
                 const newLocalLoreBooks = (currentChat.localLore ?? [])
-                    .filter((book) => book.comment !== name)
+                    .filter((book) => (book.comment ?? '') !== comment)
                 newLocalLoreBooks.push({
                     alwaysActive,
-                    comment: name,
-                    content: content,
+                    comment,
+                    content: content ?? '',
                     insertorder: insertOrder,
                     mode: 'normal',
                     key,
@@ -1181,6 +1189,7 @@ export async function runScripted(code:string, arg:{
                 if(!ScriptingLowLevelIds.has(id)){
                     return
                 }
+                flushScriptingVariables()
 
                 const db = getScriptingDatabase()
 
@@ -1196,23 +1205,14 @@ export async function runScripted(code:string, arg:{
 
                 let totalTokens = 0
                 const loreBooks = []
-                // When the budget cannot stop the walk (a missing reserve makes it NaN), every prompt is parsed anyway, so
-                // the prompts are parsed first and counted in one request where counts run natively.
-                const parsedAhead = Number.isNaN(maxContext) || maxContext === Infinity
-                    ? fullLoreBooks.map((book) => risuChatParser(book.prompt, { chara: selectedChar }).trim())
-                    : null
-                const counter = tokenCounter()
-                if (parsedAhead) {
-                    await counter.prefetch(parsedAhead.filter((parsed) => parsed.length > 0))
-                }
 
-                for (const [index, book] of fullLoreBooks.entries()) {
-                    const parsed = parsedAhead?.[index] ?? risuChatParser(book.prompt, { chara: selectedChar }).trim()
+                for (const book of fullLoreBooks) {
+                    const parsed = risuChatParser(book.prompt, { chara: selectedChar, ...scriptingParserOptions(db) }).trim()
                     if (parsed.length === 0) {
                         continue
                     }
 
-                    const tokens = await counter.count(parsed)
+                    const tokens = await tokenize(parsed)
 
                     if (totalTokens + tokens > maxContext) {
                         break

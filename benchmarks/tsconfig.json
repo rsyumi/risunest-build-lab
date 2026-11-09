@@ -2,6 +2,7 @@
   "extends": "../tsconfig.json",
   "include": [
     "./harnessConfig.ts",
+    "./failureRecord*.ts",
     "./generation-memory/**/*.ts",
     "./generation-send/**/*.ts",
     "./tokenizer/*.ts",
@@ -15,7 +16,6 @@
     "./legacy-restore/**/*.ts",
     "./official-account/**/*.ts",
     "./plugin-review/**/*.ts",
-    "./rust-core-oracles/**/*.ts",
     "../src/**/*.d.ts"
   ],
   "exclude": [

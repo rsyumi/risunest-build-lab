@@ -166,20 +166,16 @@ mod tests {
         assert_eq!(b.choices.len(), 1);
     }
     #[test]
-    fn identity_forms_and_writes_are_rejected_but_hash_is_deterministic() {
+    fn deterministic_forms_and_writes_are_rejected() {
         for source in [
             "{{pick::A::B}}",
             "{{rollp::2d6}}",
             "{{rollpick::2d6}}",
+            "{{hash::x}}",
             "{{setvar::x::{{random::A::B}}}}",
         ] {
             assert!(prepare(&cbs::units(source), &Context::default()).is_err());
         }
-        let program = prepare(&cbs::units("{{hash::}}"), &Context::default()).unwrap();
-        let result = sample(&program, None).unwrap();
-        assert_eq!(result.output, cbs::units("0000040"));
-        assert!(result.choices.is_empty());
-        assert_eq!(result.entropy_words, 0);
     }
     #[test]
     fn runtime_failure_aborts_without_retry() {
