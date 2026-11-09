@@ -705,8 +705,11 @@ fn restore_portable_inner(
             }
             probe.result()?;
             archive.check_identity().map_err(error)?;
-            let warning_codes = vec![];
-            let final_revision = if !prepared_device.is_empty() {
+            let skipped: u64 = prepared_device.iter().map(|section| section.rows().skipped()).sum();
+            let warning_codes = if skipped == 0 { vec![] } else { vec![format!("plugin-values-skipped:{skipped}")] };
+            // The activation receipt names the authority the commit ran under, not
+            // whatever the binding reads after the commit.
+            let (final_revision, authority) = if !prepared_device.is_empty() {
                 let context = context.ok_or_else(|| {
                     NativeJobError::new(
                         "device-maintenance-unavailable",
@@ -744,15 +747,17 @@ fn restore_portable_inner(
                     &mut store,
                 )
                 .map_err(error)?;
-                result
+                let header = context.coordinator.library_replacement_header(&session).map_err(error)?;
+                (result, header.binding_authority)
             } else {
                 let header = crate::persistent_store::lww::Header { binding_authority: store.lww_binding_authority().map_err(error)?, request_id: job.id() };
                 let result = store.lww_commit_staged_replacement(&header,&stage.staging_id).map_err(error)?;
                 committed = true;
                 store.release_replacement_source(&stage.staging_id).map_err(error)?;
-                result.revision
+                (result.revision, header.binding_authority)
             };
-            job.publish_portable_activation(final_revision, store.lww_binding_authority().map_err(error)?.0.to_string()).map_err(error)?;
+            #[cfg(test)] after_library_commit(&mut store);
+            job.publish_portable_activation(final_revision, authority.0.to_string()).map_err(error)?;
             job.wait_for_portable_adoption().map_err(error)?;
             // Device recovery leaves a journal this job still holds, so the job releases it itself.
             journal_owned = false;
@@ -908,6 +913,17 @@ fn counts(archive: &VerifiedArchive) -> Result<(u64, u64), NativeJobError> {
 }
 
 #[cfg(test)]
+thread_local! {
+    static AFTER_LIBRARY_COMMIT: std::cell::RefCell<Option<Box<dyn FnOnce(&mut PersistentStore)>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs the hook a test installed on the restore thread between the library commit and the activation receipt.
+#[cfg(test)]
+fn after_library_commit(store: &mut PersistentStore) {
+    if let Some(hook) = AFTER_LIBRARY_COMMIT.with(|slot| slot.borrow_mut().take()) { hook(store); }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::local_backup::NeverCancelled;
@@ -1045,6 +1061,7 @@ mod tests {
             super::super::JobKind::ExportPortableBackup,
             Err(failure),
             vec![],
+            None,
         );
         let status = job.status();
         assert_eq!(status.state, super::super::JobState::Cancelled);
@@ -1177,7 +1194,7 @@ mod tests {
             let context = NativePortableRestoreContext {persistent: &persistent, coordinator: &worker_coordinator};
             let result = restore_portable_with_context(source, true, 1, &owned, PersistentStore::open(&worker_target).unwrap(), &worker_job, Some((&context, None)));
             let receipt = result.as_ref().map(|result| result.revision).map_err(|error| error.code.clone());
-            super::super::finish_worker_outcome(&worker_job, JobKind::RestorePortableBackup, result, vec![]);
+            super::super::finish_worker_outcome(&worker_job, JobKind::RestorePortableBackup, result, vec![], None);
             done.send(receipt).unwrap();
         });
         struct Retire(Arc<NativeFileJobState>);
@@ -1290,7 +1307,7 @@ mod tests {
         }
     }
 
-    fn activate_portable_restore() -> ActivatedPortableRestore {
+    fn activate_portable_restore(after_commit: Option<Box<dyn FnOnce(&mut PersistentStore) + Send>>) -> ActivatedPortableRestore {
         use super::super::{JobKind, NativeFileJobState, WorkerPermit};
         use std::sync::{Arc, mpsc};
         let directory = tempfile::tempdir().unwrap();
@@ -1311,11 +1328,14 @@ mod tests {
         let (done, completion) = mpsc::channel();
         let worker = std::thread::spawn(move || {
             let _permit = permit;
+            if let Some(hook) = after_commit {
+                super::AFTER_LIBRARY_COMMIT.with(|slot| *slot.borrow_mut() = Some(hook));
+            }
             let persistent = crate::persistent_store::commands::PersistentStoreState::default();
             let context = NativePortableRestoreContext {persistent: &persistent, coordinator: &worker_coordinator};
             let result = restore_portable_with_context(source, true, 1, &owned, PersistentStore::open(&worker_target).unwrap(), &worker_job, Some((&context, None)));
             let receipt = result.as_ref().map(|result| result.revision).map_err(|error| error.code.clone());
-            super::super::finish_worker_outcome(&worker_job, JobKind::RestorePortableBackup, result, vec![]);
+            super::super::finish_worker_outcome(&worker_job, JobKind::RestorePortableBackup, result, vec![], None);
             done.send(receipt).unwrap();
         });
         wait_for_job(&job, |status| status.phase == JobPhase::AwaitingBackupSelection);
@@ -1352,7 +1372,7 @@ mod tests {
 
     #[test]
     fn portable_restore_completes_device_recovery_before_its_missing_body_transfer() {
-        let restore = activate_portable_restore();
+        let restore = activate_portable_restore(None);
         assert!(crate::asset_repository::job_pins::durable_cas_job_held(&restore.target, &restore.job.id()).unwrap());
         crate::device_backup::complete_native_recovery_command_for_test(&restore.coordinator, &restore.session).unwrap();
         assert!(!restore.coordinator.is_blocking().unwrap());
@@ -1369,7 +1389,7 @@ mod tests {
 
     #[test]
     fn portable_restore_stopped_after_activation_completes_recovery_at_next_start() {
-        let restore = activate_portable_restore();
+        let restore = activate_portable_restore(None);
         restore.state.begin_cleanup().unwrap();
         assert!(restore.completion.recv_timeout(std::time::Duration::from_secs(30)).unwrap().is_err());
         restore.worker.join().unwrap();
@@ -1391,6 +1411,29 @@ mod tests {
         assert_eq!(restarted.bootstrap_for_entry().unwrap().mode, "normal");
         assert_eq!(DurableCasJob::open(&restore.target, &job_id).err().map(|error| error.kind()), Some(std::io::ErrorKind::NotFound));
         assert_eq!(PersistentStore::open(&restore.target).unwrap().revision().unwrap(), restore.revision);
+    }
+
+    #[test]
+    fn portable_activation_receipt_names_the_authority_its_commit_used() {
+        use crate::persistent_store::sync_selection::{SwitchBindingRequest, SyncTarget};
+        let committed = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let observed = committed.clone();
+        let restore = activate_portable_restore(Some(Box::new(move |store: &mut PersistentStore| {
+            let before = store.lww_binding_state().unwrap();
+            *observed.lock().unwrap() = Some(before.target_authority.0.to_string());
+            store.switch_lww_binding(&SwitchBindingRequest {
+                initial_publication: false,
+                header: crate::persistent_store::lww::Header { binding_authority: before.target_authority, request_id: "synthetic-switch-after-portable-commit".into() },
+                expected_selection_epoch: before.selection_epoch, target: SyncTarget::None, inspection_id: None,
+            }).unwrap();
+        })));
+        let committed = committed.lock().unwrap().clone().unwrap();
+        let current = PersistentStore::open(&restore.target).unwrap().lww_binding_authority().unwrap().0.to_string();
+        assert_ne!(current, committed, "the synthetic switch must change the binding authority");
+        assert_eq!(restore.authority, committed);
+        restore.state.begin_cleanup().unwrap();
+        assert!(restore.completion.recv_timeout(std::time::Duration::from_secs(30)).unwrap().is_err());
+        restore.worker.join().unwrap();
     }
 
     /// Exports a library whose one asset body is not on this device, held as `held` says.
@@ -1467,7 +1510,7 @@ mod tests {
             let job = super::super::JobRegistry::default()
                 .create(super::super::JobKind::RestorePortableBackup).unwrap();
             job.start(JobPhase::ReadingSource).unwrap();
-            super::super::finish_worker_outcome(&job, super::super::JobKind::RestorePortableBackup, Err(failure), vec![]);
+            super::super::finish_worker_outcome(&job, super::super::JobKind::RestorePortableBackup, Err(failure), vec![], None);
             let status = job.status();
             let returned = status.error.as_ref().unwrap();
             assert_eq!(returned.code, "portable-backup-failed");

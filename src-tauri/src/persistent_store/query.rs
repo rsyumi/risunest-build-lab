@@ -1,6 +1,6 @@
 use super::{
     active_generation, compare_plugin_storage_keys, current_revision, AnchorOccurrence,
-    ArchivedCharacterSummary, AssetAlias, AssetAliasListQuery, AssetAliasPage, AssetOwnerHead,
+    ArchivedCharacterSummary, AssetAlias, AuthorNotePresetUsage, AssetAliasListQuery, AssetAliasPage, AssetOwnerHead,
     AssetOwnerLocator, CharacterPage, CharacterQuery,
     CharacterSummary, ConversationPage, ConversationQuery, ConversationSummary,
     ConversationMessageMetadata, ConversationMessageMetadataWindow, ConversationWindow,
@@ -683,6 +683,37 @@ pub(super) fn read_character(
         revision: target.revision,
         value: serde_json::from_str(&detail)?,
     }))
+}
+
+pub(super) fn query_author_note_preset_usage(
+    connection: &Connection,
+    preset_id: &str,
+    target: &ReadTarget,
+) -> StoreResult<Vec<AuthorNotePresetUsage>> {
+    let mut statement = connection.prepare(
+        "SELECT c.character_id, k.name, c.conversation_id, c.name,
+             json_extract(c.detail, '$.note'), json_extract(c.detail, '$.authorNotePreset.fingerprint')
+         FROM conversations c JOIN characters k
+             ON k.generation = c.generation AND k.character_id = c.character_id
+         WHERE c.generation = ?1 AND json_extract(c.detail, '$.authorNotePreset.id') = ?2
+         ORDER BY k.configured_index, c.configured_index",
+    )?;
+    let mut rows = statement.query(params![target.generation, preset_id])?;
+    let mut items = Vec::new();
+    while let Some(row) = rows.next()? {
+        let note: Option<String> = row.get(4).ok().flatten();
+        let fingerprint: Option<String> = row.get(5).ok().flatten();
+        if fingerprint.as_deref() != Some(&super::author_note::fingerprint(note.as_deref().unwrap_or(""))) {
+            continue;
+        }
+        items.push(AuthorNotePresetUsage {
+            character_id: row.get(0)?,
+            character_name: row.get(1)?,
+            conversation_id: row.get(2)?,
+            conversation_name: row.get(3)?,
+        });
+    }
+    Ok(items)
 }
 
 pub(super) fn query_conversations(

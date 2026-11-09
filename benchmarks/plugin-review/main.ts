@@ -133,7 +133,7 @@ Object.assign(window, { __pluginReview: {
                 fetch: async () => { throw new Error('Unexpected fixture network request') },
                 save: async (filename, bytes) => {
                     check(filename === name && bytes.length === size, 'Download metadata differs')
-                    const saved = await downloadFile(filename, bytes, { saveDialog: true })
+                    const saved = await downloadFile(filename, bytes)
                     downloadResult = { done: true, saved }
                     return saved
                 },

@@ -41,6 +41,24 @@ export function createRegexWorkerMessageHandler(
             }
             return
         }
+        if (request.type === 'testEach') {
+            let regex: RegExp
+            try {
+                regex = new RegExp(request.pattern, request.flags)
+            } catch (error) {
+                respond({ type: 'error', id: request.id, message: errorMessage(error) })
+                return
+            }
+            const matches = request.inputs.map((input, index) => {
+                // Each input starts from a fresh match position, as a separate operation would.
+                regex.lastIndex = 0
+                const matched = regex.test(input)
+                respond({ type: 'progress', id: request.id, index, matched })
+                return matched
+            })
+            respond({ type: 'operationResult', id: request.id, value: matches })
+            return
+        }
         if (request.type === 'register') {
             retainedInput = undefined
             registeredRevision = request.revision
@@ -96,6 +114,7 @@ export function createRegexWorkerMessageHandler(
             if (entry.pattern === '') {
                 continue
             }
+            if (request.continuation) respond({ type: 'progress', id: request.id, index: nextIndex })
             try {
                 if (entry.compileError !== undefined) {
                     throw new Error(entry.compileError)

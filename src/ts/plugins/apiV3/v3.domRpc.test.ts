@@ -861,7 +861,7 @@ function __postToParent(message) {
         expect(Object.hasOwn(request.messages[0].expected, '__old')).toBe(true)
     })
 
-    it('reaches the private host tools from the guest under the db permission', async () => {
+    it('reaches the private host tools from the guest under their own permission', async () => {
         vi.mocked(linkPluginQueryAbortSignals).mockImplementation(() => ({ signal: new AbortController().signal, dispose() {} }))
         const listed = { scope: 'scope-a', tools: [{ source: 'internal:dice', sourceName: 'Dice', name: 'rollDice', inputSchema: { type: 'object' } }] }
         mocks.listHostTools.mockResolvedValueOnce(listed)
@@ -874,6 +874,7 @@ function __postToParent(message) {
             return JSON.stringify({ list, content });
         `)))
         expect(result).toEqual({ list: listed, content: [{ type: 'text', text: 'Rolled 1d6: 4' }] })
+        expect(mocks.confirm).toHaveBeenCalledExactlyOnceWith(language.hostToolPermissionConsent.replace('{}', 'tool-caller'))
         expect(mocks.listHostTools).toHaveBeenCalledWith('tool-caller')
         expect(mocks.callHostTool).toHaveBeenCalledWith('tool-caller',
             { scope: 'scope-a', source: 'internal:dice', name: 'rollDice', arguments: { notation: '1d6' } }, expect.any(AbortSignal))
@@ -888,7 +889,7 @@ function __postToParent(message) {
             return JSON.stringify(errors);
         `))) as string[]
         expect(errors).toHaveLength(2)
-        for (const error of errors) expect(error).toContain('db permission')
+        for (const error of errors) expect(error).toContain('hostTools permission')
         expect(mocks.listHostTools).toHaveBeenCalledTimes(1)
         expect(mocks.callHostTool).toHaveBeenCalledTimes(1)
     })

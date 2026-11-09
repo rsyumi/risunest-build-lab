@@ -126,6 +126,23 @@ describe("iOS generation lifecycle", () => {
       remove();
     }
   });
+  it("records the foreground return in the generation diagnostics", async () => {
+    const { generationDiagnostics } = await import("./generationDiagnostics");
+    invoke.mockResolvedValueOnce(7 as never);
+    generationDiagnostics.startDocument();
+    expect(invoke).toHaveBeenCalledWith("native_generation_diagnostic", { event: { kind: "document-start" } });
+    // Lets the document handshake settle before the event is sent.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const remove = installIOSPersistenceLifecycle(vi.fn(async () => {}));
+    try {
+      window.dispatchEvent(new CustomEvent("risunest-ios-lifecycle", { detail: { event: "active" } }));
+      expect(invoke).toHaveBeenCalledWith("native_generation_diagnostic", {
+        event: expect.objectContaining({ kind: "lifecycle", documentSequence: 7, event: "active" }),
+      });
+    } finally {
+      remove();
+    }
+  });
   it("ends the background save assertion without waiting when the app returned during the save", async () => {
     const holds = { settled: vi.fn(() => new Promise<void>(() => {})), expire: vi.fn() };
     let finish!: () => void;

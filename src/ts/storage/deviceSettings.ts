@@ -19,12 +19,16 @@ export interface RisuNestDeviceSettings {
     generationHistoryLimitMultiplier: number
     messageSendKey: MessageSendKey
     pluginOutputCurrentChatOnly: boolean
+    automaticSnapshotsEnabled: boolean
+    /** Sent with every snapshot request; see `KeepCount` in Rust. */
+    snapshotKeepCount: number
 }
+
+/** The most snapshots this device keeps, matching the native rotation limit. */
+export const MAX_SNAPSHOT_KEEP_COUNT = 8
 
 const storageKey = 'risuNestDeviceSettings'
 const exclusionsKey = 'risuNestStartupExclusions'
-const nativeOllamaGenerationKey = 'risuNestNativeOllamaGeneration'
-const nativeDisplayRenderKey = 'risuNestNativeDisplayRender'
 
 const defaults: RisuNestDeviceSettings = {
     schema: 'risunest.device-settings/v1',
@@ -35,7 +39,11 @@ const defaults: RisuNestDeviceSettings = {
     generationHistoryLimitMultiplier: 2,
     messageSendKey: 'enter',
     pluginOutputCurrentChatOnly: false,
+    automaticSnapshotsEnabled: true,
+    snapshotKeepCount: MAX_SNAPSHOT_KEEP_COUNT,
 }
+
+const addedFields = ['pluginOutputCurrentChatOnly', 'automaticSnapshotsEnabled', 'snapshotKeepCount'] as const
 
 function snapshot(settings: RisuNestDeviceSettings): RisuNestDeviceSettings {
     return { ...settings }
@@ -54,7 +62,7 @@ function isValidSettings(value: unknown): value is RisuNestDeviceSettings {
     if (!value || typeof value !== 'object') return false
     const settings = value as Record<string, unknown>
     return (
-        Object.keys(settings).length === 8 &&
+        Object.keys(settings).length === 10 &&
         settings.schema === defaults.schema &&
         (settings.performanceProfile === 'normal' ||
             settings.performanceProfile === 'low-spec') &&
@@ -67,7 +75,11 @@ function isValidSettings(value: unknown): value is RisuNestDeviceSettings {
         (settings.messageSendKey === 'enter' ||
             settings.messageSendKey === 'ctrl-shift-enter' ||
             settings.messageSendKey === 'button') &&
-        typeof settings.pluginOutputCurrentChatOnly === 'boolean'
+        typeof settings.pluginOutputCurrentChatOnly === 'boolean' &&
+        typeof settings.automaticSnapshotsEnabled === 'boolean' &&
+        Number.isInteger(settings.snapshotKeepCount) &&
+        (settings.snapshotKeepCount as number) >= 1 &&
+        (settings.snapshotKeepCount as number) <= MAX_SNAPSHOT_KEEP_COUNT
     )
 }
 
@@ -75,9 +87,9 @@ function isValidSettings(value: unknown): value is RisuNestDeviceSettings {
 // field's default.
 function withAddedDefaults(value: unknown): unknown {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return value
-    return 'pluginOutputCurrentChatOnly' in value
-        ? value
-        : { ...value, pluginOutputCurrentChatOnly: defaults.pluginOutputCurrentChatOnly }
+    const missing = addedFields.filter((field) => !(field in value))
+    if (missing.length === 0) return value
+    return { ...value, ...Object.fromEntries(missing.map((field) => [field, defaults[field]])) }
 }
 
 function readSettings(markers: DeviceMarkerStorage): RisuNestDeviceSettings {
@@ -191,54 +203,4 @@ export function updateStartupExclusions(exclusions: readonly RecoveryExclusion[]
     if (!isExclusionList(exclusions)) throw new Error('Invalid startup exclusions')
     storage?.setItem(exclusionsKey, JSON.stringify([...new Set(exclusions)]))
     void flushDeviceSettings().catch(reportStoreFailure)
-}
-
-/**
- * Whether ordinary Ollama Send runs in the app core. It stays on this installation
- * and defaults to off, so a missing or unreadable value reads false.
- */
-export function getNativeOllamaGeneration(): boolean {
-    initializeSettings()
-    try {
-        return storage?.getItem(nativeOllamaGenerationKey) === 'true'
-    } catch { return false }
-}
-
-/** Returns false when the value could not be stored, leaving the previous one in place. */
-export function updateNativeOllamaGeneration(enabled: boolean): boolean {
-    initializeSettings()
-    try {
-        storage?.setItem(nativeOllamaGenerationKey, enabled ? 'true' : 'false')
-        void flushDeviceSettings().catch(reportStoreFailure)
-        return true
-    } catch (error) {
-        reportStoreFailure(error)
-        return false
-    }
-}
-
-/**
- * Whether chat messages render in the app core (`true`) or in TS (`false`) on this installation,
- * whatever the routing rule says. A missing or unreadable value reads null, and the rule decides.
- */
-export function getNativeDisplayRender(): boolean | null {
-    initializeSettings()
-    try {
-        const value = storage?.getItem(nativeDisplayRenderKey)
-        return value === 'true' ? true : value === 'false' ? false : null
-    } catch { return null }
-}
-
-/** `null` leaves it to the routing rule. Returns false when the value could not be stored, leaving the previous one in place. */
-export function updateNativeDisplayRender(enabled: boolean | null): boolean {
-    initializeSettings()
-    try {
-        if (enabled === null) storage?.removeItem(nativeDisplayRenderKey)
-        else storage?.setItem(nativeDisplayRenderKey, enabled ? 'true' : 'false')
-        void flushDeviceSettings().catch(reportStoreFailure)
-        return true
-    } catch (error) {
-        reportStoreFailure(error)
-        return false
-    }
 }

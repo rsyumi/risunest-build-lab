@@ -32,10 +32,23 @@ export type RegexWorkerRequest = {
     id: number
     operation: RegexOperation
 } | {
+    type: 'testEach'
+    id: number
+    pattern: string
+    flags: string
+    inputs: string[]
+} | {
     type: 'release'
 }
 
 export type RegexWorkerResponse = { type: 'ready' } | {
+    // Sent before each rule of a continuation, so a timeout names the rule that did not finish,
+    // and after each input of `testEach` with its result.
+    type: 'progress'
+    id: number
+    index: number
+    matched?: boolean
+} | {
     type: 'result'
     id: number
     data: string
@@ -48,7 +61,7 @@ export type RegexWorkerResponse = { type: 'ready' } | {
 } | {
     type: 'operationResult'
     id: number
-    value: RegexOperationResults[keyof RegexOperationResults]
+    value: RegexOperationResults[keyof RegexOperationResults] | boolean[]
 } | {
     type: 'error'
     id: number
@@ -72,10 +85,13 @@ export interface RegexWorkerExecuteOptions {
 interface PendingRequest {
     plan?: RegexExecutionPlan
     operation?: RegexOperation
+    tests?: { pattern: string, flags: string, inputs: string[] }
+    matches?: boolean[]
     cbsContext?: DisplayCbsContext
     continuation?: { start: number, end: number, skipPlainCbs?: boolean }
     input: string
     timeoutMs: number
+    ruleIndex?: number
     signal?: AbortSignal
     abortListener?: () => void
     timeout?: ReturnType<typeof setTimeout>
@@ -86,7 +102,7 @@ interface PendingRequest {
 export class RegexExecutionTimeoutError extends Error {
     readonly category = 'regex_timeout'
 
-    constructor(readonly revision: number) {
+    constructor(readonly revision: number, readonly ruleIndex?: number, readonly matches?: boolean[]) {
         super('Regex script execution timed out.')
         this.name = 'RegexExecutionTimeoutError'
     }
@@ -138,6 +154,11 @@ export class RegexWorkerClient {
         return this.enqueue({ operation, input: operation.input }, options)
     }
 
+    /** Tests each input in order. The timeout applies to each input, and its error keeps the earlier results. */
+    testEach(pattern: string, flags: string, inputs: string[], options: RegexWorkerExecuteOptions = {}): Promise<boolean[]> {
+        return this.enqueue({ tests: { pattern, flags, inputs }, matches: [], input: '' }, options)
+    }
+
     releaseContinuation(): void {
         this.continuation = undefined
         if (this.ready && this.activeId === undefined && this.pending.size === 0) {
@@ -146,7 +167,7 @@ export class RegexWorkerClient {
         }
     }
 
-    private enqueue<T>(work: Pick<PendingRequest, 'plan' | 'operation' | 'input' | 'continuation' | 'cbsContext'>, options: RegexWorkerExecuteOptions): Promise<T> {
+    private enqueue<T>(work: Pick<PendingRequest, 'plan' | 'operation' | 'tests' | 'matches' | 'input' | 'continuation' | 'cbsContext'>, options: RegexWorkerExecuteOptions): Promise<T> {
         if (options.signal?.aborted) return Promise.reject(createAbortError(options.signal))
         return new Promise((resolve, reject) => {
             const id = this.nextRequestId++
@@ -191,6 +212,15 @@ export class RegexWorkerClient {
             }
             const request = this.pending.get(response.id)
             if (!request || this.activeId !== response.id) return
+            if (response.type === 'progress') {
+                if (request.matches) {
+                    request.matches.push(response.matched!)
+                    clearTimeout(request.timeout)
+                    this.startTimeout(response.id, request)
+                }
+                else request.ruleIndex = response.index
+                return
+            }
             this.pending.delete(response.id)
             this.activeId = undefined
             this.cleanupPending(request)
@@ -231,10 +261,14 @@ export class RegexWorkerClient {
         if (!next) return
         const [id, request] = next
         this.activeId = id
-        request.timeout = setTimeout(() => this.replaceWorker(new RegexExecutionTimeoutError(request.plan?.revision ?? 0), id), request.timeoutMs)
+        this.startTimeout(id, request)
         try {
             if (request.operation) {
                 this.worker.postMessage({ type: 'operation', id, operation: request.operation })
+                return
+            }
+            if (request.tests) {
+                this.worker.postMessage({ type: 'testEach', id, ...request.tests })
                 return
             }
             const plan = request.plan!
@@ -257,6 +291,11 @@ export class RegexWorkerClient {
         } catch (error) {
             this.replaceWorker(error, id)
         }
+    }
+
+    private startTimeout(id: number, request: PendingRequest): void {
+        request.timeout = setTimeout(() => this.replaceWorker(new RegexExecutionTimeoutError(
+            request.plan?.revision ?? 0, request.ruleIndex, request.matches), id), request.timeoutMs)
     }
 
     private replaceWorker(error: unknown, culpritId?: number): void {

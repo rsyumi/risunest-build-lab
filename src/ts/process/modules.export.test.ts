@@ -3,11 +3,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
     platform: 'web' as 'web' | 'desktop' | 'ios' | 'android',
-    importIOS: vi.fn(), importAndroid: vi.fn(), importDesktop: vi.fn(),
+    importIOS: vi.fn(), importAndroid: vi.fn(),
     open: vi.fn(),
+    readFile: vi.fn(),
+    selectMultipleFile: vi.fn(),
     readImage: vi.fn(),
     saveAsset: vi.fn(async (_data: Uint8Array) => ''),
-    invoke: vi.fn(),
+    exportRisum: vi.fn(),
 }))
 
 vi.mock('../platform', async () => (await import('../platform.testSupport')).platformModule(() => ({
@@ -16,11 +18,9 @@ vi.mock('../platform', async () => (await import('../platform.testSupport')).pla
 })))
 vi.mock('../storage/iosContentPicker', () => ({ importIOSContentFromPicker: mocks.importIOS }))
 vi.mock('../storage/androidContentPicker', () => ({ importAndroidContentFromPicker: mocks.importAndroid }))
-vi.mock('../storage/nativeModuleFileRoute', () => ({ importDesktopNativeModulePath: mocks.importDesktop }))
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: mocks.open }))
-vi.mock('@tauri-apps/api/core', async (original) => ({
-    ...(await original<typeof import('@tauri-apps/api/core')>()), invoke: mocks.invoke,
-}))
+vi.mock('@tauri-apps/plugin-fs', () => ({ readFile: mocks.readFile }))
+vi.mock('../storage/nativeModuleRisumExportRoute', () => ({ exportNativeModuleRisumFromPicker: mocks.exportRisum }))
 vi.mock('../mobileBackgroundTask', async () => (await import('../mobileBackgroundTask.testSupport')).mobileBackgroundTaskModule())
 
 vi.mock('../alert', () => ({
@@ -53,7 +53,7 @@ vi.mock('../globalApi.svelte', async () => {
 })
 vi.mock('../util', () => ({
     checkPersonaBinded: vi.fn(),
-    selectSingleFile: vi.fn(),
+    selectMultipleFile: mocks.selectMultipleFile,
     sleep: vi.fn(),
 }))
 vi.mock('uuid', () => ({ v4: () => 'roundtrip-module-id' }))
@@ -75,7 +75,7 @@ vi.mock('../characterCards', () => ({
 
 import { get } from 'svelte/store'
 import { language } from 'src/lang'
-import { exportModuleLegacy, importModule, importModuleData, importPreparedNativeModuleContent, readModule, type RisuModule } from './modules'
+import { exportModuleLegacy, importModule, importModuleData, readModule, type RisuModule } from './modules'
 import { DBState } from '../stores.svelte'
 import {
     dismissNativeFileOperationOutcome,
@@ -139,6 +139,18 @@ describe('legacy module export', () => {
         expect(alertNormal).not.toHaveBeenCalled()
     })
 
+    it('reports a native RISUM export refused while the library is busy, and leaves success to the export dialog', async () => {
+        mocks.platform = 'desktop'
+        const module = { id: 'source', name: 'Synthetic', description: '' }
+        mocks.exportRisum.mockRejectedValueOnce(
+            Object.assign(new Error('Another library operation is running'), { code: 'library-operation-busy' }))
+        await expect(exportModuleLegacy(module)).resolves.toEqual(new Uint8Array(0))
+        expect(alertError).toHaveBeenCalledExactlyOnceWith(language.risuNest.importDialog.reasonBusy)
+        mocks.exportRisum.mockResolvedValueOnce({ revision: 1 })
+        await exportModuleLegacy(module)
+        expect(alertNormal).not.toHaveBeenCalled()
+    })
+
     it.each([false, true])('rejects legacy RISUM stdio before saving assets with lowLevelAccess=%s', async lowLevelAccess => {
         mocks.readImage.mockResolvedValue(new Uint8Array([1, 2, 3]))
         const exported = await exportModuleLegacy({
@@ -154,28 +166,54 @@ describe('legacy module export', () => {
         expect(alertError).toHaveBeenCalledWith(expect.any(StdioModuleImportError))
     })
 
-    it.each(['https://synthetic.invalid/mcp', 'internal:dice', 'plugin:synthetic'])('preserves %s in JSON and RISUM imports', async url => {
+    it.each(['https://synthetic.invalid/mcp', 'internal:dice', 'plugin:synthetic'])('drops %s from JSON and RISUM imports', async url => {
         const module = { id: 'source', name: 'Synthetic', description: '', mcp: { url } }
         await importModuleData({
             name: 'synthetic.json', data: Buffer.from(JSON.stringify({ ...module, type: 'risuModule' })),
         })
         const exported = await exportModuleLegacy(module, { alertEnd: false, saveData: false })
         await importModuleData({ name: 'synthetic.risum', data: exported })
-        expect(DBState.db.modules.map(module => module.mcp?.url)).toEqual([url, url])
+        expect(DBState.db.modules.map(module => module.name)).toEqual(['Synthetic', 'Synthetic'])
+        expect(DBState.db.modules.map(module => Object.hasOwn(module, 'mcp'))).toEqual([false, false])
         expect(alertError).not.toHaveBeenCalled()
     })
 
-    it.each(['ios', 'android', 'desktop'] as const)('routes the public module picker only to %s', async platform => {
+    it.each(['ios', 'android'] as const)('routes the public module picker only to %s', async platform => {
         mocks.platform = platform
-        mocks.open.mockResolvedValue('C:/synthetic/module.risum')
         mocks.importIOS.mockResolvedValue('ios-module')
         mocks.importAndroid.mockResolvedValue('android-module')
         await importModule()
         expect(mocks.importIOS).toHaveBeenCalledTimes(platform === 'ios' ? 1 : 0)
         expect(mocks.importAndroid).toHaveBeenCalledTimes(platform === 'android' ? 1 : 0)
-        expect(mocks.importDesktop).toHaveBeenCalledTimes(platform === 'desktop' ? 1 : 0)
         if (platform === 'ios') expect(mocks.importIOS).toHaveBeenCalledWith('module')
         if (platform === 'android') expect(mocks.importAndroid).toHaveBeenCalledWith('module')
+        expect(mocks.open).not.toHaveBeenCalled()
+    })
+
+    const moduleJson = (name: string) => new TextEncoder().encode(JSON.stringify({ type: 'risuModule', id: name, name }))
+
+    it('imports every module picked on desktop in one dialog', async () => {
+        mocks.platform = 'desktop'
+        mocks.open.mockResolvedValue(['C:/synthetic/first.json', 'C:/synthetic/second.lorebook'])
+        mocks.readFile.mockImplementation(async (path: string) => moduleJson(path.includes('first') ? 'First' : 'Second'))
+
+        await expect(importModule()).resolves.toBe('module')
+
+        expect(mocks.open).toHaveBeenCalledWith(expect.objectContaining({ multiple: true }))
+        expect(DBState.db.modules.map(module => module.name)).toEqual(['First', 'Second'])
+        expect(get(nativeFileOperationOutcome)).toMatchObject({
+            kind: 'import', state: 'succeeded', batch: { total: 2, imported: 2, failures: [], declined: [] },
+        })
+    })
+
+    it('imports every module picked on the web', async () => {
+        mocks.selectMultipleFile.mockResolvedValue([
+            { name: 'first.json', data: moduleJson('First') },
+            { name: 'second.json', data: moduleJson('Second') },
+        ])
+        await expect(importModule()).resolves.toBe('module')
+        expect(mocks.selectMultipleFile).toHaveBeenCalledWith(['json', 'lorebook', 'risum', 'charx'])
+        expect(DBState.db.modules.map(module => module.name)).toEqual(['First', 'Second'])
     })
 
     it.each(['ios', 'android'] as const)('leaves a failed %s picker import to its dialog and reports a refused start', async platform => {
@@ -194,27 +232,37 @@ describe('legacy module export', () => {
         expect(alertError).toHaveBeenCalledExactlyOnceWith(language.risuNest.backup.fileBusy)
     })
 
-    it('preserves the desktop native import error and leaves a started import failure to its dialog', async () => {
+    it('lists the desktop modules that could not be read or were refused in the dialog and reports a refused start', async () => {
         mocks.platform = 'desktop'
-        mocks.open.mockResolvedValue('C:/synthetic/module.risum')
-        const failure = Object.assign(new Error('Another library operation is running'), { code: 'library-operation-busy' })
-        mocks.importDesktop.mockImplementationOnce(async (_path, _import, _options, report) => {
-            report(failure)
-            return { kind: 'failed' }
+        mocks.open.mockResolvedValue(['C:/synthetic/first.json', 'C:/synthetic/missing.json', 'C:/synthetic/unnamed.json'])
+        mocks.readFile.mockImplementation(async (path: string) => {
+            if (path.includes('missing')) throw Object.assign(new Error('synthetic read failure'), { code: 'io-error' })
+            return moduleJson(path.includes('unnamed') ? '' : 'First')
         })
-        await importModule()
-        expect(alertError).toHaveBeenCalledExactlyOnceWith(failure)
-
+        await expect(importModule()).resolves.toBe('module')
+        expect(DBState.db.modules.map(module => module.name)).toEqual(['First'])
+        expect(get(nativeFileOperationOutcome)).toMatchObject({
+            state: 'failed',
+            batch: {
+                total: 3,
+                imported: 1,
+                failures: [{ name: 'missing.json', error: { code: 'io-error' } }],
+                declined: ['unnamed.json'],
+            },
+        })
+        // The converter still names the refusal itself.
+        expect(alertError).toHaveBeenCalledExactlyOnceWith(language.errors.noData)
         vi.mocked(alertError).mockClear()
-        mocks.importDesktop.mockImplementationOnce(async (_path, _import, _options, report) => {
-            await runSharedNativeFileOperation('import', 'content:module.risum', async () => {
-                throw new Error('synthetic invalid module')
-            }, { presentation: 'dialog', format: 'content' }).catch(report)
-            return { kind: 'failed' }
-        })
-        await importModule()
-        expect(get(nativeFileOperationOutcome)).toMatchObject({ kind: 'import', state: 'failed' })
-        expect(alertError).not.toHaveBeenCalled()
+
+        dismissNativeFileOperationOutcome()
+        let release!: () => void
+        const running = runSharedNativeFileOperation('import', 'risu-save-import', () => new Promise<null>(resolve => {
+            release = () => resolve(null)
+        }))
+        await expect(importModule()).resolves.toBeNull()
+        expect(alertError).toHaveBeenCalledExactlyOnceWith(language.risuNest.backup.fileBusy)
+        release()
+        await running
     })
 
     it('roundtrips ordinary asset bytes and preserves asset metadata exactly', async () => {
@@ -254,19 +302,5 @@ describe('legacy module export', () => {
             ['ordinary-asset-a', 'asset://roundtrip-a', 'bin', 'first-tail', { rank: 1 }],
             ['ordinary-asset-b', 'asset://roundtrip-b', 'dat', 'second-tail', { rank: 2 }],
         ])
-    })
-
-    // A card picked for a module import is converted by the native job too.
-    it('names the module destination in the native content import request', async () => {
-        mocks.platform = 'desktop'
-        const refused = new Error('synthetic stop after the request')
-        mocks.invoke.mockRejectedValue(refused)
-        const source = { type: 'desktopPath', path: 'C:/synthetic/card.charx' } as const
-
-        await importPreparedNativeModuleContent({ source, displayName: 'card.charx' }).catch(() => undefined)
-
-        expect(mocks.invoke).toHaveBeenCalledWith('native_file_job_start', {
-            request: { kind: 'prepare-content-import', source, displayName: 'card.charx', importDestination: 'module' },
-        })
     })
 })

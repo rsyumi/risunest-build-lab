@@ -14,7 +14,6 @@ import {
     SaveCoordinator,
 } from './saveCoordinator.testSupport'
 import { safeStructuredClone } from '../polyfill'
-import { cloneConversationMetadata } from './selectedConversationLifecycle'
 
 vi.mock('../polyfill', async (importOriginal) => {
     const actual = await importOriginal<typeof import('../polyfill')>()
@@ -202,19 +201,24 @@ describe('SaveCoordinator', () => {
             expect(() => harness.coordinator.retireWindowedSelectedConversation()).not.toThrow()
         })
 
-        it('rejects inconsistent refresh normalization before clearing an unsaved root edit', async () => {
+        it('retires windowed ownership while only a storage-only mutation is queued behind the flush', async () => {
             const harness = makeWindowedHarness()
-            harness.database.username = 'Pending root edit'
+            harness.database.username = 'Saved before leaving'
             harness.coordinator.markPersistentDataDirty(0)
-            const metadata = cloneConversationMetadata(harness.selected().chats[0])
-            expect(() => harness.coordinator.initialize(2, undefined, {
-                conversation: { before: metadata, after: { ...metadata, isStreaming: false } },
-            })).toThrow(/normalization/)
-            await harness.coordinator.flushPendingDataLocally('after-rejected-normalization')
-            expect(harness.commit.mock.calls[0][0]).toMatchObject({ rootMutations: [
-                { type: 'set', key: 'username', value: 'Pending root edit' },
-            ] })
-            expect(harness.database.username).toBe('Pending root edit')
+            const cleanup = deferred<void>()
+            void harness.coordinator.flushPendingData('deleted-owner-assets')
+            const storageOnly = harness.coordinator.runStorageOnlyMutation(async (expectedRevision) => {
+                await cleanup.promise
+                return expectedRevision + 1
+            })
+            expect(() => harness.coordinator.retireWindowedSelectedConversation()).toThrow('pending persistence')
+            await harness.coordinator.flushPendingData('deactivate-working-set')
+            expect(harness.coordinator.hasPendingPersistenceWork).toBe(true)
+            expect(() => harness.coordinator.retireWindowedSelectedConversation()).not.toThrow()
+            cleanup.resolve()
+            await storageOnly
+            expect(harness.coordinator.revision).toBe(4)
+            expect(harness.coordinator.hasPendingPersistenceWork).toBe(false)
         })
 
         it('commits a character addition beside the windowed selection and keeps later saves to their own changes', async () => {
@@ -303,6 +307,7 @@ describe('SaveCoordinator', () => {
                 deleteCount: number
                 messages: Array<{ role: string; data: string }>
                 conversationName?: string
+                note?: string
             },
         ) {
             coordinator.recordActiveConversationMutation({
@@ -322,33 +327,10 @@ describe('SaveCoordinator', () => {
                     id: options.conversationId ?? 'two',
                     name: options.conversationName ?? 'Two',
                     localLore: [],
-                    note: '',
+                    note: options.note ?? '',
                 },
             })
         }
-
-        it('captures a windowed recovery prefix without loading history and preserves a later journal suffix', () => {
-            const harness = makeWindowedHarness({ totalMessages: 10_000 })
-            harness.replaceAuthority({ ...harness.authority()!, sessionVersion: 1, totalMessages: 10_001 })
-            recordWindowedMutation(harness.coordinator, { sessionToken: harness.sessionToken, previousVersion: 0, sessionVersion: 1,
-                start: 10_000, deleteCount: 0, messages: [{ role: 'user', data: 'Captured append' }] })
-            const captured = harness.coordinator.captureReceiveConversationEdits('char-a', 'two', 2)
-            expect(captured.originalMessageCount).toBe(10_000)
-            expect(captured.messageCount).toBe(10_001)
-            expect(captured.ranges).toEqual([{ start: 10_000, deleteCount: 0, messages: [{ role: 'user', data: 'Captured append' }] }])
-            expect(captured.isCurrent()).toBe(true)
-            harness.replaceAuthority({ ...harness.authority()!, sessionVersion: 2, totalMessages: 10_001 })
-            recordWindowedMutation(harness.coordinator, { sessionToken: harness.sessionToken, previousVersion: 1, sessionVersion: 2,
-                start: 10_000, deleteCount: 1, messages: [{ role: 'user', data: 'Later edit of inserted row' }] })
-            expect(captured.isCurrent()).toBe(false)
-            expect(() => captured.assertPrefixCurrent()).not.toThrow()
-            expect(captured.ranges[0].messages[0].data).toBe('Captured append')
-            expect(harness.coordinator.captureReceiveConversationEdits('char-a', 'two', 2).ranges).toHaveLength(2)
-            expect(harness.readConversationWindow).not.toHaveBeenCalled()
-            expect(harness.commit).not.toHaveBeenCalled()
-            expect(harness.onPersisted).not.toHaveBeenCalled()
-            harness.coordinator.markCommittedWorkingSetRefreshRequired(2, new Error('Synthetic retained receive conflict'))
-        })
 
         it('rejects windowed adoption while ordinary dirty work is pending', () => {
             const database = makeDatabase()
@@ -1035,6 +1017,79 @@ describe('SaveCoordinator', () => {
             expect(harness.onPersisted.mock.calls.map(([event]) => event.sessionVersion)).toEqual([
                 1,
                 2,
+            ])
+        })
+
+        it('folds a reply streamed while the store is blocked into one catch-up range under the commit limit', async () => {
+            const blocked = deferred<void>()
+            const entered = deferred<void>()
+            let persistedTotal = 10_000
+            const commit = vi.fn(async (input: WorkingSetCommit) => {
+                const bytes = new TextEncoder().encode(JSON.stringify(input)).byteLength
+                if (commit.mock.calls.length === 1) {
+                    entered.resolve()
+                    await blocked.promise
+                }
+                if (bytes > 32 * 1024) throw new PayloadTooLargeError('commit', bytes)
+                for (const mutation of input.conversations ?? []) {
+                    if (mutation.type === 'replace-range') persistedTotal += mutation.messages.length - mutation.deleteCount
+                }
+                return { revision: input.expectedRevision + 1 }
+            })
+            const harness = makeWindowedHarness({ commit })
+            harness.readConversationWindow.mockImplementation(async () => ({
+                revision: harness.coordinator.revision,
+                value: {
+                    characterId: 'char-a',
+                    conversationId: 'two',
+                    messages: [{ role: 'user' as const, data: 'first persisted message' }],
+                    startIndex: 0,
+                    endIndex: 1,
+                    totalMessages: persistedTotal,
+                    hasMoreBefore: false,
+                    hasMoreAfter: true,
+                },
+            }))
+            const note = 'n'.repeat(2048)
+            harness.projectedConversation.note = note
+            let version = 0
+            const record = (deleteCount: number, data: string) => {
+                recordWindowedMutation(harness.coordinator, {
+                    sessionToken: harness.sessionToken,
+                    previousVersion: version,
+                    sessionVersion: version + 1,
+                    start: 10_000,
+                    deleteCount,
+                    messages: [{ role: 'char', data }],
+                    note,
+                })
+                version += 1
+                harness.replaceAuthority({ ...harness.authority()!, sessionVersion: version, totalMessages: 10_001 })
+            }
+
+            record(0, '')
+            const flushing = harness.coordinator.flushPendingData('blocked-stream')
+            await entered.promise
+            let reply = ''
+            for (let update = 1; update <= 40; update++) {
+                reply += 'x'.repeat(100)
+                record(1, reply)
+            }
+            blocked.resolve()
+            await flushing
+
+            expect(commit.mock.calls.map(([input]) => input.conversations)).toEqual([
+                [expect.objectContaining({ start: 10_000, deleteCount: 0, messages: [{ role: 'char', data: '' }] })],
+                [expect.objectContaining({
+                    start: 10_000,
+                    deleteCount: 1,
+                    messages: [{ role: 'char', data: reply }],
+                    conversation: expect.objectContaining({ note }),
+                })],
+            ])
+            expect(harness.onPersisted.mock.calls.map(([event]) => [event.sessionVersion, event.revision])).toEqual([
+                [1, 3],
+                ...Array.from({ length: 40 }, (_, index) => [index + 2, 4]),
             ])
         })
 

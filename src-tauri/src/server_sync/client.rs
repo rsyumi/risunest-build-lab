@@ -310,6 +310,8 @@ pub(crate) struct Reply {
     pub object_range: Option<String>,
     pub retry_after: Option<Duration>,
     pub attempt_duration: Duration,
+    /// The level headers, absent from a server that predates format levels.
+    pub library_format: Option<super::library_format::LibraryFormat>,
 }
 /// A request body ready to send: `wire` is what travels, encoded when the
 /// marker is set. Every attempt reads the same bytes.
@@ -815,6 +817,7 @@ impl ServerClient {
             .query(query)
             .bearer_auth(&config.token)
             .header("x-risu-library", &config.library_id)
+            .header(risunest_sync_wire::library_format::HEADER, super::library_format::LEVEL.to_string())
             .header("accept-encoding", "identity")
             .timeout(timeout);
         if self.codec_enabled() {
@@ -855,6 +858,8 @@ impl ServerClient {
         })?;
         capture.response(response.status().as_u16(), response.url().as_str(), response.headers());
         let status = response.status().as_u16();
+        let library_format = super::library_format::read(response.headers())?;
+        super::lww_client::observe_library_format(&config.endpoint, &config.library_id, status, library_format);
         let object_range = response
             .headers()
             .get("x-risu-object-range")
@@ -928,6 +933,7 @@ impl ServerClient {
             object_range,
             retry_after,
             attempt_duration: Duration::ZERO,
+            library_format,
         })
     }
 
@@ -981,12 +987,20 @@ impl ServerClient {
         ))
     }
     pub fn head(&self) -> Result<RemoteHead> {
-        let (_, head): (u16, RemoteHead) = self.json(Method::GET, "head", &[], None::<&()>, &[])?;
+        Ok(self.head_with_format()?.0)
+    }
+    /// The library head and the format level its reply reports.
+    pub(crate) fn head_with_format(&self) -> Result<(RemoteHead, Option<super::library_format::LibraryFormat>)> {
+        let reply = self.request(Method::GET, "head", &[], None, &[], MAX_METADATA_BYTES)?;
+        if !(200..300).contains(&reply.status) {
+            return Err(response_error(reply));
+        }
+        let head: RemoteHead = canonical::decode(&reply.body, MAX_METADATA_BYTES)?;
         head.validate()?;
         if head.library_id != self.config().library_id {
             return Err(SyncError::new("library-mismatch", 409));
         }
-        Ok(head)
+        Ok((head, reply.library_format))
     }
 }
 

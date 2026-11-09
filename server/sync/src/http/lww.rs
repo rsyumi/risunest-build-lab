@@ -57,10 +57,24 @@ pub(super) async fn bind_writer(
 pub(super) async fn push(
     State(app): State<App>,
     Extension(device): Extension<Device>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response> {
+    let empty_only = match header(&headers, library_format::PRECONDITION_HEADER) {
+        None if !headers.contains_key(library_format::PRECONDITION_HEADER) => false,
+        Some(library_format::EMPTY_LIBRARY) => true,
+        _ => return Err(Error::new("invalid-precondition", 400)),
+    };
     let request: PushRequest = canonical::decode(&body, MAX_METADATA_BYTES)?;
-    blocking(move || Ok(Json(app.store.push(&device, &request)?).into_response())).await
+    blocking(move || {
+        let receipt = if empty_only {
+            app.store.push_to_empty_library(&device, &request)?
+        } else {
+            app.store.push(&device, &request)?
+        };
+        Ok(Json(receipt).into_response())
+    })
+    .await
 }
 pub(super) async fn operation(
     State(app): State<App>,
@@ -151,29 +165,44 @@ pub(super) async fn notify(
     State(app): State<App>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
-) -> Result<Response> {
-    let token = header(&headers, "authorization")
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or(Error::new("unauthorized", 401))?
-        .to_owned();
-    let library = header(&headers, "x-risu-library")
-        .ok_or(Error::new("unauthorized", 401))?
-        .to_owned();
-    let device = app.authenticate(&library, &token).await?;
-    if *app.shutdown.borrow() || app.workload.status()?.state != "open" {
-        return Err(Error::new("server-updating", 503));
+) -> Response {
+    let store = app.store.clone();
+    let mut authenticated = false;
+    let result = async {
+        let token = header(&headers, "authorization")
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .ok_or(Error::new("unauthorized", 401))?
+            .to_owned();
+        let library = header(&headers, "x-risu-library")
+            .ok_or(Error::new("unauthorized", 401))?
+            .to_owned();
+        let mut device = app.authenticate(&library, &token).await?;
+        authenticated = true;
+        device.format_level = declared_format(&headers)?;
+        admit_format(app.store.library_format(), device.format_level)?;
+        if *app.shutdown.borrow() || app.workload.status()?.state != "open" {
+            return Err(Error::new("server-updating", 503));
+        }
+        // An open socket reads the head through the store, which refuses the
+        // device once a switch leaves it behind, and then closes.
+        let mut response = ws
+            .max_message_size(1024)
+            .max_frame_size(1024)
+            .write_buffer_size(0)
+            .max_write_buffer_size(4096)
+            .on_upgrade(move |socket| notify_socket(app, device, socket))
+            .into_response();
+        response
+            .headers_mut()
+            .insert("cache-control", "no-store".parse().unwrap());
+        Ok::<_, Error>(response)
     }
-    let mut response = ws
-        .max_message_size(1024)
-        .max_frame_size(1024)
-        .write_buffer_size(0)
-        .max_write_buffer_size(4096)
-        .on_upgrade(move |socket| notify_socket(app, device, socket))
-        .into_response();
+    .await;
+    let mut response = result.unwrap_or_else(IntoResponse::into_response);
+    if authenticated {
+        insert_format_headers(&store, response.headers_mut());
+    }
     response
-        .headers_mut()
-        .insert("cache-control", "no-store".parse().unwrap());
-    Ok(response)
 }
 
 async fn notify_socket(mut app: App, device: Device, mut socket: WebSocket) {
@@ -389,6 +418,48 @@ pub(super) mod tests {
                 Some(Ok(_)) => (),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_switch_closes_the_sockets_of_clients_behind_the_level_and_refuses_new_ones() {
+        let _serial = NOTIFY_SOCKETS.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::store::Store::init(dir.path()).unwrap());
+        let credential = store.add_device().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = super::super::router(store.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut released = connect(address, &credential).await.unwrap();
+        let mut aware = store
+            .authenticate(&credential.library_id, &credential.token)
+            .unwrap();
+        aware.format_level = Some(2);
+        let writer = "00000000-0000-4000-8000-000000000001";
+        store
+            .push(
+                &aware,
+                &PushRequest {
+                    library_id: credential.library_id.clone(),
+                    writer_id: writer.into(),
+                    operation_id: "switch".into(),
+                    changes: vec![UnitChange {
+                        key: risunest_sync_wire::library_format::key(),
+                        stamp: Stamp {
+                            physical_ms: 1.into(),
+                            logical: 0,
+                            writer_id: writer.into(),
+                        },
+                        value: risunest_sync_wire::library_format::value(2).unwrap(),
+                    }],
+                },
+            )
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), closed(&mut released))
+            .await
+            .expect("a socket behind the level stays open");
+        assert_eq!(connect(address, &credential).await.unwrap_err(), 409);
+        server.abort();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

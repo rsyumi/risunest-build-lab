@@ -1,4 +1,5 @@
-import type { Chat, Message, character, customscript } from './storage/database.svelte'
+import type { Chat, Database, Message, character, customscript } from './storage/database.svelte'
+import { effectiveAuthorNote } from './authorNotePresets'
 import { CONVERSATION_RANGE_MAX_LIMIT, type DataRevision } from './storage/persistentDataStore'
 import type { simpleCharacterArgument } from './parser/parser.svelte'
 import type { ProcessScriptCaptureContext } from './process/scripts'
@@ -137,13 +138,15 @@ export function fullScreenshotRange(totalTurns: number): ScreenshotRange {
     return Object.freeze({ start: 1, end: totalTurns })
 }
 
+/** The captured chat keeps the author's note it reads now, so parsing it needs no preset list. */
 export function snapshotChatScreenshotCharacter(
     source: character,
     chat: Chat,
+    authorNotePresets: Database['authorNotePresets'],
 ): character {
     const captureChat: Chat = {
         message: [],
-        note: chat.note ?? '',
+        note: effectiveAuthorNote(authorNotePresets, chat),
         name: chat.name ?? '',
         localLore: chat.localLore ?? [],
         scriptstate: chat.scriptstate ?? {},

@@ -39,7 +39,8 @@ fn own_publication(missing_body: bool) -> TestTraffic {
     counters.reset();
     let received = receive_cycle(&client, &mut store, &[]).unwrap();
     let traffic = counters.traffic.lock().unwrap().clone();
-    assert_eq!(received.received_units, 3, "every published fixture unit must reconcile");
+    // The fixture units and the library format unit the first send set.
+    assert_eq!(received.received_units, 4, "every published fixture unit must reconcile");
     assert_eq!(traffic.prepared_units, received.received_units as u64);
     assert_eq!(traffic.journal_requests, 1);
     assert!(traffic.journal_response_raw_bytes > traffic.journal_inline_decoded_bytes);

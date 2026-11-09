@@ -7,8 +7,6 @@ const mocks = vi.hoisted(() => ({
     currentCharacter: null as any,
     modelRequests: [] as any[],
     modelResponse: null as any,
-    deferChatCounts: false,
-    prefetched: [] as Array<{ texts: string[], tokenizerType?: string }>,
     deviceSettings: {
         generationHistoryLimitEnabled: true,
         generationHistoryLimitMultiplier: 2,
@@ -49,8 +47,6 @@ vi.mock('../tokenizer', async () => (await import('./tests/sendChatTestHarness')
     // Every message costs ten tokens in the window walk.
     tokenize: vi.fn(async () => 10),
     encodeWithTokenizer: vi.fn(async () => new Array(10).fill(0)),
-    deferChatCounts: () => mocks.deferChatCounts,
-    prefetchTokens: (texts, tokenizerType) => mocks.prefetched.push({ texts, tokenizerType }),
 }))
 vi.mock('../alert', async () => (await import('./tests/sendChatTestHarness')).alertModule({
     alertError: mocks.alertError,
@@ -310,8 +306,6 @@ describe('sendChat with the history window', () => {
         doingChat.set(false)
         mocks.modelRequests.length = 0
         mocks.modelResponse = streamingResponse('answer')
-        mocks.deferChatCounts = false
-        mocks.prefetched.length = 0
         mocks.onModelRequest = null
         mocks.deviceSettings = { generationHistoryLimitEnabled: true, generationHistoryLimitMultiplier: 2 }
         mocks.startTrigger = null
@@ -364,11 +358,6 @@ describe('sendChat with the history window', () => {
         // maxContext 500 times 2 at ten tokens per message keeps a hundred messages.
         expect(promptContents()).toEqual(range(900, 1000))
         expect(Math.min(...bodyReads.map(([start]) => start))).toBeGreaterThanOrEqual(900 - 64)
-        // The walk counts each page it reads ahead.
-        expect(mocks.prefetched).toEqual([
-            { texts: range(936, 1000).reverse(), tokenizerType: undefined },
-            { texts: range(872, 936).reverse(), tokenizerType: undefined },
-        ])
         expect(mocks.acquireCompleteConversation).not.toHaveBeenCalled()
         expect(stored.slice(0, 900)).toEqual(before)
         expect(stored.at(-1)?.data).toBe('answer')
@@ -387,7 +376,6 @@ describe('sendChat with the history window', () => {
         expect(promptContents()).toEqual(range(900, 1000))
         const tokenizers = new Set(vi.mocked(encodeWithTokenizer).mock.calls.map((call) => call[1]))
         expect([...tokenizers]).toEqual(['o200k_base'])
-        expect(mocks.prefetched.map(({ tokenizerType }) => tokenizerType)).toEqual(['o200k_base', 'o200k_base'])
     })
 
     it('honors the multiplier', async () => {
@@ -425,16 +413,6 @@ describe('sendChat with the history window', () => {
         await sendChat(arg)
 
         expect(processed()).toEqual(range(0, 300))
-    })
-
-    it.each([false, true])('records the input tokens of the prompt it sends (counted after the loop: %s)', async (deferred) => {
-        const { session } = installComplete(messages(5))
-        mocks.deferChatCounts = deferred
-
-        await expect(sendChat({})).resolves.toBe(true)
-
-        // One token per chat.
-        expect(session.materializeCompatibilityArray().at(-1)?.generationInfo?.inputTokens).toBe(promptContents().length)
     })
 
     it('builds the same prompt and result from a complete conversation', async () => {
@@ -535,7 +513,8 @@ describe('sendChat with the history window', () => {
 
         await expect(sendChat({ historyLimit: true })).resolves.toBe(true)
 
-        const idWrites = mutations.filter((mutation) => mutation.start < 1000)
+        // Generation also records its streaming flags as metadata-only updates, which write no message.
+        const idWrites = mutations.filter((mutation) => mutation.start < 1000 && mutation.messages.length > 0)
         expect(idWrites).toHaveLength(1)
         expect(idWrites[0]).toMatchObject({ start: 900, deleteCount: 90 })
         expect(stored.slice(900, 990).every((message) => typeof message.chatId === 'string')).toBe(true)

@@ -527,7 +527,6 @@ async function hypaMemoryV3MainExp(
     const randomMemoryRatio =
         1 - settings.recentMemoryRatio - settings.similarMemoryRatio;
     const selectedImportantSummaries: Summary[] = [];
-    await tokenizer.prefetch(data.summaries.map((summary) => summary.text + summarySeparator));
 
     // Select important summaries
     {
@@ -1260,7 +1259,6 @@ async function hypaMemoryV3Main(
     const randomMemoryRatio =
         1 - settings.recentMemoryRatio - settings.similarMemoryRatio;
     const selectedImportantSummaries: Summary[] = [];
-    await tokenizer.prefetch(data.summaries.map((summary) => summary.text + summarySeparator));
 
     // Select important summaries
     {

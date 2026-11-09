@@ -10,6 +10,7 @@ type AsyncifyExports = {
     asyncify_start_rewind(data: number): void
     asyncify_stop_rewind(): void
 }
+const formatInLua = Symbol('formatInLua')
 
 export class LuaAsyncifyRuntime {
     private readonly lua
@@ -21,6 +22,7 @@ export class LuaAsyncifyRuntime {
     private readonly entrypoint: number
     private readonly sourceLoader: number
     private readonly callbackEntry: number
+    private readonly hostWrapper: number
     private readonly gcControl: number
     private readonly controlCall
     private queue: Promise<unknown> = Promise.resolve()
@@ -92,6 +94,29 @@ export class LuaAsyncifyRuntime {
             end`)
         engine.global.assertOk(this.lua.lua_pcallk(engine.global.address, 0, 1, 0, 0, null))
         this.callbackEntry = this.lua.luaL_ref(engine.global.address, LUA_REGISTRYINDEX)
+        // Mirrors Wasmoon's table conversion order so key __tostring calls run as resumable Lua.
+        engine.global.loadString(`local kind, walk, describe, count, pick = type, next, tostring, select, select
+            local function collect(strings, seen, value)
+                if kind(value) ~= 'table' or seen[value] then return end
+                seen[value] = true
+                for key in walk, value do strings[#strings + 1] = describe(key) end
+                for key, item in walk, value do
+                    strings[#strings + 1] = describe(key)
+                    collect(strings, seen, item)
+                end
+            end
+            local function wrap(raw)
+                local function finish(...)
+                    if (...) ~= wrap then return ... end
+                    local strings = {}
+                    for i = 2, count('#', ...) do collect(strings, {}, (pick(i, ...))) end
+                    return raw(strings, pick(2, ...))
+                end
+                return function(...) return finish(raw(nil, ...)) end
+            end
+            return wrap`)
+        engine.global.assertOk(this.lua.lua_pcallk(engine.global.address, 0, 1, 0, 0, null))
+        this.hostWrapper = this.lua.luaL_ref(engine.global.address, LUA_REGISTRYINDEX)
         this.stack = this.module._malloc(1024 * 1024)
         this.data = this.module._malloc(8)
         this.module.setValue(this.data, this.stack, 'i32')
@@ -154,15 +179,54 @@ export class LuaAsyncifyRuntime {
             }
             // Suspend the WASM stack, including Lua C-library callbacks, without yielding Lua.
             this.controlGC(false)
-            let args: unknown[]
-            try { args = thread.getStackValues() }
+            let args: unknown[] | undefined
+            try { args = this.convertArguments(thread) }
             finally { this.controlGC(true) }
+            if (!args) {
+                // The wrapper formats the table keys in Lua and calls again with the strings.
+                this.lua.lua_rawgeti(address, LUA_REGISTRYINDEX, BigInt(this.hostWrapper))
+                this.lua.lua_copy(address, -1, 1)
+                this.lua.lua_settop(address, -2)
+                return this.lua.lua_gettop(address)
+            }
             this.pending = this.request(name, args).catch(error => ({ failure: encodeLuaFailure(error) }))
             this.exports.asyncify_start_unwind(this.data)
             return 0
         }, 'ii')
-        this.lua.lua_pushcclosure(this.engine.global.address, callback, 0)
-        this.lua.lua_setglobal(this.engine.global.address, name)
+        const address = this.engine.global.address
+        this.lua.lua_rawgeti(address, LUA_REGISTRYINDEX, BigInt(this.hostWrapper))
+        this.lua.lua_pushcclosure(address, callback, 0)
+        this.engine.global.assertOk(this.controlCall(address, 1, 1, 0, 0, null))
+        this.lua.lua_setglobal(address, name)
+    }
+
+    private convertArguments(thread: LuaThread): unknown[] | undefined {
+        // Wasmoon formats table keys with luaL_tolstring. A __tostring metamethod would run
+        // under this JS frame, where a nested host call cannot suspend the WASM stack.
+        const address = thread.address
+        const top = this.lua.lua_gettop(address)
+        const format = thread.indexToString
+        let strings: string[] | undefined
+        if (this.lua.lua_type(address, 1) === LuaType.Table) {
+            strings = []
+            for (let i = 1, count = this.lua.lua_rawlen(address, 1); i <= count; i++) {
+                this.lua.lua_rawgeti(address, 1, BigInt(i))
+                strings.push(this.lua.lua_tolstring(address, -1, null))
+                this.lua.lua_settop(address, -2)
+            }
+        }
+        let used = 0
+        thread.indexToString = strings
+            ? index => used < strings.length ? strings[used++] : format.call(thread, index)
+            : index => {
+                if (this.lua.luaL_getmetafield(address, index, '__tostring') !== LuaType.Nil) throw formatInLua
+                return format.call(thread, index)
+            }
+        try { return thread.getStackValues(1) }
+        catch (error) {
+            if (error !== formatInLua) throw error
+            this.lua.lua_settop(address, top)
+        }
     }
 
     private async resume(thread: LuaThread, count: number, invocation: number) {

@@ -189,28 +189,54 @@ describe('bounded regex execution through the real Worker handler', () => {
         expect(result.data).toBe('E')
     })
 
-    it('isolates once for thirty queued rows, preserves following rules, and remembers the same text across batches', async () => {
+    it('waits once for thirty queued rows, keeps the rules around the stuck one, and remembers its input across batches', async () => {
         vi.useFakeTimers()
         try {
             const client = new RegexWorkerClient(() => new StallingWorker())
             const scope = createRegexTimeoutScope()
             const notices = vi.fn()
-            const plan = continuationPlan([['missing', 'unused'], ['SLOW-display', 'bad'], ['row', 'rendered']])
+            const plan = continuationPlan([['row', 'line'], ['SLOW-display', 'bad'], ['line', 'rendered']])
             const run = (input: string, batch = scope) => executePlan(new RegexExecutor({ client, worker: true, scope: batch,
-                requestTimeoutMs: 10, invocationTimeoutMs: 30, onTimeout: notices }), plan, input)
+                skipPlainCbs: true, requestTimeoutMs: 10, invocationTimeoutMs: 30, onTimeout: notices }), plan, input)
             let timerFired = false
             setTimeout(() => { timerFired = true }, 1)
-            const start = Date.now()
+            let finished = false
             const rows = Promise.all(Array.from({ length: 30 }, (_, i) => run(`<row ${i} SLOW-display>`)))
+                .finally(() => { finished = true })
             await vi.advanceTimersByTimeAsync(1)
             expect(timerFired).toBe(true)
-            await vi.advanceTimersByTimeAsync(19)
+            await vi.advanceTimersByTimeAsync(9)
+            expect(finished).toBe(true)
             expect((await rows).map((row) => row.data)).toEqual(Array.from({ length: 30 }, (_, i) => `<rendered ${i} SLOW-display>`))
-            expect(Date.now() - start).toBe(20)
             expect(notices).toHaveBeenCalledOnce()
-            // This exact input timed out; a new batch must not wait for it again.
+            // The stuck rule's own input timed out; a new batch must not wait for it again.
             expect((await run('<row 0 SLOW-display>', createRegexTimeoutScope())).data).toBe('<rendered 0 SLOW-display>')
             expect(notices).toHaveBeenCalledOnce()
+        } finally { vi.useRealTimers() }
+    })
+
+    it('skips a display rule that timed out on other text in a later batch, but waits again for stored output', async () => {
+        vi.useFakeTimers()
+        try {
+            const memory = new RegexTimeoutMemory()
+            const client = new RegexWorkerClient(() => new StallingWorker())
+            const plan = continuationPlan([['SLOW-edit', 'bad'], ['row', 'rendered']])
+            const run = (input: string, skipTimedOutRules: boolean) => executePlan(new RegexExecutor({ client, worker: true, memory,
+                scope: createRegexTimeoutScope(), requestTimeoutMs: 10, skipTimedOutRules }), plan, input)
+            const first = run('<row SLOW-edit>', true)
+            await vi.advanceTimersByTimeAsync(10)
+            expect((await first).data).toBe('<rendered SLOW-edit>')
+            let finished = false
+            const edited = run('<row SLOW-edit> edited', true).finally(() => { finished = true })
+            await vi.advanceTimersByTimeAsync(1)
+            expect(finished).toBe(true)
+            expect((await edited).data).toBe('<rendered SLOW-edit> edited')
+            finished = false
+            const stored = run('<row SLOW-edit> edited', false).finally(() => { finished = true })
+            await vi.advanceTimersByTimeAsync(9)
+            expect(finished).toBe(false)
+            await vi.advanceTimersByTimeAsync(1)
+            expect((await stored).data).toBe('<rendered SLOW-edit> edited')
         } finally { vi.useRealTimers() }
     })
 
@@ -229,14 +255,14 @@ describe('bounded regex execution through the real Worker handler', () => {
         } finally { vi.useRealTimers() }
     })
 
-    it('caps timeout time including isolation and skips the remaining rules', async () => {
+    it('caps timeout time and skips the remaining rules', async () => {
         vi.useFakeTimers()
         try {
             const plan = continuationPlan([['SLOW-budget-1', 'bad'], ['SLOW-budget-2', 'bad'], ['tail', 'changed']])
             const executor = new RegexExecutor({ client: new RegexWorkerClient(() => new StallingWorker()), worker: true,
-                requestTimeoutMs: 10, invocationTimeoutMs: 25 })
+                requestTimeoutMs: 10, invocationTimeoutMs: 15 })
             const result = executePlan(executor, plan, 'tail')
-            await vi.advanceTimersByTimeAsync(25)
+            await vi.advanceTimersByTimeAsync(15)
             expect((await result).data).toBe('tail')
         } finally { vi.useRealTimers() }
     })
@@ -253,6 +279,23 @@ describe('bounded regex execution through the real Worker handler', () => {
             expect(replaceRegexMatches('<text>', await replacement, () => 'bad')).toBe('<text>')
             expect(await executor.operation({ kind: 'replace', pattern: 'text', flags: '', input: '<text>', replacement: 'next' })).toBe('<next>')
         } finally { vi.useRealTimers() }
+    })
+
+    it('does not wait for other regex work when testEach has no inputs', async () => {
+        vi.useFakeTimers()
+        const executor = new RegexExecutor({ client: new RegexWorkerClient(() => new StallingWorker()), worker: true, requestTimeoutMs: 10 })
+        const stalled = executor.operation({ kind: 'test', pattern: 'SLOW-lock', flags: '', input: 'text' })
+        try {
+            let empty: boolean[] | undefined
+            void executor.testEach('a', '', [], 'empty').then((value) => { empty = value })
+            await vi.advanceTimersByTimeAsync(0)
+            expect(empty).toEqual([])
+        } finally {
+            // Let the stalled operation time out so later tests get the regex lock.
+            await vi.advanceTimersByTimeAsync(10)
+            await stalled
+            vi.useRealTimers()
+        }
     })
 
     it('preserves callback captures, optional named groups, zero-width matches, and split semantics', async () => {
@@ -453,6 +496,64 @@ describe('RegexWorkerClient', () => {
         finally {
             vi.useRealTimers()
         }
+    })
+
+    it('names the last rule the Worker started when its request times out', async () => {
+        vi.useFakeTimers()
+        try {
+            class SilentWorker extends InMemoryWorker {
+                override respond(response: RegexWorkerResponse): void {
+                    if (response.type !== 'result') super.respond(response)
+                }
+            }
+            const client = new RegexWorkerClient(() => new SilentWorker())
+            const outcome = client.execute(continuationPlan([['a', 'b'], ['b', 'c'], ['c', 'd']]), 'a',
+                { timeoutMs: 10, continuation: { start: 0, end: 3, skipPlainCbs: true } }).catch((error) => error)
+            await vi.advanceTimersByTimeAsync(10)
+            expect(await outcome).toMatchObject({ name: 'RegexExecutionTimeoutError', ruleIndex: 2 })
+        } finally { vi.useRealTimers() }
+    })
+
+    it('times each testEach input separately and keeps the results before the one that timed out', async () => {
+        vi.useFakeTimers()
+        try {
+            // Each input takes 6 ms, so the inputs together outlast the 10 ms limit.
+            class PacedWorker extends FakeWorker {
+                constructor(private readonly finished: number) { super() }
+                override postMessage(message: RegexWorkerRequest): void {
+                    super.postMessage(message)
+                    if (message.type !== 'testEach') return
+                    const matches = message.inputs.map((input) => input === message.pattern)
+                    matches.slice(0, this.finished).forEach((matched, index) => setTimeout(() => {
+                        this.respond({ type: 'progress', id: message.id, index, matched })
+                        if (index === message.inputs.length - 1) this.respond({ type: 'operationResult', id: message.id, value: matches })
+                    }, 6 * (index + 1)))
+                }
+            }
+            const finished = new RegexWorkerClient(() => new PacedWorker(3)).testEach('a', '', ['a', 'b', 'a'], { timeoutMs: 10 })
+            await vi.advanceTimersByTimeAsync(18)
+            await expect(finished).resolves.toEqual([true, false, true])
+
+            const stalled = new RegexWorkerClient(() => new PacedWorker(2)).testEach('a', '', ['a', 'b', 'a'], { timeoutMs: 10 })
+                .catch((error) => error)
+            await vi.advanceTimersByTimeAsync(21)
+            let settled = false
+            void stalled.then(() => { settled = true })
+            await vi.advanceTimersByTimeAsync(0)
+            expect(settled).toBe(false)
+            await vi.advanceTimersByTimeAsync(1)
+            expect(await stalled).toMatchObject({ name: 'RegexExecutionTimeoutError', matches: [true, false] })
+        } finally { vi.useRealTimers() }
+    })
+
+    it('reports each testEach input as it finishes, starting each at its beginning as separate operations would', () => {
+        const responses: RegexWorkerResponse[] = []
+        createRegexWorkerMessageHandler((response) => responses.push(response))({ type: 'testEach', id: 1, pattern: 'a', flags: 'g', inputs: ['a', 'a'] })
+        expect(responses).toEqual([
+            { type: 'progress', id: 1, index: 0, matched: true },
+            { type: 'progress', id: 1, index: 1, matched: true },
+            { type: 'operationResult', id: 1, value: [true, true] },
+        ])
     })
 
     it('allows only parser-independent plain replacement plans and inputs', () => {

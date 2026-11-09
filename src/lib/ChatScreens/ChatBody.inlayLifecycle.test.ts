@@ -209,6 +209,8 @@ describe('ChatBody deferred inlay lifecycle', () => {
         bytes.resolve({ data: new Blob(['first']), type: 'image', name: 'synthetic.png' })
         await vi.waitFor(() => expect(target.querySelector('img')?.getAttribute('src')).toBe('blob:first'))
         expect(settled).toHaveBeenCalledOnce()
+        // Plugins and custom CSS select the rendered markup as direct children of the text root.
+        expect(target.querySelector('img')?.parentElement).toBe(target.firstElementChild)
     })
 
     test('learns beta image dimensions after identical markup reuses the displayed DOM', async () => {

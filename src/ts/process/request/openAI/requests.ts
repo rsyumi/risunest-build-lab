@@ -2,7 +2,7 @@ import { language } from "src/lang"
 import { alertError } from "src/ts/alert";
 import { getDatabase } from "src/ts/storage/database.svelte"
 import { LLMFlags, LLMFormat, LLMProvider } from "src/ts/model/modellist"
-import { prefetchTokenIds, strongBan, tokenizeNum } from "src/ts/tokenizer"
+import { strongBan, tokenizeNum } from "src/ts/tokenizer"
 import { getFreeOpenRouterModels } from "src/ts/model/openrouter"
 import { addFetchLog, fetchNative, globalFetch, textifyReadableStream } from "src/ts/globalApi.svelte"
 import { simplifySchema } from "src/ts/util"
@@ -181,10 +181,6 @@ export async function requestOpenAI(arg:RequestDataArgumentExtended):Promise<req
         })
     }
 
-    // The plain bias strings the loop below encodes.
-    const biasIds = await prefetchTokenIds(arg.biasString
-        .filter((bia) => !(bia[0].startsWith('[[') && bia[0].endsWith(']]')) && bia[1] !== -101)
-        .map((bia) => bia[0]))
     for(let i=0;i<arg.biasString.length;i++){
         const bia = arg.biasString[i]
         if(bia[0].startsWith('[[') && bia[0].endsWith(']]')){
@@ -197,7 +193,7 @@ export async function requestOpenAI(arg:RequestDataArgumentExtended):Promise<req
             arg.bias = await strongBan(bia[0], arg.bias)
             continue
         }
-        const tokens = biasIds.get(bia[0]) ?? await tokenizeNum(bia[0])
+        const tokens = await tokenizeNum(bia[0])
 
         for(const token of tokens){
             arg.bias[token] = bia[1]
@@ -634,7 +630,8 @@ export async function requestOpenAI(arg:RequestDataArgumentExtended):Promise<req
 
         const transtream = getTranStream(arg)
 
-        da.body.pipeTo(transtream.writable)
+        // A failed or stopped body reaches the reader through transtream.
+        da.body.pipeTo(transtream.writable).catch(() => {})
 
         return {
             type: 'streaming',
@@ -1290,7 +1287,8 @@ function wrapToolStream(
                         }
                         
                         const transtream = getTranStream(arg)                    
-                        resRec.body.pipeTo(transtream.writable)
+                        // A failed or stopped body reaches the reader through transtream.
+                        resRec.body.pipeTo(transtream.writable).catch(() => {})
                         
                         reader = transtream.readable.getReader()
                         

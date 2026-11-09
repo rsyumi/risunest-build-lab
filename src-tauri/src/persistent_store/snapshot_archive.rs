@@ -54,17 +54,21 @@ impl Drop for Scratch {
 
 impl Archive {
     pub fn open(directory: &Path) -> StoreResult<Self> {
-        fs::create_dir_all(directory)?;
-        reject_link(directory)?;
-        let lock_path = directory.join("archive.lock");
-        reject_link_if_present(&lock_path)?;
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(lock_path)?;
+        let lock = lock_file(directory)?;
         lock_archive(&lock)?;
+        Self::open_locked(directory, lock)
+    }
+
+    /// Opens the archive when no other holder has it, without waiting.
+    pub fn try_open(directory: &Path) -> StoreResult<Option<Self>> {
+        let lock = lock_file(directory)?;
+        if !try_lock_archive(&lock)? {
+            return Ok(None);
+        }
+        Self::open_locked(directory, lock).map(Some)
+    }
+
+    fn open_locked(directory: &Path, lock: File) -> StoreResult<Self> {
         // Earlier RisuNest recovery formats are neither migrated nor removed.
         for entry in fs::read_dir(directory)? {
             let entry = entry?;
@@ -173,21 +177,16 @@ impl Archive {
             input.read_exact(&mut buffer[..length])?;
             let data = &buffer[..length];
             let hash = Sha256::digest(data).to_vec();
-            tx.execute(
-                "INSERT OR IGNORE INTO chunks(hash,data) VALUES(?1,?2)",
-                params![hash, data],
-            )?;
-            let existing: Vec<u8> =
-                tx.query_row("SELECT data FROM chunks WHERE hash=?1", [&hash], |r| {
-                    r.get(0)
-                })?;
+            tx.prepare_cached("INSERT OR IGNORE INTO chunks(hash,data) VALUES(?1,?2)")?
+                .execute(params![hash, data])?;
+            let existing: Vec<u8> = tx
+                .prepare_cached("SELECT data FROM chunks WHERE hash=?1")?
+                .query_row([&hash], |r| r.get(0))?;
             if existing != data {
                 return Err(invalid("snapshot chunk is corrupt or has a hash collision"));
             }
-            tx.execute(
-                "INSERT INTO snapshot_pages(snapshot_id,seq,hash) VALUES(?1,?2,?3)",
-                params![metadata.id, seq, hash],
-            )?;
+            tx.prepare_cached("INSERT INTO snapshot_pages(snapshot_id,seq,hash) VALUES(?1,?2,?3)")?
+                .execute(params![metadata.id, seq, hash])?;
             hasher.update(data);
             metadata.bytes += length as u64;
             seq += 1;
@@ -240,16 +239,11 @@ impl Archive {
         let mut result = Vec::with_capacity(ids.len());
         for id in ids {
             let metadata = self.metadata(&id)?;
-            let reclaimable_bytes: i64 = self.connection.query_row(
-                "SELECT coalesce(sum(length(data)),0) FROM chunks WHERE hash IN (SELECT hash FROM snapshot_pages WHERE snapshot_id=?1)
-                 AND hash NOT IN (SELECT hash FROM snapshot_pages WHERE snapshot_id<>?1)", [&id], |r| r.get(0))?;
             result.push(SnapshotInfo {
                 id,
                 bytes: metadata.bytes,
                 modified_at: metadata.created_at,
                 reason: metadata.reason,
-                reclaimable_bytes: u64::try_from(reclaimable_bytes)
-                    .map_err(|_| invalid("invalid snapshot size"))?,
             });
         }
         result.sort_by(|a, b| {
@@ -325,15 +319,7 @@ impl Archive {
     }
 
     pub fn bytes(&self) -> StoreResult<u64> {
-        let mut total = 0_u64;
-        for suffix in ["", "-journal", "-wal", "-shm"] {
-            match fs::metadata(self.directory.join(format!("{ARCHIVE_FILE}{suffix}"))) {
-                Ok(meta) => total = total.saturating_add(meta.len()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-                Err(error) => return Err(error.into()),
-            }
-        }
-        Ok(total)
+        file_bytes(&self.directory)
     }
 
     pub fn delete(&mut self, id: &str) -> StoreResult<()> {
@@ -347,10 +333,10 @@ impl Archive {
         Ok(())
     }
 
-    pub fn rotate(&mut self, byte_budget: u64, protected: &str) -> StoreResult<()> {
+    pub fn rotate(&mut self, keep_count: usize, byte_budget: u64, protected: &str) -> StoreResult<()> {
         loop {
             let snapshots = self.list()?;
-            if snapshots.len() <= 8 && self.bytes()? <= byte_budget {
+            if snapshots.len() <= keep_count && self.bytes()? <= byte_budget {
                 break;
             }
             let Some(oldest) = snapshots
@@ -377,19 +363,64 @@ fn is_scratch_name(name: &str) -> bool {
         .is_some_and(|id| validate_id(id).is_ok())
 }
 
-#[cfg(not(target_os = "android"))]
+fn lock_file(directory: &Path) -> StoreResult<File> {
+    fs::create_dir_all(directory)?;
+    reject_link(directory)?;
+    let lock_path = directory.join("archive.lock");
+    reject_link_if_present(&lock_path)?;
+    Ok(OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)?)
+}
+
+/// Another holder can keep the archive for minutes, so a wait for it leaves the
+/// async worker to other tasks.
 fn lock_archive(file: &File) -> std::io::Result<()> {
+    if try_lock_archive(file)? {
+        return Ok(());
+    }
+    crate::async_worker::blocking(|| wait_for_archive(file))
+}
+
+#[cfg(not(target_os = "android"))]
+fn try_lock_archive(file: &File) -> std::io::Result<bool> {
+    match file.try_lock() {
+        Ok(()) => Ok(true),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn wait_for_archive(file: &File) -> std::io::Result<()> {
     file.lock()
 }
 
 #[cfg(target_os = "android")]
-fn lock_archive(file: &File) -> std::io::Result<()> {
+fn try_lock_archive(file: &File) -> std::io::Result<bool> {
+    match flock(file, libc::LOCK_EX | libc::LOCK_NB) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(target_os = "android")]
+fn wait_for_archive(file: &File) -> std::io::Result<()> {
+    flock(file, libc::LOCK_EX)
+}
+
+#[cfg(target_os = "android")]
+fn flock(file: &File, operation: libc::c_int) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
     // std::fs::File::lock is unsupported on Android. Closing the owned file
     // releases flock, including after process termination.
     loop {
         // SAFETY: file owns a live descriptor for the duration of this call.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+        if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
             return Ok(());
         }
         let error = std::io::Error::last_os_error();
@@ -397,6 +428,23 @@ fn lock_archive(file: &File) -> std::io::Result<()> {
             return Err(error);
         }
     }
+}
+
+/// The archive's file lengths, read without opening the archive or taking its
+/// lock, so a capture or rotation in progress does not hold up a size report.
+pub(super) fn file_bytes(directory: &Path) -> StoreResult<u64> {
+    reject_link_if_present(directory)?;
+    let mut total = 0_u64;
+    for suffix in ["", "-journal", "-wal", "-shm"] {
+        let path = directory.join(format!("{ARCHIVE_FILE}{suffix}"));
+        reject_link_if_present(&path)?;
+        match fs::metadata(&path) {
+            Ok(meta) => total = total.saturating_add(meta.len()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(total)
 }
 
 fn validate_id(id: &str) -> StoreResult<()> {
@@ -435,7 +483,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roots_read_checked_metadata_without_reading_snapshot_payload_tables() {
+    fn roots_and_list_read_checked_metadata_without_reading_snapshot_payload_tables() {
         unsafe extern "C" fn deny_payload_reads(
             _: *mut std::ffi::c_void,
             action: std::ffi::c_int,
@@ -471,9 +519,12 @@ mod tests {
         let roots = archive.roots().unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].object_hashes, expected.object_hashes);
-        assert!(archive.list().is_err());
+        let listed = archive.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!((listed[0].reason.as_str(), listed[0].bytes), ("synthetic", 8192));
         archive.connection.execute("UPDATE snapshots SET checksum=zeroblob(32)", []).unwrap();
         assert!(archive.roots().is_err());
+        assert!(archive.list().is_err());
     }
 
     #[test]
@@ -500,11 +551,6 @@ mod tests {
             .insert(&source.path, 1, "second", AssetRootSet::default())
             .unwrap();
         assert_eq!(before, unique(&archive));
-        assert!(archive
-            .list()
-            .unwrap()
-            .iter()
-            .all(|s| s.reclaimable_bytes == 0));
         archive.delete(&first.id).unwrap();
         let restored = archive.scratch().unwrap();
         archive.restore(&second.id, &restored.path).unwrap();
@@ -525,10 +571,10 @@ mod tests {
         for _ in 0..7 {
             latest = archive.insert(&source.path, 1, "manual", AssetRootSet::default()).unwrap().id;
         }
-        archive.rotate(u64::MAX, &latest).unwrap();
+        archive.rotate(8, u64::MAX, &latest).unwrap();
         assert!(archive.metadata(&periodic.id).is_err());
         assert!(archive.metadata(&manual.id).is_ok());
-        archive.rotate(1, &latest).unwrap();
+        archive.rotate(8, 1, &latest).unwrap();
         let kept = archive.list().unwrap();
         assert_eq!(kept.len(), 1);
         assert!(!kept.iter().any(|item| item.id == manual.id));
@@ -709,7 +755,7 @@ mod tests {
     }
 
     #[test]
-    fn deletion_returns_file_space_and_counts_unique_reclaimable_pages() {
+    fn deletion_returns_file_space() {
         let dir = tempfile::tempdir().unwrap();
         let mut archive = Archive::open(dir.path()).unwrap();
         let source = archive.scratch().unwrap();
@@ -722,10 +768,6 @@ mod tests {
             .insert(&source.path, 1, "large", Default::default())
             .unwrap();
         let large_bytes = archive.bytes().unwrap();
-        assert_eq!(
-            archive.list().unwrap()[0].reclaimable_bytes,
-            data.len() as u64
-        );
         archive.delete(&first.id).unwrap();
         assert!(archive.bytes().unwrap() < large_bytes / 4);
     }

@@ -46,7 +46,7 @@ export function restoreRuntime(
             try { return await operation({revision:options.fencedRevision ?? revision,mutationGeneration:1} as PersistentMutationToken) }
             finally { options.release?.() }
         },
-        store: createStoreStub({readRoot:async()=>({revision,value:{} as PersistentRoot})}),
+        store: createStoreStub({readRevision:async()=>revision}),
         setActivatedLibraryRecoveryLifecycle: () => {},
         beginActivatedLibraryGuard: () => ({complete(){},abortUnchanged:async()=>{}}),
         refreshActivatedLibraryUnderPause: async () => {

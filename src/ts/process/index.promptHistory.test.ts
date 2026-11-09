@@ -7,8 +7,6 @@ const testState = vi.hoisted(() => ({
     activeSession: null as unknown,
     runTrigger: vi.fn(),
     onTokenizeChat: null as null | (() => void | Promise<void>),
-    deferChatCounts: false,
-    loreActives: [] as unknown[],
     cbsCallbacks: new Map<string, (...args: any[]) => any>(),
     pluginV2: {
         editprocess: new Set<(content: string) => string | Promise<string>>(),
@@ -63,12 +61,9 @@ vi.mock('../tokenizer', async () => (await import('./tests/sendChatTestHarness')
         return chats.length
     },
     tokenizeNum: vi.fn(async () => 1),
-    deferChatCounts: () => testState.deferChatCounts,
 }))
 
-vi.mock('./lorebook.svelte', async () => (await import('./tests/sendChatTestHarness')).lorebookModule({
-    loadLoreBookV3Prompt: async () => ({ actives: testState.loreActives }),
-}))
+vi.mock('./lorebook.svelte', async () => (await import('./tests/sendChatTestHarness')).lorebookModule())
 
 vi.mock('./request/request', async () => (await import('./tests/sendChatTestHarness')).requestModule(vi.fn()))
 
@@ -125,6 +120,7 @@ import { DBState, selectedCharID } from '../stores.svelte'
 import { doingChat } from './generationState'
 import { previewFormated, sendChat } from './index.svelte'
 import { resetScriptCache } from './scripts'
+import { authorNoteFingerprint } from '../authorNotePresets'
 
 const TAIL_TOKEN = 'TAIL_TOKEN'
 const ACTIVE_MESSAGE_COUNT = 130
@@ -240,8 +236,6 @@ describe('sendChat prompt history characterization', () => {
         testState.activeSession = null
         testState.runTrigger.mockReset()
         testState.onTokenizeChat = null
-        testState.deferChatCounts = false
-        testState.loreActives = []
         testState.pluginV2.editprocess.clear()
         resetScriptCache()
     })
@@ -281,64 +275,6 @@ describe('sendChat prompt history characterization', () => {
             ? ['newer'] : ['older', 'boundary', 'newer'])
     })
 
-    it.each([false, true])('trims the oldest history past maxContext with its depth prompt (counted after the loop: %s)', async (deferred) => {
-        const database = makeDatabase()
-        const owner = database.characters[0] as character
-        owner.customscript = []
-        owner.firstMessage = ''
-        owner.chats[0].fmIndex = -1
-        owner.chats[0].message = [
-            { role: 'user', data: 'older', chatId: 'older' },
-            { role: 'user', data: 'middle', chatId: 'middle' },
-            { role: 'user', data: 'newer', chatId: 'newer' },
-        ]
-        // The 50 tokens sendChat reserves, a template prompt, and two chats of one token each.
-        database.maxContext = 53
-        database.promptTemplate = [
-            { type: 'plain', type2: 'normal', role: 'system', text: 'template note' },
-            { type: 'chat', rangeStart: 0, rangeEnd: 'end' },
-        ]
-        setDatabaseLite(database)
-        mockTriggerClone()
-        testState.loreActives = [{
-            depth: 1, pos: 'depth', prompt: 'depth note', role: 'system', order: 0, tokens: 1, priority: 0, source: '',
-            inject: null,
-        }]
-        testState.deferChatCounts = deferred
-
-        await expect(sendChat({ preview: true })).resolves.toBe(true)
-        expect(previewFormated.map(message => message.content)).toEqual(['template note', 'newer', 'depth note'])
-    })
-
-    it('runs no editprocess plugin for a later message once a count fails, while counts are deferred', async () => {
-        const database = makeDatabase()
-        const owner = database.characters[0] as character
-        owner.customscript = []
-        owner.firstMessage = ''
-        owner.chats[0].fmIndex = -1
-        owner.chats[0].message = [
-            { role: 'user', data: 'older', chatId: 'older' },
-            { role: 'user', data: 'middle', chatId: 'middle' },
-            { role: 'user', data: 'newer', chatId: 'newer' },
-        ]
-        setDatabaseLite(database)
-        mockTriggerClone()
-        // The greeting runs through the plugin too, so only history messages are recorded.
-        const history = ['older', 'middle', 'newer']
-        const processed: string[] = []
-        testState.pluginV2.editprocess.add((content) => {
-            if (history.includes(content)) processed.push(content)
-            return content
-        })
-        testState.onTokenizeChat = () => {
-            if (processed.length > 0) throw new Error('synthetic count failure')
-        }
-        testState.deferChatCounts = true
-
-        await expect(sendChat({ preview: true })).rejects.toThrow('synthetic count failure')
-        expect(processed).toEqual(['older'])
-    })
-
     it('formats ordinary messages with the configured name template and role', async () => {
         const database = makeDatabase()
         const character = database.characters[0]
@@ -358,6 +294,54 @@ describe('sendChat prompt history characterization', () => {
             role: 'system',
             content: '[Prompt Character] Synthetic reply',
         })])
+    })
+
+    it('sends the text a linked author note preset holds when the prompt is built, parsed for this character', async () => {
+        const database = makeDatabase()
+        const character = database.characters[0]
+        character.customscript = []
+        character.triggerscript = []
+        character.firstMessage = ''
+        character.chats[0].fmIndex = -1
+        character.chats[0].message = [{ role: 'user', data: 'Synthetic question', chatId: 'question' }]
+        character.chats[0].note = 'stale copy'
+        character.chats[0].authorNotePreset = { id: 'preset', fingerprint: authorNoteFingerprint('stale copy') }
+        database.authorNotePresets = [{ id: 'preset', name: 'Preset', text: 'Loaded for {{char}}' }]
+        database.promptTemplate = [{ type: 'authornote' }, { type: 'chat', rangeStart: 0, rangeEnd: 'end' }]
+        setDatabaseLite(database)
+        DBState.db.authorNotePresets![0].text = 'Edited for {{char}}'
+
+        await expect(sendChat({ preview: true })).resolves.toBe(true)
+        expect(previewFormated.map((message) => message.content)).toEqual(['Edited for Prompt Character', 'Synthetic question'])
+    })
+
+    it.each([
+        { selected: '', bound: 'Bound description', sent: ['<persona>Bound description</persona>', 'Synthetic question'] },
+        { selected: 'Selected description', bound: '', sent: ['Synthetic question'] },
+    ])('builds the persona block from the bound persona description $bound, not the selected $selected', async ({ selected, bound, sent }) => {
+        const database = makeDatabase()
+        const character = database.characters[0]
+        character.customscript = []
+        character.triggerscript = []
+        character.firstMessage = ''
+        character.chats[0].fmIndex = -1
+        character.chats[0].message = [{ role: 'user', data: 'Synthetic question', chatId: 'question' }]
+        character.chats[0].bindedPersona = 'bound'
+        database.personas = [
+            { id: 'selected', name: 'Selected', icon: '', personaPrompt: selected, note: '' },
+            { id: 'bound', name: 'Bound', icon: '', personaPrompt: bound, note: '' },
+        ]
+        database.selectedPersona = 0
+        database.username = 'Selected'
+        database.personaPrompt = selected
+        database.promptTemplate = [
+            { type: 'persona', innerFormat: '<persona>{{slot}}</persona>' },
+            { type: 'chat', rangeStart: 0, rangeEnd: 'end' },
+        ]
+        setDatabaseLite(database)
+
+        await expect(sendChat({ preview: true })).resolves.toBe(true)
+        expect(previewFormated.map((message) => message.content)).toEqual(sent)
     })
 
     it('preserves final OpenAIChat parity through trigger cloning, scripts, CBS, regex, and 128-message pages', async () => {

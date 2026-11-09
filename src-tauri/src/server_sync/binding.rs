@@ -1686,7 +1686,7 @@ mod tests {
         config: &super::super::client::ServerConfig,
         key: &risunest_sync_wire::unit::UnitKey,
     ) -> Option<risunest_sync_wire::lww::UnitChange> {
-        let device = server.server.authenticate(&config.library_id, &config.token).unwrap();
+        let device = server.device(&config.library_id, &config.token);
         let pin = server.server.create_state_pin(&device).unwrap();
         let page = server.server.state_page(&device, &pin.pin_id, None, 1024).unwrap();
         server.server.release_state_pin(&device, &pin.pin_id).unwrap();
@@ -1717,7 +1717,7 @@ mod tests {
         Header { binding_authority: state.target_authority, request_id: uuid::Uuid::new_v4().to_string() }
     }
     fn server_keys(server: &LocalServerFixture, config: &super::super::client::ServerConfig) -> std::collections::BTreeSet<String> {
-        let device = server.server.authenticate(&config.library_id, &config.token).unwrap();
+        let device = server.device(&config.library_id, &config.token);
         let pin = server.server.create_state_pin(&device).unwrap();
         let page = server.server.state_page(&device, &pin.pin_id, None, 1024).unwrap();
         server.server.release_state_pin(&device, &pin.pin_id).unwrap();
@@ -2476,7 +2476,7 @@ mod tests {
     }
     /// What the old installation of a registration claimed before this one received the code.
     fn claim_for_other_installation(server: &LocalServerFixture, config: &super::super::client::ServerConfig) {
-        let device = server.server.authenticate(&config.library_id, &config.token).unwrap();
+        let device = server.device(&config.library_id, &config.token);
         server
             .server
             .claim_new_device_writer(&device, &NewDeviceClaimRequest {

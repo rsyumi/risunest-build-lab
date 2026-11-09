@@ -19,8 +19,8 @@
     import { hasLibraryCharacters } from 'src/ts/storage/libraryCharacters'
     import { createNativeSyncBindingBridge } from 'src/ts/storage/sync/bindingNative'
     import { subscribeSyncBindingChanges } from 'src/ts/storage/sync/bindingChanges'
-    import { isExternalLwwRunning, requestExternalLwwNow, subscribeExternalLwwCatchUp, subscribeExternalLwwFailures, supportsExternalLwwNewDevice } from 'src/ts/storage/sync/external/lwwProduction'
-    import { externalErrorLabel, externalSyncFailureText, externalSyncStatusView } from 'src/ts/storage/sync/syncStatusView'
+    import { isExternalLwwRunning, requestExternalLwwNow, subscribeExternalLwwCatchUp, subscribeExternalLwwFailures, supportsExternalLwwNewDevice, switchExternalLwwLibraryFormat } from 'src/ts/storage/sync/external/lwwProduction'
+    import { externalErrorLabel, externalFormatCode, externalSyncFailureText, externalSyncStatusView } from 'src/ts/storage/sync/syncStatusView'
     import BindingTargetSwitch from 'src/ts/storage/sync/BindingTargetSwitch.svelte'
     import { PREVIOUS_FILES_DOWNLOAD_FAILED } from 'src/ts/storage/sync/bindingFlow'
     import { language } from 'src/lang'
@@ -140,6 +140,23 @@
         busy = true
         try { await requestExternalLwwNow(connection.id) }
         catch (reason) { error = externalErrorMessage(strings, reason) }
+        finally {
+            await refresh(true)
+            busy = false
+        }
+    }
+    async function switchFormat(connection: ExternalConnectionSummary): Promise<void> {
+        const lww = language.lwwSync
+        const choice = await alertCheckboxConfirm({ title: lww.formatSwitchTitle, description: lww.formatSwitchDescription, checkboxLabel: lww.formatSwitchAcknowledge, actionLabel: lww.formatSwitch, cancelLabel: strings.cancel, requireChecked: true })
+        if (!choice.confirmed) return
+        busy = true
+        try {
+            // A library already above this app's level stops sync with its own guidance, which the sync attempt records.
+            try { await switchExternalLwwLibraryFormat(connection.id) } catch (reason) {
+                if (externalFormatCode(reason) !== 'app-update-required') { error = lww.formatSwitchFailed; return }
+            }
+            await requestExternalLwwNow(connection.id)
+        } catch (reason) { error = externalErrorMessage(strings, reason) }
         finally {
             await refresh(true)
             busy = false
@@ -769,7 +786,7 @@
 
     // The status button shows the same badge, so the mapping lives with the sync status view.
     function connectionBadge(connection: ExternalConnectionSummary) {
-        return externalSyncStatusView(strings, connection, activeJob(connection), externalProgressFor(progress, connection.id), syncStopped(connection), syncCatchingUp.has(connection.id))
+        return externalSyncStatusView(strings, connection, activeJob(connection), externalProgressFor(progress, connection.id), syncStopped(connection), syncCatchingUp.has(connection.id), syncFailures.get(connection.id))
     }
 
     // A backup registers each pack as it seals it, so its upload has no total until it ends.
@@ -904,6 +921,9 @@
                 {#if syncFailures.has(connection.id)}
                     {@const failure = syncFailures.get(connection.id)}
                     <SettingNotice role="status" text={externalSyncFailureText(strings, failure)} />
+                    {#if syncTarget && externalFormatCode(failure) === 'library-format-switch-required'}
+                        <div class="actions"><SettingButton disabled={busy} onclick={() => void switchFormat(connection)}>{language.lwwSync.formatSwitch}</SettingButton></div>
+                    {/if}
                     {#if ['clockSkew', 'corrupt'].includes(externalErrorKind(failure) ?? '') && supportsExternalLwwNewDevice(connection.id)}
                         <div class="actions">
                             <BindingTargetSwitch target={{kind:'external',connectionId:connection.id}} options={{mode:'new-device'}} label={language.lwwSync.newDeviceAction} onBound={() => refreshExternalStorageProductionState().then(() => refresh())} onError={reason => error = externalErrorMessage(strings, reason)} />
@@ -1128,11 +1148,11 @@
             class="dialog outline-hidden"
         >
             <h3 id="external-recovery-title" class="text-lg font-bold">{strings.recovery}</h3>
-            <p class="text-sm text-textcolor2">{strings.recoveryNotice}</p>
+            <p class="text-sm text-subtext">{strings.recoveryNotice}</p>
             <label class="block text-sm">
                 <span class="font-medium">{strings.recoveryCode}</span>
                 <input readonly class="mt-1 w-full select-all rounded-md border border-darkborderc bg-darkbg p-2 font-mono shadow-xs" value={recoveryKey} />
-                <span class="mt-1 block text-[13px] text-textcolor2">{strings.recoveryCodeHelp}</span>
+                <span class="mt-1 block text-[13px] text-subtext">{strings.recoveryCodeHelp}</span>
             </label>
             <div class="actions"><SettingButton onclick={closeRecoveryKey}>{strings.closeRecovery}</SettingButton></div>
         </div>
@@ -1150,7 +1170,7 @@
     .placeholder {
         padding: 1rem;
         font-size: 14px;
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
     }
     .blank {
         display: grid;
@@ -1167,14 +1187,14 @@
         border: 1px solid var(--risu-theme-darkborderc);
         border-radius: 50%;
         background: var(--risu-theme-bgcolor);
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
     }
     .blank p {
         max-width: 46ch;
         margin: 0;
         font-size: 13px;
         line-height: 1.55;
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
     }
     .card {
         display: grid;
@@ -1210,7 +1230,7 @@
         border: 1px solid var(--risu-theme-darkborderc);
         border-radius: 0.5rem;
         background: var(--risu-theme-bgcolor);
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
     }
     .card-name {
         min-width: 0;
@@ -1226,7 +1246,7 @@
         margin: 0.125rem 0 0;
         font-size: 12.5px;
         line-height: 1.4;
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
         overflow-wrap: anywhere;
     }
     .kv {
@@ -1238,7 +1258,7 @@
         line-height: 1.45;
     }
     .kv dt {
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
         white-space: nowrap;
     }
     .kv dd {
@@ -1250,7 +1270,7 @@
     .note {
         margin: 0;
         font-size: 13px;
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
     }
     .unlock {
         display: grid;
@@ -1309,7 +1329,7 @@
         border-bottom: 2px solid transparent;
         background: transparent;
         font-size: 13px;
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
         cursor: pointer;
     }
     .tabs:only-child .tab {
@@ -1336,7 +1356,7 @@
     .empty {
         margin: 0;
         font-size: 13px;
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
     }
     .rows {
         display: grid;
@@ -1373,7 +1393,7 @@
         font-size: 11.5px;
         font-weight: 600;
         line-height: 1.5;
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
     }
     .kind[data-kind='snapshot'] {
         border-color: color-mix(in srgb, var(--risu-theme-primary-500) 45%, transparent);
@@ -1407,7 +1427,7 @@
         gap: 0.25rem;
         font-size: 12px;
         line-height: 1.25;
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
     }
     .flag + .flag {
         margin-left: 0.5rem;
@@ -1449,7 +1469,7 @@
     .stat dt {
         font-size: 13px;
         line-height: 1.4;
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
     }
     .stat dd {
         margin: 0;
@@ -1464,12 +1484,12 @@
     }
     .stat-value[data-unknown='true'] {
         font-weight: 500;
-        color: color-mix(in srgb, var(--risu-theme-textcolor2) 62%, var(--risu-theme-textcolor) 38%);
+        color: var(--color-subtext);
     }
     .stat-note {
         font-size: 13px;
         line-height: 1.45;
-        color: color-mix(in srgb, var(--risu-theme-textcolor2) 62%, var(--risu-theme-textcolor) 38%);
+        color: var(--color-subtext);
     }
     .usage-section {
         display: grid;
@@ -1510,7 +1530,7 @@
         min-width: 0;
     }
     .bucket-count {
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
     }
@@ -1553,14 +1573,14 @@
     }
     .unit {
         font-size: 13px;
-        color: var(--risu-theme-textcolor2);
+        color: var(--color-subtext);
     }
     .help {
         max-width: 62ch;
         margin: 0;
         font-size: 13px;
         line-height: 1.5;
-        color: color-mix(in srgb, var(--risu-theme-textcolor2) 62%, var(--risu-theme-textcolor) 38%);
+        color: var(--color-subtext);
     }
     .foot {
         display: flex;

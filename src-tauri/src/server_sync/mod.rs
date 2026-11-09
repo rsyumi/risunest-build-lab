@@ -16,6 +16,7 @@ pub(crate) mod progress;
 mod tests;
 pub(crate) mod transfer;
 pub(crate) mod lww_client;
+pub(crate) mod library_format;
 #[cfg(test)]
 pub(crate) mod hash_metrics;
 mod binding;
@@ -49,9 +50,6 @@ pub(crate) struct SyncError {
     /// An activation failed before changing an already usable local library.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub startup_local_ready: Option<bool>,
-    /// This stored-page invocation was rejected before applying its staged units.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub receive_not_applied: Option<bool>,
     /// Where the error was raised. Kept for the device log, never sent.
     #[serde(skip)]
     pub at: &'static std::panic::Location<'static>,
@@ -69,7 +67,6 @@ impl SyncError {
             status,
             retryable,
             startup_local_ready: None,
-            receive_not_applied: None,
             at: std::panic::Location::caller(),
             cause: None,
         }
@@ -158,10 +155,7 @@ impl From<crate::persistent_store::StoreError> for SyncError {
             }
             crate::persistent_store::StoreError::Validation { message } if matches!(message.as_str(), "accepted-clock-correction-required" | "incoming-clock-skew" | "clock-skew" | "equal-stamp-integrity" | "writer-collision" | "binding-authority-changed") => Self::new(message,409),
             crate::persistent_store::StoreError::Store { message } => Self::caused("local-storage", 503, message),
-            crate::persistent_store::StoreError::CommitBusy => Self::new("library-operation-busy", 409),
-            crate::persistent_store::StoreError::Validation { message }
-                if message == "Asset inventory is being pinned by a local capture" =>
-                Self::new("library-operation-busy", 409),
+            crate::persistent_store::StoreError::CommitBusy | crate::persistent_store::StoreError::AssetInventoryBusy => Self::new("library-operation-busy", 409),
             other => Self::caused("local-validation", 409, other.to_string()),
         }
     }

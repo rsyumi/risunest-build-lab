@@ -107,7 +107,6 @@ vi.mock('src/ts/model/modellist', () => ({
 }))
 
 vi.mock('src/ts/tokenizer', () => ({
-    prefetchTokenIds: vi.fn(async () => new Map()),
     strongBan: vi.fn(),
     tokenizeNum: vi.fn(),
 }))
@@ -213,24 +212,6 @@ describe('OpenAI Responses API helpers', () => {
             url,
             expect.objectContaining({ method: 'POST' }),
         )
-    })
-
-    it('sends the token IDs of the plain bias strings from one batch', async () => {
-        const { prefetchTokenIds, tokenizeNum } = await import('src/ts/tokenizer')
-        vi.mocked(prefetchTokenIds).mockImplementationOnce(async (texts) => new Map(texts.map((text) => [text, [11, 12]])))
-        vi.mocked(tokenizeNum).mockResolvedValueOnce([99])
-        mocks.fetchNative.mockResolvedValue(new Response('synthetic endpoint reached', { status: 503 }))
-
-        await requestOpenAI(baseArg({
-            aiModel: 'gpt-fixture',
-            formated: [{ role: 'user', content: 'synthetic' }],
-            customURL: 'http://localhost:11434/v1/chat/completions',
-            useStreaming: true,
-            biasString: [['[[7]]', 5], ['plain', 3]],
-        }))
-
-        expect(vi.mocked(prefetchTokenIds).mock.calls.at(-1)).toEqual([['plain']])
-        expect(JSON.parse(mocks.fetchNative.mock.calls[0][1].body).logit_bias).toEqual({ 7: 5, 11: 3, 12: 3 })
     })
 
     it('builds a Responses request body for text, developer role, multimodal input, tools, and model parameters', async () => {
@@ -743,5 +724,51 @@ describe('OpenAI Responses API helpers', () => {
 
         const chunks = await chunksPromise
         expect(chunks.at(-1)?.['0']).toContain('stream failed')
+    })
+
+    it.each([
+        ['chat completions', 'data: {"choices":[{"delta":{"content":"Hel"}}]}\n\n', (abortSignal: AbortSignal) => requestOpenAI(baseArg({
+            aiModel: 'gpt-fixture',
+            formated: [{ role: 'user', content: 'synthetic' }],
+            customURL: 'http://localhost:11434/v1/chat/completions',
+            useStreaming: true,
+            abortSignal,
+        }))],
+        ['Responses', 'data: {"type":"response.output_text.delta","delta":"Hel"}\n\n', (abortSignal: AbortSignal) => requestOpenAIResponseAPI(baseArg({
+            useStreaming: true,
+            abortSignal,
+        }))],
+    ])('reports a stopped %s stream to its reader without an unhandled rejection', async (_name, event, request) => {
+        const unhandledRejections: unknown[] = []
+        const onUnhandledRejection = (reason: unknown) => {
+            unhandledRejections.push(reason)
+        }
+        process.on('unhandledRejection', onUnhandledRejection)
+        try {
+            const stop = new AbortController()
+            mocks.fetchNative.mockResolvedValueOnce({
+                status: 200,
+                headers: { get: () => 'text/event-stream' },
+                // The native HTTP plugin errors a response body with this string once its request is aborted.
+                body: new ReadableStream<Uint8Array>({
+                    start(controller) {
+                        controller.enqueue(new TextEncoder().encode(event))
+                        stop.signal.addEventListener('abort', () => controller.error('Request cancelled'))
+                    },
+                }),
+            })
+
+            const result = await request(stop.signal)
+            expect(result.type).toBe('streaming')
+            const reader = (result.result as ReadableStream<Record<string, string>>).getReader()
+            await expect(reader.read()).resolves.toEqual({ done: false, value: { '0': 'Hel' } })
+            stop.abort()
+
+            await expect(reader.read()).rejects.toBe('Request cancelled')
+            await new Promise((resolve) => setTimeout(resolve, 0))
+            expect(unhandledRejections).toEqual([])
+        } finally {
+            process.off('unhandledRejection', onUnhandledRejection)
+        }
     })
 })

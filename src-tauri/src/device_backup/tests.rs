@@ -393,8 +393,13 @@ fn native_section_archive_roundtrip_keeps_structured_keys_objects_and_local_scop
     let large_string = format!("{}\n{}", "가".repeat(25_000), "z".repeat(100));
     let large_json = format!("{{ \"items\": [1.50, 2e1],\n  \"text\": \"{}\" }}", "j".repeat(70_000));
     let large_setting = serde_json::json!({ "notes": "s".repeat(70_000) });
+    let part = vec![0u8, 255, 128];
+    let part_hash = risunest_sync_wire::hash(&part);
+    let structured = format!(
+        "#risunest-structured:1\n{{\"parts\":[\"p:{part_hash}\"],\"bytes\":3,\"nodes\":[{{\"type\":\"ArrayBuffer\",\"offset\":0,\"byteLength\":3}}],\"root\":{{\"ref\":0}}}}");
     {
         let device = source.device_store_mut().unwrap();
+        crate::persistent_store::device_store::plugin_values::structure::put_part(device.connection(), &part).unwrap();
         device
             .write_hypa_embeddings(&[HypaEmbeddingWrite {
                 cache_key: "ab".repeat(32),
@@ -436,6 +441,11 @@ fn native_section_archive_roundtrip_keeps_structured_keys_objects_and_local_scop
                         space: "json".into(),
                         key: "large".into(),
                         value: large_json.clone(),
+                    },
+                    PluginDeviceMutation::Set {
+                        space: "json".into(),
+                        key: "structured".into(),
+                        value: structured.clone(),
                     },
                 ],
             )
@@ -492,7 +502,7 @@ fn native_section_archive_roundtrip_keeps_structured_keys_objects_and_local_scop
             .db
             .query_row::<i64, _, _>("SELECT count(*) FROM objects", [], |row| row.get(0))
             .unwrap(),
-        4
+        5
     );
     assert_eq!(
         catalog
@@ -503,7 +513,7 @@ fn native_section_archive_roundtrip_keeps_structured_keys_objects_and_local_scop
                 |row| row.get(0),
             )
             .unwrap(),
-        5
+        6
     );
     let path = root.path().join("native.risunest");
     catalog.write_candidate(&path, false, &Never).unwrap();
@@ -573,6 +583,15 @@ fn native_section_archive_roundtrip_keeps_structured_keys_objects_and_local_scop
             Some(expected)
         );
     }
+    assert_eq!(
+        device.read_plugin_device_value("owner-b", "json", "structured").unwrap(),
+        Some(structured)
+    );
+    assert_eq!(
+        device.connection().query_row::<Vec<u8>, _, _>(
+            "SELECT body FROM message_page_objects WHERE hash=?1", [&part_hash], |row| row.get(0)).unwrap(),
+        part
+    );
     assert_eq!(
         device.read_setting("risuNestDeviceSettings").unwrap(),
         Some(large_setting.clone())

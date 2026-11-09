@@ -5,7 +5,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }))
 vi.mock('./plugins.svelte', () => ({ pluginStorageStore: { forOwner: mocks.owner } }))
 vi.mock('../storage/persistentDataStoreFactory', () => ({ getPersistentDataStore: () => ({ listPluginStorage: mocks.list }) }))
 vi.mock('./pluginDeviceKeyspace', () => ({ invalidatePluginDeviceKeyspaces: vi.fn() }))
-import { deletePluginDataForOwner } from './pluginDataInventory'
+import { deletePluginDataForOwner, listPluginDataItems, pluginDataItemId, searchPluginDataValues } from './pluginDataInventory'
 beforeEach(() => {
     vi.resetAllMocks()
     mocks.owner.mockReturnValue({ mutate: mocks.mutate, dispose: vi.fn() })
@@ -44,5 +44,19 @@ describe('plugin removal data deletion', () => {
         await deletePluginDataForOwner('absent')
         expect(mocks.mutate).not.toHaveBeenCalled()
         expect(mocks.invoke).toHaveBeenCalledExactlyOnceWith('pds_list_plugin_device_storage')
+    })
+})
+describe('device value listing', () => {
+    it('lists a structure value by its type and leaves it out of value search', async () => {
+        mocks.invoke.mockImplementation(async (command, args) => {
+            if (command === 'pds_list_plugin_device_storage') return [
+                { owner: 'plugin', space: 'json', key: 'bytes', byteSize: 9, structureType: 'Uint8Array' },
+                { owner: 'plugin', space: 'json', key: 'text', byteSize: 9 },
+            ]
+            if (command === 'pds_read_plugin_device_value') return args.key === 'text' ? '"risunest"' : '#risunest-structured:1 {}'
+        })
+        const items = await listPluginDataItems('device')
+        expect(items.map(item => [item.key, item.structureType, item.byteSize])).toEqual([['bytes', 'Uint8Array', 9], ['text', undefined, 9]])
+        await expect(searchPluginDataValues(items, 'risunest', () => false)).resolves.toEqual(new Set([pluginDataItemId(items[1])]))
     })
 })

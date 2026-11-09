@@ -4,6 +4,8 @@ import {
     type AndroidSafDestinationReservation,
     type AndroidSafExportKind,
 } from './androidSafBridge'
+import { runSharedNativeFileOperation, type NativeFileOperationPresentation } from './nativeFileJobManager'
+import type { NativeFileJobOptions } from './nativeFileJobs'
 
 export interface NativeContentExportRuntime {
     readonly revision: number
@@ -23,16 +25,25 @@ export type NativeContentExportDestination =
   | { type: "androidSaf"; suggestedName: string; reservation?: AndroidSafDestinationReservation }
   | { type: "iosFiles"; suggestedName: string };
 
+export interface NativeContentExportPickerInput {
+    suggestedName: string
+    flushReason: string
+    androidSourceKind?: AndroidSafExportKind
+    chooseDestination(): Promise<string | null>
+}
+
+export interface NativeContentExportReady {
+    kind: 'ready'
+    destination: NativeContentExportDestination
+    expectedRevision: number
+}
+
 export type NativeContentExportPickerFlow =
     /** Neither desktop nor Android: callers fall back to the compatibility path. */
     | { kind: 'unsupported' }
     /** The desktop save dialog was dismissed without choosing a destination. */
     | { kind: 'cancelled' }
-    | {
-        kind: 'ready'
-        destination: NativeContentExportDestination
-        expectedRevision: number
-    }
+    | NativeContentExportReady
 
 /**
  * Shared platform-check/picker/flush/abort/revision flow for the native
@@ -41,12 +52,7 @@ export type NativeContentExportPickerFlow =
  * captured revision; run the export inside `withNativeContentExportDestination`.
  */
 export async function prepareNativeContentExportFromPicker(
-    input: {
-        suggestedName: string
-        flushReason: string
-        androidSourceKind?: AndroidSafExportKind
-        chooseDestination(): Promise<string | null>
-    },
+    input: NativeContentExportPickerInput,
     options: { signal?: AbortSignal },
     dependencies: NativeContentExportPickerDependencies,
 ): Promise<NativeContentExportPickerFlow> {
@@ -97,4 +103,34 @@ export function withNativeContentExportDestination<T>(
     run: () => Promise<T>,
 ): Promise<T> {
     return withAndroidSafDestination(destination.type === 'androidSaf' ? destination.reservation : undefined, run)
+}
+
+/**
+ * Runs a native content export as a shared file operation, so it waits for sync and backups to settle
+ * and keeps them paused until it ends. Resolves undefined where native export is unavailable and null
+ * when the picker is dismissed.
+ */
+export async function runNativeContentExport<T>(
+    input: NativeContentExportPickerInput,
+    options: NativeFileJobOptions,
+    dependencies: NativeContentExportPickerDependencies,
+    presentation: NativeFileOperationPresentation,
+    run: (flow: NativeContentExportReady, options: NativeFileJobOptions) => Promise<T>,
+): Promise<T | null | undefined> {
+    if (!dependencies.isDesktop() && !dependencies.isAndroid() && !dependencies.isIOS?.()) return undefined
+    return runSharedNativeFileOperation('export', `content-export:${crypto.randomUUID()}`, async context => {
+        context.signal.throwIfAborted()
+        const shared: NativeFileJobOptions = {
+            ...options,
+            signal: context.signal,
+            onStatus: status => {
+                context.onStatus(status)
+                options.onStatus?.(status)
+            },
+        }
+        const flow = await prepareNativeContentExportFromPicker(input, shared, dependencies)
+        if (flow.kind !== 'ready') return null
+        context.protect()
+        return withNativeContentExportDestination(flow.destination, () => run(flow, shared))
+    }, { format: 'content', presentation, protectAfterPicker: true, signal: options.signal })
 }

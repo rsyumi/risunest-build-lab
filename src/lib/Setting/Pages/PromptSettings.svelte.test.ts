@@ -2,8 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 import { DBState } from 'src/ts/stores.svelte'
 import { RISU_PROMPT_DRAG_TYPE } from 'src/ts/dragTypes'
-import { language } from 'src/lang'
-import { tokenizePreset } from 'src/ts/process/prompt'
 import PromptSettings from './PromptSettings.svelte'
 
 vi.mock('src/ts/stores.svelte', () => {
@@ -11,7 +9,6 @@ vi.mock('src/ts/stores.svelte', () => {
     return { DBState }
 })
 vi.mock('src/ts/process/prompt', () => ({ tokenizePreset: vi.fn(async () => 0) }))
-vi.mock('src/ts/tokenizer', async () => (await import('src/ts/tokenizer.testSupport')).tokenizerStubModule())
 vi.mock('src/ts/process/templates/templateCheck', () => ({ templateCheck: () => [] }))
 vi.mock('src/lib/Others/Help.svelte', () => ({ default: () => {} }))
 vi.mock('src/lib/UI/GUI/TextAreaInput.svelte', () => ({ default: () => {} }))
@@ -44,26 +41,6 @@ beforeEach(async () => {
 afterEach(async () => {
     await unmount(instance)
     document.body.replaceChildren()
-})
-
-describe('prompt token counts', () => {
-    afterEach(() => {
-        vi.mocked(tokenizePreset).mockImplementation(async () => 0)
-    })
-
-    it('counts the fixed and exact preset tokens together', async () => {
-        const pending: { consti: boolean, resolve: (count: number) => void }[] = []
-        vi.mocked(tokenizePreset).mockImplementation((_prompts, consti = false) =>
-            new Promise<number>((resolve) => pending.push({ consti, resolve })))
-        DBState.db.promptTemplate = [{ type: 'plain', name: 'Changed', text: 'text', role: 'system', type2: 'normal' }]
-        await tick()
-        await vi.waitFor(() => expect(pending.map((entry) => entry.consti)).toEqual([true, false]))
-
-        pending[1].resolve(7)
-        pending[0].resolve(5)
-        await vi.waitFor(() => expect(document.body.textContent).toContain(`5 ${language.fixedTokens}`))
-        expect(document.body.textContent).toContain(`7 ${language.exactTokens}`)
-    })
 })
 
 describe('prompt drag ordering', () => {

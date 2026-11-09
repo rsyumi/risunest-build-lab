@@ -11,7 +11,6 @@ import { vi } from 'vitest'
 type Overrides<M> = { [K in keyof M]?: unknown }
 
 type TokenizerModule = typeof import('../../tokenizer')
-type TokenCountBatch<T> = import('../../tokenizer').TokenCountBatch<T>
 type UtilModule = typeof import('../../util')
 type ScriptsModule = typeof import('../scripts')
 type TemplatesModule = typeof import('../templates/templates')
@@ -29,15 +28,10 @@ type IOSNativeModule = typeof import('../../iosNative')
 export function tokenizerModule(overrides: Overrides<TokenizerModule> & {
     tokenizeChat?: (...args: unknown[]) => Promise<number> | number
     tokenizeChats?: (chats: unknown[]) => Promise<number> | number
-    // While true, a count batch counts what a loop adds after the loop, as a native tokenizer counts it.
-    deferChatCounts?: () => boolean
-    // Receives the texts a token counter is asked to count ahead, as a native tokenizer counts them.
-    prefetchTokens?: (texts: string[], tokenizerType?: string) => void
 } = {}) {
-    const { tokenizeChat, tokenizeChats, deferChatCounts, prefetchTokens, ...rest } = overrides
+    const { tokenizeChat, tokenizeChats, ...rest } = overrides
     const chatTokenizer = tokenizeChat ?? (async () => 1)
     const chatsTokenizer = tokenizeChats ?? (async (chats: unknown[]) => chats.length)
-    const counters = () => result as unknown as Pick<TokenizerModule, 'tokenize' | 'encodeWithTokenizer'>
     const module = {
         ChatTokenizer: class {
             tokenizeChat(...args: unknown[]) {
@@ -46,47 +40,11 @@ export function tokenizerModule(overrides: Overrides<TokenizerModule> & {
             tokenizeChats(chats: unknown[]) {
                 return chatsTokenizer(chats)
             }
-            async prefetch() {}
-            countBatch(options: { inline?: boolean } = {}) {
-                return countBatchStub(chatTokenizer, () => !options.inline && (deferChatCounts?.() ?? false))
-            }
         } as unknown as TokenizerModule['ChatTokenizer'],
         tokenize: vi.fn(async () => 1),
         tokenizeNum: vi.fn(async () => []),
-        tokenCountBatch: (() => countBatchStub((text: string) => counters().tokenize(text), () => deferChatCounts?.() ?? false)) as unknown as TokenizerModule['tokenCountBatch'],
-        prefetchTokenIds: (async () => new Map()) as TokenizerModule['prefetchTokenIds'],
-        tokenCounter: ((tokenizerType?: string) => ({
-            prefetch: async (texts: string[]) => prefetchTokens?.(texts, tokenizerType),
-            count: async (text: string) => tokenizerType === undefined
-                ? await counters().tokenize(text)
-                : (await counters().encodeWithTokenizer(text, tokenizerType)).length,
-        })) as unknown as TokenizerModule['tokenCounter'],
     } satisfies Partial<TokenizerModule>
-    const result = { ...module, ...rest }
-    return result
-}
-
-// Counts each item as it is added, as the JavaScript tokenizer does, or, while `defer` says so, when the batch is
-// flushed or settled, as a native tokenizer does.
-export function countBatchStub<T>(count: (item: T) => Promise<number> | number, defer: () => boolean) {
-    const added: { item: T, deferred: boolean, count?: number }[] = []
-    const flush = async () => {
-        for (const entry of added) {
-            if (entry.deferred && entry.count === undefined) entry.count = await count(entry.item)
-        }
-    }
-    return {
-        add: async (item: T) => {
-            const deferred = defer()
-            added.push({ item, deferred })
-            return deferred ? 0 : await count(item)
-        },
-        flush,
-        settle: async () => {
-            await flush()
-            return added.splice(0).map((entry) => entry.count ?? 0)
-        },
-    } satisfies Pick<TokenCountBatch<T>, 'add' | 'flush' | 'settle'>
+    return { ...module, ...rest }
 }
 
 export function alertModule(overrides: Overrides<typeof import('../../alert')> = {}) {
@@ -147,7 +105,6 @@ export function scriptsModule(overrides: Overrides<ScriptsModule> = {}) {
         })),
         risuChatParser: (value: string) => value,
         resetScriptCache: vi.fn(),
-        editProcessHasEffects: vi.fn(() => false),
     } satisfies Partial<ScriptsModule>
     return { ...module, ...overrides }
 }
@@ -368,6 +325,9 @@ export function persistentRuntimeModule(overrides: Overrides<PersistentRuntimeMo
         captureWindowedConversationMutationController: () => null,
         acquireCompleteConversation: vi.fn(),
         flushPendingData: vi.fn(async () => undefined),
+        flushPendingDataLocallyForCheckpoint: vi.fn(async () => true),
+        capturesImmutableCharacters: () => true,
+        pendingConversationMutationDiagnostics: () => ({ pendingEvents: 0 }),
         getActiveConversationSession: () => null,
         peekActiveConversationSession: () => null,
         invalidateActiveConversationSession: vi.fn(),

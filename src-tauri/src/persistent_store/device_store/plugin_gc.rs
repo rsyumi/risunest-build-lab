@@ -3,10 +3,11 @@ use risunest_sync_wire::unit::{UnitKey, UnitValue};
 use rusqlite::{Connection, OpenFlags};
 use std::{path::PathBuf, time::Duration};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct PluginGcFence {
-    pub(crate) instance_id: String,
-    pub(crate) revision: i64,
+    instance_id: String,
+    revision: i64,
 }
 
 #[must_use = "Keep the device barrier alive through the destructive library page"]
@@ -44,7 +45,7 @@ pub(super) fn validate_state(db: &Connection) -> StoreResult<()> {
     read_fence(db).map(|_| ())
 }
 
-pub(crate) fn read_fence(db: &Connection) -> StoreResult<PluginGcFence> {
+fn read_fence(db: &Connection) -> StoreResult<PluginGcFence> {
     let (instance_id, revision): (String, i64) = db.query_row(
         "SELECT instance_id,revision FROM plugin_gc_state WHERE singleton=1", [],
         |row| Ok((row.get(0)?, row.get(1)?)),

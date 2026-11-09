@@ -223,7 +223,7 @@ export function createCoordinatorOwnedAssetBlobStore(
                 key, () => store.stagePut(key, ownedData, ownedMetadata, true), beforeActivate,
             )
         },
-        read: (key, range) => store.read(key, range),
+        read: (key, range, options) => store.read(key, range, options),
         stat: (key) => store.stat(key),
         statMany: store.statMany?.bind(store),
         list: (query) => store.list(query),
@@ -278,7 +278,7 @@ export function createRuntimeAssetRepositoryDispatcher(
         },
         put: (key, data, metadata) => store.put(key, data, metadata),
         putNewInlayImage: (key, data, request) => store.putNewInlayImage(key, data, request),
-        read: (key, range) => store.read(key, range),
+        read: (key, range, options) => store.read(key, range, options),
         stat: (key) => store.stat(key),
         statMany: store.statMany?.bind(store),
         list: (query) => store.list(query),

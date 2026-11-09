@@ -79,6 +79,7 @@ async fn client_reconnects_without_replaying_issuance_and_rejects_stale_edits() 
     }
     let device = Device {
         id: refreshed["devices"][0]["id"].as_str().unwrap().to_owned(),
+        format_level: None,
     };
     let body = b"synthetic retained object";
     let hash = hex::encode(Sha256::digest(body));

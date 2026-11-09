@@ -6,6 +6,7 @@ import type {
     NativeFileOperationState,
 } from '../storage/nativeFileJobManager'
 import type {
+    NativeFileJobFailureOwner,
     NativeFileJobResult,
     NativeFileJobStage,
     NativeFileJobStatus,
@@ -41,6 +42,10 @@ export interface NativeFileJobDialogTerminal {
     state: 'succeeded' | 'failed' | 'cancelled'
     summary: string
     reason: string
+    /** The library item whose data the export could not write. */
+    location: string
+    /** Files of a batch that were not imported, with why; a declined file has no reason of its own here. */
+    failedFiles: { name: string; reason: string }[]
     details: string
     restarting: boolean
 }
@@ -519,6 +524,8 @@ function buildCounters(
 
 function warningText(code: string): string {
     const copy = language.risuNest.importDialog
+    const skipped = /^plugin-values-skipped:(\d+)$/.exec(code)
+    if (skipped) return copy.warningPluginValuesSkipped.replace('{0}', skipped[1])
     switch (code) {
         case 'cleanup-failed':
             return copy.warningCleanupFailed
@@ -554,6 +561,13 @@ function warningText(code: string): string {
         default:
             return copy.warningUnknown
     }
+}
+
+export function failureLocation(owner?: NativeFileJobFailureOwner): string {
+    const template = owner && Object.hasOwn(language.risuNest.importDialog.failureOwners, owner.kind)
+        ? language.risuNest.importDialog.failureOwners[owner.kind] : undefined
+    if (!owner || !template) return ''
+    return owner.kind === 'chat' ? fillTemplate(template, owner.character ?? '', owner.name) : fillTemplate(template, owner.name)
 }
 
 export function failureReason(code: string, direction: 'import' | 'export' = 'import', itemKind?: string): string {
@@ -697,7 +711,9 @@ function overallOf(
                 indeterminate: false,
             }
         }
-        return { overallPercent: null, overallText: exporting && detail ? progressText(detail.stageCompleted, detail.stageTotal, detail.stageUnit) : '', indeterminate: terminalState === null }
+        // A restore stage that reads bytes of unknown total still shows how much it has read.
+        const measured = detail && (exporting || detail.stageUnit === 'bytes')
+        return { overallPercent: null, overallText: measured ? progressText(detail.stageCompleted, detail.stageTotal, detail.stageUnit) : '', indeterminate: terminalState === null }
     }
     if (total && total > 0) {
         return {
@@ -764,7 +780,9 @@ export function buildNativeFileJobDialogModel(
             compact: format === 'content',
             open: true,
             title: exporting ? exportTitleOf(format, state.status) : titleOf(format, state.status),
-            subtitle: exporting ? '' : subtitleOf(format, counts, false),
+            subtitle: exporting ? ''
+                : state.batch?.index ? fillTemplate(copy.batchFile, state.batch.index, state.batch.total)
+                : subtitleOf(format, counts, false),
             sourceName: state.source?.name ?? '',
             sourceSize:
                 state.source?.bytes !== undefined
@@ -825,6 +843,7 @@ export function buildNativeFileJobDialogModel(
         const counts = outcome.status?.detail?.counts
         let summary: string
         let reason = ''
+        let location = ''
         if (exporting) {
             if (outcome.state === 'succeeded') {
                 summary = copy.resultExportSucceeded
@@ -835,6 +854,7 @@ export function buildNativeFileJobDialogModel(
             } else {
                 summary = copy.resultExportFailed
                 reason = failureReason(outcome.error?.code ?? '', 'export', outcome.error?.itemKind)
+                location = failureLocation(outcome.error?.owner)
             }
         } else if (outcome.state === 'succeeded') {
             summary = restarting ? copy.resultRestarting : copy.resultSucceeded
@@ -866,6 +886,19 @@ export function buildNativeFileJobDialogModel(
         if (outcome.interruption === 'background-expired') {
             summary = outcome.partialWritesPossible ? copy.resultBackgroundExpiredPartial : copy.resultBackgroundExpired
         }
+        // A batch reports its files together; the stages and counters of the last file alone would mislead.
+        const batch = exporting ? undefined : outcome.batch
+        if (batch && !outcome.interruption) {
+            if (outcome.state === 'cancelled' && batch.imported > 0) {
+                summary = fillTemplate(copy.resultBatchCancelled, batch.imported, batch.total)
+            } else if (outcome.state === 'succeeded' && batch.imported < batch.total) {
+                // Only declined files are left; the converter or the user's own refusal already gave the reason.
+                summary = fillTemplate(copy.resultBatchPartial, batch.imported, batch.total)
+            } else if (outcome.state === 'failed' && !outcome.error?.recoveryRequired && batch.failures.length > 0) {
+                summary = fillTemplate(copy.resultBatchFailed, batch.failures.length + batch.declined.length, batch.total)
+                reason = ''
+            }
+        }
         // The non-atomic save warning only matters while saving; an interrupted
         // save reports the partial file with its own code.
         const warningCodes = outcome.warningCodes.filter((code) => code !== 'android-saf-provider-not-atomic')
@@ -873,18 +906,24 @@ export function buildNativeFileJobDialogModel(
             compact: format === 'content',
             open: true,
             title: exporting ? exportTitleOf(format, outcome.status) : titleOf(format, outcome.status),
-            subtitle: exporting ? '' : subtitleOf(format, counts, true),
-            sourceName: outcome.source?.name ?? '',
+            subtitle: exporting ? ''
+                : batch ? fillTemplate(copy.batchFiles, batch.total)
+                : subtitleOf(format, counts, true),
+            sourceName: batch ? '' : outcome.source?.name ?? '',
             sourceSize:
-                outcome.source?.bytes !== undefined
+                !batch && outcome.source?.bytes !== undefined
                     ? formatBytes(outcome.source.bytes)
                     : '',
             elapsed: fillTemplate(
                 copy.elapsed,
                 formatElapsed(outcome.finishedAt - outcome.startedAt),
             ),
-            ...overallOf(outcome.status, outcome.state),
-            stages: buildStages(
+            ...(batch ? {
+                overallPercent: Math.round(batch.imported * 100 / batch.total),
+                overallText: fillTemplate(copy.itemsOf, formatCount(batch.imported), formatCount(batch.total)),
+                indeterminate: false,
+            } : overallOf(outcome.status, outcome.state)),
+            stages: batch ? [] : buildStages(
                 format,
                 outcome.observedStages,
                 outcome.status,
@@ -892,7 +931,7 @@ export function buildNativeFileJobDialogModel(
                 exporting,
             ),
             currentItem: '',
-            counters: exporting
+            counters: exporting || batch
                 ? []
                 : [...buildCounters(
                       format,
@@ -905,8 +944,18 @@ export function buildNativeFileJobDialogModel(
                 state: outcome.state,
                 summary,
                 reason,
+                location,
+                failedFiles: batch ? [
+                    ...batch.failures.map(failure => ({
+                        name: failure.name,
+                        reason: failureReason(failure.error.code, 'import', failure.error.itemKind),
+                    })),
+                    ...batch.declined.map(name => ({ name, reason: '' })),
+                ] : [],
                 details: [
-                    outcome.error ? `[${outcome.error.code}] ${outcome.error.message}` : '',
+                    ...(batch?.failures.map(failure => `${failure.name}: [${failure.error.code}] ${failure.error.message}`) ?? []),
+                    outcome.error && !batch?.failures.some(failure => failure.error === outcome.error)
+                        ? `[${outcome.error.code}] ${outcome.error.message}` : '',
                     ...warningCodes.map((code) => `[${code}]`),
                 ].filter(Boolean).join('\n'),
                 restarting,

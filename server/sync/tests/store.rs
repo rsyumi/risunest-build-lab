@@ -1,7 +1,9 @@
 mod common;
 use common::*;
 use risunest_sync_server::{config::Config, store::Store};
-use risunest_sync_wire::hash;
+use risunest_sync_wire::{
+    canonical, descriptor::RecordDescriptor, hash, library_format, lww::UnitChange, unit::UnitValue,
+};
 
 #[test]
 fn generated_identifiers_are_uuids_and_credentials_remain_full_length() {
@@ -192,4 +194,210 @@ fn linked_data_directory_and_cas_shard_cannot_escape_private_storage() {
         "unsafe-storage-path"
     );
     assert!(!external.path().join(&digest).exists());
+}
+
+fn level(writer: &str, physical: u64, level: u64) -> UnitChange {
+    unit(
+        &["library-format"],
+        writer,
+        physical,
+        library_format::value(level).unwrap(),
+    )
+}
+
+#[test]
+fn the_library_format_rises_by_level_and_stops_clients_behind_it_in_store_operations() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::init(dir.path()).unwrap();
+    let mut aware = device(&store);
+    aware.format_level = Some(2);
+    let released = device(&store);
+    let content = request(
+        &store,
+        WRITER_A,
+        "content",
+        vec![inline("key", WRITER_A, 10, "value")],
+    );
+    store.push(&aware, &content).unwrap();
+    // The level applies by level, so an older stamp still raises it.
+    let switch = request(&store, WRITER_A, "switch", vec![level(WRITER_A, 1, 2)]);
+    assert_eq!(
+        store.push(&aware, &switch).unwrap().accepted_keys,
+        vec![library_format::key()]
+    );
+    assert_eq!(store.library_format(), 2);
+    let again = request(&store, WRITER_A, "again", vec![level(WRITER_A, 20, 2)]);
+    assert!(store.push(&aware, &again).unwrap().accepted_keys.is_empty());
+    let refused = |operation: &str, value: UnitValue| {
+        let change = unit(&["library-format"], WRITER_A, 30, value);
+        store
+            .push(&aware, &request(&store, WRITER_A, operation, vec![change]))
+            .unwrap_err()
+            .code
+    };
+    assert_eq!(
+        refused("delete", UnitValue::Deleted),
+        "library-format-downgrade"
+    );
+    let extended = UnitValue::inline(br#"{"level":2,"next":1}"#).unwrap();
+    assert_eq!(refused("extended", extended), "invalid-library-format");
+    let later = library_format::value(3).unwrap();
+    assert_eq!(refused("later", later), "sync-server-update-required");
+    // Only a level this server does not know stays out of the operation's answer.
+    assert!(store.operation(&aware, "delete").is_ok());
+    assert_eq!(
+        store.operation(&aware, "later").unwrap_err().code,
+        "operation-not-found"
+    );
+
+    // Each operation reads the level itself, whatever the request was admitted at.
+    let behind = risunest_sync_server::store::Device {
+        format_level: Some(1),
+        ..released.clone()
+    };
+    for (client, code) in [
+        (&released, "server-incompatible"),
+        (&behind, "app-update-required"),
+    ] {
+        assert_eq!(
+            store.changes(client, 0u64.into(), 10).unwrap_err().code,
+            code
+        );
+        assert_eq!(store.create_state_pin(client).unwrap_err().code, code);
+        let late = request(
+            &store,
+            WRITER_B,
+            "late",
+            vec![inline("other", WRITER_B, 40, "x")],
+        );
+        assert_eq!(store.push(client, &late).unwrap_err().code, code);
+        assert_eq!(
+            store
+                .put_object(client, &hash(b"late"), b"late")
+                .unwrap_err()
+                .code,
+            code
+        );
+    }
+    // A refused client that updates retries the same operation from scratch.
+    let updated = risunest_sync_server::store::Device {
+        format_level: Some(2),
+        ..released.clone()
+    };
+    assert_eq!(
+        store.operation(&updated, "late").unwrap_err().code,
+        "operation-not-found"
+    );
+    let items = store.changes(&aware, 0u64.into(), 10).unwrap().items;
+    assert!(items.iter().any(|item| library_format::is_key(&item.key)));
+    drop(store);
+    assert_eq!(Store::open(dir.path()).unwrap().library_format(), 2);
+}
+
+#[test]
+fn an_empty_library_switches_only_while_it_holds_no_other_unit() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::init(dir.path()).unwrap();
+    let mut a = device(&store);
+    let mut b = device(&store);
+    (a.format_level, b.format_level) = (Some(2), Some(2));
+    let first = request(&store, WRITER_A, "a", vec![level(WRITER_A, 1, 2)]);
+    store.push_to_empty_library(&a, &first).unwrap();
+    // A second client racing on the same empty library ends at the same level.
+    let second = request(&store, WRITER_B, "b", vec![level(WRITER_B, 1, 2)]);
+    assert!(store
+        .push_to_empty_library(&b, &second)
+        .unwrap()
+        .accepted_keys
+        .is_empty());
+    assert_eq!(store.library_format(), 2);
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::init(dir.path()).unwrap();
+    let mut aware = device(&store);
+    aware.format_level = Some(2);
+    let released = device(&store);
+    let content = request(
+        &store,
+        WRITER_B,
+        "first",
+        vec![inline("key", WRITER_B, 1, "value")],
+    );
+    store.push(&released, &content).unwrap();
+    let switch = request(&store, WRITER_A, "switch", vec![level(WRITER_A, 2, 2)]);
+    assert_eq!(
+        store
+            .push_to_empty_library(&aware, &switch)
+            .unwrap_err()
+            .code,
+        "library-not-empty"
+    );
+    // The refusal is the operation's answer, so a lost reply is retried safely.
+    assert_eq!(
+        store
+            .push_to_empty_library(&aware, &switch)
+            .unwrap_err()
+            .code,
+        "library-not-empty"
+    );
+    assert_eq!(store.library_format(), 1);
+    let mixed = request(
+        &store,
+        WRITER_A,
+        "mixed",
+        vec![level(WRITER_A, 3, 2), inline("key", WRITER_A, 3, "other")],
+    );
+    assert_eq!(
+        store
+            .push_to_empty_library(&aware, &mixed)
+            .unwrap_err()
+            .code,
+        "invalid-precondition"
+    );
+    assert_eq!(store.library_format(), 1);
+}
+
+#[test]
+fn a_level_one_library_refuses_plugin_values_that_name_parts() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::init(dir.path()).unwrap();
+    let mut aware = device(&store);
+    aware.format_level = Some(2);
+    let (body, part) = (br#""structure""#.as_slice(), b"part".as_slice());
+    for bytes in [body, part] {
+        store.put_object(&aware, &hash(bytes), bytes).unwrap();
+    }
+    let plain = RecordDescriptor::content(hash(body));
+    let parted = RecordDescriptor {
+        dependencies: vec![hash(part)],
+        ..plain.clone()
+    };
+    for descriptor in [&plain, &parted] {
+        let encoded = canonical::encode(descriptor).unwrap();
+        store
+            .put_object(&aware, &descriptor.hash().unwrap(), &encoded)
+            .unwrap();
+    }
+    let key = ["plugin-local", "plugin", "json", "key"];
+    let push = |operation: &str, physical: u64, descriptor: &RecordDescriptor| {
+        let change = unit(
+            &key,
+            WRITER_A,
+            physical,
+            UnitValue::object(descriptor.clone()).unwrap(),
+        );
+        store.push(&aware, &request(&store, WRITER_A, operation, vec![change]))
+    };
+    assert_eq!(
+        push("parted", 1, &parted).unwrap_err().code,
+        "library-format-switch-required"
+    );
+    assert_eq!(push("plain", 2, &plain).unwrap().accepted_keys.len(), 1);
+    store
+        .push(
+            &aware,
+            &request(&store, WRITER_A, "switch", vec![level(WRITER_A, 3, 2)]),
+        )
+        .unwrap();
+    assert_eq!(push("after", 4, &parted).unwrap().accepted_keys.len(), 1);
 }

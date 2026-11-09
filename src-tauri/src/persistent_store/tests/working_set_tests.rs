@@ -808,6 +808,60 @@ fn conversation_catalog_includes_chat_list_metadata() {
 }
 
 #[test]
+fn author_note_preset_usage_lists_only_conversations_still_reading_the_preset() {
+    let directory = tempfile::tempdir().expect("create temporary directory");
+    let mut store = PersistentStore::open(directory.path()).expect("open persistent store");
+    let link = |id: &str, note: &str| {
+        json!({"id": id, "fingerprint": crate::persistent_store::author_note::fingerprint(note)})
+    };
+    let chat = |id: &str, note: Option<&str>, link: Value| {
+        let mut chat = json!({"id": id, "name": format!("Chat {id}"), "message": [], "authorNotePreset": link});
+        if let Some(note) = note {
+            chat["note"] = json!(note);
+        }
+        chat
+    };
+    let revision = store
+        .commit(&WorkingSetCommit {
+            add_character: Some(json!({
+                "type": "character",
+                "chaId": "first",
+                "name": "First",
+                "chats": [
+                    chat("linked", Some("copy"), link("preset", "copy")),
+                    chat("edited", Some("changed"), link("preset", "copy")),
+                    chat("other", Some("copy"), link("other", "copy")),
+                ]
+            })),
+            ..empty_working_set_commit(0)
+        })
+        .expect("add first character")
+        .revision;
+    store
+        .commit(&WorkingSetCommit {
+            add_character: Some(json!({
+                "type": "character",
+                "chaId": "second",
+                "name": "Second",
+                "chats": [chat("empty", None, link("preset", ""))]
+            })),
+            ..empty_working_set_commit(revision)
+        })
+        .expect("add second character");
+
+    let usage = store
+        .query_author_note_preset_usage("preset")
+        .expect("query author's note preset usage");
+    assert_eq!(
+        serde_json::to_value(usage).expect("serialize usage"),
+        json!([
+            {"characterId": "first", "characterName": "First", "conversationId": "linked", "conversationName": "Chat linked"},
+            {"characterId": "second", "characterName": "Second", "conversationId": "empty", "conversationName": "Chat empty"},
+        ])
+    );
+}
+
+#[test]
 fn conversation_windows_cover_latest_and_anchor_boundaries() {
     let (_directory, store, _) = open_fixture();
     let window = |anchor: Option<&str>, before, after| ConversationWindowQuery {
@@ -2226,10 +2280,6 @@ fn two_revision_leases_remain_independent_until_each_is_released() {
             .value["username"],
         "Fixture User"
     );
-    assert!(matches!(
-        store.checkpoint(CheckpointMode::Truncate),
-        Err(StoreError::Store { .. })
-    ));
 
     store
         .release_revision(&second.lease)
@@ -3399,87 +3449,4 @@ fn app_kv_accepts_only_the_two_job_marker_prefixes() {
             .expect("count app kv rows"),
         0
     );
-}
-
-#[test]
-fn conversation_history_rebase_keeps_snapshot_positions_and_rejects_released_or_replaced_leases() {
-    use crate::persistent_store::conversation_rebase::Request;
-    let (_directory, mut store, database) = open_fixture();
-    let character = database["characters"].as_array().unwrap().iter().find(|character|
-        character["chats"].as_array().unwrap().iter().any(|chat| !chat["message"].as_array().unwrap().is_empty())).unwrap();
-    let conversation = character["chats"].as_array().unwrap().iter().find(|chat| !chat["message"].as_array().unwrap().is_empty()).unwrap();
-    let character_id = character["chaId"].as_str().unwrap();
-    let conversation_id = conversation["id"].as_str().unwrap();
-    let original_count = conversation["message"].as_array().unwrap().len();
-    let before = store.revision().unwrap();
-    let baseline = store.acquire_revision(before).unwrap();
-    let commit: WorkingSetCommit = serde_json::from_value(json!({
-        "expectedRevision": before,
-        "conversations": [{"type":"replace-range", "characterId":character_id, "conversationId":conversation_id,
-            "start":0, "deleteCount":0, "messages":[{"role":"user", "data":"Synthetic native rebase prefix", "chatId":"synthetic-rebase-prefix"}]}]
-    })).unwrap();
-    let revision = store.commit(&commit).unwrap().revision;
-    let current = store.acquire_revision(revision).unwrap();
-    let mut request = Request { baseline_lease: baseline.lease.clone(), current_lease: current.lease.clone(),
-        baseline_revision: before, current_revision: revision, character_id: character_id.into(), conversation_id: conversation_id.into() };
-    assert_eq!(serde_json::to_value(store.rebase_conversation_history(&request).unwrap()).unwrap(), json!({
-        "kind":"mapped", "originalCount":original_count, "currentCount":original_count+1,
-        "spans":[{"originalStart":0,"currentStart":1,"count":original_count}]
-    }));
-    request.baseline_revision += 1;
-    assert!(matches!(store.rebase_conversation_history(&request), Err(StoreError::Validation { .. })));
-    request.baseline_revision = before;
-    store.release_revision(&baseline.lease).unwrap();
-    assert!(matches!(store.rebase_conversation_history(&request), Err(StoreError::SnapshotReleased)));
-    request.baseline_lease = current.lease.clone();
-    request.baseline_revision = revision;
-    let staging = store.replace_begin().unwrap();
-    store.replace_put_root(&staging.staging_id, &staged_root(&database)).unwrap();
-    store.replace_put_presets(&staging.staging_id, database["botPresets"].as_array().unwrap()).unwrap();
-    store.replace_add_characters(&staging.staging_id, database["characters"].as_array().unwrap()).unwrap();
-    let replacement = store.replace_commit(&staging.staging_id, Some(revision)).unwrap();
-    let replaced = store.acquire_revision(replacement.revision).unwrap();
-    request.current_lease = replaced.lease.clone();
-    request.current_revision = replacement.revision;
-    assert!(matches!(store.rebase_conversation_history(&request), Err(StoreError::Validation { .. })));
-    store.release_revision(&current.lease).unwrap();
-    store.release_revision(&replaced.lease).unwrap();
-}
-
-#[test]
-fn native_conversation_history_proof_packets_match_retained_store_rows() {
-    use crate::persistent_store::conversation_rebase::Request;
-    let cases: Vec<Value> = serde_json::from_str(include_str!("../../../../tests/fixtures/nativeConversationHistory.json")).unwrap();
-    for case in cases {
-        let (_directory, mut store, database) = open_fixture();
-        let character = &database["characters"][0];
-        let conversation = &character["chats"][0];
-        let character_id = character["chaId"].as_str().unwrap();
-        let conversation_id = conversation["id"].as_str().unwrap();
-        let messages = |values: &Value| -> Vec<Value> { values.as_array().unwrap().iter().map(|data|
-            json!({"role":"char","data":data,"chatId":"shared-duplicate-id"})).collect() };
-        let original: WorkingSetCommit = serde_json::from_value(json!({
-            "expectedRevision":store.revision().unwrap(), "conversations":[{"type":"replace-range", "characterId":character_id,
-                "conversationId":conversation_id,"start":0,"deleteCount":conversation["message"].as_array().unwrap().len(),
-                "messages":messages(&case["original"])}]
-        })).unwrap();
-        let before = store.commit(&original).unwrap().revision;
-        store.connection.execute("UPDATE messages SET canonical_hash='' WHERE message_index % 2 = 0", []).unwrap();
-        let baseline = store.acquire_revision(before).unwrap();
-        let updated: WorkingSetCommit = serde_json::from_value(json!({
-            "expectedRevision":before, "conversations":[{"type":"replace-range", "characterId":character_id,
-                "conversationId":conversation_id,"start":0,"deleteCount":case["original"].as_array().unwrap().len(),
-                "messages":messages(&case["current"])}]
-        })).unwrap();
-        let revision = store.commit(&updated).unwrap().revision;
-        store.connection.execute("UPDATE messages SET canonical_hash='' WHERE message_index % 2 = 0", []).unwrap();
-        let current = store.acquire_revision(revision).unwrap();
-        let request = Request { baseline_lease:baseline.lease.clone(),current_lease:current.lease.clone(),baseline_revision:before,
-            current_revision:revision,character_id:character_id.into(),conversation_id:conversation_id.into() };
-        let budget = |key: &str, default| case["budget"][key].as_u64().map(|value| value as usize).unwrap_or(default);
-        let result = store.rebase_conversation_history_with_budget(&request, budget("maxSpans",4096), budget("maxCells",262144), budget("maxKeys",8192)).unwrap();
-        assert_eq!(serde_json::to_value(result).unwrap(), case["mapping"], "proof packet {}", case["name"]);
-        store.release_revision(&baseline.lease).unwrap();
-        store.release_revision(&current.lease).unwrap();
-    }
 }

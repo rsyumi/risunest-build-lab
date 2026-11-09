@@ -45,6 +45,7 @@
     let translatedStackTrace = $state('');
     let stackTraceTranslationFailed = $state(false);
     let isTranslating = $state(false);
+    let markdownRoot = $state<HTMLElement>();
     const displayedStackTrace = $derived(translatedStackTrace || $alertStore.stackTrace || '');
     const stackTraceCodeBlock = $derived(formatErrorDetails(
         $diagnosticInfo, $alertStore.msg, displayedStackTrace,
@@ -229,8 +230,8 @@
             {/if}
             {#if $alertStore.type === 'markdown'}
                 <div class="overflow-y-auto" class:wrapped-code={$alertStore.wrapCode}>
-                    <span class="text-gray-300 chattext prose chattext2" class:prose-invert={$ColorSchemeTypeStore}>
-                        <DeferredMarkdown data={$alertStore.msg} />
+                    <span class="text-gray-300 chattext prose chattext2" class:prose-invert={$ColorSchemeTypeStore} bind:this={markdownRoot}>
+                        <DeferredMarkdown data={$alertStore.msg} root={markdownRoot} />
                     </span>
                 </div>
             {:else if $alertStore.type === 'tos' || $alertStore.type === 'risu-tos'}

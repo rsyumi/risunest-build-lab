@@ -41,10 +41,18 @@ async function recover(): Promise<void> {
     const existing = store.read();
     if (existing && existing.jobId !== job.jobId) continue;
     if (!existing) {
+      const terminal = ["succeeded", "failed", "cancelled"].includes(job.state);
       const choice = await alertSelect(
-        [text.review, text.later],
+        terminal ? [text.review, text.discard, text.later] : [text.review, text.later],
         text.needsReview,
       );
+      if (terminal && choice === "1") {
+        if (job.result?.handoffPath) {
+          await invoke("native_portable_handoff_cleanup", { path: job.result.handoffPath });
+        }
+        await invoke("native_file_job_forget", { jobId: job.jobId });
+        continue;
+      }
       if (choice !== "0") continue;
       let status = await invoke<PortableJobStatus>("native_file_job_status", {
         jobId: job.jobId,

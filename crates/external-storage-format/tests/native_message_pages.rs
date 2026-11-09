@@ -60,6 +60,23 @@ mod archive {
     #[allow(dead_code)]
     pub(crate) type ArchivedObject = serde_json::Value;
 }
+mod device_store {
+    pub(crate) mod plugin_values {
+        pub(crate) mod structure {
+            use crate::{record_projection::codec_error, StoreResult};
+            #[allow(dead_code)]
+            pub(crate) fn row_parts(
+                _db: &rusqlite::Connection,
+                _schema: &str,
+                _visit: impl FnMut(&str) -> StoreResult<()>,
+            ) -> StoreResult<()> {
+                Err(codec_error(
+                    "native plugin value roots are unavailable in the isolated page fixture",
+                ))
+            }
+        }
+    }
+}
 // The sweep and copied-database acceptance are outside this fixture.
 #[allow(dead_code)]
 #[path = "../../../src-tauri/src/persistent_store/message_pages.rs"]

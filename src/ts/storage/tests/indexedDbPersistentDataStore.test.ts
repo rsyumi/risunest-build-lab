@@ -9,6 +9,7 @@ import {
 } from '../persistentDataStore'
 import { fixtureDatabase } from './persistentDataFixtures'
 import { persistentDataStoreContract } from './persistentDataStoreContract'
+import { authorNoteFingerprint } from '../../authorNotePresets'
 
 let databaseSequence = 0
 
@@ -943,6 +944,24 @@ describe('IndexedDbPersistentDataStore I/O shape', () => {
             folderId: 'folder-a',
             bindedPersona: 'persona-a',
         })
+    })
+
+    it('lists conversations still reading an author note preset in configured order', async () => {
+        const store = new IndexedDbPersistentDataStore(`author-note-usage-${databaseSequence++}`, new IDBFactory(), IDBKeyRange)
+        await store.open()
+        const database = structuredClone(fixtureDatabase)
+        const link = (id: string, note: string) => ({ note, authorNotePreset: { id, fingerprint: authorNoteFingerprint(note) } })
+        const [beta, alpha, gamma] = database.characters
+        Object.assign(alpha.chats[1], link('preset', 'copy'))
+        Object.assign(alpha.chats[0], link('preset', 'copy'), { note: 'edited elsewhere' })
+        Object.assign(beta.chats[0], link('preset', ''))
+        Object.assign(gamma.chats[0], link('other', 'copy'))
+        await store.replaceFromDatabase(database)
+
+        expect(await store.queryAuthorNotePresetUsage('preset')).toEqual([
+            { characterId: 'char-b', characterName: 'Beta', conversationId: 'conv-beta', conversationName: 'Beta chat' },
+            { characterId: 'char-a', characterName: 'Alpha', conversationId: 'conv-short', conversationName: 'Short chat' },
+        ])
     })
 
     it('atomically adds one complete character with root and selected edits across reopen', async () => {

@@ -34,16 +34,6 @@ test('real child exchanges successive JSONL requests', { timeout: 5000 }, async 
   assert.deepEqual(await client.send({ text: 'first\nsecond', units: [0xd800] }),
     { output: { text: 'first\nsecond', units: [0xd800] } });
   assert.deepEqual(await client.send({ id: 2 }), { output: { id: 2 } });
-  const effects = { status: 'evaluated', result: { error: { name: 'CbsHistoryAccessError', message: [0xd800], access: [] } },
-    effects: [{ sequence: 0, key: { kind: 'undefined' }, value: { kind: 'undefined' } },
-      { sequence: 1, key: { kind: 'text', units: [] }, value: { kind: 'text', units: [0x75, 0x6e] } }],
-    history: { provenance: { captureId: [0xd800], characterId: [], conversationId: [0xdc00], revision: '18446744073709551615' },
-      count: true, rows: [9007199254740990, 3] } };
-  assert.deepEqual(await client.send(effects), { output: effects });
-  const program = { op: 'evaluateEffects', text: [0xd800], input: { mode: 'mutableMap', program: {
-    mode: 'localFunctions', limits: { functions: 16, frames: 24, sourceUnits: 4096, expandedUnits: 16384, retainedBytes: 65536 }
-  } }, fold: true };
-  assert.deepEqual(await client.send(program), { output: program });
 });
 
 test('invalid JSON rejects pending and future sends', { timeout: 5000 }, async t => {

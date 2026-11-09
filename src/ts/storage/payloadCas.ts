@@ -1,6 +1,7 @@
 import {
     validateBlobReadRange,
     type BlobKeyValueBackend,
+    type BlobReadOptions,
     type BlobReadRange,
     type BlobStore,
 } from './blobStore'
@@ -36,11 +37,12 @@ export class PayloadSizeMismatchError extends Error {
 export interface ImmutablePayloadCas {
     prepare(data: Uint8Array): Promise<PreparedImmutablePayload>
     /** Throws `PayloadSizeMismatchError` when a stored object is not `expectedSize` bytes. */
-    readObject(contentHash: string, expectedSize?: number): Promise<Uint8Array | null>
+    readObject(contentHash: string, expectedSize?: number, options?: BlobReadOptions): Promise<Uint8Array | null>
     readObjectRange(
         contentHash: string,
         range: BlobReadRange,
         expectedSize?: number,
+        options?: BlobReadOptions,
     ): Promise<Uint8Array | null>
     statObject(contentHash: string): Promise<number | null>
     statObjects?(contentHashes: readonly string[]): Promise<(number | null)[]>

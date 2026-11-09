@@ -4,9 +4,9 @@ import type { SyncExitDrainAdapter } from '../syncExitCoordinator'
 import type { RetainableReplacementFence } from '../retainableReplacementFence'
 import { isTauri } from 'src/ts/platform'
 import { createSyncBindingRecoveryRegistration, installSyncBindingFlow } from './bindingProduction'
-import { withPausedPersistentWrites, beginActivatedLibraryGuard, refreshActivatedLibraryUnderPause, applyPersistentStoredLwwReceive, flushPendingDataLocally, getPersistentDataRuntime } from '../persistentDataRuntime.svelte'
+import { withPausedPersistentWrites, beginActivatedLibraryGuard, refreshActivatedLibraryUnderPause, applyPersistentLwwReceive, flushPendingDataLocally, getPersistentDataRuntime } from '../persistentDataRuntime.svelte'
 import type { PersistentMutationToken } from '../saveCoordinator'
-import { RevisionConflictError, type LwwStoredReceive, type LwwApplyResult } from '../persistentDataStore'
+import { RevisionConflictError, type LwwStageReceive, type LwwRemoteChange } from '../persistentDataStore'
 import { beginDeferredMobileBackgroundTask, runWithDeferredMobileBackgroundTask, runWithMobileBackgroundTask, type MobileBackgroundTask } from '../../mobileBackgroundTask'
 import { isBackgroundExpiryReason } from '../../iosNative'
 import { fencePluginExecutionForAuthorityReplacement, invalidatePluginCachesAfterAuthorityReplacement, restartPluginsAfterAuthorityReplacement } from 'src/ts/plugins/apiV3/v3.svelte'
@@ -253,6 +253,12 @@ const checkReceiveContext = (c: BindingContext) => {
     if (!context || bindingIdentity(context.state) !== bindingIdentity(c.state)) throw new Error('Sync binding changed')
     context.signal.throwIfAborted()
 }
+// A binding this launch did not resume has no context, which is its launch failure, not a binding change.
+const checkResumedReceiveContext = (c: BindingContext) => {
+    c.signal.throwIfAborted()
+    if (!context) throw new Error(error || 'Sync binding is unavailable')
+    checkReceiveContext(c)
+}
 async function startupRequest<T>(captured: BindingContext, command: string, args: Record<string, unknown>): Promise<T> {
     try {
         const result = await invoke<T>(command, args)
@@ -288,14 +294,20 @@ async function ensureActivated(captured: BindingContext): Promise<void> {
     await activating
     checkContext(captured)
 }
-interface ServerReceiveDescriptor extends LwwStoredReceive {
-    progress: { kind: 'server'; cursor: string }
-    receivedUnits: number
-    receiveFrontier?: string | null
-    more: boolean
-    hasBodyReferences: boolean
-    hasRepresentativeReferences: boolean
-}
+const receivedBodyReferences = (changes: LwwRemoteChange[]) => changes.some(change => {
+    const key: string[] = JSON.parse(change.key)
+    if (change.value.kind === 'inline') return key[0] === 'asset' || key[0] === 'inlay'
+    if (change.value.kind !== 'object' || key[0] === 'messages') return false
+    const descriptor = change.value.descriptor as { dependencies?: unknown[]; dependencyRoot?: unknown; relationRoot?: unknown }
+    return !!descriptor.dependencies?.length || !!descriptor.dependencyRoot || !!descriptor.relationRoot
+})
+const receivedRepresentativeReferences = (changes: LwwRemoteChange[]) => changes.some(change => {
+    const key: string[] = JSON.parse(change.key)
+    return key[0] === 'character' && (key[2] === 'image' || key[2] === 'trashTime')
+        || key[0] === 'exists' && key[1] === 'character'
+        || key[0] === 'archive' || key[0] === 'asset'
+        || key[0] === 'order' && key[1] === 'characters'
+})
 /** `continuation` lets hydration that a received page triggered start or continue while hidden. */
 function continueHydration(continuation = false): void {
     if ((!hydrationPending && !representativesPending) || !(foreground || continuation && continuing) || !context || context.signal.aborted || scheduler.isBlocked() || scheduler.isWaiting() || isLibraryFileOperationReserved()) return
@@ -400,26 +412,32 @@ const scheduler = createServerSyncScheduler({
         for (;;) {
             captured.signal.throwIfAborted()
             if (captured !== context) throw new Error('Sync binding changed')
-            const request = await during('downloading', () => startupRequest<ServerReceiveDescriptor>(captured, 'server_sync_lww_pull', { request: header(), startup: initialReceive }))
-            receiveFrontier ??= request.receiveFrontier ?? undefined
+            const request = await during('downloading', () => startupRequest<LwwStageReceive & { receiveFrontier?: string; more?: boolean }>(captured, 'server_sync_lww_pull', { request: header(), startup: initialReceive }))
+            receiveFrontier ??= request.receiveFrontier
             captured.signal.throwIfAborted()
             checkContext(captured)
             initialReceive = false
             // A page is applied under the stage that received it, so reading many pages shows one stage.
-            try { await during('downloading', () => applyPersistentStoredLwwReceive(request, applied => invoke<LwwApplyResult>('server_sync_lww_apply_receive', { request: applied }))) }
+            try { await during('downloading', () => applyPersistentLwwReceive(request)) }
             catch (value) { throw localApplyFailure(value) }
             checkContext(captured)
-            if (request.hasBodyReferences) { receivedBodies = true; hydrationPending = true }
-            if (status.assetPolicy === 'remote' && request.hasRepresentativeReferences) { receivedBodies = true; representativesPending = true }
+            if (receivedBodyReferences(request.changes)) { receivedBodies = true; hydrationPending = true }
+            if (status.assetPolicy === 'remote' && receivedRepresentativeReferences(request.changes)) { receivedBodies = true; representativesPending = true }
             if ((!active() || isLibraryFileOperationReserved()) && !completeAvailable) break
             await invoke('server_sync_lww_ack', { request: { bindingAuthority: request.bindingAuthority, requestId: request.requestId } })
             checkContext(captured)
             if (request.more === false || (receiveFrontier !== undefined && BigInt(request.progress.cursor) >= BigInt(receiveFrontier))
-                || (request.more === undefined && request.receivedUnits === 0)) { notifySyncReceiveCompleted(); break }
+                || (request.more === undefined && request.changes.length === 0)) { notifySyncReceiveCompleted(); break }
         }
         if (receivedBodies) continueHydration(true)
     }),
     retryClock: () => retryNativeClock(true),
+    checkFormat: async () => {
+        const captured = context
+        if (!captured) throw new Error('Sync binding is unavailable')
+        await invoke('server_sync_lww_check_format', { request: header() })
+        checkContext(captured)
+    },
     publishHidden: () => attempted(async () => {
         const captured = context
         if (!captured || captured.signal.aborted) return
@@ -464,9 +482,9 @@ const transport: SyncBindingTransport = {
         if (code !== 'cancelled') { recordFailure(failures(value)[0]); changed() }
     },
     async fenceOldJobs(c) { halt(); context = undefined; persistedBinding = undefined; await scheduler.fence(); await hydrating; activationPending = undefined; await invoke('server_sync_lww_fence', { newDevice: c.mode === 'new-device' || c.mode === 'fresh-writer' }); hydrationPending = false; representativesPending = false; hydrationAgain = false },
-    async receiveAvailableChanges(c) { checkReceiveContext(c); await receiveAvailableServerChanges(); checkReceiveContext(c) },
+    async receiveAvailableChanges(c) { checkResumedReceiveContext(c); await receiveAvailableServerChanges(); checkReceiveContext(c) },
     async preparePluginStartup(c) {
-        checkReceiveContext(c)
+        checkResumedReceiveContext(c)
         if (canStartPluginsOffline(startupFailure)) return
         try { await transport.receiveAvailableChanges!(c) }
         catch (value) { checkReceiveContext(c); if (startupFailure !== value || !canStartPluginsOffline(value)) throw value }
@@ -483,10 +501,13 @@ const transport: SyncBindingTransport = {
             activationPending = c
             try { await ensureActivated(c) }
             catch (value) {
-                if (binding || c.holdAutomaticSync || !isServerSyncUnavailable(value)) throw value
+                // A busy or unavailable local store is tried again by automatic sync too, without the offline notice.
+                if (binding || c.holdAutomaticSync || !isServerSyncUnavailable(value)
+                    && !['library-operation-busy', 'server-sync-busy', 'asset-jobs-busy', 'local-store-unavailable'].includes(serverSyncErrorCode(value))) throw value
                 checkContext(c)
                 attemptFailed = true
-                scheduler.reportFailure(value)
+                // The receive that activates the binding again clears it.
+                scheduler.reportFailure(value, 'pull')
             }
             persistedBinding = c.state; hydrationPending = true
             if (!c.holdAutomaticSync) { await updateForeground(document.visibilityState !== 'hidden'); scheduler.remoteHint() }
@@ -557,6 +578,18 @@ export function dismissServerSyncConnectionFailure(): void {
 }
 /** Stops automatic sync until the returned release runs, so an asset download is not refused as busy. */
 export const holdServerSync = () => controller.beginReplacement()
+/** Raises the library to this app's data format. Sync resumes on the next retry. */
+export async function switchServerSyncLibraryFormat(): Promise<void> {
+    // A binding whose first publication stopped at the format level resumes before it switches.
+    if (!context || context.signal.aborted) {
+        await controller.ensureStatus()
+        if (persistedBinding?.target.kind === 'server') await resumeCurrentServerBinding(persistedBinding)
+    }
+    const captured = context
+    if (!captured) throw new Error('Sync binding is unavailable')
+    await invoke('server_sync_lww_switch_format', { request: header() })
+    checkContext(captured)
+}
 export function retryServerSync(): Promise<void> {
     return runWithMobileBackgroundTask('sync', () => syncServerNow(), undefined, true)
 }

@@ -30,7 +30,8 @@ codes!(SkipReason { Ineligible, Compatibility, MissingCapture, CompleteGate, Sto
 codes!(ResultKind { Buffered, Streaming, Multiline, Failed });
 codes!(SavePath { Windowed, Complete, Fallback, Unknown });
 codes!(Boundary { Checkpoint, Final });
-codes!(Lifecycle { Background, Stop, Exit, Expiry, MemoryWarning, TrimMemory });
+codes!(Lifecycle { Active, Background, Start, Stop, Freeze, Resume, Exit, Expiry, MemoryWarning, TrimMemory });
+codes!(FailureReason { ConversationChanged, TriggerStop, MemoryFailed, TokenLimit, Fenced, Error, StreamError });
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", rename_all_fields = "camelCase", deny_unknown_fields)]
@@ -45,7 +46,7 @@ pub(crate) enum Event {
     Phase {
         document_sequence: u64, event_sequence: u64, generation_sequence: u64, phase: Phase, edge: Edge,
         outcome: Option<Outcome>, skip_reason: Option<SkipReason>, result_kind: Option<ResultKind>,
-        save_path: Option<SavePath>,
+        save_path: Option<SavePath>, reason: Option<FailureReason>,
     },
     Persistence {
         document_sequence: u64, event_sequence: u64, generation_sequence: u64, boundary: Boundary, save_path: SavePath,
@@ -297,8 +298,8 @@ impl Diagnostics {
                 let code = match error {
                     StoreError::RevisionConflict { .. } => "revision-conflict",
                     StoreError::SnapshotReleased => "snapshot-released", StoreError::RawBodyUnavailable => "raw-body-unavailable",
-                    StoreError::SnapshotPinned { .. } => "snapshot-pinned",
-                    StoreError::CommitBusy => "commit-busy", StoreError::CommitDecode { .. } => "commit-decode",
+                    StoreError::CommitBusy => "commit-busy", StoreError::AssetInventoryBusy => "library-operation-busy",
+                    StoreError::CommitDecode { .. } => "commit-decode",
                     StoreError::Committed { .. } => "committed", StoreError::Validation { .. } => "validation",
                     StoreError::SchemaMismatch { .. } => "schema-mismatch", StoreError::Store { .. } => "store-error",
                 };
@@ -318,6 +319,13 @@ impl Diagnostics {
         }
         emit(sink, "info", serde_json::json!({"kind":"renderer-reload",
             "documentSequence":self.document.load(Ordering::SeqCst), "outcome":outcome}));
+    }
+    #[cfg(any(target_os = "android", test))]
+    fn service_refused(&self, foreground: bool, background: bool, sink: &impl DiagnosticSink) {
+        emit(sink, "error", serde_json::json!({"kind":"background-service",
+            "documentSequence":self.document.load(Ordering::SeqCst),
+            "stage":if foreground { "foreground" } else { "start" },
+            "outcome":if background { "background-refused" } else { "failed" }}));
     }
     fn renderer_exit(&self, reason: RendererExit, sink: &impl DiagnosticSink) {
         self.recovery.store(true, Ordering::SeqCst);
@@ -351,6 +359,20 @@ pub(crate) enum RendererExit {
     #[cfg(any(target_os = "android", test))]
     Android { did_crash: bool },
 }
+#[cfg(any(target_os = "macos", target_os = "ios", test))]
+impl RendererExit {
+    /// Names WebKit's private `_WKProcessTerminationReason` value.
+    pub(crate) fn apple(reason: Option<isize>) -> Self {
+        RendererExit::Apple { reason: match reason {
+            Some(0) => "memory-limit",
+            Some(1) => "cpu-limit",
+            Some(2) => "client-request",
+            Some(3) => "crash",
+            Some(4) => "shared-process-crash-limit",
+            _ => "unknown",
+        } }
+    }
+}
 pub(crate) fn document_started() { with_context(|state, sink| state.document_started(sink)); }
 pub(crate) fn commit_document() -> u64 { with_context(|state, _| state.document.load(Ordering::SeqCst)) }
 pub(crate) fn commit_finished(document: u64, expected: i64, result: &Result<RevisionResult, StoreError>, committed_revision: Option<i64>) {
@@ -358,6 +380,8 @@ pub(crate) fn commit_finished(document: u64, expected: i64, result: &Result<Revi
 }
 pub(crate) fn renderer_exit(reason: RendererExit) { with_context(|state, sink| state.renderer_exit(reason, sink)); }
 pub(crate) fn reload_result(outcome: &'static str) { with_context(|state, sink| state.reload_result(outcome, sink)); }
+#[cfg(target_os = "android")]
+fn service_refused(foreground: bool, background: bool) { with_context(|state, sink| state.service_refused(foreground, background, sink)); }
 
 #[tauri::command]
 pub(crate) fn native_generation_diagnostic(window: tauri::WebviewWindow, event: Event) -> Result<u64, &'static str> {
@@ -378,6 +402,15 @@ pub extern "system" fn Java_io_github_rsyumi_risunest_MainActivity_recordRendere
         renderer_exit(RendererExit::Android { did_crash: did_crash != 0 });
         reload_result("requested");
     });
+}
+
+/// Android refused to start the background service, or to bring it to the foreground.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_io_github_rsyumi_risunest_BackgroundServiceLog_recordRefused(
+    _env: jni::JNIEnv, _class: jni::objects::JClass, foreground: jni::sys::jboolean, background: jni::sys::jboolean,
+) {
+    let _ = std::panic::catch_unwind(|| service_refused(foreground != 0, background != 0));
 }
 
 #[cfg(test)]
@@ -403,8 +436,9 @@ mod tests {
             "generationSequence":1, "boundary":"final", "savePath":"complete"})).unwrap(), &sink).unwrap();
         state.record(serde_json::from_value(serde_json::json!({"kind":"phase", "documentSequence":1, "eventSequence":3,
             "generationSequence":1, "phase":"final-acknowledgement", "edge":"enter"})).unwrap(), &sink).unwrap();
-        state.renderer_exit(RendererExit::Apple { reason: "unknown" }, &sink);
+        state.renderer_exit(RendererExit::apple(Some(0)), &sink);
         let value = tail(&sink);
+        assert_eq!(value["reason"]["reason"], "memory-limit");
         assert_eq!(value["phase"]["savePath"], "complete");
         assert_eq!(value["phase"]["edge"], "enter");
         assert_eq!(value["commit"]["revision"], 8);
@@ -420,7 +454,8 @@ mod tests {
         let before = sink.tail(None).len();
         state.record(old_path, &sink).unwrap();
         assert_eq!(sink.tail(None).len(), before);
-        state.renderer_exit(RendererExit::Apple { reason: "unknown" }, &sink);
+        state.renderer_exit(RendererExit::apple(None), &sink);
+        assert_eq!(tail(&sink)["reason"]["reason"], "unknown");
         assert_eq!(tail(&sink)["phase"]["phase"], "final-acknowledgement");
         assert_eq!(tail(&sink)["phase"]["phaseEventSequence"], 3);
         assert_eq!(tail(&sink)["phase"]["savePath"], "complete");
@@ -584,12 +619,14 @@ mod tests {
         assert_eq!(tail(&sink)["phase"]["phaseEventSequence"], crate::native_log::RING_CAPACITY + 2);
         assert_eq!(tail(&sink)["admission"]["admittedMessages"], 12);
         let mut failure = phase(1);
-        if let Event::Phase { outcome, event_sequence, .. } = &mut failure {
+        if let Event::Phase { outcome, event_sequence, reason, .. } = &mut failure {
             *outcome = Some(Outcome::Failed);
             *event_sequence = 2001;
+            *reason = Some(FailureReason::StreamError);
         }
         state.record(failure, &sink).unwrap();
         assert_eq!(tail(&sink)["outcome"], "failed");
+        assert_eq!(tail(&sink)["reason"], "stream-error");
         assert_eq!(tail(&sink)["admission"]["route"], "history-window");
         assert!(std::fs::read_to_string(sink.file_path()).unwrap().contains("generation-diagnostic"));
     }
@@ -598,11 +635,20 @@ mod tests {
         let state = Diagnostics::default();
         let sink = crate::native_log::NativeLogState::for_tests();
         state.document_started(&sink);
-        for event in ["stop", "exit"] {
+        for event in ["stop", "exit", "active", "start", "freeze", "resume"] {
             state.record(serde_json::from_value(serde_json::json!({"kind":"lifecycle", "documentSequence":1,
                 "eventSequence":1, "event":event})).unwrap(), &sink).unwrap();
             assert_eq!(tail(&sink)["event"], event);
         }
+        state.record(serde_json::from_value(serde_json::json!({"kind":"lifecycle", "documentSequence":1,
+            "eventSequence":1, "event":"trim-memory", "trimLevel":20})).unwrap(), &sink).unwrap();
+        assert_eq!(tail(&sink)["trimLevel"], 20);
+        state.service_refused(false, true, &sink);
+        assert_eq!(tail(&sink), serde_json::json!({"kind":"background-service", "documentSequence":1,
+            "stage":"start", "outcome":"background-refused"}));
+        state.service_refused(true, false, &sink);
+        assert_eq!(tail(&sink)["stage"], "foreground");
+        assert_eq!(tail(&sink)["outcome"], "failed");
         state.record(serde_json::from_value(serde_json::json!({"kind":"phase", "documentSequence":1,
             "eventSequence":2, "generationSequence":1, "phase":"completion-processing", "edge":"enter"})).unwrap(), &sink).unwrap();
         state.renderer_exit(RendererExit::Linux { reason:"crashed" }, &sink);
@@ -614,6 +660,8 @@ mod tests {
             serde_json::json!({"kind":"document-start", "text":"private"}),
             serde_json::json!({"kind":"phase", "documentSequence":1, "eventSequence":1,"generationSequence":1,"phase":"private", "edge":"enter"}),
             serde_json::json!({"kind":"lifecycle", "documentSequence":1, "eventSequence":1,"event":"background", "message":"private"}),
+            serde_json::json!({"kind":"phase", "documentSequence":1, "eventSequence":1,"generationSequence":1,"phase":"prompt-preparation",
+                "edge":"exit", "outcome":"failed", "reason":"private"}),
         ] { assert!(serde_json::from_value::<Event>(value).is_err()); }
     }
     #[test]

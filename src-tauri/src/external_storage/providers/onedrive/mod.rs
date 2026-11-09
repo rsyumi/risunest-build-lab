@@ -953,11 +953,24 @@ impl OneDrive {
         head: &HeadBytes,
         cancel: &Cancellation,
     ) -> Result<HeadReceipt> {
-        let context = self.context(repository)?;
         locator.validate_for(repository)?;
         if locator.object != HEAD_OBJECT || locator.collection.is_some() {
             return Err(corrupt());
         }
+        self.put_content(repository, locator, expected, head, cancel).await
+    }
+
+    /// Writes the content of the head or the descriptor at `locator`, which
+    /// the caller has checked.
+    async fn put_content(
+        &self,
+        repository: &RepositoryHandle,
+        locator: &RemoteLocator,
+        expected: Option<&ExpectedHead>,
+        head: &HeadBytes,
+        cancel: &Cancellation,
+    ) -> Result<HeadReceipt> {
+        let context = self.context(repository)?;
         let token = self.access_token(context, cancel).await?;
         let condition = match expected {
             Some(ExpectedHead::Exact(version)) => Some(version.0.clone()),
@@ -1293,6 +1306,27 @@ impl Provider for OneDrive {
             cancel.check()?;
             self.write_head(repository, locator, None, head, cancel)
                 .await
+        })
+    }
+
+    fn replace_descriptor<'a>(
+        &'a self,
+        repository: &'a RepositoryHandle,
+        locator: &'a RemoteLocator,
+        bytes: &'a HeadBytes,
+        cancel: &'a Cancellation,
+    ) -> ProviderFuture<'a, HeadReceipt> {
+        Box::pin(async move {
+            cancel.check()?;
+            locator.validate_for(repository)?;
+            let folder = config::role_folder(ObjectRole::Descriptor);
+            let name = locator.object.strip_prefix(folder).and_then(|rest| rest.strip_prefix('/'));
+            if locator.collection.as_deref() != Some(folder)
+                || name.is_none_or(|name| name.is_empty() || name.contains('/'))
+            {
+                return Err(corrupt());
+            }
+            self.put_content(repository, locator, None, bytes, cancel).await
         })
     }
 

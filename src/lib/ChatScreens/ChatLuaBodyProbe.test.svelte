@@ -16,6 +16,7 @@
     let translating = $state(false)
     let retranslate = $state(false)
     let refreshRevision = $state(0)
+    let bodyRoot = $state<HTMLElement | null>(null)
     export function refreshMessageDisplay(state: ChatDisplayRefresh) {
         message = state.message
         parserProjection = state.parserProjection
@@ -30,8 +31,9 @@
 
 </script>
 
-<div data-lua-body data-index={idx}>
+<div data-lua-body data-index={idx} bind:this={bodyRoot}>
     <ChatBody
+        {bodyRoot}
         msgDisplay={message}
         {character}
         {idx}

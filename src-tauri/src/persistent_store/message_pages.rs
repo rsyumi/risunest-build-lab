@@ -1,4 +1,4 @@
-use super::{record_projection::codec_error, StoreError, StoreResult};
+use super::{record_projection::codec_error, stored_json, StoreError, StoreResult};
 use risunest_external_storage_format::{
     logical_records::{decode_message_page, encoded_object, LOGICAL_MESSAGE_PAGE_SIZE},
     message_pages::{
@@ -543,13 +543,14 @@ fn capture(
                 if index != position {
                     return Err(codec_error("noncontiguous conversation messages"));
                 }
-                let body: String = tx.query_row(
+                let body: String = tx.prepare_cached(
                     "SELECT value FROM messages WHERE generation=?1 AND character_id=?2
                     AND conversation_id=?3 AND message_index=?4",
+                )?.query_row(
                     params![generation, character, conversation, position as i64],
                     |r| r.get(0),
                 )?;
-                let body = payload_value::canonicalize(body.as_bytes()).map_err(codec_error)?;
+                let body = stored_json::canonicalize(&body).map_err(codec_error)?;
                 if {
                     #[cfg(test)]
                     crate::persistent_store::hash_work::observe("native_message_verify", body.len());
@@ -730,10 +731,10 @@ fn stage_pages(
             if index as i64 != position {
                 return Err(codec_error("noncontiguous conversation messages"));
             }
-            let body: String = tx.query_row("SELECT value FROM messages WHERE generation=?1 AND character_id=?2
-                AND conversation_id=?3 AND message_index=?4", params![generation, character, conversation, position],
+            let body: String = tx.prepare_cached("SELECT value FROM messages WHERE generation=?1 AND character_id=?2
+                AND conversation_id=?3 AND message_index=?4")?.query_row(params![generation, character, conversation, position],
                 |row| row.get(0))?;
-            let body = payload_value::canonicalize(body.as_bytes()).map_err(codec_error)?;
+            let body = stored_json::canonicalize(&body).map_err(codec_error)?;
             if {
                 #[cfg(test)]
                 crate::persistent_store::hash_work::observe("native_message_verify", body.len());
@@ -825,13 +826,14 @@ fn next_hash(
         )));
     }
     // Upstream import staging may have inserted messages without a computed cache.
-    let body: String = tx.query_row(
+    let body: String = tx.prepare_cached(
         "SELECT value FROM messages WHERE generation=?1 AND character_id=?2
         AND conversation_id=?3 AND message_index=?4",
+    )?.query_row(
         params![generation, character, conversation, index],
         |r| r.get(0),
     )?;
-    let bytes = payload_value::canonicalize(body.as_bytes()).map_err(codec_error)?;
+    let bytes = stored_json::canonicalize(&body).map_err(codec_error)?;
     let cached = {
         #[cfg(test)]
         crate::persistent_store::hash_work::observe("native_message_verify", bytes.len());
@@ -1368,6 +1370,17 @@ pub(super) fn object_roots<'a>(
     Ok(roots)
 }
 
+/// Every unit value found inside `bodies`, which no store table holds, such as
+/// received pages that are not staged yet.
+pub(super) fn json_roots(objects: &Connection, bodies: &[Value], scratch: Connection) -> StoreResult<ObjectRoots> {
+    let mut roots = ObjectRoots::new(scratch)?;
+    for body in bodies {
+        roots.json(objects, body)?;
+    }
+    roots.scratch.execute_batch("COMMIT")?;
+    Ok(roots)
+}
+
 /// Collects the objects that library rows visible on `db` reference: page
 /// indexes and manifests of every generation, unit values in every unit table,
 /// and hashes kept by staged restores and external storage captures.
@@ -1413,7 +1426,7 @@ fn library_object_roots(db: &Connection, objects: &Connection, roots: &mut Objec
 
 /// Collects the objects that unfinished device rows in `schema` on `db`
 /// reference: device units, staged receives, unfinished intents with their
-/// rows, and unpublished proofs.
+/// rows, unpublished proofs, and the parts of structure-form plugin values.
 fn device_object_roots(db: &Connection, schema: &str, objects: &Connection, roots: &mut ObjectRoots) -> StoreResult<()> {
     for sql in [
         format!("SELECT value FROM {schema}.lww_units WHERE json_extract(value,'$.kind')='object'"),
@@ -1423,6 +1436,7 @@ fn device_object_roots(db: &Connection, schema: &str, objects: &Connection, root
     ] {
         unit_value_roots(db, objects, &sql, roots)?;
     }
+    super::device_store::plugin_values::structure::row_parts(db, schema, |hash| roots.insert(hash))?;
     for sql in [
         format!("SELECT body FROM {schema}.lww_receive WHERE finished=0"),
         format!("SELECT body FROM {schema}.lww_intents WHERE complete=0"),
@@ -1457,17 +1471,60 @@ pub(crate) struct ObjectSweep {
     pub(crate) wrapped: bool,
 }
 
-/// Visits up to `limit` objects of the store that `tx` writes, after its stored
-/// cursor. An object nothing references is marked the first time and deleted
-/// once it has stayed unreferenced for `grace_ms`; a referenced object loses
-/// its mark.
+/// Visits up to `limit` objects of the store that `tx` writes: first, when
+/// `expired_marks` is set, those whose mark is older than `grace_ms`, wherever
+/// they are, then those after its stored cursor. An object none of `roots`
+/// references is marked the first time and deleted once it has stayed
+/// unreferenced for `grace_ms`; a referenced object loses its mark. Deleted
+/// hashes are added to `deleted`.
 pub(super) fn sweep_objects(
     tx: &Transaction<'_>,
-    roots: &ObjectRoots,
+    roots: &[&ObjectRoots],
     now_ms: i64,
     grace_ms: i64,
     limit: usize,
+    expired_marks: bool,
+    deleted: &mut Vec<String>,
 ) -> StoreResult<ObjectSweep> {
+    let referenced = |hash: &str| -> StoreResult<bool> {
+        for roots in roots {
+            if roots.contains(hash)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
+    let mut sweep = ObjectSweep::default();
+    // Without an index this reads every mark, so a pass of several batches
+    // reads them in its first batch only.
+    let expired: Vec<(String, Option<i64>)> = if expired_marks {
+        let mut statement = tx.prepare(
+            "SELECT m.hash,length(o.body) FROM message_page_object_marks m
+            LEFT JOIN message_page_objects o ON o.hash=m.hash
+            WHERE m.unreferenced_since<=?1 LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![now_ms.saturating_sub(grace_ms), limit as i64], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<Result<_, _>>()?
+    } else {
+        Vec::new()
+    };
+    for (hash, size) in &expired {
+        match size {
+            Some(size) if !referenced(hash)? => {
+                tx.execute("DELETE FROM message_page_objects WHERE hash=?1", [hash])?;
+                sweep.deleted += 1;
+                sweep.deleted_bytes += u64::try_from(*size).unwrap_or(0);
+                deleted.push(hash.clone());
+            }
+            _ => {
+                tx.execute("DELETE FROM message_page_object_marks WHERE hash=?1", [hash])?;
+            }
+        }
+    }
+    let limit = limit - expired.len();
+    if limit == 0 {
+        return Ok(sweep);
+    }
     let after: Option<String> = tx
         .query_row("SELECT after_hash FROM message_page_sweep_cursor WHERE singleton=1", [], |row| row.get(0))
         .optional()?;
@@ -1475,14 +1532,13 @@ pub(super) fn sweep_objects(
         let mut statement = tx.prepare(
             "SELECT o.hash,length(o.body),m.unreferenced_since FROM message_page_objects o
             LEFT JOIN message_page_object_marks m ON m.hash=o.hash
-            WHERE ?1 IS NULL OR o.hash>?1 ORDER BY o.hash LIMIT ?2",
+            WHERE o.hash>coalesce(?1,'') ORDER BY o.hash LIMIT ?2",
         )?;
         let rows = statement.query_map(params![after, limit as i64], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
         rows.collect::<Result<_, _>>()?
     };
-    let mut sweep = ObjectSweep::default();
     for (hash, size, mark) in &candidates {
-        if roots.contains(hash)? {
+        if referenced(hash)? {
             if mark.is_some() {
                 tx.execute("DELETE FROM message_page_object_marks WHERE hash=?1", [hash])?;
             }
@@ -1497,6 +1553,7 @@ pub(super) fn sweep_objects(
                 tx.execute("DELETE FROM message_page_objects WHERE hash=?1", [hash])?;
                 sweep.deleted += 1;
                 sweep.deleted_bytes += u64::try_from(*size).unwrap_or(0);
+                deleted.push(hash.clone());
             }
             Some(_) => {}
         }
@@ -1516,6 +1573,59 @@ pub(super) fn sweep_objects(
     Ok(sweep)
 }
 
+/// Marks the objects among `hashes` that this store holds as unreferenced since
+/// `since`, keeping an older mark. A sweep still deletes only what it finds
+/// unreferenced.
+pub(super) fn mark_unreferenced<'a>(db: &Connection, hashes: impl IntoIterator<Item = &'a str>, since: i64) -> StoreResult<()> {
+    let mut statement = db.prepare_cached(
+        "INSERT INTO message_page_object_marks(hash,unreferenced_since)
+        SELECT ?1,?2 WHERE EXISTS(SELECT 1 FROM message_page_objects WHERE hash=?1)
+        ON CONFLICT(hash) DO UPDATE SET unreferenced_since=min(unreferenced_since,excluded.unreferenced_since)",
+    )?;
+    for hash in hashes {
+        statement.execute(params![hash, since])?;
+    }
+    Ok(())
+}
+
+/// The objects `value` names in `db`: its descriptor, its object, its
+/// dependencies with the nodes and leaves of its dependency tree, and the nodes
+/// of its relation tree, the same set a sweep roots for it. `None` when a tree
+/// node is missing or unreadable here, since what it names is then unknown.
+pub(super) fn named_objects(db: &Connection, value: &UnitValue) -> StoreResult<Option<std::collections::BTreeSet<String>>> {
+    use risunest_sync_wire::descriptor::ReferencePage;
+    use std::collections::BTreeSet;
+    let mut named = BTreeSet::new();
+    let UnitValue::Object { descriptor_hash, descriptor } = value else {
+        return Ok(Some(named));
+    };
+    named.insert(descriptor_hash.clone());
+    named.insert(descriptor.object_hash.clone());
+    named.extend(descriptor.dependencies.iter().cloned());
+    let mut visited = BTreeSet::new();
+    for (root, relations) in [(&descriptor.dependency_root, false), (&descriptor.relation_root, true)] {
+        let mut pending: Vec<String> = root.iter().cloned().collect();
+        while let Some(node) = pending.pop() {
+            if !visited.insert(node.clone()) {
+                continue;
+            }
+            let Ok(Some(body)) = object_body(db, &node) else {
+                return Ok(None);
+            };
+            let Ok(page) = risunest_sync_wire::canonical::decode::<ReferencePage>(&body, risunest_sync_wire::MAX_METADATA_BYTES) else {
+                return Ok(None);
+            };
+            named.insert(node);
+            match page {
+                ReferencePage::Branches { children } => pending.extend(children),
+                ReferencePage::Objects { hashes } if !relations => named.extend(hashes),
+                _ => {}
+            }
+        }
+    }
+    Ok(Some(named))
+}
+
 /// A marked object may be collected soon, so callers that would otherwise skip
 /// fetching it treat it as absent and put it again, which clears the mark.
 pub(super) fn retained_object_present(db: &Connection, hash: &str) -> StoreResult<bool> {
@@ -1525,6 +1635,14 @@ pub(super) fn retained_object_present(db: &Connection, hash: &str) -> StoreResul
             [hash],
             |row| row.get::<_, bool>(0),
         )?)
+}
+
+/// Whether `db` holds a verified body for `hash`, clearing a mark on it first
+/// so that a sweep keeps it from now on, as storing it again would.
+pub(super) fn keep_verified_object(db: &Connection, hash: &str) -> StoreResult<bool> {
+    risunest_sync_wire::validate_hash(hash).map_err(codec_error)?;
+    db.execute("DELETE FROM message_page_object_marks WHERE hash=?1", [hash])?;
+    verified_object_present(db, hash)
 }
 
 fn sql_u64(value: i64, index: usize) -> rusqlite::Result<u64> {
@@ -1598,17 +1716,82 @@ mod capture_work_tests {
     }
 
     fn fixture() -> Connection {
+        fixture_with(&["{\"chatId\":\"first\"}", "{\"chatId\":\"second\"}"])
+    }
+
+    /// One conversation of messages stored as `values`, without cached hashes.
+    fn fixture_with(values: &[&str]) -> Connection {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE messages(generation TEXT,character_id TEXT,conversation_id TEXT,message_index INTEGER,
             message_id TEXT,value TEXT,canonical_hash TEXT NOT NULL DEFAULT '',canonical_size INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(generation,character_id,conversation_id,message_index));
             CREATE TABLE conversations(generation TEXT,character_id TEXT,conversation_id TEXT,message_count INTEGER,
-            PRIMARY KEY(generation,character_id,conversation_id));
-            INSERT INTO conversations VALUES('g','c','chat',2);
-            INSERT INTO messages VALUES('g','c','chat',0,'first','{\"chatId\":\"first\"}','','0');
-            INSERT INTO messages VALUES('g','c','chat',1,'second','{\"chatId\":\"second\"}','','0');").unwrap();
+            PRIMARY KEY(generation,character_id,conversation_id));").unwrap();
+        db.execute("INSERT INTO conversations VALUES('g','c','chat',?1)", [values.len() as i64]).unwrap();
+        for (index, value) in values.iter().enumerate() {
+            db.execute("INSERT INTO messages VALUES('g','c','chat',?1,NULL,?2,'',0)", params![index as i64, value]).unwrap();
+        }
         db.execute_batch(SCHEMA).unwrap();
         db
+    }
+
+    #[test]
+    fn stored_message_texts_hash_and_page_as_their_canonical_encodings() {
+        // Texts whose encodings reorder keys, rewrite numbers and escapes, keep
+        // the raw value token as an ordinary key, or hold a converted binary
+        // under keys out of order. The digest was taken while message texts
+        // were canonicalized through a parsed value.
+        let binary = (0..300).map(|index| format!("\"{index}\":{}", index * 7 % 256)).collect::<Vec<_>>().join(",");
+        let texts = [
+            format!("{{\"role\":\"user\",\"data\":\"x\",\"blob\":{{{binary}}}}}"),
+            "{\"b\":1,\"a\":2,\"10\":3,\"9\":4,\"01\":5,\"\":6,\"\u{e9}\":7,\"\\ud83d\\ude00\":8,\"\u{ff5a}\":9}".to_owned(),
+            "{\"n\":[0,-0,-0.0,1.5,1e21,1e-7,18446744073709551616,-9223372036854775808,3.08984926168550152811e-32]}".to_owned(),
+            " { \"data\" : \"a\\n\\u0000\\u001f\\/\\\"\u{d55c}\" , \"z\" : [ true , false , null ] }\r\n".to_owned(),
+            r#"{"$serde_json::private::RawValue":"5","x":{"$serde_json::private::RawValue":"{}"}}"#.to_owned(),
+            r#"[1,{"b":2,"a":1},"s"]"#.to_owned(),
+        ];
+        let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let stored = |db: &Connection| {
+            let rows: Vec<(String, i64)> = db.prepare("SELECT canonical_hash,canonical_size FROM messages ORDER BY message_index").unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap().collect::<Result<_, _>>().unwrap();
+            let manifest: Vec<u8> = db.query_row("SELECT body FROM message_page_manifests", [], |row| row.get(0)).unwrap();
+            risunest_sync_wire::hash(format!("{rows:?}{manifest:?}").as_bytes())
+        };
+        let mut db = fixture_with(&texts);
+        let tx = db.transaction().unwrap();
+        // Hashes the rows lack, then verifies them while building the pages.
+        capture_manifest(&tx, "g", "c", "chat", None).unwrap();
+        let captured = stored(&tx);
+        assert_eq!(captured, "adec4beb34d1e394b2832c1d42531a0c41232289b5b1a9ba1a49da62830003a8");
+        // Staging verifies cached hashes, and hashes the rows that lack one.
+        for clear in [false, true] {
+            tx.execute_batch("DELETE FROM message_page_indexes; DELETE FROM message_page_manifests;").unwrap();
+            if clear {
+                tx.execute("UPDATE messages SET canonical_hash='',canonical_size=0", []).unwrap();
+            }
+            stage_conversation_pages(&tx, "g", "c", "chat", &|| Ok(())).unwrap();
+            assert_eq!(stored(&tx), captured, "cleared {clear}");
+        }
+        drop(tx);
+        // A repeated key fails, even when the row caches the hash of the text
+        // with the key's last value.
+        for (text, last) in [(r#"{"a":1,"a":2}"#, r#"{"a":2}"#), (r#"{"z":0,"b":{"0":1,"0":2}}"#, r#"{"b":{"0":2},"z":0}"#)] {
+            for cached in [false, true] {
+                let mut db = fixture_with(&[text]);
+                if cached {
+                    let hash = MessageHash::from_bytes(last.as_bytes());
+                    db.execute("UPDATE messages SET canonical_hash=?1,canonical_size=?2", params![hash.hash, sql_i64(hash.byte_length).unwrap()]).unwrap();
+                }
+                let tx = db.transaction().unwrap();
+                let failures = [
+                    capture_manifest(&tx, "g", "c", "chat", None).map(|_| ()).unwrap_err(),
+                    stage_conversation_pages(&tx, "g", "c", "chat", &|| Ok(())).unwrap_err(),
+                ];
+                for failure in failures {
+                    assert_eq!(failure.to_string(), "invalid-payload-json", "{text} cached {cached}");
+                }
+            }
+        }
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import { tokenizeAccurateList } from "../tokenizer";
+import { tokenizeAccurate } from "../tokenizer";
 import { addPreset, presetTemplate } from "../storage/database.svelte";
 import { alertError, alertNormal } from "../alert";
 import type { OobaChatCompletionRequestParams } from "../model/ooba";
@@ -65,12 +65,12 @@ export interface PromptItemCache {
 }
 
 export async function tokenizePreset(prompts:PromptItem[], consti:boolean = false){
-    const texts:string[] = []
+    let total = 0
     for(const prompt of prompts){
         switch(prompt.type){
             case 'plain':
             case 'jailbreak':{
-                texts.push(prompt.text)
+                total += await tokenizeAccurate(prompt.text, consti)
                 break
             }
             case 'persona':
@@ -80,15 +80,11 @@ export async function tokenizePreset(prompts:PromptItem[], consti:boolean = fals
             case 'authornote':
             case 'memory':{
                 if(prompt.innerFormat){
-                    texts.push(prompt.innerFormat)
+                    total += await tokenizeAccurate(prompt.innerFormat, consti)
                 }
                 break
             }
         }
-    }
-    let total = 0
-    for(const count of await tokenizeAccurateList(texts, consti)){
-        total += count
     }
     return total
 }

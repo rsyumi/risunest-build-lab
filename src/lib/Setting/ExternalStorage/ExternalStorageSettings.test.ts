@@ -6,7 +6,7 @@ import { beginExternalProgress, clearExternalProgress } from 'src/ts/storage/syn
 const state = vi.hoisted(() => ({
     getState: vi.fn(),
     prepareHistoryDelete: vi.fn(),
-    syncNow: vi.fn(), bind: vi.fn(), unbind: vi.fn(), resume: vi.fn(), actionConfirm: vi.fn(),
+    syncNow: vi.fn(), switchFormat: vi.fn(), bind: vi.fn(), unbind: vi.fn(), resume: vi.fn(), actionConfirm: vi.fn(),
     stopped: new Set<string>(),
     form: undefined as undefined | { onconnected: (result: unknown) => Promise<void> },
     failures: new Map<string, unknown>(), remedy: true,
@@ -46,7 +46,7 @@ vi.mock('qrcode', async importOriginal => {
     return { default: { ...actual.default, toDataURL: state.qrDataUrl } }
 })
 vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn(), alertNormal: vi.fn(), alertCheckboxConfirm: vi.fn(), alertActionConfirm: state.actionConfirm }))
-vi.mock('src/ts/storage/sync/external/lwwProduction', () => ({ requestExternalLwwNow: state.syncNow, isExternalLwwRunning: (id: string) => !state.stopped.has(id), supportsExternalLwwNewDevice: () => state.remedy, subscribeExternalLwwFailures(callback: (value: ReadonlyMap<string, unknown>) => void) { callback(new Map(state.failures)); return () => {} }, subscribeExternalLwwCatchUp(callback: (value: ReadonlySet<string>) => void) { callback(new Set()); return () => {} } }))
+vi.mock('src/ts/storage/sync/external/lwwProduction', () => ({ requestExternalLwwNow: state.syncNow, switchExternalLwwLibraryFormat: state.switchFormat, isExternalLwwRunning: (id: string) => !state.stopped.has(id), supportsExternalLwwNewDevice: () => state.remedy, subscribeExternalLwwFailures(callback: (value: ReadonlyMap<string, unknown>) => void) { callback(new Map(state.failures)); return () => {} }, subscribeExternalLwwCatchUp(callback: (value: ReadonlySet<string>) => void) { callback(new Set()); return () => {} } }))
 vi.mock('src/ts/storage/sync/bindingRegistry', () => ({ bindSyncTarget: state.bind, unbindSyncTarget: state.unbind, resumeCurrentSyncBinding: state.resume, prepareBoundLibraryReplacement: state.prepareReplacement }))
 vi.mock('src/ts/storage/libraryCharacters', () => ({ hasLibraryCharacters: state.characters }))
 // The form's own steps are covered by its tests; here it only reports a finished connection.
@@ -1312,6 +1312,59 @@ it('explains a sync stopped because the previous storage could not be reached', 
     expect(target.textContent).toContain(language.lwwSync.previousStorageUnavailable)
     expect(target.textContent).not.toContain(strings.errorGeneric)
     unmount(component); component = undefined; target.remove()
+})
+
+describe('a sync library below this app data format', () => {
+    const lww = language.lwwSync
+    const button = (label: string) => [...target.querySelectorAll('button')].find(item => item.textContent?.trim() === label)
+    async function open(kind = 'libraryFormatSwitchRequired') {
+        state.failures.set('connection-1', { kind })
+        state.getState.mockResolvedValue({ supported: true, selection: { kind: 'external', connectionId: 'connection-1', selectionEpoch: '0', paused: false },
+            connections: [{ ...connection(10, 30), purpose: 'sync', strategy: 'sequential' }], jobs: [] })
+        state.listHistory.mockResolvedValue({ items: [] })
+        target = document.createElement('div')
+        document.body.append(target)
+        component = mount(ExternalStorageSettings, { target }); await settle()
+    }
+    afterEach(() => {
+        if (component) unmount(component)
+        component = undefined; target.remove()
+        vi.clearAllMocks()
+    })
+    it('names the stop and switches after the acknowledgement, then syncs', async () => {
+        vi.mocked(alertCheckboxConfirm).mockResolvedValue({ confirmed: true, checked: true })
+        await open()
+        expect(target.querySelector('.card-status')?.textContent?.trim()).toBe(lww.formatSwitchRequired)
+        expect(target.textContent).toContain(lww.formatSwitchRequiredHelp)
+        button(lww.formatSwitch)!.click(); await settle()
+        expect(alertCheckboxConfirm).toHaveBeenCalledWith(expect.objectContaining({ title: lww.formatSwitchTitle, description: lww.formatSwitchDescription, checkboxLabel: lww.formatSwitchAcknowledge, actionLabel: lww.formatSwitch, requireChecked: true }))
+        expect(state.switchFormat).toHaveBeenCalledExactlyOnceWith('connection-1')
+        expect(state.syncNow).toHaveBeenCalledExactlyOnceWith('connection-1')
+    })
+    it('switches nothing when the question is cancelled', async () => {
+        vi.mocked(alertCheckboxConfirm).mockResolvedValue({ confirmed: false, checked: false })
+        await open()
+        button(lww.formatSwitch)!.click(); await settle()
+        expect(state.switchFormat).not.toHaveBeenCalled(); expect(state.syncNow).not.toHaveBeenCalled()
+    })
+    it('explains a failed switch and does not sync', async () => {
+        vi.mocked(alertCheckboxConfirm).mockResolvedValue({ confirmed: true, checked: true })
+        state.switchFormat.mockRejectedValueOnce({ kind: 'transient' })
+        await open()
+        button(lww.formatSwitch)!.click(); await settle()
+        expect(target.querySelector('[role="alert"]')?.textContent).toBe(lww.formatSwitchFailed)
+        expect(state.syncNow).not.toHaveBeenCalled()
+        // A library already above this app is left to the sync attempt, which reports it.
+        state.switchFormat.mockRejectedValueOnce({ kind: 'appUpdateRequired' })
+        button(lww.formatSwitch)!.click(); await settle()
+        expect(state.syncNow).toHaveBeenCalledExactlyOnceWith('connection-1')
+    })
+    it('offers no switch while a newer library stops sync', async () => {
+        await open('appUpdateRequired')
+        expect(button(lww.formatSwitch)).toBeUndefined()
+        expect(target.querySelector('.card-status')?.textContent?.trim()).toBe(lww.appUpdateRequired)
+        expect(target.textContent).toContain(lww.appUpdateRequiredHelp)
+    })
 })
 
 it('explains a connection not made because the files could not be downloaded first', async () => {

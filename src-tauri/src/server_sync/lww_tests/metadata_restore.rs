@@ -25,7 +25,8 @@ fn state_restore_registers_remote_sizes_without_downloading_local_or_duplicate_a
     crate::asset_repository::body_io::reset_body_io();
     let (_, changes) = client.state(&mut store, upper).unwrap();
     let work = crate::asset_repository::body_io::take_body_io();
-    assert_eq!(changes.len(), 4);
+    // The four aliases and the library format unit.
+    assert_eq!(changes.len(), 5);
     assert_eq!((work.stat_requests, work.batch_stat_requests), (0, 1));
     let db = crate::sqlite_open::open(store.repository_root().join("persistent").join(crate::persistent_store::DATABASE_FILE)).unwrap();
     let mut query = db.prepare("SELECT object_hash,byte_size FROM asset_objects").unwrap();

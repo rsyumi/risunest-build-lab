@@ -5,7 +5,7 @@
     import { registerAppLockSurface, setAppLockInputBlocked } from './ts/appLock/input'
     import LazyScreenError from "./lib/UI/LazyScreenError.svelte";
     import ChatBindingLifecycle from './lib/SideBars/ChatBindingLifecycle.svelte'
-    import { DynamicGUI, settingsOpen, sideBarStore, sideBarClosing, ShowRealmFrameStore, openPresetList, openPersonaList, MobileGUI, CustomGUISettingMenuStore, loadedStore, alertStore, LoadingStatusState, bookmarkListOpen, popupStore, easyPanelStore, popUpEditorStore, loadoutModalStore, onboardingModalStore, irisStore, customSideBarConfigDialogStore, bootFailure, recoveryStart } from './ts/stores.svelte';
+    import { DynamicGUI, settingsOpen, sideBarStore, sideBarClosing, ShowRealmFrameStore, openPresetList, openPersonaList, MobileGUI, CustomGUISettingMenuStore, loadedStore, alertStore, LoadingStatusState, bookmarkListOpen, popupStore, easyPanelStore, popUpEditorStore, loadoutModalStore, onboardingModalStore, irisStore, customSideBarConfigDialogStore, bootFailure, recoveryStart, moduleScopeMenuOpen } from './ts/stores.svelte';
     import Sidebar from './lib/SideBars/Sidebar.svelte';
     import { DBState } from './ts/stores.svelte';
     import ChatScreen from './lib/ChatScreens/ChatScreen.svelte';
@@ -14,10 +14,12 @@
     import Onboarding from './lib/Others/Onboarding/Onboarding.svelte';
     import { onboardingHold } from './lib/Others/Onboarding/onboardingGate';
     import BookmarkList from './lib/Others/BookmarkList.svelte';
+    import ModuleScopeMenu from './lib/Setting/Pages/Module/ModuleScopeMenu.svelte';
     import { showRealmInfoStore, importCharacterProcess } from './ts/characterCards';
     import { importPreset, getDatabase, setDatabase } from './ts/storage/database.svelte';
     import { readModule } from './ts/process/modules';
     import { alertNormal } from './ts/alert';
+    import { showsDialog } from './ts/alertQueue';
     import { language } from './lang';
     import RealmFrame from './lib/UI/Realm/RealmFrame.svelte';
     import SavePopupIconComp from './lib/Others/SavePopupIcon.svelte';
@@ -31,7 +33,6 @@
     import HypaV3Progress from './lib/Others/HypaV3Progress.svelte';
     import PopupList from './lib/UI/PopupList.svelte';
     import EasyPanel from './lib/Others/ProTools/EasyPanel.svelte';
-    import { createKeepAliveAudio } from './ts/keepAliveAudio';
     import PopupEditor from './lib/Others/PopupEditor.svelte';
     import TextEditorPopup from './lib/Others/TextEditorPopup.svelte';
     import { textEditorPopup } from './ts/gui/textEditorPopup.svelte';
@@ -73,7 +74,8 @@
     import { openRisuNestSettingsTab } from './ts/setting/risuNestSettingsTabs'
 
     const bootFailureVisible = $derived(!$loadedStore && !$recoveryStart && !!$bootFailure)
-    const appLockVisible = $derived(isTauri && !bootFailureVisible && ($loadedStore || !!$recoveryStart) && appLock.gated)
+    // A dialog during loading waits behind the lock, so the lock screen comes up before loading finishes.
+    const appLockVisible = $derived(isTauri && !bootFailureVisible && ($loadedStore || !!$recoveryStart || showsDialog($alertStore)) && appLock.gated)
 
     const appLockFramesHidden = $derived(isTauri && !bootFailureVisible && appLock.gated)
 
@@ -97,7 +99,7 @@
     $effect(() => {
         if (!isTauri) return
         const failure = bootFailureVisible
-        const loading = !$loadedStore && !$recoveryStart && !$bootFailure
+        const loading = !$loadedStore && !$recoveryStart && !$bootFailure && !appLockVisible
         const epoch = appLock.state.epoch
         const presentation = appLock.state.presentationRevision
         const initialized = appLock.state.initialized
@@ -156,6 +158,12 @@
     })
 
     let startupElapsedSeconds = $state(0)
+    // `language` is a plain module binding. A start switches it to the library's language right before
+    // the next status text, so the label is read again with each one.
+    const startupLabel = $derived.by(() => {
+        void LoadingStatusState.text
+        return language.loading
+    })
     $effect(() => {
         const startedAt = LoadingStatusState.startedAt
         if ($loadedStore || $bootFailure || startedAt === null) return
@@ -201,8 +209,6 @@
     let gridOpen = $state(false)
     let aprilFools = $state(new Date().getMonth() === 3 && new Date().getDate() === 1)
     let aprilFoolsPage = $state(0)
-    let keepingSessionAlive = $state(false)
-    let keepAliveAudio: HTMLAudioElement | null = null
 
     const getMainDropEffect = (e:DragEvent): DataTransfer['dropEffect'] => {
         const types = Array.from(e.dataTransfer?.types ?? [])
@@ -223,7 +229,6 @@
 
 <ChatBindingLifecycle />
 
-<!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <main inert={$persistentWorkingSetInputBlocked || appLockVisible} class="flex bg-bg w-full h-full max-w-100vw text-textcolor" use:keepFocusedInputVisible={isTauriMobile} ondragover={(e) => {
     const dropEffect = getMainDropEffect(e)
@@ -264,39 +269,6 @@
         })
         checkCharOrder()
     }
-}} onclick={() => {
-    if(keepingSessionAlive){
-        return
-    }
-
-    const aliveMode = DBState?.db?.keepSessionAlive
-    switch(aliveMode){
-        case 'pip':{
-
-            break
-        }
-        case 'sound':{
-            console.log("Starting inaudible audio to keep session alive")
-            if(!keepAliveAudio){
-                keepAliveAudio = createKeepAliveAudio()
-                // Paused by the OS or by another app taking audio focus; restart on the next click
-                keepAliveAudio.addEventListener('pause', () => {
-                    keepingSessionAlive = false
-                })
-            }
-            keepingSessionAlive = true
-            keepAliveAudio.play().catch(() => {
-                keepingSessionAlive = false
-            })
-            if('mediaSession' in navigator){
-                navigator.mediaSession.metadata = new MediaMetadata({
-                    title: 'RisuNest'
-                })
-            }
-            break
-        }
-    }
-
 }}>
     {#if !import.meta.env.VITE_RISU_LEGAL_CONFIGURED}
         <Legal />
@@ -386,7 +358,7 @@
                 class="w-full h-full flex justify-center items-center text-textcolor text-xl bg-darkbg"
             >
                 <LoadingIndicator
-                    label={language.loading}
+                    label={startupLabel}
                     detail={LoadingStatusState.text}
                     elapsedText={language.risuNest.startup.elapsed(startupElapsedSeconds)}
                 />
@@ -526,6 +498,9 @@
     {/if}
     {#if $bookmarkListOpen}
         <BookmarkList />
+    {/if}
+    {#if $moduleScopeMenuOpen}
+        <ModuleScopeMenu close={() => moduleScopeMenuOpen.set(false)} />
     {/if}
     {#if $hypaV3ModalOpen}
         <HypaV3Modal />

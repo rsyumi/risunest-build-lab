@@ -1,4 +1,3 @@
-import type { ConversationHistoryMapping, ConversationHistoryRebaseRequest } from './conversationJournalRebase'
 import type { Chat, Database, Message, botPreset, character } from './database.svelte'
 
 export type DataRevision = number
@@ -299,30 +298,6 @@ export interface ArchivePreview {
     archived: boolean
 }
 
-export interface ArchiveHistoryWitness {
-    characterId: string
-    conversationId: string
-    messageCount: number | null
-    historyHash: string | null
-    detailHash: string | null
-}
-
-export interface ArchiveReconcileRequest {
-    header: LwwReceiveHeader
-    expectedRevision: DataRevision
-    selectionEpoch: string
-    characterId: string
-    histories: ArchiveHistoryWitness[]
-    unitMutations: PersistentUnitMutation[]
-    conversations: ConversationMutation[]
-    assetOwnerHeads: AssetOwnerHead[]
-}
-
-export type ArchiveReconcileResult =
-    | { status: 'committed'; revision: DataRevision; archive: ArchivePreview; histories: ArchiveHistoryWitness[] }
-    | { status: 'replayed'; committedRevision: DataRevision }
-    | { status: 'history-conflict'; characterId: string; conversationId: string }
-
 export class ArchivedCharacterError extends Error {
     constructor(readonly characterId: string) {
         super(`Character ${characterId} is archived`)
@@ -426,6 +401,14 @@ export interface ConversationPage {
     nextCursor?: string
 }
 
+/** A stored conversation that currently reads its author's note from a preset. */
+export interface AuthorNotePresetUsage {
+    characterId: string
+    characterName: string
+    conversationId: string
+    conversationName: string
+}
+
 export interface ConversationWindowQuery {
     characterId: string
     conversationId: string
@@ -513,123 +496,7 @@ export interface LwwReceiveHeader {
     requestId: string
 }
 
-export interface NativeReceiveDevicePluginFence {
-    instanceId: string
-    revision: string
-}
-
-export interface NativeReceiveEvidence {
-    identity: { storeId: string; libraryEpoch: string; generation: string; selectionEpoch: string; revision: DataRevision }
-    bindingAuthority: string
-    devicePlugins: NativeReceiveDevicePluginFence
-    deviceRevision?: string
-}
-export type NativeReceiveMode = 'stored' | 'staged' | 'drain'
-export interface NativeReceiveCapability {
-    incarnation: string
-    sequence: string
-    nonce: string
-    mode: NativeReceiveMode
-    sourceDigest: string
-    identityDigest: string
-}
-export type NativeReceiveSource = { mode: 'stored' | 'staged'; header: LwwReceiveHeader }
-    | { mode: 'drain'; bindingAuthority: string }
-export type NativeReceivePhase = 'admitting' | 'producing' | 'finalizing' | 'sealed' | 'delivered' | 'settled' | 'cleanup'
-export type NativeReceiveOutcome = 'processed' | 'superseded'
-export type NativeReceivePartition = 'library' | 'device'
-export interface NativeReceivePartitionRoot { pages: string; root: string; dispositionPages: string; dispositionRoot: string }
-export interface NativeReceiveRoots { library: NativeReceivePartitionRoot; device: NativeReceivePartitionRoot }
-export interface NativeReceiveForeign { library: boolean; device: boolean; plugins: boolean; scope: boolean }
-export interface NativeReceiveState {
-    capability: NativeReceiveCapability
-    progressToken: string
-    phase: NativeReceivePhase
-    revision: DataRevision
-    outcome: NativeReceiveOutcome | null
-    foreign: NativeReceiveForeign
-    roots: NativeReceiveRoots | null
-    devicePlugins: NativeReceiveDevicePluginFence | null
-    deviceRevision: string | null
-}
-export interface NativeReceiveBegin {
-    candidate: NativeReceiveCapability
-    source: NativeReceiveSource
-    nativeBaseline?: NativeReceiveEvidence
-}
-export interface NativeReceiveAdvance {
-    capability: NativeReceiveCapability
-    expectedProgressToken: string
-    generating: GeneratingConversation[]
-}
-export type NativeReceiveBeginResult = { status: 'admitted' | 'existing' | 'recovery'; state: NativeReceiveState }
-export interface NativeReceiveStepFence { keys: string[]; unknownLibrary: boolean; unknownDevice: boolean }
-export type NativeReceiveAdvanceResult = { status: 'advanced' | 'stale'; state: NativeReceiveState; fence: NativeReceiveStepFence }
-export interface NativeReceivePageRequest {
-    capability: NativeReceiveCapability
-    partition: NativeReceivePartition
-    kind: 'effects' | 'dispositions'
-    ordinal: string
-    previousDigest: string
-}
-interface NativeReceivePageHeader {
-    capabilityDigest: string
-    partition: NativeReceivePartition
-    ordinal: string
-    previousDigest: string
-}
-export type NativeReceiveHistoryPage =
-    | { kind: 'effects'; digest: string; page: NativeReceivePageHeader & { effects: Array<{ key: string; affected: boolean; pluginStorageChanged: boolean }> } }
-    | { kind: 'dispositions'; digest: string; page: NativeReceivePageHeader & { entries: Array<{ key: string; disposition: 'held' | 'deferred' }> } }
-export interface NativeReceiveDelivery { capability: NativeReceiveCapability; roots: NativeReceiveRoots; projection: NativeReceiveEvidence }
-export interface NativeReceiveRetire { capability: NativeReceiveCapability; roots: NativeReceiveRoots }
-export interface NativeReceiveCompletion { capability: NativeReceiveCapability; revision: DataRevision; outcome: NativeReceiveOutcome }
-export interface NativeReceiveStore {
-    prepare(source: NativeReceiveSource): Promise<NativeReceiveCapability>
-    begin(request: NativeReceiveBegin): Promise<NativeReceiveBeginResult>
-    advance(request: NativeReceiveAdvance): Promise<NativeReceiveAdvanceResult>
-    readPage(request: NativeReceivePageRequest): Promise<NativeReceiveHistoryPage>
-    acknowledgeDelivery(request: NativeReceiveDelivery): Promise<NativeReceiveState>
-    retire(request: NativeReceiveRetire): Promise<{ status: 'pending' | 'retired' }>
-}
-
-export type NativeConflictCopyField = { type: 'set'; field: string; value: unknown } | { type: 'delete'; field: string }
-export interface NativeConflictCopySource {
-    lease: string
-    identity: NativeReceiveEvidence['identity']
-    characterId: string
-    conversationId: string
-    messageCount: number
-}
-export type NativeConflictCopyAssetScope = { type: 'character-field'; mutation: number }
-    | { type: 'conversation-field'; mutation: number } | { type: 'message'; range: number; message: number }
-export interface NativeConflictCopyRequest {
-    header: LwwReceiveHeader
-    expectedRevision: DataRevision
-    source: NativeConflictCopySource
-    targetCharacterId: string
-    targetConversationId: string
-    characterFields: NativeConflictCopyField[]
-    conversationFields: NativeConflictCopyField[]
-    ranges: Array<{ start: number; deleteCount: number; messages: Message[] }>
-    introducedAssetBindings: Array<{ scope: NativeConflictCopyAssetScope; location: { pointer: string; tokenIndex: number | null }; alias: AssetAlias; witnessLease: string }>
-    introducedOwnerHead: { mutation: number; head: AssetOwnerHead; witnessLease: string } | null
-}
-interface NativeConflictCopyIdentity {
-    sourceCharacterId: string
-    sourceConversationId: string
-    targetCharacterId: string
-    targetConversationId: string
-}
-export type NativeConflictCopyResult =
-    | ({ status: 'committed'; revision: DataRevision } & NativeConflictCopyIdentity)
-    | ({ status: 'replayed'; committedRevision: DataRevision; requiresCurrentRecovery: boolean; currentIdentityMatches: boolean } & NativeConflictCopyIdentity)
-    | { status: 'historical-status-unavailable' }
-    | { status: 'conflict'; kind: 'identity' | 'source-history' | 'range' | 'asset-binding' | 'target-collision' | 'unsupported-field' | 'cancelled' }
-
 export interface LwwApplyResult {
-    currentStateRecoveryRequired?: boolean
-    nativeDevicePluginFence?: NativeReceiveDevicePluginFence
     pluginStorageChangedKeys?: string[]
     revision: DataRevision
     affectedKeys: string[]
@@ -653,10 +520,6 @@ export interface LwwRemoteChange {
     value: LwwUnitValue
 }
 
-export interface LwwStoredReceive extends LwwReceiveHeader {
-    incomingKeys: string[]
-}
-
 export interface LwwStageReceive extends LwwReceiveHeader {
     changes: LwwRemoteChange[]
     progress: { kind: 'server' | 'external'; cursor: string; writerId?: string }
@@ -664,7 +527,6 @@ export interface LwwStageReceive extends LwwReceiveHeader {
 }
 
 export interface LwwApplyReceive extends LwwReceiveHeader {
-    nativeBaseline?: NativeReceiveEvidence
     generating: GeneratingConversation[]
 }
 
@@ -772,7 +634,6 @@ export interface PersistentDatabaseReplacementStage {
 }
 
 export interface PersistentDataStore {
-    readonly nativeReceive?: NativeReceiveStore
     readonly messageMetadataReadMode?: 'projected' | 'materialized'
     lwwBindingState?(): Promise<{ targetAuthority: string }>
     lwwReadOutbox?(request: LwwOutboxRequest): Promise<LwwOutboxPage>
@@ -787,13 +648,14 @@ export interface PersistentDataStore {
     readRevision?(): Promise<DataRevision>
     /** Stable across ordinary writes, changed by a full library replacement. */
     readLibraryIdentity?(): Promise<string>
-    rebaseConversationHistory?(request: ConversationHistoryRebaseRequest): Promise<ConversationHistoryMapping>
     queryPresets(): Promise<PresetCatalog>
     readPreset(id: string): Promise<Versioned<botPreset> | null>
     queryCharacters(input: CharacterQuery): Promise<CharacterPage>
     readCharacterSummary(id: string): Promise<CharacterSummary | null>
     readCharacter(id: string): Promise<Versioned<CharacterDetail> | null>
     queryConversations(input: ConversationQuery): Promise<ConversationPage>
+    /** Conversations of non-archived characters linked to the preset with a matching fingerprint. */
+    queryAuthorNotePresetUsage?(presetId: string): Promise<AuthorNotePresetUsage[]>
     readConversation(characterId: string, conversationId: string): Promise<Versioned<Chat> | null>
     readConversationMetadata(
         characterId: string,
@@ -822,13 +684,6 @@ export interface PersistentDataStore {
         expectedRevision: DataRevision,
     ): Promise<{ revision: DataRevision }>
     commit(input: WorkingSetCommit): Promise<{ revision: DataRevision }>
-    readNativeReceiveEvidence?(lease: PersistentRevisionLease): Promise<NativeReceiveEvidence>
-    readConflictCopySource?(lease: PersistentRevisionLease, characterId: string, conversationId: string): Promise<NativeConflictCopySource>
-    hydrateConflictCopy?(request: NativeConflictCopyRequest, signal?: AbortSignal): Promise<void>
-    copyConflictedConversation?(request: NativeConflictCopyRequest, signal?: AbortSignal): Promise<NativeConflictCopyResult>
-    archiveReconcileHistories?(lease: PersistentRevisionLease, characterId: string, conversationIds: string[]): Promise<ArchiveHistoryWitness[]>
-    hydrateArchiveReconcile?(characterId: string, signal?: AbortSignal): Promise<void>
-    reconcileArchivedCharacter?(request: ArchiveReconcileRequest, signal?: AbortSignal): Promise<ArchiveReconcileResult>
     archivePreview(characterId: string): Promise<ArchivePreview>
     archiveCharacter(
         characterId: string,

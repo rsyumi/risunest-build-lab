@@ -18,69 +18,6 @@ import type { botPreset, character, Database, Message } from './database.svelte'
 import type { PluginStorageValue } from './persistentDataStore'
 
 describe('SqlitePersistentDataStore', () => {
-    it('maps retained history through the native command and forwards the bounded capability through admission', async () => {
-        const packet = { kind: 'mapped', originalCount: 1, currentCount: 2, spans: [{ originalStart: 0, currentStart: 1, count: 1 }] }
-        mocks.invoke.mockImplementation(async (command: string, input: Record<string, unknown>) => {
-            if (command === 'pds_acquire_revision') return { lease: `snapshot-${input.revision}` }
-            if (command === 'pds_rebase_conversation_history') return packet
-            throw new Error(`Unexpected history payload command ${command}`)
-        })
-        const store = createMutationGatedPersistentDataStore(new SqlitePersistentDataStore(), createStorageMutationGate({ locks: createInRealmStorageLockManager() }))
-        const baseline = await store.acquireRevision(3)
-        const current = await store.acquireRevision(4)
-        await expect(store.rebaseConversationHistory!({ baseline, current, characterId: 'character', conversationId: 'conversation' })).resolves.toEqual(packet)
-        expect(mocks.invoke).toHaveBeenLastCalledWith('pds_rebase_conversation_history', { request: {
-            baselineLease: 'snapshot-3', currentLease: 'snapshot-4', baselineRevision: 3, currentRevision: 4,
-            characterId: 'character', conversationId: 'conversation',
-        } })
-    })
-
-    it('reads receive evidence from the retained native lease without rounding the device fence', async () => {
-        const evidence = { identity: { storeId: 'store', libraryEpoch: 'library', generation: 'generation', selectionEpoch: 'selection', revision: 7 },
-            bindingAuthority: '9007199254740993', devicePlugins: { instanceId: 'device', revision: '9007199254740995' } }
-        mocks.invoke.mockImplementation(async (command: string) => {
-            if (command === 'pds_acquire_revision') return { lease: 'retained-source' }
-            if (command === 'pds_read_native_receive_evidence') return evidence
-            throw new Error(`Unexpected evidence command ${command}`)
-        })
-        const store = createMutationGatedPersistentDataStore(new SqlitePersistentDataStore(), createStorageMutationGate({ locks: createInRealmStorageLockManager() }))
-        const lease = await store.acquireRevision(7)
-        await expect(store.readNativeReceiveEvidence!(lease)).resolves.toEqual(evidence)
-        expect(mocks.invoke).toHaveBeenLastCalledWith('pds_read_native_receive_evidence', { lease: 'retained-source' })
-    })
-
-    it('hydrates archive reconciliation before write admission and retains the captured request and replay result', async () => {
-        let entered!: () => void, release!: () => void
-        const enteredGate = new Promise<void>(resolve => { entered = resolve })
-        const holdGate = new Promise<void>(resolve => { release = resolve })
-        const gate = createStorageMutationGate({ locks: createInRealmStorageLockManager() })
-        let transitionReleased = false
-        const holding = gate.runTransition(async () => { entered(); await holdGate; transitionReleased = true })
-        await enteredGate
-        const request: import('./persistentDataStore').ArchiveReconcileRequest = {
-            header: { bindingAuthority: '1', requestId: 'archive-reconcile' }, expectedRevision: 3, selectionEpoch: 'selection',
-            characterId: 'character', histories: [], conversations: [], assetOwnerHeads: [],
-            unitMutations: [{ type: 'set', key: '["character","character","name"]', value: 'Captured name' }],
-        }
-        mocks.invoke.mockImplementation(async (command: string, input: Record<string, unknown>) => {
-            if (command === 'pds_hydrate_archive_reconcile') return undefined
-            if (command === 'pds_reconcile_archived_character') {
-                expect(transitionReleased).toBe(true)
-                expect(input.request).toMatchObject({ unitMutations: [{ value: 'Captured name' }] })
-                return { status: 'replayed', committedRevision: 4 }
-            }
-            throw new Error(`Unexpected archive command ${command}`)
-        })
-        const store = createMutationGatedPersistentDataStore(new SqlitePersistentDataStore(), gate)
-        try {
-            await expect(store.hydrateArchiveReconcile!('character')).resolves.toBeUndefined()
-            const reconciled = store.reconcileArchivedCharacter!(request)
-            request.unitMutations[0] = { type: 'set', key: '["character","character","name"]', value: 'Later edit' }
-            release()
-            await holding
-            await expect(reconciled).resolves.toEqual({ status: 'replayed', committedRevision: 4 })
-        } finally { release(); await holding }
-    })
     it('activates a bound upstream staging generation through an immutable LWW replacement request', async () => {
         const header={bindingAuthority:'9007199254740993',requestId:'synthetic-import'}
         mocks.invoke.mockImplementation(async (command: string) => {
@@ -252,6 +189,7 @@ describe('SqlitePersistentDataStore', () => {
         await store.readConversation('char-a', 'conv-long')
         await store.readConversationMetadata('char-a', 'conv-long')
         await store.readConversationWindow(windowQuery)
+        await store.queryAuthorNotePresetUsage('preset')
         await store.queryPluginStorage()
         await store.queryPluginStorage('test-plugin')
         await store.readPluginStorage('test-plugin', 'memory')
@@ -281,6 +219,7 @@ describe('SqlitePersistentDataStore', () => {
                 { characterId: 'char-a', conversationId: 'conv-long' },
             ],
             ['pds_read_conversation_window', { query: windowQuery }],
+            ['pds_query_author_note_preset_usage', { presetId: 'preset' }],
             ['pds_query_plugin_storage', {}],
             ['pds_query_plugin_storage', { owner: 'test-plugin' }],
             ['pds_read_plugin_storage', { owner: 'test-plugin', key: 'memory' }],

@@ -78,13 +78,9 @@ export function beginGenerationEndRun(
     }
 }
 
-/** Returns a function that puts the mark back as it was, for a step that turns out not to have entered generation. */
-export function noteGenerationStarted(target: GenerationEndTarget | undefined): () => void {
+export function noteGenerationStarted(target: GenerationEndTarget | undefined): void {
     const run = capturing(target)
-    if (!run) return () => {}
-    const started = run.started
-    run.started = true
-    return () => { run.started = started }
+    if (run) run.started = true
 }
 
 export function noteGenerationMessage(target: GenerationEndTarget | undefined, messageId: string | undefined): void {

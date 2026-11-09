@@ -6,7 +6,7 @@ use risunest_sync_server::{
     store::{DeviceCredential, Store},
 };
 use risunest_sync_wire::{
-    body, hash,
+    body, hash, library_format,
     lww::{PushReceipt, PushRequest},
     transfer::{self, Frame},
     RemoteHead,
@@ -1459,4 +1459,134 @@ async fn replies_are_encoded_only_for_accepting_clients_on_bounded_routes() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(marker(&response), None);
     assert_eq!(response.bytes().await.unwrap(), object);
+}
+
+#[tokio::test]
+async fn the_format_gate_admits_clients_by_the_level_they_declare() {
+    let server = Server::start().await;
+    // Status, error code, then the library and server levels the reply names.
+    let send = |request: RequestBuilder| async move {
+        let response = request.send().await.unwrap();
+        let level = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .map(|value| value.to_str().unwrap().to_owned())
+        };
+        let levels = (
+            level(library_format::HEADER),
+            level(library_format::MAX_HEADER),
+        );
+        let status = response.status();
+        let body: serde_json::Value = response.json().await.unwrap_or_default();
+        (status, body["error"].as_str().map(str::to_owned), levels)
+    };
+    let get = |path: &str, declared: Option<&str>| {
+        let request = server.auth(
+            server.client.get(format!("{}{path}", server.base)),
+            &server.a,
+        );
+        match declared {
+            Some(declared) => request.header(library_format::HEADER, declared),
+            None => request,
+        }
+    };
+    let at = |level: &str| (Some(level.to_owned()), Some("2".to_owned()));
+    let (status, _, levels) = send(server.client.get(format!("{}/session", server.base))).await;
+    assert_eq!((status, levels), (StatusCode::UNAUTHORIZED, (None, None)));
+    assert_eq!(
+        send(get("/session", None)).await,
+        (StatusCode::OK, None, at("1"))
+    );
+    assert_eq!(
+        send(get("/session", Some("x"))).await,
+        (
+            StatusCode::BAD_REQUEST,
+            Some("invalid-library-format".into()),
+            at("1")
+        )
+    );
+
+    let switch = request(
+        &server.store,
+        WRITER_A,
+        "switch",
+        vec![common::unit(
+            &["library-format"],
+            WRITER_A,
+            1,
+            library_format::value(2).unwrap(),
+        )],
+    );
+    let push = |push: &PushRequest, precondition: Option<&str>| {
+        let request = server
+            .auth(
+                server.client.post(format!("{}/push", server.base)),
+                &server.a,
+            )
+            .header(library_format::HEADER, "2")
+            .json(push);
+        match precondition {
+            Some(value) => request.header(library_format::PRECONDITION_HEADER, value),
+            None => request,
+        }
+    };
+    let content = request(
+        &server.store,
+        WRITER_B,
+        "content",
+        vec![inline("key", WRITER_B, 1, "value")],
+    );
+    assert_eq!(server.push(&server.b, &content).await.0, StatusCode::OK);
+    assert_eq!(
+        send(push(&switch, Some("full"))).await,
+        (
+            StatusCode::BAD_REQUEST,
+            Some("invalid-precondition".into()),
+            at("1")
+        )
+    );
+    assert_eq!(
+        send(push(&switch, Some(library_format::EMPTY_LIBRARY))).await,
+        (
+            StatusCode::CONFLICT,
+            Some("library-not-empty".into()),
+            at("1")
+        )
+    );
+    let mut switch = switch;
+    switch.operation_id = "user-switch".into();
+    assert_eq!(
+        send(push(&switch, None)).await,
+        (StatusCode::OK, None, at("2"))
+    );
+
+    for path in ["/session", "/changes?after=0", "/head"] {
+        assert_eq!(
+            send(get(path, None)).await,
+            (
+                StatusCode::CONFLICT,
+                Some("server-incompatible".into()),
+                at("2")
+            ),
+            "{path}"
+        );
+        assert_eq!(
+            send(get(path, Some("1"))).await,
+            (
+                StatusCode::CONFLICT,
+                Some("app-update-required".into()),
+                at("2")
+            ),
+            "{path}"
+        );
+    }
+    assert_eq!(
+        send(get("/session", Some("2"))).await,
+        (StatusCode::OK, None, at("2"))
+    );
+    assert_eq!(
+        send(get("/session", Some("3"))).await,
+        (StatusCode::OK, None, at("2"))
+    );
 }

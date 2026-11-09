@@ -9,7 +9,6 @@ import LoreBookList from './LoreBookList.svelte'
 import { IndexedDbPersistentDataStore } from 'src/ts/storage/indexedDbPersistentDataStore'
 import { SaveCoordinator } from 'src/ts/storage/saveCoordinator'
 import { capturePersistentRoot } from 'src/ts/storage/persistentDataRuntime'
-import { tokenizeAccurate } from 'src/ts/tokenizer'
 
 const mocks = vi.hoisted(() => ({ create: vi.fn(), instances: [] as { destroy: ReturnType<typeof vi.fn> }[] }))
 vi.mock('sortablejs/modular/sortable.core.esm.js', () => ({ default: { create: mocks.create } }))
@@ -54,7 +53,6 @@ async function remove(name: string) {
 }
 
 beforeEach(() => {
-    vi.mocked(tokenizeAccurate).mockReset().mockResolvedValue(1)
     alerts.alertConfirm.mockReset().mockResolvedValue(true)
     alerts.alertCheckboxConfirm.mockReset().mockResolvedValue({ confirmed: true, checked: true })
     mocks.create.mockReset()
@@ -260,29 +258,6 @@ describe('lorebook editing', () => {
         row('Keep').querySelector<HTMLButtonElement>('button')!.click()
         await tick()
         expect(mocks.create).toHaveBeenCalledTimes(creations + 1)
-    })
-
-    it('shows the count of the latest prompt while a newer count is pending', async () => {
-        const counts = new Map<string, (count: number) => void>()
-        vi.mocked(tokenizeAccurate).mockImplementation((text: string) => new Promise(resolve => counts.set(text, resolve)))
-        const label = () => document.querySelector('span.text-textcolor2.mt-2')?.textContent?.trim()
-        DBState.db.characters[0].globalLore = [book('Entry', { content: 'a' })]
-        instance = mount(LoreBookList, { target: document.body })
-        await tick()
-        row('Entry').querySelector<HTMLButtonElement>('button')!.click()
-        await tick()
-        const lore = DBState.db.characters[0].globalLore[0]
-
-        lore.content = 'bb'
-        await tick()
-        counts.get('bb')!(2)
-        await vi.waitFor(() => expect(label()).toBe(`2 ${languageEnglish.tokens}`))
-        counts.get('a')!(1)
-        await tick()
-        lore.content = 'ccc'
-        await tick()
-
-        expect(label()).toBe(`2 ${languageEnglish.tokens}`)
     })
 
     it('toggles a folder and its children without closing their editor', async () => {

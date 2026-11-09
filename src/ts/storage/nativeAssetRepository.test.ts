@@ -225,6 +225,35 @@ describe('native CAS reads', () => {
         }
     })
 
+    it('starts waiting foreground reads before waiting background reads, each in arrival order', async () => {
+        const started: string[] = []
+        const held: (() => void)[] = []
+        const invoke = vi.fn((command: string, args?: Record<string, unknown>) => {
+            if (command === 'asset_remote_hydrate_object') return Promise.resolve(1)
+            started.push(String(args?.contentHash)[0])
+            return new Promise((resolve) => held.push(() => resolve(Uint8Array.of(0).buffer)))
+        })
+        const budget = createNativeCasReadBudget({ capacityBytes: 1, minimumWeightBytes: 1 })
+        const cas = createNativeImmutablePayloadCas(invoke, budget)
+        const remote = createNativeRemoteAssetReader(invoke, budget)
+        const background = { background: true }
+        const reads = [
+            cas.readObject('a'.repeat(64), 1, background),
+            cas.readObjectRange('b'.repeat(64), { start: 0, endExclusive: 1 }, 1, background),
+            remote.readObject('c'.repeat(64), undefined, background),
+        ]
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        reads.push(cas.readObject('d'.repeat(64), 1), remote.readObject('e'.repeat(64)))
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(started).toEqual(['a'])
+        while (held.length > 0) {
+            held.shift()!()
+            await new Promise((resolve) => setTimeout(resolve, 0))
+        }
+        expect((await Promise.all(reads)).every((result) => result?.byteLength === 1)).toBe(true)
+        expect(started).toEqual(['a', 'd', 'e', 'b', 'c'])
+    })
+
     it('reads hydrated remote bytes at the hydrated size and treats a vanished object as missing', async () => {
         const source = Uint8Array.from({ length: P + 200 }, (_, index) => index % 251)
         let present = true

@@ -480,7 +480,7 @@ impl Recorder {
             capture_error: None,
             request: Message {
                 method: Some(shorten(method, 32)),
-                url: shorten(url, 8192),
+                url: shorten(&masking::url(url, settings.hide_auth), 8192),
                 headers,
                 body: request_body,
                 status: None,
@@ -721,7 +721,7 @@ impl Capture {
         };
         let response = Message {
             status: Some(status),
-            url: url.chars().take(8192).collect(),
+            url: masking::url(url, signal.hide).chars().take(8192).collect(),
             headers,
             body,
             method: None,

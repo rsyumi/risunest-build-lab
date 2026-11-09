@@ -1,11 +1,11 @@
 mod portrait_rendition;
 pub(crate) mod admission;
-mod card_mapping;
 mod character_charx_export;
 mod character_json_export;
 mod character_png_export;
 pub mod charx;
 mod content;
+mod available_payload;
 mod dataset_export;
 mod gallery_export;
 pub(crate) mod download_handoff;
@@ -16,6 +16,7 @@ pub mod screenshot_output;
 mod backup_source;
 mod legacy_backup;
 mod restore_receipts;
+mod portable_export_receipts;
 pub(crate) mod snapshot_bodies;
 mod snapshot_restore;
 #[cfg(test)]
@@ -42,9 +43,6 @@ mod official_snapshot;
 pub(crate) mod official_assets;
 mod transfer_retry;
 mod risum_export;
-mod preset_codec;
-mod preset_import;
-mod preset_export;
 mod verified_read;
 #[cfg(windows)]
 mod windows_cloud_source;
@@ -89,6 +87,20 @@ pub(crate) struct NativeJobError {
     pub(crate) message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) item_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) owner: Option<FailureOwner>,
+}
+
+/// The library item whose data failed. Its name stays out of the message,
+/// which is logged.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FailureOwner {
+    pub(crate) kind: &'static str,
+    pub(crate) name: String,
+    /// The character a chat belongs to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) character: Option<String>,
 }
 
 impl NativeJobError {
@@ -97,11 +109,18 @@ impl NativeJobError {
             code: code.to_owned(),
             message: bounded_message(message.as_ref()),
             item_kind: None,
+            owner: None,
         }
     }
 
     pub(crate) fn too_large(item_kind: &str, message: impl AsRef<str>) -> Self {
         Self { item_kind: Some(item_kind.to_owned()), ..Self::new("payload-too-large", message) }
+    }
+
+    /// Names the owner unless a nearer one is already named.
+    pub(crate) fn owned_by(mut self, owner: &FailureOwner) -> Self {
+        self.owner.get_or_insert_with(|| owner.clone());
+        self
     }
 }
 
@@ -343,12 +362,6 @@ pub(crate) enum NativeFileJobStartRequest {
         format: CharacterCardExportFormat,
         metadata: Value,
     },
-    PreparePresetImport { source: JobSource, display_name: String },
-    ExportPreset {
-        destination: Option<String>, expected_revision: i64,
-        preset_index: u64, preset_id: String, format: preset_export::PresetFormat,
-        #[serde(default)] compatibility_source_path: Option<String>,
-    },
     ExportRisuModule {
         destination: Option<String>,
         expected_revision: i64,
@@ -371,8 +384,6 @@ pub(crate) enum NativeFileJobStartRequest {
     PrepareContentImport {
         source: JobSource,
         display_name: String,
-        #[serde(default)]
-        import_destination: card_mapping::ContentDestination,
     },
     ImportJpegAsset {
         source: JobSource,
@@ -406,6 +417,17 @@ pub(crate) enum NativeFileJobStartRequest {
         #[serde(default)]
         concurrency: Option<u8>,
         reauthenticated: bool,
+    },
+    PublishOfficialAccountAssets {
+        base_url: String,
+        credential: official_snapshot::OfficialSnapshotCredential,
+        account_id: String,
+        lease: String,
+        #[serde(default)]
+        session: Option<String>,
+        assets: Vec<official_assets::upload::PinnedAsset>,
+        #[serde(default)]
+        concurrency: Option<u8>,
     },
 }
 
@@ -1017,8 +1039,6 @@ fn is_owned_handoff_name(path: &Path) -> bool {
         || handoff_name(path, "risu-character-card-", ".json")
         || handoff_name(path, "risu-character-card-", ".png")
         || handoff_name(path, "risu-module-", ".risum")
-        || handoff_name(path, "preset-", ".json")
-        || handoff_name(path, "preset-", ".risup")
         || handoff_name(path, dataset_export::PREFIX, dataset_export::SUFFIX)
         || handoff_name(path, download_handoff::PREFIX, download_handoff::SUFFIX)
 }
@@ -1038,6 +1058,7 @@ fn cleanup_stale_handoffs_at(
     let canonical_root = handoffs_root
         .canonicalize()
         .map_err(|error| format!("native handoff root cannot be resolved: {error}"))?;
+    let retained = portable_export_receipts::retained_handoffs(handoffs_root.parent().unwrap_or(handoffs_root));
     let mut errors = Vec::new();
     for entry in fs::read_dir(&canonical_root)
         .map_err(|error| format!("native handoff root cannot be read: {error}"))?
@@ -1053,7 +1074,7 @@ fn cleanup_stale_handoffs_at(
             }
         };
         let path = entry.path();
-        if !is_owned_handoff_name(&path) {
+        if !is_owned_handoff_name(&path) || retained.contains(&path) {
             continue;
         }
         let metadata = match fs::symlink_metadata(&path) {
@@ -1459,6 +1480,10 @@ impl NativeFileJobState {
                 capability_error.get_or_insert(error);
             }
         }
+        let registry = Arc::new(JobRegistry::default());
+        if let Err(error) = portable_export_receipts::restore(&root, &registry) {
+            startup_warnings.push(NativeJobError::new("export-receipt-unavailable", error));
+        }
         if jobs_root.is_dir() {
             if let Err(error) = cleanup_owned_directories(&jobs_root) {
                 startup_warnings.push(NativeJobError::new("cleanup-failed", error));
@@ -1479,7 +1504,7 @@ impl NativeFileJobState {
             snapshot_body_start: Arc::new(Mutex::new(())),
             cleanup_closed: Arc::new(std::sync::RwLock::new(false)),
             root,
-            registry: Arc::new(JobRegistry::default()),
+            registry,
             admission: Arc::new(admission::Admission::default()),
             active_workers: Arc::new(AtomicUsize::new(0)),
             max_concurrent_jobs,
@@ -1798,28 +1823,6 @@ impl NativeFileJobState {
                     prepared,
                 }
             }
-            NativeFileJobStartRequest::PreparePresetImport { source, display_name } => {
-                if !is_bounded_content_display_name(&display_name) {
-                    return Err(NativeJobError::new("invalid-input", "preset display name is invalid"));
-                }
-                let opened_source = match &source {
-                    JobSource::DesktopPath { .. } => Some(open_job_source(&self.root, &source)?),
-                    JobSource::AndroidSpool { token } => { parse_android_spool_token(token)?; None },
-                    _ => return Err(invalid_source_error("Portable custody is not a preset source")),
-                };
-                NativeFileJobTask::PreparePresetImport { opened_source, source, display_name }
-            }
-            NativeFileJobStartRequest::ExportPreset { destination, expected_revision, preset_index, preset_id, format, compatibility_source_path } => {
-                if preset_id.is_empty() || preset_id.len() > 512 {
-                    return Err(NativeJobError::new("invalid-input", "preset export requires a bounded preset ID"));
-                }
-                let destination = destination.map(PathBuf::from);
-                if let Some(path) = destination.as_deref() { validate_desktop_destination(path)?; }
-                let prepared = crate::persistent_store::commands::with_store_mut(app.state(), |store| {
-                    store.prepare_risu_save_export(expected_revision)
-                }).map_err(native_store_error)?;
-                NativeFileJobTask::ExportPreset { destination, preset_index, preset_id, format, prepared, compatibility_source_path: compatibility_source_path.map(PathBuf::from) }
-            }
             NativeFileJobStartRequest::ExportRisuModule {
                 destination,
                 expected_revision,
@@ -2036,6 +2039,41 @@ impl NativeFileJobState {
                     },
                 }
             }
+            NativeFileJobStartRequest::PublishOfficialAccountAssets {
+                base_url,
+                credential,
+                account_id,
+                lease,
+                session,
+                assets,
+                concurrency,
+            } => {
+                let concurrency = official_assets::upload::validate_publication_start(
+                    &base_url,
+                    &account_id,
+                    &lease,
+                    session.as_deref(),
+                    &assets,
+                    concurrency,
+                )?;
+                let (root, uploads) =
+                    crate::persistent_store::commands::with_store(app.state(), |store| {
+                        official_assets::upload::pinned_uploads(store, &lease, &assets)
+                    })
+                    .map_err(native_store_error)?;
+                NativeFileJobTask::PublishOfficialAssets {
+                    request: official_assets::upload::PublicationRequest {
+                        base_url,
+                        credential,
+                        account_id,
+                        session,
+                        concurrency,
+                        root,
+                        uploads,
+                        shared: official_assets::upload::PublicationHandle::default(),
+                    },
+                }
+            }
         };
         self.spawn(task, true)
     }
@@ -2052,7 +2090,6 @@ impl NativeFileJobState {
         let NativeFileJobStartRequest::PrepareContentImport {
             source,
             display_name,
-            import_destination,
         } = request
         else {
             return Err(NativeJobError::new(
@@ -2097,11 +2134,6 @@ impl NativeFileJobState {
             )
             .map_err(|error| NativeJobError::new("store-error", error))?;
         let job_id = job.id();
-        if let Err(error) = job.set_content_destination(import_destination) {
-            let _ = job.finish_failure("store-error", &error);
-            let _ = self.registry.forget(&job_id);
-            return Err(NativeJobError::new("store-error", error));
-        }
         let owned_directory = match create_owned_directory(&self.root.join("jobs"), &job_id) {
             Ok(path) => path,
             Err(error) => {
@@ -2280,6 +2312,10 @@ impl NativeFileJobState {
             job.status.lock().map_err(|_| NativeJobError::new("store-error", "native job status mutex poisoned"))?
                 .official_asset_shared = Some(request.shared.clone());
         }
+        if let NativeFileJobTask::PublishOfficialAssets { request } = &task {
+            job.status.lock().map_err(|_| NativeJobError::new("store-error", "native job status mutex poisoned"))?
+                .official_asset_publication_shared = Some(request.shared.clone());
+        }
         let job_id = job.id();
         let owned_directory = match create_owned_directory(&self.root.join("jobs"), &job_id) {
             Ok(path) => path,
@@ -2307,8 +2343,7 @@ impl NativeFileJobState {
                     source,
                     ..
                 } => (opened_source, source, None),
-                NativeFileJobTask::PreparePresetImport { opened_source, source, display_name }
-                | NativeFileJobTask::ImportJpegAsset {
+                NativeFileJobTask::ImportJpegAsset {
                     opened_source,
                     source,
                     display_name,
@@ -2579,12 +2614,6 @@ impl NativeFileJobState {
                             )
                         }
                     },
-                    NativeFileJobTask::PreparePresetImport { opened_source, display_name, .. } => {
-                        preset_import::prepare(opened_source.ok_or_else(|| NativeJobError::new("store-error", "preset source was not prepared"))?, &display_name, &owned_directory, &job)
-                    }
-                    NativeFileJobTask::ExportPreset { destination, preset_index, preset_id, format, prepared, compatibility_source_path } => {
-                        preset_export::export(prepared, preset_index, &preset_id, format, compatibility_source_path.as_deref(), &owned_directory, &root.join("handoffs"), destination.as_deref(), &job)
-                    }
                     NativeFileJobTask::ExportRisuModule {
                         destination,
                         module_index,
@@ -2646,17 +2675,20 @@ impl NativeFileJobState {
                     NativeFileJobTask::RestoreOfficialAssets { request } => {
                         official_assets::run(request, &owned_directory, &job)
                     }
+                    NativeFileJobTask::PublishOfficialAssets { request } => {
+                        official_assets::upload::publish(request, &job)
+                    }
                 },
                 "native file job worker panicked",
             );
             let mut cleanup_errors = Vec::new();
-            if kind != JobKind::PreparePresetImport || outcome.is_err() {
-                if let Err(error) = cleanup_one_owned_directory(&root.join("jobs"), &owned_directory, &job.id()) {
-                    cleanup_errors.push(error);
-                }
+            if let Err(error) =
+                cleanup_one_owned_directory(&root.join("jobs"), &owned_directory, &job.id())
+            {
+                cleanup_errors.push(error);
             }
             release_worker_admission(&admission);
-            finish_worker_outcome(&job, kind, outcome, cleanup_errors);
+            finish_worker_outcome(&job, kind, outcome, cleanup_errors, Some(&root));
             let _ = registry.prune();
         });
         Ok(NativeFileJobStarted {
@@ -2724,14 +2756,6 @@ impl NativeFileJobState {
         &self,
         job_id: &str,
     ) -> Result<PreparedContent, NativeJobError> {
-        self.prepared_content_for_mapping(job_id).map(|(content, _)| content)
-    }
-
-    /// The prepared content and the destination its import request named.
-    pub(crate) fn prepared_content_for_mapping(
-        &self,
-        job_id: &str,
-    ) -> Result<(PreparedContent, card_mapping::ContentDestination), NativeJobError> {
         let job = self
             .registry
             .lookup(job_id)
@@ -2762,7 +2786,7 @@ impl NativeFileJobState {
                 "native content receipt CAS session does not match its job",
             ));
         }
-        Ok((prepared, status.content_destination))
+        Ok(prepared)
     }
 
     pub(crate) fn list(&self) -> Result<Vec<JobStatus>, NativeJobError> {
@@ -2868,16 +2892,11 @@ impl NativeFileJobState {
             }
         }
         if let Some(job) = self.registry.lookup(job_id).map_err(|error| NativeJobError::new("store-error", error))? {
-            let status = job.status_summary();
-            if status.kind == JobKind::PreparePresetImport {
-                if !status.state.is_terminal() { return Err(NativeJobError::new("invalid-state", "preset preparation is still running")); }
-                let directory = self.root.join("jobs").join(job_id);
-                match fs::symlink_metadata(&directory) {
-                    Ok(_) => cleanup_one_owned_directory(&self.root.join("jobs"), &directory, job_id)
-                        .map_err(|error| NativeJobError::new("cleanup-failed", error))?,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
-                    Err(error) => return Err(NativeJobError::new("cleanup-failed", error.to_string())),
-                }
+            let status = job.status();
+            if status.kind == JobKind::ExportPortableBackup && status.state == JobState::Succeeded
+                && status.result.as_ref().is_some_and(|result| result.handoff_path.is_some()) {
+                portable_export_receipts::forget(&self.root, job_id)
+                    .map_err(|error| NativeJobError::new("cleanup-failed", error))?;
             }
         }
         self.registry
@@ -3018,9 +3037,6 @@ enum NativeFileJobTask {
         metadata: Value,
         prepared: crate::persistent_store::PreparedRisuSaveExport,
     },
-    PreparePresetImport { opened_source: Option<OpenedJobSource>, source: JobSource, display_name: String },
-    ExportPreset { destination: Option<PathBuf>, preset_index: u64, preset_id: String,
-        format: preset_export::PresetFormat, prepared: crate::persistent_store::PreparedRisuSaveExport, compatibility_source_path: Option<PathBuf> },
     ExportRisuModule {
         destination: Option<PathBuf>,
         module_index: u64,
@@ -3056,6 +3072,9 @@ enum NativeFileJobTask {
     RestoreOfficialAssets {
         request: official_assets::Request,
     },
+    PublishOfficialAssets {
+        request: official_assets::upload::PublicationRequest,
+    },
 }
 
 impl NativeFileJobTask {
@@ -3072,8 +3091,6 @@ impl NativeFileJobTask {
             Self::ExportCompatibleLocalBackup { .. } => JobKind::ExportCompatibleLocalBackup,
             Self::ExportCharacterCharx { .. } => JobKind::ExportCharacterCharx,
             Self::ExportCharacterCard { .. } => JobKind::ExportCharacterCard,
-            Self::PreparePresetImport { .. } => JobKind::PreparePresetImport,
-            Self::ExportPreset { .. } => JobKind::ExportPreset,
             Self::ExportRisuModule { .. } => JobKind::ExportRisuModule,
             Self::ExportDataset { .. } => JobKind::ExportDataset,
             Self::ExportGallery { archive, .. } => if *archive { JobKind::ExportGalleryZip } else { JobKind::ExportGalleryFile },
@@ -3083,6 +3100,7 @@ impl NativeFileJobTask {
             #[cfg(feature = "native-official-publication")]
             Self::OfficialPublication { .. } => JobKind::OfficialPublicationUpload,
             Self::RestoreOfficialAssets { .. } => JobKind::RestoreOfficialAccountAssets,
+            Self::PublishOfficialAssets { .. } => JobKind::PublishOfficialAccountAssets,
         }
     }
 
@@ -3091,7 +3109,7 @@ impl NativeFileJobTask {
             Self::ExportPortable {
                 expected_revision, ..
             } => *expected_revision,
-            Self::ExportRawRecovery { .. } | Self::PreparePresetImport { .. } => None,
+            Self::ExportRawRecovery { .. } => None,
             Self::RestorePortable {
                 expected_revision, ..
             } => Some(*expected_revision),
@@ -3118,7 +3136,6 @@ impl NativeFileJobTask {
             } => Some(*expected_revision),
             Self::ExportCharacterCharx { prepared, .. }
             | Self::ExportCharacterCard { prepared, .. }
-            | Self::ExportPreset { prepared, .. }
             | Self::ExportRisuModule { prepared, .. }
             | Self::ExportDataset { prepared, .. }
             | Self::ExportGallery { prepared, .. } => Some(prepared.revision),
@@ -3126,7 +3143,7 @@ impl NativeFileJobTask {
             Self::KeiBackup { prepared } => Some(prepared.revision()),
             #[cfg(feature = "native-official-publication")]
             Self::OfficialPublication { request, .. } => Some(request.expected_revision),
-            Self::RestoreOfficialAssets { .. } => None,
+            Self::RestoreOfficialAssets { .. } | Self::PublishOfficialAssets { .. } => None,
         }
     }
 }
@@ -3134,9 +3151,10 @@ impl NativeFileJobTask {
 fn native_store_error(error: crate::persistent_store::StoreError) -> NativeJobError {
     let code = match error {
         crate::persistent_store::StoreError::RevisionConflict { .. } => "revision-conflict",
+        crate::persistent_store::StoreError::AssetInventoryBusy => "library-operation-busy",
         crate::persistent_store::StoreError::CommitDecode { .. } | crate::persistent_store::StoreError::Validation { .. } => "invalid-input",
         crate::persistent_store::StoreError::Committed { .. } | crate::persistent_store::StoreError::RawBodyUnavailable | crate::persistent_store::StoreError::CommitBusy | crate::persistent_store::StoreError::SnapshotReleased
-        | crate::persistent_store::StoreError::SnapshotPinned { .. } | crate::persistent_store::StoreError::SchemaMismatch { .. } | crate::persistent_store::StoreError::Store { .. } => "store-error",
+        | crate::persistent_store::StoreError::SchemaMismatch { .. } | crate::persistent_store::StoreError::Store { .. } => "store-error",
     };
     NativeJobError::new(code, error.to_string())
 }
@@ -3235,13 +3253,24 @@ fn finish_worker_outcome(
     kind: JobKind,
     outcome: Result<JobResultSummary, NativeJobError>,
     cleanup_errors: Vec<String>,
+    receipt_root: Option<&Path>,
 ) {
+    let finish_success = |result| {
+        let completed = job.finish_success_with_receipt(result, receipt_root);
+        if kind == JobKind::ExportPortableBackup {
+            if let Err(error) = completed {
+                if job.is_cancel_requested() { let _ = job.finish_cancelled(); }
+                else { let _ = job.finish_native_failure(&error); }
+            }
+        }
+    };
     match (outcome, cleanup_errors.is_empty()) {
         (Ok(result), true) => {
             let _ = if kind == JobKind::OfficialPublicationUpload {
                 job.finish_official_publication_success(result)
             } else {
-                job.finish_success(result)
+                finish_success(result);
+                Ok(())
             };
         }
         (Ok(mut result), false) => {
@@ -3255,7 +3284,8 @@ fn finish_worker_outcome(
             let _ = if kind == JobKind::OfficialPublicationUpload {
                 job.finish_official_publication_success(result)
             } else {
-                job.finish_success(result)
+                finish_success(result);
+                Ok(())
             };
         }
         (Err(error), false) => {
@@ -3374,6 +3404,17 @@ impl restore::ReplacementSink for PersistentReplacementSink {
         })
     }
 
+    fn add_characters_with_binaries(
+        &self,
+        staging_id: &str,
+        characters: &[serde_json::Value],
+        binaries: &crate::persistent_store::held_binary::HeldBinaries,
+    ) -> crate::persistent_store::StoreResult<()> {
+        crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
+            store.replace_add_characters_with_binaries(staging_id, characters, binaries)
+        })
+    }
+
     fn supports_incremental_characters(&self) -> bool {
         true
     }
@@ -3445,11 +3486,13 @@ impl restore::ReplacementSink for PersistentReplacementSink {
         &self,
         staging_id: &str,
         expected_revision: i64,
+        binding_authority: Option<&str>,
     ) -> crate::persistent_store::StoreResult<crate::persistent_store::RevisionResult> {
         crate::persistent_store::commands::commit_staged_replacement(
             &self.app,
             staging_id,
             Some(expected_revision),
+            binding_authority,
         )
     }
 
@@ -3485,38 +3528,17 @@ pub(crate) fn native_file_job_status(
 }
 
 #[tauri::command(async)]
-pub(crate) async fn native_file_job_prepared_preset(app: AppHandle, job_id: String) -> Result<preset_import::PreparedPreset, NativeJobError> {
-    tauri::async_runtime::spawn_blocking(move || preset_import::receipt(&app.state::<NativeFileJobState>(), &job_id))
-        .await.map_err(|error| NativeJobError::new("store-error", error.to_string()))?
-}
-
-#[tauri::command(async)]
-pub(crate) fn native_file_job_preset_source(state: State<'_, NativeFileJobState>, job_id: String, offset: u64, length: usize) -> Result<Vec<u8>, NativeJobError> {
-    preset_import::source_chunk(&state, &job_id, offset, length)
-}
-
-#[tauri::command(async)]
-pub(crate) fn native_preset_handoff_cleanup(state: State<'_, NativeFileJobState>, path: String) -> Result<bool, NativeJobError> {
-    let path = Path::new(&path);
-    let suffix = if handoff_name(path, "preset-", ".json") { ".json" } else { ".risup" };
-    cleanup_handoff_path(&state.root, path, "preset-", suffix, "preset")
-}
-
-#[tauri::command(async)]
 pub(crate) async fn native_file_job_prepared_content(
     app: AppHandle,
     job_id: String,
-) -> Result<card_mapping::PreparedContentReceipt, NativeJobError> {
+) -> Result<PreparedContent, NativeJobError> {
     logged("native_file_job_prepared_content", async move {
         tauri::async_runtime::spawn_blocking(move || {
-            let (content, destination) = {
-                let _operation = app.state::<crate::persistent_store::PersistentStoreState>()
-                    .admit_renderer_operation().map_err(|error| NativeJobError::new("store-error", error.to_string()))?;
-                crate::asset_repository::commands::with_content_session(&app, &job_id, |_| {
-                    app.state::<NativeFileJobState>().prepared_content_for_mapping(&job_id)
-                })?
-            };
-            Ok(card_mapping::receipt(content, destination))
+            let _operation = app.state::<crate::persistent_store::PersistentStoreState>()
+                .admit_renderer_operation().map_err(|error| NativeJobError::new("store-error", error.to_string()))?;
+            crate::asset_repository::commands::with_content_session(&app, &job_id, |_| {
+                app.state::<NativeFileJobState>().prepared_content_receipt(&job_id)
+            })
         }).await.map_err(|error| NativeJobError::new("store-error", error.to_string()))?
     }.await)
 }
@@ -3868,8 +3890,6 @@ pub(crate) enum JobKind {
     ExportCharacterCharx,
     ExportCharacterCard,
     ExportRisuModule,
-    ExportPreset,
-    PreparePresetImport,
     ExportDataset,
     ExportGalleryFile,
     ExportGalleryZip,
@@ -3878,6 +3898,7 @@ pub(crate) enum JobKind {
     KeiBackupUpload,
     OfficialPublicationUpload,
     RestoreOfficialAccountAssets,
+    PublishOfficialAccountAssets,
 }
 
 #[allow(dead_code)]
@@ -3951,7 +3972,7 @@ pub(crate) enum JobStage {
 fn export_progress_stage(kind: JobKind, phase: JobPhase) -> Option<JobStage> {
     if !matches!(kind, JobKind::ExportPortableBackup | JobKind::ExportBlockRisuSave
         | JobKind::ExportCompatibleLocalBackup | JobKind::ExportCharacterCharx
-        | JobKind::ExportCharacterCard | JobKind::ExportRisuModule | JobKind::ExportPreset
+        | JobKind::ExportCharacterCard | JobKind::ExportRisuModule
         | JobKind::OfficialPublicationUpload) { return None; }
     match phase {
         JobPhase::WritingExport => Some(if kind == JobKind::ExportPortableBackup { JobStage::PreparingExport } else { JobStage::WritingExport }),
@@ -4083,11 +4104,14 @@ fn validate_detail_transition(
     if next.stage < previous.stage {
         return Err("native job stage cannot move backwards".to_owned());
     }
+    // A stage total may become unknown, as when a restore starts reading
+    // payloads of unknown size, but it never changes to another value.
     if next.stage == previous.stage
         && (next.stage_completed < previous.stage_completed
             || previous
                 .stage_total
-                .is_some_and(|total| next.stage_total != Some(total)))
+                .zip(next.stage_total)
+                .is_some_and(|(before, after)| before != after))
     {
         return Err("native job stage progress is invalid or non-monotonic".to_owned());
     }
@@ -4194,8 +4218,6 @@ pub(crate) struct JobStatus {
     pub(crate) error: Option<JobFailure>,
     #[serde(skip_serializing)]
     pub(crate) prepared_content: Option<PreparedContent>,
-    #[serde(skip_serializing)]
-    pub(crate) content_destination: card_mapping::ContentDestination,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) publication_attempt: Option<OfficialPublicationAttemptResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4218,6 +4240,10 @@ pub(crate) struct JobStatus {
     pub(crate) official_asset_restore: Option<official_assets::RestoreProgress>,
     #[serde(skip_serializing)]
     pub(crate) official_asset_shared: Option<official_assets::Handle>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) official_asset_publication: Option<official_assets::upload::PublicationProgress>,
+    #[serde(skip_serializing)]
+    pub(crate) official_asset_publication_shared: Option<official_assets::upload::PublicationHandle>,
 }
 
 impl JobStatus {
@@ -4241,7 +4267,6 @@ impl JobStatus {
             result: self.result.clone(),
             error: self.error.clone(),
             prepared_content: None,
-            content_destination: self.content_destination,
             publication_attempt: self.publication_attempt.clone(),
             compatibility_report: self.compatibility_report.clone(),
             preservation_report: self.preservation_report.clone(),
@@ -4252,6 +4277,8 @@ impl JobStatus {
             incomplete_restore_preview: self.incomplete_restore_preview.clone(),
             official_asset_restore: self.official_asset_restore.clone(),
             official_asset_shared: self.official_asset_shared.clone(),
+            official_asset_publication: self.official_asset_publication.clone(),
+            official_asset_publication_shared: self.official_asset_publication_shared.clone(),
         }
     }
 }
@@ -4277,6 +4304,7 @@ pub(crate) struct RestoreOmissions {
     pub(crate) oversized_plugin_storage: u64,
     pub(crate) inlays: u64,
     pub(crate) excluded_characters: u64,
+    pub(crate) missing_assets: u64,
 }
 
 impl IncompleteRestorePreview {
@@ -4296,6 +4324,7 @@ impl IncompleteRestorePreview {
             ("oversized-plugin-storage", self.omissions.oversized_plugin_storage),
             ("skipped-backup-inlays", self.omissions.inlays),
             ("excluded-backup-characters", self.omissions.excluded_characters),
+            ("missing-backup-assets", self.omissions.missing_assets),
         ] {
             if count != 0 { warnings.push(format!("{kind}:{count}")); }
         }
@@ -4342,6 +4371,8 @@ pub(crate) struct JobFailure {
     pub(crate) message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) item_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) owner: Option<FailureOwner>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -4476,7 +4507,6 @@ impl JobRegistry {
                 result: None,
                 error: None,
                 prepared_content: None,
-                content_destination: card_mapping::ContentDestination::Character,
                 publication_attempt: None,
                 compatibility_report: None,
                 preservation_report: None,
@@ -4487,6 +4517,8 @@ impl JobRegistry {
                 incomplete_restore_preview: None,
                 official_asset_restore: None,
                 official_asset_shared: None,
+                official_asset_publication: None,
+                official_asset_publication_shared: None,
             }),
         });
         self.jobs
@@ -4626,6 +4658,15 @@ pub(crate) struct JobControl {
     status: Mutex<JobStatus>,
 }
 
+impl crate::local_backup::CancellationProbe for JobControl {
+    fn cancellation_flag(&self) -> Option<Arc<AtomicBool>> {
+        Some(JobControl::cancellation_flag(self))
+    }
+    fn is_cancelled(&self) -> bool {
+        self.is_cancel_requested()
+    }
+}
+
 impl JobControl {
     pub(crate) fn publish_file_activation(&self, result: &JobResultSummary, authority: String) -> Result<(), String> {
         let mut status = self.status.lock().map_err(|_| "native job mutex poisoned".to_owned())?;
@@ -4659,9 +4700,10 @@ impl JobControl {
     pub(crate) fn set_incomplete_restore_preview(&self, mut preview: IncompleteRestorePreview) -> Result<(), String> {
         let mut status = self.status.lock().map_err(|_| "native job mutex poisoned".to_owned())?;
         if let Some(previous) = &status.incomplete_restore_preview {
-            let inlays = preview.omissions.inlays;
+            let (inlays, assets) = (preview.omissions.inlays, preview.omissions.missing_assets);
             preview.omissions = previous.omissions.clone();
             preview.omissions.inlays = preview.omissions.inlays.saturating_add(inlays);
+            preview.omissions.missing_assets = preview.omissions.missing_assets.saturating_add(assets);
         }
         status.incomplete_restore_preview = if preview.warning_codes().is_empty() { None } else { Some(preview) };
         Ok(())
@@ -4812,7 +4854,7 @@ impl JobControl {
         let receipt=status.portable_body_retry.as_mut().ok_or("portable body owner is missing")?;
         receipt.available=!wait.portable_body_retired;
         status.state=if self.is_cancel_requested() {JobState::Cancelled} else {JobState::Failed};
-        status.error=Some(JobFailure {code:failure.code.clone(),message:bounded_message(&failure.message),item_kind:None});
+        status.error=Some(JobFailure {code:failure.code.clone(),message:bounded_message(&failure.message),item_kind:None,owner:None});
         drop(status);
         while !wait.portable_body_retry_requested && !wait.portable_body_retired {
             wait=self.wait_changed.wait(wait).map_err(|_|"native job wait mutex poisoned")?;
@@ -4871,11 +4913,6 @@ impl JobControl {
         status.error=None;
         drop(wait);drop(status);
         self.wait_changed.notify_all();
-        Ok(())
-    }
-
-    pub(crate) fn set_content_destination(&self, destination: card_mapping::ContentDestination) -> Result<(), String> {
-        self.status.lock().map_err(|_| "native job mutex poisoned".to_owned())?.content_destination = destination;
         Ok(())
     }
 
@@ -5028,7 +5065,6 @@ impl JobControl {
             && status.prepared_content.is_some())
             || (status.kind == JobKind::ExportCharacterCharx && status.state.is_terminal())
             || (status.kind == JobKind::ExportCharacterCard && status.state.is_terminal())
-            || (matches!(status.kind, JobKind::ExportPreset | JobKind::PreparePresetImport) && status.state.is_terminal())
             || (status.kind == JobKind::ExportRisuModule && status.state.is_terminal())
             || (matches!(status.kind, JobKind::ExportDataset | JobKind::ExportGalleryFile | JobKind::ExportGalleryZip) && status.state.is_terminal())
             || (status.kind == JobKind::ExportPortableBackup && status.state.is_terminal())
@@ -5359,13 +5395,14 @@ impl JobControl {
             JobKind::ExportCompatibleLocalBackup => JobPhase::WritingExport,
             JobKind::ExportCharacterCharx => JobPhase::WritingExport,
             JobKind::ExportCharacterCard => JobPhase::WritingExport,
-            JobKind::ExportRisuModule | JobKind::ExportPreset => JobPhase::WritingExport,
+            JobKind::ExportRisuModule => JobPhase::WritingExport,
             JobKind::ExportDataset | JobKind::ExportGalleryFile | JobKind::ExportGalleryZip => JobPhase::WritingExport,
-            JobKind::PrepareContentImport | JobKind::PreparePresetImport => JobPhase::ReadingSource,
+            JobKind::PrepareContentImport => JobPhase::ReadingSource,
             JobKind::ImportJpegAsset => JobPhase::ReadingSource,
             JobKind::KeiBackupUpload => JobPhase::WritingExport,
             JobKind::OfficialPublicationUpload => JobPhase::WritingExport,
             JobKind::RestoreOfficialAccountAssets => JobPhase::ReadingSource,
+            JobKind::PublishOfficialAccountAssets => JobPhase::WritingExport,
         };
         if status.state != JobState::Queued || phase != expected {
             return Err("native job can only start from queued".to_owned());
@@ -5536,6 +5573,7 @@ impl JobControl {
                 Some(JobFailure {
                     code: "cleanup-failed".to_owned(),
                     item_kind: None,
+                    owner: None,
                     message: bounded_message(&format!(
                         "{}; cleanup failed: {cleanup}",
                         error.message
@@ -5548,6 +5586,7 @@ impl JobControl {
                 Some(JobFailure {
                     code: "cleanup-failed".to_owned(),
                     item_kind: None,
+                    owner: None,
                     message: bounded_message(&cleanup),
                 }),
                 None,
@@ -5559,6 +5598,7 @@ impl JobControl {
                     code: error.code,
                     message: error.message,
                     item_kind: error.item_kind,
+                    owner: error.owner,
                 }),
                 None,
             ),
@@ -5574,10 +5614,14 @@ impl JobControl {
         self.mark_terminal()
     }
 
-    pub(crate) fn finish_success(&self, mut result: JobResultSummary) -> Result<(), String> {
-        validate_result(&result)?;
+    pub(crate) fn finish_success(&self, result: JobResultSummary) -> Result<(), String> {
+        self.finish_success_with_receipt(result, None).map_err(|error| error.message)
+    }
+
+    fn finish_success_with_receipt(&self, mut result: JobResultSummary, receipt_root: Option<&Path>) -> Result<(), NativeJobError> {
+        validate_result(&result).map_err(|error| NativeJobError::new("store-error", error))?;
         if result.publication.is_some() {
-            return Err("non-publication job returned publication metadata".to_owned());
+            return Err(NativeJobError::new("store-error", "non-publication job returned publication metadata"));
         }
         let context_warnings = self.status().warning_codes;
         for warning in context_warnings {
@@ -5586,13 +5630,19 @@ impl JobControl {
             }
         }
         result.warning_codes.truncate(MAX_WARNING_CODES);
-        validate_result(&result)?;
+        validate_result(&result).map_err(|error| NativeJobError::new("store-error", error))?;
         let mut status = self
             .status
             .lock()
-            .map_err(|error| format!("native job status mutex poisoned: {error}"))?;
+            .map_err(|error| NativeJobError::new("store-error", format!("native job status mutex poisoned: {error}")))?;
         if status.state != JobState::Running || self.is_cancel_requested() {
-            return Err("native job cannot succeed from its current state".to_owned());
+            return Err(NativeJobError::new("store-error", "native job cannot succeed from its current state"));
+        }
+        if status.kind == JobKind::ExportPortableBackup && result.handoff_path.is_some() {
+            if let Some(root) = receipt_root {
+                portable_export_receipts::persist(root, &status.job_id, &result)
+                    .map_err(|error| NativeJobError::new("export-receipt-write-failed", error))?;
+            }
         }
         status.state = JobState::Succeeded;
         status.phase = JobPhase::Complete;
@@ -5601,7 +5651,7 @@ impl JobControl {
         status.prepared_content = None;
         status.publication_attempt = None;
         drop(status);
-        self.mark_terminal()?;
+        self.mark_terminal().map_err(|error| NativeJobError::new("store-error", error))?;
         Ok(())
     }
 
@@ -5642,14 +5692,14 @@ impl JobControl {
     }
 
     pub(crate) fn finish_failure(&self, code: &str, message: &str) -> Result<(), String> {
-        self.finish_failure_with_item(code, message, None)
+        self.finish_failure_with_item(code, message, None, None)
     }
 
     fn finish_native_failure(&self, error: &NativeJobError) -> Result<(), String> {
-        self.finish_failure_with_item(&error.code, &error.message, error.item_kind.as_deref())
+        self.finish_failure_with_item(&error.code, &error.message, error.item_kind.as_deref(), error.owner.clone())
     }
 
-    fn finish_failure_with_item(&self, code: &str, message: &str, item_kind: Option<&str>) -> Result<(), String> {
+    fn finish_failure_with_item(&self, code: &str, message: &str, item_kind: Option<&str>, owner: Option<FailureOwner>) -> Result<(), String> {
         if code.is_empty() || code.len() > MAX_CODE_BYTES {
             return Err("native job error code is invalid".to_owned());
         }
@@ -5678,6 +5728,7 @@ impl JobControl {
             code: code.to_owned(),
             message: bounded_message(message),
             item_kind: item_kind.map(str::to_owned),
+            owner,
         });
         status.prepared_content = None;
         status.publication_attempt = None;
@@ -6415,7 +6466,6 @@ mod tests {
                     path: source.to_string_lossy().into_owned(),
                 },
                 display_name: display_name.to_owned(),
-                import_destination: Default::default(),
             })
             .expect("start content preparation")
     }
@@ -6938,6 +6988,7 @@ mod tests {
                 JobKind::RestoreBlockRisuSave,
                 Ok(result(4)),
                 Vec::new(),
+                None,
             );
         });
         assert!(admission.server().is_err());
@@ -7019,38 +7070,6 @@ mod tests {
         assert!(waited.join().unwrap().is_err());
     }
 
-    // The destination the import request names reaches the receipt's mapping: a card imported as a module also carries
-    // the converted module, and a request that names none maps the card as a character only.
-    #[test]
-    fn content_receipt_maps_the_destination_its_request_names() {
-        for (destination, converted) in [(None, false), (Some("character"), false), (Some("module"), true)] {
-            let directory = TempDir::new().unwrap();
-            let source = directory.path().join("card.json");
-            fs::write(&source, br#"{"spec":"chara_card_v3","spec_version":"3.0","data":{"name":"Destination","extensions":{}}}"#)
-                .unwrap();
-            let state = NativeFileJobState::initialize(directory.path().join("native-file-jobs"));
-            let mut request = json!({
-                "kind": "prepare-content-import",
-                "source": {"type": "desktopPath", "path": source.to_string_lossy()},
-                "displayName": "card.json",
-            });
-            if let Some(destination) = destination {
-                request["importDestination"] = json!(destination);
-            }
-            let started = state.start_content_for_test(serde_json::from_value(request).unwrap()).unwrap();
-            assert_eq!(wait_for_content_job(&state, &started.job_id).state, JobState::Succeeded);
-            let (content, named) = state.prepared_content_for_mapping(&started.job_id).unwrap();
-            let receipt = card_mapping::receipt(content, named);
-            assert!(matches!(receipt.native_mapping, card_mapping::NativeMapping::Mapped(_)), "{:?}", receipt.native_mapping);
-            assert!(
-                matches!(receipt.native_module_mapping, Some(card_mapping::NativeMapping::Mapped(_))) == converted
-                    && receipt.native_module_mapping.is_some() == converted,
-                "{destination:?}: {:?}",
-                receipt.native_module_mapping
-            );
-        }
-    }
-
     #[test]
     fn content_prepare_promotes_assets_and_succeeds_with_logical_descriptors() {
         let directory = TempDir::new().unwrap();
@@ -7067,7 +7086,6 @@ mod tests {
                     path: source.to_string_lossy().into_owned(),
                 },
                 display_name: "card.json".to_owned(),
-                import_destination: Default::default(),
             })
             .expect("start content preparation");
 
@@ -7173,10 +7191,11 @@ mod tests {
                     "unknownFutureField": { "retained": true },
                     "assets": [
                         ["duplicate", "legacy-a", ".unsafe/path", { "future": true }],
-                        ["duplicate", "legacy-b", "bin"]
+                        ["duplicate", "legacy-b", "bin"],
+                        ["undeclared", "legacy-c", null]
                     ]
                 }),
-                &[b"exact ordinary bytes", b""],
+                &[b"exact ordinary bytes", b"", b"RIFF\x04\0\0\0WEBPVP8 "],
             ),
         )
         .unwrap();
@@ -7220,6 +7239,23 @@ mod tests {
             Some(expected_logical_id.as_str())
         );
         assert_eq!(serialized.pointer("/assets/1/ext"), Some(&json!("bin")));
+        assert_eq!(serialized.pointer("/assets/2/ext"), Some(&json!("webp")));
+        assert_eq!(
+            serialized
+                .pointer("/assets/2/logicalId")
+                .and_then(Value::as_str),
+            Some(
+                format!(
+                    "assets/{}.webp",
+                    serialized
+                        .pointer("/assets/2/objectHash")
+                        .and_then(Value::as_str)
+                        .unwrap()
+                )
+                .as_str()
+            )
+        );
+        assert_eq!(serialized.pointer("/metadata/assets/2/2"), Some(&json!("")));
         assert_eq!(
             serialized.pointer("/metadata/assets/0/3/future"),
             Some(&json!(true))
@@ -7227,7 +7263,33 @@ mod tests {
         assert!(serialized.pointer("/assets/0/token").is_none());
         assert!(serialized.pointer("/assets/0/referenceKey").is_none());
         assert_eq!(serialized.pointer("/ownerHead/present"), Some(&json!(true)));
-        assert_eq!(serialized.pointer("/ownerHead/entryCount"), Some(&json!(2)));
+        assert_eq!(serialized.pointer("/ownerHead/entryCount"), Some(&json!(3)));
+        let manifest = crate::asset_repository::owner_manifest_codec::decode_owner_manifest(
+            &crate::asset_repository::PayloadCas::new(directory.path())
+                .unwrap()
+                .read_object(
+                    serialized
+                        .pointer("/ownerHead/manifestHash")
+                        .and_then(Value::as_str)
+                        .unwrap(),
+                )
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        // TypeScript activation keeps each metadata tuple with its logical ID
+        // and requires the owner manifest to carry exactly that tuple.
+        for (position, entry) in manifest.iter().enumerate() {
+            let tuple = &serialized["metadata"]["assets"][position];
+            assert_eq!(
+                json!(entry.tuple),
+                json!([
+                    tuple[0],
+                    serialized["assets"][position]["logicalId"],
+                    tuple[2]
+                ])
+            );
+        }
         assert_eq!(content.cas_session_id, started.job_id);
         let encoded = serde_json::to_string(content).unwrap();
         assert!(!encoded.contains("stagedPath"));
@@ -7260,7 +7322,7 @@ mod tests {
             &started.job_id,
         )
         .unwrap();
-        assert_eq!(session.pin_count(), 3);
+        assert_eq!(session.pin_count(), 4);
         assert!(!session.is_sealed());
     }
 
@@ -7762,7 +7824,6 @@ mod tests {
                     token: token.clone(),
                 },
                 display_name: "android-card.json".to_owned(),
-                import_destination: Default::default(),
             })
             .expect("content job should claim the ready Android spool");
         assert!(state
@@ -7771,7 +7832,6 @@ mod tests {
                     token: token.clone(),
                 },
                 display_name: "android-card.json".to_owned(),
-                import_destination: Default::default(),
             })
             .is_err());
 
@@ -7843,7 +7903,6 @@ mod tests {
             .start_content_for_test(NativeFileJobStartRequest::PrepareContentImport {
                 source: JobSource::AndroidSpool { token },
                 display_name: "linked-card.json".to_owned(),
-                import_destination: Default::default(),
             })
             .expect_err("content preparation must not follow a claimed spool source link");
 
@@ -7881,7 +7940,6 @@ mod tests {
                     token: token.clone(),
                 },
                 display_name: "card.json".to_owned(),
-                import_destination: Default::default(),
             })
             .expect_err("content preparation must use the claimed spool display name");
 
@@ -8168,7 +8226,6 @@ mod tests {
                     path: source.to_string_lossy().into_owned(),
                 },
                 display_name: "large-card.json".to_owned(),
-                import_destination: Default::default(),
             })
             .expect("start content preparation");
 
@@ -8668,10 +8725,30 @@ mod tests {
         let status = serde_json::to_value(oversized.status()).unwrap();
         assert_eq!(status["error"]["code"], "payload-too-large");
         assert_eq!(status["error"]["itemKind"], "compatible-database");
+        let rejected = registry.create(JobKind::ExportCompatibleLocalBackup).unwrap();
+        rejected.start(JobPhase::WritingExport).unwrap();
+        let owner = FailureOwner { kind: "chat", name: "Synthetic chat".into(), character: Some("Synthetic".into()) };
+        rejected.finish_native_failure(&NativeJobError::new("unsupported-projection", "synthetic rejection").owned_by(&owner)).unwrap();
+        assert_eq!(serde_json::to_value(rejected.status()).unwrap()["error"]["owner"],
+            serde_json::json!({"kind":"chat","name":"Synthetic chat","character":"Synthetic"}));
         let content = registry.create(JobKind::PrepareContentImport).unwrap();
         content.start(JobPhase::ReadingSource).unwrap();
         content.finish_content_job_inner(Err(NativeJobError::too_large("card", "synthetic size limit")), Ok(()), None).unwrap();
         assert_eq!(serde_json::to_value(content.status()).unwrap()["error"]["itemKind"], "card");
+    }
+
+    #[test]
+    fn restore_preview_keeps_recorded_omissions_with_the_counts_the_staging_adds() {
+        let job = JobRegistry::default().create(JobKind::RestoreLegacyLocalBackup).unwrap();
+        job.record_restore_omission("excludedCharacters", 2).unwrap();
+        let mut staged = IncompleteRestorePreview::default();
+        staged.omissions.inlays = 1;
+        staged.omissions.missing_assets = 3;
+        job.set_incomplete_restore_preview(staged).unwrap();
+        assert_eq!(
+            job.status().incomplete_restore_preview.unwrap().warning_codes(),
+            ["skipped-backup-inlays:1", "excluded-backup-characters:2", "missing-backup-assets:3"],
+        );
     }
 
     #[test]
@@ -8930,7 +9007,6 @@ mod tests {
         for kind in [
             JobKind::ExportCharacterCard,
             JobKind::ExportRisuModule,
-            JobKind::ExportPreset,
             JobKind::ExportDataset,
         ] {
             let job = registry.create(kind).unwrap();
@@ -9370,10 +9446,6 @@ mod tests {
                 "character-charx" => cleanup_character_charx_handoff_path,
                 "character-card" => cleanup_character_card_handoff_path,
                 "risu-module" => cleanup_risu_module_handoff_path,
-                "preset" => |root, path| {
-                    let suffix = if handoff_name(path, "preset-", ".json") { ".json" } else { ".risup" };
-                    cleanup_handoff_path(root, path, "preset-", suffix, "preset")
-                },
                 "dataset-export" => cleanup_dataset_handoff_path,
                 "download" => |root, path| {
                     cleanup_handoff_path(
@@ -9388,7 +9460,7 @@ mod tests {
             }
         };
         let grammars = fixture["managedHandoffs"].as_array().unwrap();
-        assert_eq!(grammars.len(), 9, "grammar count drifted from the fixture");
+        assert_eq!(grammars.len(), 8, "grammar count drifted from the fixture");
 
         for grammar in grammars {
             let kind = grammar["kind"].as_str().unwrap();

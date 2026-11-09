@@ -62,9 +62,25 @@ export class StallingWorker extends InMemoryWorker {
     override postMessage(message: RegexWorkerRequest): void {
         if (message.type === 'register') this.entries = message.entries
         if (message.type === 'operation' && message.operation.pattern.startsWith('SLOW')) return
+        if (message.type === 'testEach') {
+            const slow = message.inputs.findIndex((input) => input.startsWith('SLOW'))
+            if (slow >= 0) {
+                // The real Worker reports each input it finished.
+                const regex = new RegExp(message.pattern, message.flags)
+                message.inputs.slice(0, slow).forEach((input, index) => {
+                    this.respond({ type: 'progress', id: message.id, index, matched: regex.test(input) })
+                })
+                return
+            }
+        }
         if (message.type === 'execute') {
             const { start = 0, end = this.entries.length } = message.continuation ?? {}
-            if (this.entries.slice(start, end).some((entry) => entry[1].startsWith('SLOW'))) return
+            const slow = this.entries.findIndex((entry, index) => index >= start && index < end && entry[1].startsWith('SLOW'))
+            if (slow >= 0) {
+                // The real Worker names a rule before running it.
+                if (message.continuation) this.respond({ type: 'progress', id: message.id, index: slow })
+                return
+            }
         }
         super.postMessage(message)
     }

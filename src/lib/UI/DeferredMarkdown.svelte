@@ -13,6 +13,8 @@
 
     interface Props {
         data: string
+        /** The parent element holding only this markdown, which renders as its direct children. */
+        root: HTMLElement | null | undefined
         character?: MarkdownCharacter
         mode?: MarkdownMode
         chatID?: number
@@ -26,6 +28,7 @@
 
     let {
         data,
+        root,
         character = null,
         mode = 'normal',
         chatID = -1,
@@ -35,7 +38,6 @@
         scriptContext,
         rebuildRevision = 0,
     }: Props = $props()
-    let root = $state<HTMLElement>()
     let displayedHtml = $state('')
     let displayEpoch = $state(0)
     let failed = $state(false)
@@ -144,11 +146,9 @@
 
 </script>
 
-<span style="display:contents" bind:this={root}>
-    {#key displayEpoch}
-        {@html displayedHtml}
-    {/key}
-    {#if failed}
-        <span class="text-textcolor2 italic" role="alert">{language.contentRenderFailed}</span>
-    {/if}
-</span>
+{#key displayEpoch}
+    {@html displayedHtml}
+{/key}
+{#if failed}
+    <span class="text-textcolor2 italic" role="alert">{language.contentRenderFailed}</span>
+{/if}

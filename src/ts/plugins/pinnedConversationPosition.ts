@@ -1,4 +1,4 @@
-import type { PersistentDataStore } from '../storage/persistentDataStore'
+import { readCurrentRevision, type PersistentDataStore } from '../storage/persistentDataStore'
 import { getPersistentDataStore } from '../storage/persistentDataStoreFactory'
 import { acquireCurrentRevisionWithRetry, withPersistentRevisionLease } from '../storage/persistentRecordIterator'
 import { findCharacterIndex, findChatIndex } from './conversationContext'
@@ -10,7 +10,7 @@ export interface PinnedConversationPosition {
 }
 
 export interface PinnedConversationPositionSource {
-    store: Pick<PersistentDataStore, 'open' | 'acquireRevision' | 'readRoot'>
+    store: Pick<PersistentDataStore, 'open' | 'acquireRevision' | 'readRoot' | 'readRevision'>
     flushPendingData(reason: string): Promise<void>
 }
 
@@ -25,7 +25,7 @@ export function createPinnedConversationPositionResolver(source: () => PinnedCon
         }))
         const lease = await acquireCurrentRevisionWithRetry(
             (revision) => store.acquireRevision(revision),
-            async () => (await store.readRoot()).revision,
+            () => readCurrentRevision(store),
         )
         return withPersistentRevisionLease(lease, async (reader) => {
             const characterIndex = await findCharacterIndex(reader, characterId)

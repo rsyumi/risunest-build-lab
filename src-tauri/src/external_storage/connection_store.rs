@@ -137,6 +137,7 @@ impl ConnectionStore {
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS connections(id TEXT PRIMARY KEY,value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS automatic_backup_pauses(connection_id TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS format_levels(connection_id TEXT PRIMARY KEY,level INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS usage_objects(connection_id TEXT NOT NULL,locator TEXT NOT NULL,byte_length TEXT NOT NULL,PRIMARY KEY(connection_id,locator));
             CREATE TABLE IF NOT EXISTS usage_removed(connection_id TEXT NOT NULL,locator TEXT NOT NULL,PRIMARY KEY(connection_id,locator));
             CREATE TABLE IF NOT EXISTS usage_observations(connection_id TEXT PRIMARY KEY,observed_at_ms INTEGER NOT NULL);
@@ -158,6 +159,28 @@ impl ConnectionStore {
         } else {
             self.0.execute("DELETE FROM automatic_backup_pauses WHERE connection_id=?1", [id]).map_err(storage)?;
         }
+        Ok(())
+    }
+    /// The highest library format level this device has seen for the
+    /// connection's repository, 1 when it has seen none. It is kept beside the
+    /// connection rather than in it, so builds that predate levels still read
+    /// the connection.
+    pub fn format_level(&self, id: &str) -> Result<u64> {
+        let level: Option<i64> = self.0
+            .query_row("SELECT level FROM format_levels WHERE connection_id=?1", [id], |row| row.get(0))
+            .optional().map_err(storage)?;
+        level.map_or(Ok(1), |level| u64::try_from(level).map_err(|_| corrupt()))
+    }
+    /// Raises the recorded level to `level`; a lower one leaves it unchanged.
+    pub fn record_format_level(&self, id: &str, level: u64) -> Result<()> {
+        if level < 2 {
+            return Ok(());
+        }
+        let level = i64::try_from(level).map_err(|_| corrupt())?;
+        self.0.execute(
+            "INSERT INTO format_levels VALUES(?1,?2) ON CONFLICT(connection_id) DO UPDATE SET level=max(level,excluded.level)",
+            params![id, level],
+        ).map_err(storage)?;
         Ok(())
     }
     pub fn list(&self) -> Result<Vec<StoredConnection>> {
@@ -481,6 +504,8 @@ impl ConnectionStore {
         tx.execute("DELETE FROM unusable_objects WHERE connection_id=?1", [id])
             .map_err(storage)?;
         tx.execute("DELETE FROM automatic_backup_pauses WHERE connection_id=?1", [id])
+            .map_err(storage)?;
+        tx.execute("DELETE FROM format_levels WHERE connection_id=?1", [id])
             .map_err(storage)?;
         for table in ["usage_objects", "usage_removed", "usage_observations", "usage_snapshots"] {
             tx.execute(&format!("DELETE FROM {table} WHERE connection_id=?1"), [id]).map_err(storage)?;

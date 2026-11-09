@@ -7,6 +7,14 @@
     import SettingRow from '../RisuNest/SettingRow.svelte'
     import SettingButton from '../RisuNest/SettingButton.svelte'
     import SettingProgress from '../RisuNest/SettingProgress.svelte'
+    import SettingToggle from '../RisuNest/SettingToggle.svelte'
+    import NumberInput from 'src/lib/UI/GUI/NumberInput.svelte'
+    import {
+        getDeviceSettings,
+        MAX_SNAPSHOT_KEEP_COUNT,
+        subscribeDeviceSettings,
+        updateDeviceSettings,
+    } from 'src/ts/storage/deviceSettings'
     import {
         getServerSyncCacheUsage,
         cleanupServerSyncCache,
@@ -20,6 +28,7 @@
         previewNativePersistentAssetGc,
         restoreNativePersistentSnapshot,
     } from 'src/ts/storage/nativePersistentMaintenance'
+    import { requestStoreCompaction } from 'src/ts/storage/storeCompaction'
     import { getSyncConflictBackupStore } from 'src/ts/storage/sync/syncConflictBackup'
     import { assetAliasCleanupTarget, flushPendingData } from 'src/ts/storage/persistentDataRuntime.svelte'
     import { deleteUnusedAssetAliases } from 'src/ts/storage/deletedOwnerAssetCleanup'
@@ -54,11 +63,12 @@
     let view = $state(dashboard.snapshot())
     // Restoring restarts the app, so the flag only ever clears on cancel or failure.
     let restoringSnapshot: string | null = $state(null)
+    let requestingCompaction = $state(false)
+    // The snapshot list is not part of the totals, so they show without it.
     let rollup = $derived(
-        view.stats && view.loadedSources.length === 4
+        view.stats && view.loadedSources.includes('conflictBackups') && view.loadedSources.includes('tempUsage')
             ? storageDashboardRollup(
                   view.stats,
-                  view.snapshots,
                   view.conflictBackups,
                   view.tempUsage,
               )
@@ -133,8 +143,8 @@
     )
     const listHeaderClass = 'flex cursor-pointer list-none items-center gap-2 px-4 py-2.5 text-[15px] select-none [&::-webkit-details-marker]:hidden'
     const listRowClass = 'flex flex-wrap items-center gap-x-3 gap-y-1.5 border-t border-darkborderc/55 py-1.5 pr-4 pl-10 text-sm'
-    const listNoteClass = 'px-4 py-2 text-sm text-textcolor2'
-    const listEmptyClass = 'border-t border-darkborderc/55 py-2 pr-4 pl-10 text-sm text-textcolor2'
+    const listNoteClass = 'px-4 py-2 text-sm text-subtext'
+    const listEmptyClass = 'border-t border-darkborderc/55 py-2 pr-4 pl-10 text-sm text-subtext'
 
     function snapshotReason(reason: string): string {
         const reasons = strings.snapshotReasons
@@ -144,14 +154,21 @@
         return ""
     }
 
+    // Another operation holding the library refused the action; it works once that operation ends.
+    const refusedAsBusy = (error: unknown): boolean =>
+        typeof error === 'object' && error !== null && 'code' in error
+        && (error.code === 'library-operation-busy' || error.code === 'commit-busy')
+
     function showActionError(error: unknown, fallback = strings.actionFailed): void {
-        void error
-        alertError(fallback)
+        alertError(refusedAsBusy(error) ? language.risuNest.importDialog.reasonBusy : fallback)
     }
 
     // Creating a snapshot or reading an image fails on the same damage the data check names.
     async function showStorageFailure(error: unknown): Promise<void> {
-        void error
+        if (refusedAsBusy(error)) {
+            showActionError(error)
+            return
+        }
         if (await alertConfirm(`${strings.actionFailed} ${language.risuNest.dataHealth.openResult}`))
             openDataHealthScreen()
     }
@@ -246,20 +263,58 @@
         try { await dashboard.cleanupTemp() } catch (error) { showActionError(error) }
     }
 
+    async function compactDatabase(): Promise<void> {
+        if (requestingCompaction || !await alertConfirm(strings.compactConfirm)) return
+        requestingCompaction = true
+        try { await requestStoreCompaction() } catch (error) { showActionError(error) } finally { requestingCompaction = false }
+    }
+
     async function createSnapshot(): Promise<void> {
         try { await dashboard.createSnapshot() } catch (error) { await showStorageFailure(error) }
     }
 
+    const initialSettings = getDeviceSettings()
+    let automaticSnapshots = $state(initialSettings.automaticSnapshotsEnabled)
+    let storedKeepCount = initialSettings.snapshotKeepCount
+    let keepCount = $state(initialSettings.snapshotKeepCount)
+    const unsubscribeSettings = subscribeDeviceSettings((settings) => {
+        automaticSnapshots = settings.automaticSnapshotsEnabled
+        storedKeepCount = settings.snapshotKeepCount
+        keepCount = settings.snapshotKeepCount
+    })
+
+    function setAutomaticSnapshots(next: boolean): void {
+        if (next === automaticSnapshots) return
+        automaticSnapshots = next
+        updateDeviceSettings({ automaticSnapshotsEnabled: next })
+    }
+
+    function commitKeepCount(): void {
+        const value = Number(keepCount)
+        if (keepCount === null || !Number.isFinite(value)) {
+            keepCount = storedKeepCount
+            return
+        }
+        const next = Math.min(MAX_SNAPSHOT_KEEP_COUNT, Math.max(1, Math.round(value)))
+        keepCount = next
+        if (next === storedKeepCount) return
+        storedKeepCount = next
+        updateDeviceSettings({ snapshotKeepCount: next })
+    }
+
     const unsubscribe = dashboard.subscribe((next) => { view = next })
     onMount(() => { void dashboard.load() })
-    onDestroy(unsubscribe)
+    onDestroy(() => {
+        unsubscribe()
+        unsubscribeSettings()
+    })
 </script>
 
 {#snippet listHeader(label: string, summary: string)}
     <summary class={listHeaderClass}>
-        <ChevronRight size={16} class="shrink-0 text-textcolor2 transition-transform duration-200 group-open:rotate-90" aria-hidden="true" />
+        <ChevronRight size={16} class="shrink-0 text-subtext transition-transform duration-200 group-open:rotate-90" aria-hidden="true" />
         <span>{label}</span>
-        {#if summary}<span class="ml-auto text-sm text-textcolor2 tabular-nums">{summary}</span>{/if}
+        {#if summary}<span class="ml-auto text-sm text-subtext tabular-nums">{summary}</span>{/if}
     </summary>
 {/snippet}
 
@@ -268,7 +323,7 @@
         <SettingButton variant="secondary" busy={view.loading} onclick={() => dashboard.load()}>{strings.refresh}</SettingButton>
     {/snippet}
     {#if view.loadFailed}
-        <p class="px-4 py-3 text-sm text-textcolor2" role="alert" aria-live="assertive">{rollup ? strings.staleTotals : strings.loadFailed}</p>
+        <p class="px-4 py-3 text-sm text-subtext" role="alert" aria-live="assertive">{rollup ? strings.staleTotals : strings.loadFailed}</p>
     {/if}
     {#if view.loading && !rollup}
         <!-- The placeholder keeps the loaded shape: the total, the bar, and one legend line. -->
@@ -285,10 +340,10 @@
         <div data-storage-summary class="p-4">
             <div class="flex flex-wrap items-end justify-between gap-x-6 gap-y-2">
                 <div>
-                    <div class="text-xs text-textcolor2">{strings.total}</div>
+                    <div class="text-xs text-subtext">{strings.total}</div>
                     <div class="text-[1.7rem] leading-tight font-bold tabular-nums">{formatRisuNestStorageBytes(totalBytes)}</div>
                 </div>
-                <p class="text-sm text-textcolor2">
+                <p class="text-sm text-subtext">
                     {strings.counts
                         .replace('{0}', formatCount(rollup.counts.characters))
                         .replace('{1}', formatCount(rollup.counts.conversations))
@@ -312,7 +367,7 @@
                     <li class="flex flex-col {segment.id === 'media' && mediaNote ? 'col-span-full' : ''}">
                         <div class="flex items-center gap-2">
                             <span class="h-2.5 w-2.5 shrink-0 rounded-xs {segment.color}" aria-hidden="true"></span>
-                            <span class="min-w-0 flex-1 text-textcolor2 break-keep">{segment.label}</span>
+                            <span class="min-w-0 flex-1 text-subtext break-keep">{segment.label}</span>
                             <span class="shrink-0 whitespace-nowrap tabular-nums">{formatRisuNestStorageBytes(segment.bytes)}</span>
                         </div>
                         <!-- The placeholder holds the note's line so the legend does not move when the note arrives. -->
@@ -321,12 +376,12 @@
                                 <span class="h-2.5 w-32 max-w-full animate-pulse rounded-xs bg-darkbutton"></span>
                             </div>
                         {:else if segment.id === 'media' && offDeviceNote}
-                            <div data-storage-off-device class="pl-[18px] text-xs text-textcolor2 tabular-nums">{offDeviceNote}</div>
+                            <div data-storage-off-device class="pl-[18px] text-xs text-subtext tabular-nums">{offDeviceNote}</div>
                         {/if}
                     </li>
                 {/each}
             </ul>
-            <p class="mt-2 text-xs text-textcolor2">
+            <p class="mt-2 text-xs text-subtext">
                 {strings.subMetrics
                     .replace('{0}', formatRisuNestStorageBytes(cardBytes('inlays')))
                     .replace('{1}', formatRisuNestStorageBytes(cardBytes('plugins')))}
@@ -341,8 +396,8 @@
             {#if view.failedSources.includes('snapshots')}<p role="alert" class={listNoteClass}>{strings.loadFailed}</p>{/if}
             {#each view.snapshots as snapshot (snapshot.id)}
                 <div data-storage-backup-row class={listRowClass}>
-                    <span class="min-w-0 flex-1 break-words tabular-nums">{new Date(snapshot.modifiedAt).toLocaleString()}<span class="ml-2 text-textcolor2">{snapshotReason(snapshot.reason)}</span></span>
-                    <span class="text-textcolor2 tabular-nums">{formatRisuNestStorageBytes(snapshot.bytes)}</span>
+                    <span class="min-w-0 flex-1 break-words tabular-nums">{new Date(snapshot.modifiedAt).toLocaleString()}<span class="ml-2 text-subtext">{snapshotReason(snapshot.reason)}</span></span>
+                    <span class="text-subtext tabular-nums">{formatRisuNestStorageBytes(snapshot.bytes)}</span>
                     <SettingButton variant="secondary" busy={restoringSnapshot === snapshot.id} disabled={restoringSnapshot !== null || isBusy(`delete-snapshot:${snapshot.id}`)} onclick={() => restoreSnapshot(snapshot.id)}>{strings.restoreSnapshot}</SettingButton>
                     <SettingButton variant="secondary" busy={isBusy(`delete-snapshot:${snapshot.id}`)} disabled={restoringSnapshot !== null} onclick={() => deleteSnapshot(snapshot.id)}>{language.remove}</SettingButton>
                 </div>
@@ -358,7 +413,7 @@
             {#each view.conflictBackups as backup (backup.id)}
                 <div data-storage-backup-row class={listRowClass}>
                     <span class="min-w-0 flex-1 break-words tabular-nums">{new Date(backup.createdAt).toLocaleString()}</span>
-                    <span class="text-textcolor2 tabular-nums">{formatRisuNestStorageBytes(backup.byteLength)}</span>
+                    <span class="text-subtext tabular-nums">{formatRisuNestStorageBytes(backup.byteLength)}</span>
                     <SettingButton variant="secondary" busy={isBusy(`delete-conflict-backup:${backup.id}`)} onclick={() => deleteConflictBackup(backup.id)}>{language.remove}</SettingButton>
                 </div>
             {:else}
@@ -372,8 +427,8 @@
             {#if view.tempUsage}
                 <div data-storage-temp-row class="grid items-center gap-x-6 gap-y-2 border-t border-darkborderc/55 py-2 pr-4 pl-10 text-sm @xl:grid-cols-[minmax(50%,1fr)_auto]">
                     <div class="min-w-0">
-                        <span class="text-textcolor2 tabular-nums">{syncLabels.protected} {formatRisuNestStorageBytes(view.tempUsage.protectedBytes)} · {syncLabels.reclaimable} {formatRisuNestStorageBytes(view.tempUsage.reclaimableBytes)}</span>
-                        {#if view.tempUsage.blockedReason}<p class="mt-0.5 text-xs text-textcolor2">{describeBlockedReason(view.tempUsage.blockedReason)}</p>{/if}
+                        <span class="text-subtext tabular-nums">{syncLabels.protected} {formatRisuNestStorageBytes(view.tempUsage.protectedBytes)} · {syncLabels.reclaimable} {formatRisuNestStorageBytes(view.tempUsage.reclaimableBytes)}</span>
+                        {#if view.tempUsage.blockedReason}<p class="mt-0.5 text-xs text-subtext">{describeBlockedReason(view.tempUsage.blockedReason)}</p>{/if}
                     </div>
                     <div class="flex flex-wrap items-center gap-2 @xl:justify-self-end">
                         <SettingButton variant="secondary" busy={isBusy('cleanup-temp')} disabled={view.tempUsage.reclaimableBytes === 0 || Boolean(view.tempUsage.blockedReason)} onclick={cleanupTemp}>{syncLabels.clean}</SettingButton>
@@ -385,6 +440,20 @@
         </details>
         {/if}
 
+    <SettingRow inline data-storage-setting="automatic-snapshots" label={strings.automaticSnapshots} help={strings.automaticSnapshotsHelp}>
+        <SettingToggle checked={automaticSnapshots} onchange={setAutomaticSnapshots} label={strings.automaticSnapshots} />
+    </SettingRow>
+    <SettingRow data-storage-setting="snapshot-keep-count" label={strings.snapshotKeepCount} help={strings.snapshotKeepCountHelp.replace('{0}', formatCount(MAX_SNAPSHOT_KEEP_COUNT))}>
+        <NumberInput
+            size="sm"
+            min={1}
+            max={MAX_SNAPSHOT_KEEP_COUNT}
+            ariaLabel={strings.snapshotKeepCount}
+            className="w-28 text-right"
+            bind:value={keepCount}
+            onChange={commitKeepCount}
+        />
+    </SettingRow>
     {#if view.stats}
         <SettingRow data-storage-action="snapshot" label={strings.createSnapshotTitle} help={strings.createSnapshotHelp}>
             <SettingButton busy={isBusy('create-snapshot')} onclick={createSnapshot}>{strings.createSnapshot}</SettingButton>
@@ -416,34 +485,34 @@
                     {#snippet gcRow(candidate: NativeAssetGcCandidate)}
                         <div data-storage-gc-row class="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 px-3 py-1.5 text-sm">
                             <span class="font-mono text-xs break-all">{candidate.objectHash.slice(0, 12)}</span>
-                            <span class="tabular-nums text-textcolor2">{formatRisuNestStorageBytes(candidate.bytes)}</span>
-                            <span class="min-w-0 flex-1 text-textcolor2">{gcReason(candidate)}</span>
+                            <span class="tabular-nums text-subtext">{formatRisuNestStorageBytes(candidate.bytes)}</span>
+                            <span class="min-w-0 flex-1 text-subtext">{gcReason(candidate)}</span>
                         </div>
                     {/snippet}
                     {#if gcDeletable.length > 0}
                         <details data-storage-gc-list class="group mt-2" open>
                             <summary class="flex cursor-pointer list-none items-center gap-2 text-sm select-none [&::-webkit-details-marker]:hidden">
-                                <ChevronRight size={16} class="shrink-0 text-textcolor2 transition-transform duration-200 group-open:rotate-90" aria-hidden="true" />
+                                <ChevronRight size={16} class="shrink-0 text-subtext transition-transform duration-200 group-open:rotate-90" aria-hidden="true" />
                                 <span>{strings.gcListTitle}</span>
-                                <span class="text-textcolor2 tabular-nums">{formatCount(gcDeletable.length)}</span>
+                                <span class="text-subtext tabular-nums">{formatCount(gcDeletable.length)}</span>
                             </summary>
                             <div class="mt-1 divide-y divide-darkborderc/55 rounded-md border border-darkborderc/55">
                                 {#each gcDeletable as candidate (candidate.objectHash)}
                                     {@render gcRow(candidate)}
                                 {/each}
                                 {#if view.gcPreview.omitted}
-                                    <p class="px-3 py-1.5 text-sm text-textcolor2">{strings.gcListMore.replace('{0}', formatCount(view.gcPreview.omitted))}</p>
+                                    <p class="px-3 py-1.5 text-sm text-subtext">{strings.gcListMore.replace('{0}', formatCount(view.gcPreview.omitted))}</p>
                                 {/if}
                             </div>
                         </details>
                     {/if}
                     {#if gcKept.length > 0}
                         <details data-storage-gc-kept class="group mt-2">
-                            <summary class="flex cursor-pointer list-none items-center gap-2 text-sm text-textcolor2 select-none [&::-webkit-details-marker]:hidden">
+                            <summary class="flex cursor-pointer list-none items-center gap-2 text-sm text-subtext select-none [&::-webkit-details-marker]:hidden">
                                 <ChevronRight size={16} class="shrink-0 transition-transform duration-200 group-open:rotate-90" aria-hidden="true" />
                                 <span>{strings.gcListKept.replace('{0}', formatCount(gcKept.length))}</span>
                             </summary>
-                            <p class="mt-1 text-[13px] leading-normal text-textcolor2">{strings.gcListKeptHelp}</p>
+                            <p class="mt-1 text-[13px] leading-normal text-subtext">{strings.gcListKeptHelp}</p>
                             <div class="mt-1 divide-y divide-darkborderc/55 rounded-md border border-darkborderc/55">
                                 {#each gcKept as candidate (candidate.objectHash)}
                                     {@render gcRow(candidate)}
@@ -453,6 +522,10 @@
                     {/if}
                 {/if}
             {/snippet}
+        </SettingRow>
+        <SettingRow data-storage-action="compact" label={strings.compactTitle} help={strings.compactHelp}>
+            <span class="text-sm text-subtext tabular-nums">{strings.compactReclaimable.replace('{0}', formatRisuNestStorageBytes(view.stats.databaseReclaimableBytes))}</span>
+            <SettingButton variant="secondary" busy={requestingCompaction} disabled={view.stats.databaseReclaimableBytes === 0} onclick={compactDatabase}>{strings.compact}</SettingButton>
         </SettingRow>
     {/if}
 </SettingGroup>

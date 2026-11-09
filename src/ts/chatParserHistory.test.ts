@@ -8,6 +8,19 @@ import {
 } from './chatParserHistory'
 
 describe('chat parser history classification', () => {
+    it.each(['lastmessage', 'previouscharchat', 'history'])('plans the legacy opener like a normal expression: %s', (name) => {
+        expect(planChatParserHistory({ source: `{#${name}}}` })).toEqual(planChatParserHistory({ source: `{{${name}}}` }))
+    })
+
+    it('extracts nested expressions inside a legacy block and expressions after it', () => {
+        expect(planChatParserHistory({ source: '{#if x\n{{previouschatlog::2}}#}{{lastmessage}}' }))
+            .toEqual(planChatParserHistory({ source: '{{previouschatlog::2}}{{lastmessage}}' }))
+        expect(planChatParserHistory({ source: '{#if x\n{{previouschatlog::2}}#}{{#pure}}{{history}}{{/pure}}{{lastmessage}}' }))
+            .toEqual(planChatParserHistory({ source: '{{previouschatlog::2}}{{lastmessage}}' }))
+        expect(planChatParserHistory({ source: '{#history#}{{lastmessage}}' }))
+            .toEqual(planChatParserHistory({ source: '{{lastmessage}}' }))
+    })
+
     it.each([
         '{{#if 1}}HP{{/if}}', '{{#when::1::is::1}}HP{{/when}}',
         '{{#pure}}HP{{/pure}}', '{{#escape}}HP{{/escape}}',

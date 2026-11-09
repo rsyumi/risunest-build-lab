@@ -262,7 +262,7 @@ impl Store {
                     }
                     if checked.elapsed() >= Duration::from_millis(100) {
                         checked = Instant::now();
-                        self.download_delta_progress(&Device { id: device.clone() }, &id)
+                        self.download_delta_progress(&Device::resumed(device.clone()), &id)
                             .map_err(|_| WireError("delta-cancelled"))?;
                     }
                     Ok(())

@@ -176,32 +176,6 @@ describe('selectHistoryWindow', () => {
         expect(window.endedAtAllBefore).toBe(true)
     })
 
-    it('counts each page it loads in one prefetch, newest first, before counting its messages', async () => {
-        const all = messages(20, { 15: { disabled: true }, 6: { disabled: 'allBefore' } })
-        const { reader } = readerOf(all)
-        const events: string[] = []
-
-        const window = await selectHistoryWindow({
-            reader,
-            tokenBudget: 1000,
-            countTokens: async (text) => {
-                events.push(text)
-                return 10
-            },
-            prefetchTokens: async (texts) => {
-                events.push(`prefetch ${texts.join(' ')}`)
-            },
-            minimumMessages: 1,
-            pageSize: 8,
-        })
-
-        expect(window.start).toBe(6)
-        expect(events).toEqual([
-            'prefetch m19 m18 m17 m16 m14 m13 m12', 'm19', 'm18', 'm17', 'm16', 'm14', 'm13', 'm12',
-            'prefetch m11 m10 m9 m8 m7', 'm11', 'm10', 'm9', 'm8', 'm7',
-        ])
-    })
-
     it('returns an empty window for an empty conversation', async () => {
         const { reader, reads } = readerOf([])
 

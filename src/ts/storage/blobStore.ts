@@ -76,6 +76,11 @@ export interface BlobReadRange {
     endExclusive: number
 }
 
+export interface BlobReadOptions {
+    /** A background read starts after the waiting foreground reads of native storage. */
+    background?: boolean
+}
+
 export interface BlobListQuery {
     kind?: BlobKind
 }
@@ -103,7 +108,7 @@ export interface BlobStore {
         data: Uint8Array,
         input: { name: string, options?: InlayEncodeOptions, metadata?: Record<string, unknown> },
     ): Promise<InlayBlobMetadata>
-    read(key: string, range?: BlobReadRange): Promise<Uint8Array | null>
+    read(key: string, range?: BlobReadRange, options?: BlobReadOptions): Promise<Uint8Array | null>
     stat(key: string): Promise<BlobMetadata | null>
     statMany?(keys: readonly string[]): Promise<(BlobMetadata | null)[]>
     list(query?: BlobListQuery): Promise<BlobMetadata[]>

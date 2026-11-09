@@ -7,11 +7,13 @@ import type { ChatScreenshotRenderContext } from '../../../chatScreenshotRange'
 import { planChatParserHistory } from '../../../chatParserHistory'
 import { captureResidentCbsHistory, prepareCbsHistory, type CbsHistoryReader } from '../../../prepareCbsHistory'
 import { createCbsHistoryAccess, CbsHistoryAccessError } from '../../../cbsHistoryAccess'
+import { RevisionConflictError } from '../../../storage/persistentDataStore'
 import type { PersistentDataRuntime } from '../../../storage/persistentDataRuntime'
 import { RegexExecutor } from '../../../process/regexExecutor'
 import { getRegexExecutionPlan } from '../../../process/regexExecutionPlan'
 import { RegexWorkerClient } from '../../../process/regexWorkerClient'
 import { InMemoryWorker } from '../../../../../tests/support/regexWorker'
+import { authorNotePresetLinkPatch } from '../../../authorNotePresets'
 
 vi.mock('../../../platform', async () => (await import('../../../platform.testSupport')).platformModule({ runtime: 'web', os: 'windows' }))
 
@@ -139,7 +141,7 @@ async function createProductScreenshotJob(input: {
     const parserContext = input.renderContext.parserContext
     const sourceCharacter = parserContext.character
     const sourceChat = sourceCharacter.chats[sourceCharacter.chatPage]
-    const captureCharacter = snapshotChatScreenshotCharacter(sourceCharacter, sourceChat)
+    const captureCharacter = snapshotChatScreenshotCharacter(sourceCharacter, sourceChat, parserContext.database.authorNotePresets)
     const renderContext: ChatScreenshotRenderContext = {
         ...input.renderContext,
         parserContext: {
@@ -261,6 +263,45 @@ test.each(['navigate', 'stream', 'promote', 'unload'])('Plugin parsing retains i
     if (action === 'stream') expect(await parseRisuChat('{{lastmessage}}')).toBe('next stream token')
 })
 
+test.each(['acquire', 'read'])('Plugin parsing maps a conflicting %s to a target change', async (stage) => {
+    const character = live.database.characters[0]
+    character.chats[0].id = 'conflicting-conversation'
+    character.chats[0] = createMetadataOnlySelectedConversation(character.chats[0])
+    let released = false
+    live.runtime = {
+        captureSelectedConversationAuthority: () => ({ totalMessages: 2, storeRevision: 1 }),
+        getActiveConversationViewportSource: () => null,
+        store: { acquireRevision: async () => {
+            if (stage === 'acquire') throw new RevisionConflictError(1, 2)
+            return {
+                revision: 1,
+                readConversationWindow: async () => { throw new RevisionConflictError(1, 2) },
+                release: async () => { released = true },
+            }
+        } },
+    } as unknown as PersistentDataRuntime
+    await expect(parseRisuChat('{{previouschatlog::0}}')).rejects.toMatchObject({ name: 'PluginParserTargetChangedError' })
+    expect(released).toBe(stage === 'read')
+})
+
+test.each([new Error('primary read failed'), 0, undefined])('Plugin parsing preserves a read error %s when lease cleanup fails', async (primary) => {
+    const character = live.database.characters[0]
+    character.chats[0].id = 'cleanup-conversation'
+    character.chats[0] = createMetadataOnlySelectedConversation(character.chats[0])
+    let released = false
+    live.runtime = {
+        captureSelectedConversationAuthority: () => ({ totalMessages: 2, storeRevision: 1 }),
+        getActiveConversationViewportSource: () => null,
+        store: { acquireRevision: async () => ({
+            revision: 1,
+            readConversationWindow: async () => { throw primary },
+            release: async () => { released = true; throw new Error('cleanup failed') },
+        }) },
+    } as unknown as PersistentDataRuntime
+    await expect(parseRisuChat('{{previouschatlog::0}}')).rejects.toBe(primary)
+    expect(released).toBe(true)
+})
+
 test('Plugin regex passes read only the history exposed by their actual output', async () => {
     const character = live.database.characters[0]
     const messages: Message[] = Array.from({ length: 80 }, (_, index) => ({ role: 'char', data: `row ${index}` }))
@@ -323,6 +364,7 @@ test('prepared CBS reads match complete history for composed expressions and spa
         '{{previouschatlog::2}}|{{previous_chat_log::70}}', '{{lastmessage}}',
         '{{previouscharchat}}', '{{previoususerchat}}', '{{messageidleduration}}',
         '{{messagetime}}|{{messagedate}}|{{role}}', '{{idleduration}}',
+        '{#lastmessage}}', '{#previouscharchat}}', '{#history}}',
         '{{history}}', '{{userhistory}}', '{{charhistory}}', '{{messageunixtimearray}}',
         '{{{{getvar::macro}}}}', '{{#if 1}}{{lastmessage}}{{/if}}',
         '{{#pure}}{{lastmessage}}{{/pure}}', '{{#each {{array::a::b}}}}{{previouscharchat}}{{/each}}',
@@ -374,6 +416,99 @@ test('prepared CBS reads match complete history for composed expressions and spa
     expect(count.dependencies.affectedBy([{ start: 80, end: 81, countChanged: true }])).toBe(true)
 })
 
+test.each(['retained', 'first pass'])('fully loaded live displays survive a commit during %s preparation', async (timing) => {
+    const character = live.database.characters[0]
+    character.chats[0].id = 'chat'
+    let revision = 1
+    const source = new PersistentConversationViewportSource({ characterId: character.chaId,
+        conversationId: 'chat', revision, totalMessages: 2, rowBudget: 8,
+        reader: { readConversationWindow: async () => { throw new Error('Unexpected persisted history read') } } })
+    live.runtime = {
+        captureSelectedConversationTarget: () => ({ characterId: character.chaId, conversationId: 'chat', storeRevision: revision, navigationGeneration: 0 }),
+        captureSelectedConversationAuthority: () => null,
+        getActiveConversationViewportSource: () => source,
+        acquireCompleteConversation: () => { throw new Error('Unexpected complete promotion') },
+    } as unknown as PersistentDataRuntime
+    const onStale = vi.fn()
+    const pending = acquireLiveDisplayParserLease({ source: '{{previouschatlog::0}}', character,
+        signal: new AbortController().signal, parseFirst: true, chatID: -1, onStale })
+    const retained = timing === 'retained' ? await pending : undefined
+    revision = 2
+    source.advanceUnchangedRevision(revision)
+    const lease = retained ?? await pending
+    try {
+        expect(lease?.projection?.parsedSource).toBe('Live previous')
+        const access = await lease!.projection!.context.parserContext.prepareHistory!('{{lastmessage}}', -1, false)
+        expect(access.row(1)?.data).toBe('Live current')
+        expect(onStale).not.toHaveBeenCalled()
+    } finally {
+        lease?.release()
+        source.dispose()
+    }
+})
+
+test.each([false, true])('initial live display preparation retries a revision-only advance unless aborted (%s)', async (abort) => {
+    const character = live.database.characters[0]
+    const messages = character.chats[0].message
+    character.chats[0].id = 'chat'
+    character.chats[0] = createMetadataOnlySelectedConversation(character.chats[0])
+    let revision = 1
+    let started!: () => void
+    const reading = new Promise<void>((resolve) => { started = resolve })
+    let finish!: () => void
+    const pendingRead = new Promise<void>((resolve) => { finish = resolve })
+    const readConversationWindow: CbsHistoryReader['readConversationWindow'] = async (query) => {
+        const readRevision = revision
+        if (readRevision === 1) {
+            started()
+            await pendingRead
+        }
+        if (readRevision !== revision) throw new RevisionConflictError(readRevision, revision)
+        const start = query.startIndex!, end = start + query.limit!
+        return { revision, value: { characterId: character.chaId, conversationId: 'chat',
+            startIndex: start, endIndex: end, totalMessages: messages.length, messages: messages.slice(start, end),
+            hasMoreBefore: start > 0, hasMoreAfter: end < messages.length } }
+    }
+    const source = new PersistentConversationViewportSource({ characterId: character.chaId,
+        conversationId: 'chat', revision, totalMessages: messages.length, rowBudget: 8, reader: { readConversationWindow } })
+    live.runtime = {
+        captureSelectedConversationTarget: () => ({ characterId: character.chaId, conversationId: 'chat', storeRevision: revision, navigationGeneration: 0 }),
+        captureSelectedConversationAuthority: () => ({ totalMessages: source.snapshot().totalMessages, storeRevision: revision }),
+        getActiveConversationViewportSource: () => source,
+        store: { acquireRevision: async (expected: number) => {
+            if (expected !== revision) throw new RevisionConflictError(expected, revision)
+            return { revision, readConversationWindow, release: async () => {} }
+        } },
+        acquireCompleteConversation: () => { throw new Error('Unexpected complete promotion') },
+    } as unknown as PersistentDataRuntime
+    const controller = new AbortController()
+    const onStale = vi.fn()
+    try {
+        const pending = acquireLiveDisplayParserLease({ source: '{{previouschatlog::0}}', character,
+            signal: controller.signal, parseFirst: true, chatID: -1, onStale })
+        const rejected = expect(pending).rejects.toThrow(RevisionConflictError)
+        await reading
+        revision = 2
+        source.advanceUnchangedRevision(revision)
+        if (abort) controller.abort()
+        finish()
+        await rejected
+        expect(onStale).toHaveBeenCalledTimes(abort ? 0 : 1)
+
+        const fresh = await acquireLiveDisplayParserLease({ source: '{{previouschatlog::0}}', character,
+            signal: new AbortController().signal, parseFirst: true, chatID: -1, onStale })
+        try {
+            expect(fresh?.projection?.parsedSource).toBe('Live previous')
+            expect(fresh?.projection?.revision).toBe(2)
+            expect(onStale).toHaveBeenCalledTimes(abort ? 0 : 1)
+        } finally { fresh?.release() }
+    } finally {
+        controller.abort()
+        finish()
+        source.dispose()
+    }
+})
+
 test('background and bookmark contexts read precise history and refresh on unpersisted tail edits', async () => {
     const character = live.database.characters[0]
     const messages = character.chats[0].message
@@ -383,17 +518,21 @@ test('background and bookmark contexts read precise history and refresh on unper
     const readConversationWindow: CbsHistoryReader['readConversationWindow'] = async (query) => {
         const start = query.startIndex!, end = start + query.limit!
         for (let index = start; index < end; index++) bodyIndices.push(index)
-        return { revision: 1, value: { characterId: character.chaId, conversationId: 'chat',
+        return { revision, value: { characterId: character.chaId, conversationId: 'chat',
             startIndex: start, endIndex: end, totalMessages: 2, messages: messages.slice(start, end),
             hasMoreBefore: start > 0, hasMoreAfter: end < 2 } }
     }
     const source = new PersistentConversationViewportSource({ characterId: character.chaId,
         conversationId: 'chat', revision: 1, totalMessages: 2, rowBudget: 8, reader: { readConversationWindow } })
+    let revision = 1
     const release = vi.fn(async () => {})
-    const acquireRevision = vi.fn(async () => ({ revision: 1, readConversationWindow, release }))
+    const acquireRevision = vi.fn(async (expected) => {
+        if (expected !== revision) throw new Error('RevisionConflict')
+        return { revision, readConversationWindow, release }
+    })
     live.runtime = {
-        captureSelectedConversationTarget: () => ({ characterId: character.chaId, conversationId: 'chat', storeRevision: 1, navigationGeneration: 0 }),
-        captureSelectedConversationAuthority: () => ({ totalMessages: source.snapshot().totalMessages, storeRevision: 1 }),
+        captureSelectedConversationTarget: () => ({ characterId: character.chaId, conversationId: 'chat', storeRevision: revision, navigationGeneration: 0 }),
+        captureSelectedConversationAuthority: () => ({ totalMessages: source.snapshot().totalMessages, storeRevision: revision }),
         getActiveConversationViewportSource: () => source,
         subscribeActiveConversationViewportSource: (listener) => { listener(source); return () => {} },
         store: { acquireRevision },
@@ -404,6 +543,25 @@ test('background and bookmark contexts read precise history and refresh on unper
     const prepare = (text: string, parseFirst = true) => acquireLiveDisplayParserLease({
         source: text, character, signal: new AbortController().signal, parseFirst, chatID: parseFirst ? -1 : 1,
     })
+    const revisionStale = vi.fn()
+    const retained = await acquireLiveDisplayParserLease({ source: 'plain', character,
+        signal: new AbortController().signal, parseFirst: true, chatID: -1, onStale: revisionStale })
+    const silent = vi.fn()
+    const stopSilent = source.subscribe(silent)
+    silent.mockClear()
+    revision = 2
+    source.advanceUnchangedRevision(revision)
+    expect(silent).not.toHaveBeenCalled()
+    expect(revisionStale).not.toHaveBeenCalled()
+    await expect(retained!.projection!.context.parserContext.prepareHistory!('{{previouschatlog::0}}', -1, false)).rejects.toThrow()
+    expect(revisionStale).toHaveBeenCalledOnce()
+    retained?.release()
+    const fresh = await prepare('{{previouschatlog::0}}')
+    expect(fresh?.projection?.parsedSource).toBe('Live previous')
+    fresh?.release()
+    stopSilent()
+    bodyIndices.length = 0
+    acquireRevision.mockClear()
     character.customscript = [{ type: 'editdisplay', in: 'HP', out: '<b>HP</b>', flag: 'g', ableFlag: true }] as any
     const plain = await prepare('{{#when::1::is::1}}HP{{/when}}')
     expect(await ParseMarkdown(plain!.projection!.parsedSource!, character, 'back', -1, {}, {
@@ -414,6 +572,11 @@ test('background and bookmark contexts read precise history and refresh on unper
     expect(acquireRevision).not.toHaveBeenCalled()
     plain?.release()
     await expect(plain!.projection!.context.parserContext.prepareHistory!('{{lastmessage}}', -1, false)).rejects.toThrow('Live display lease is closed')
+    for (const name of ['lastmessage', 'previouscharchat']) {
+        const legacy = await prepare(`{#${name}}}`)
+        expect(legacy?.projection?.parsedSource).toBe('Live current')
+        legacy?.release()
+    }
     const background = await prepare('{{previouscharchat}}|{{lastmessageindex}}')
     expect(background?.projection?.parsedSource).toBe('Live current|1')
     const inputs = captureLiveDisplayParserInputs('{{getvar::live}}', character)
@@ -1218,7 +1381,7 @@ test('keeps chardisplayasset command and exclusions in the minimal frozen charac
     ]
     source.prebuiltAssetCommand = true
     source.prebuiltAssetExclude = ['excluded.png']
-    const projected = snapshotChatScreenshotCharacter(source, source.chats[0])
+    const projected = snapshotChatScreenshotCharacter(source, source.chats[0], undefined)
     const database = { characters: [projected] } as Database
 
     live.database = makeDatabase(makeCharacter('Changed'), 'Changed')
@@ -1230,4 +1393,18 @@ test('keeps chardisplayasset command and exclusions in the minimal frozen charac
 
     expect(output).toContain('Visible display asset')
     expect(output).not.toContain('Excluded display asset')
+})
+
+test('keeps the author note of a preset-linked chat in the minimal frozen character', () => {
+    const source = makeCharacter('Frozen')
+    const preset = { id: 'preset', name: 'Preset', text: 'Frozen preset note' }
+    Object.assign(source.chats[0], authorNotePresetLinkPatch(preset, 'Stale copy'))
+    const projected = snapshotChatScreenshotCharacter(source, source.chats[0], [preset])
+    preset.text = 'Edited after capture'
+
+    expect(risuChatParser('{{authornote}}', {
+        db: { characters: [projected] } as Database,
+        chara: projected,
+        selectedCharID: 0,
+    })).toBe('Frozen preset note')
 })

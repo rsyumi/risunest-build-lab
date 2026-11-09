@@ -15,6 +15,7 @@ import {
     resolveNativeFileJobStage,
     portableBodyRetryRequest,
     retryNativePortableRestoreBodies,
+    type NativeFileJobFailureOwner,
     type NativeFileJobResult,
     type NativeFileJobStage,
     type NativeFileJobStatus,
@@ -52,6 +53,25 @@ export interface NativeFileOperationState {
     cancelRequested: boolean
     partialWritesPossible: boolean
     waitingForSync?: boolean
+    batch?: NativeFileOperationBatch
+}
+
+export interface NativeFileOperationBatchFailure {
+    name: string
+    error: NativeFileOperationError
+}
+
+/** Several files imported one after another in one operation. */
+export interface NativeFileOperationBatch {
+    /** One-based position of the file in progress; 0 before the first starts. */
+    index: number
+    total: number
+    imported: number
+    failures: NativeFileOperationBatchFailure[]
+    /** Files that ended without an import or an error: a converter refused them with its own alert, or the user stopped them. */
+    declined: string[]
+    /** Warnings of the files already finished. */
+    warningCodes: string[]
 }
 
 export type NativeFileOperationOutcomeState = 'succeeded' | 'failed' | 'cancelled'
@@ -62,6 +82,7 @@ export interface NativeFileOperationError {
     recoveryRequired: boolean
     /** The kind of a refused item that is too large to save. */
     itemKind?: string
+    owner?: NativeFileJobFailureOwner
 }
 
 export interface NativeFileOperationOutcome {
@@ -79,6 +100,7 @@ export interface NativeFileOperationOutcome {
     warningCodes: string[]
     partialWritesPossible: boolean
     interruption?: 'background-expired'
+    batch?: Omit<NativeFileOperationBatch, 'index' | 'warningCodes'>
 }
 
 export interface SharedNativeFileOperationContext {
@@ -90,6 +112,12 @@ export interface SharedNativeFileOperationContext {
     releaseLibraryAfterPortableAdoption(receipt: NativeFileJobStatus): Promise<void>
     /** With `protectAfterPicker`, begins the background task once the picker has returned. */
     protect(): void
+    /** Makes this a batch of `total` files, reported together in one outcome. */
+    beginBatch(total: number): void
+    /** Starts the batch file at the one-based `index`; its progress replaces the previous file's. */
+    beginBatchItem(index: number, source: NativeFileOperationSource): void
+    /** Records how one batch file ended; a failed file does not stop the batch. */
+    recordBatchItem(name: string, result: { imported: boolean } | { error: unknown }): void
 }
 
 export interface SharedNativeFileOperationOptions {
@@ -98,6 +126,8 @@ export interface SharedNativeFileOperationOptions {
     userInitiated?: boolean
     /** The operation opens a system picker first and calls `protect` once it returns. */
     protectAfterPicker?: boolean
+    /** Cancels the operation like the dialog's cancel control, including while it waits for sync. */
+    signal?: AbortSignal
     presentation?: NativeFileOperationPresentation
     format?: NativeFileOperationFormat
     snapshotBodyOwner?: NativeSnapshotBodiesStarted
@@ -189,7 +219,8 @@ function outcomeError(kind: NativeFileOperationKind, error: unknown): NativeFile
         'message' in error && typeof error.message === 'string'
     ) {
         return { code: error.code, message: error.message, recoveryRequired: false,
-            ...('itemKind' in error && typeof error.itemKind === 'string' ? { itemKind: error.itemKind } : {}) }
+            ...('itemKind' in error && typeof error.itemKind === 'string' ? { itemKind: error.itemKind } : {}),
+            ...(error instanceof NativeFileJobError && error.owner ? { owner: error.owner } : {}) }
     }
     return {
         code: `${kind}-error`,
@@ -203,7 +234,10 @@ function outcomeFromSettlement(
     settlement: Settlement,
     finishedAt: number,
 ): NativeFileOperationOutcome | null {
-    const statusWarnings = state.status?.result?.warningCodes ?? []
+    const statusWarnings = mergeWarningCodes(state.batch?.warningCodes ?? [], state.status?.result?.warningCodes ?? [])
+    const batch = state.batch
+        ? { total: state.batch.total, imported: state.batch.imported, failures: state.batch.failures, declined: state.batch.declined }
+        : undefined
     const base = {
         kind: state.kind,
         ...(state.format ? { format: state.format } : {}),
@@ -214,6 +248,7 @@ function outcomeFromSettlement(
         observedStages: state.observedStages,
         ...(state.status?.result ? { result: state.status.result } : {}),
         partialWritesPossible: state.partialWritesPossible,
+        ...(batch ? { batch } : {}),
     }
     if ('error' in settlement) {
         const warningCodes = mergeWarningCodes(statusWarnings, stringWarningCodes(settlement.error))
@@ -229,6 +264,13 @@ function outcomeFromSettlement(
             error: outcomeError(state.kind, settlement.error),
             warningCodes,
         }
+    }
+    if (batch) {
+        // A batch reports its files, whatever value the last one returned.
+        const warningCodes = mergeWarningCodes(stringWarningCodes(settlement.value), statusWarnings)
+        if (batch.failures.length) return { ...base, state: 'failed', error: batch.failures[0].error, warningCodes }
+        // Nothing imported means every file was left out, which the converter alerts or the user's own refusals already showed.
+        return batch.imported ? { ...base, state: 'succeeded', warningCodes } : null
     }
     if (settlement.value && typeof settlement.value === 'object' && 'kind' in settlement.value
         && ['missing', 'unchanged', 'kept-local'].includes(String(settlement.value.kind))) return null
@@ -335,9 +377,15 @@ function runSharedNativeFileOperationWithAdmission<T>(
         partialWritesPossible: false,
     }
     if (presentation === 'dialog') nativeFileOperationOutcome.set(null)
+    const cancel = () => {
+        if (activeController !== controller) return
+        controller.abort()
+        updateActiveState({ cancelRequested: true })
+    }
 
     const settle = (settlement: Settlement) => {
         if (activeOperation !== promise) return
+        options.signal?.removeEventListener('abort', cancel)
         const state = activeState
         activeOperation = null
         activeOperationKey = null
@@ -356,6 +404,8 @@ function runSharedNativeFileOperationWithAdmission<T>(
     const promise = new Promise<T>((resolve, reject) => { resolveOperation = resolve; rejectOperation = reject })
     activeOperation = promise
     publishActiveState()
+    if (options.signal?.aborted) cancel()
+    else options.signal?.addEventListener('abort', cancel, { once: true })
     const context: SharedNativeFileOperationContext = {
         signal: controller.signal,
         onStatus: status => { if (activeController === controller) recordStatus(status) },
@@ -374,6 +424,26 @@ function runSharedNativeFileOperationWithAdmission<T>(
             releaseAdmission()
         },
         protect: () => {},
+        beginBatch: total => {
+            if (activeController === controller) updateActiveState({ batch: { index: 0, total, imported: 0, failures: [], declined: [], warningCodes: [] } })
+        },
+        beginBatchItem: (index, source) => {
+            const batch = activeController === controller ? activeState?.batch : undefined
+            if (!batch) return
+            const finished = activeState?.status?.result?.warningCodes ?? []
+            updateActiveState({
+                source, status: undefined, observedStages: [],
+                batch: { ...batch, index, warningCodes: mergeWarningCodes(batch.warningCodes, finished) },
+            })
+        },
+        recordBatchItem: (name, result) => {
+            const batch = activeController === controller ? activeState?.batch : undefined
+            if (!batch) return
+            updateActiveState({ batch: 'error' in result
+                ? { ...batch, failures: [...batch.failures, { name, error: outcomeError(kind, result.error) }] }
+                : result.imported ? { ...batch, imported: batch.imported + 1 }
+                : { ...batch, declined: [...batch.declined, name] } })
+        },
     }
     let taskSignal = controller.signal
     let finalized = false

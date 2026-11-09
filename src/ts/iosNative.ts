@@ -219,7 +219,7 @@ export function installIOSPersistenceLifecycle(
   const native = (event: Event) => {
     const detail = (event as CustomEvent<{ event: string; id?: string }>)
       .detail;
-    if (detail?.event === "background" || detail?.event === "memory-warning") {
+    if (detail?.event === "active" || detail?.event === "background" || detail?.event === "memory-warning") {
       generationDiagnostics.lifecycle(detail.event);
     } else if (detail?.event === "expired") {
       generationDiagnostics.lifecycle("expiry");

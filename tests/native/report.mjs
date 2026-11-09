@@ -13,15 +13,14 @@ const expectedCases = {
     'session-end': ['commit', 'stop-requested', 'saved'],
     'read-session-end': ['saved-before-exit'],
     'session-end-unanswered': ['commit', 'stop-requested'],
-    generation: ['proof-at-issued', 'success-once', 'provider-error', 'cancel-before-execute', 'cancel-after-dispatch', 'unknown-ticket'],
-    'generation-reload': ['listed-after-loss', 'resolved-once'],
-    'generation-lost': ['listed-after-loss', 'resolved-once'],
 }
+// The failure record keeps the error's cause chain, which `error` alone drops.
+const failureText = report => report.failure ? JSON.stringify(report.failure) : report.error
 export function verifyReport(report, runId, phase, status) {
     assert.ok(Object.hasOwn(expectedCases, phase), 'unknown phase')
-    assert.equal(status, 0, report.error ?? 'native process exit')
+    assert.equal(status, 0, failureText(report) ?? 'native process exit')
     assert.equal(report.runId, runId, 'run identity')
     assert.equal(report.phase, phase, 'process phase')
-    assert.equal(report.success, true, report.error ?? 'native assertions failed')
+    assert.equal(report.success, true, failureText(report) ?? 'native assertions failed')
     assert.deepEqual(report.cases, expectedCases[phase])
 }

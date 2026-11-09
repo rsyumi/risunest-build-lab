@@ -13,11 +13,11 @@ export function androidSafReservationFixture(
     const bridge = {
         copyExport: vi.fn(),
         copyReservedExport: vi.fn(),
-        reserveExport: vi.fn<NonNullable<AndroidSafJavascriptBridge['reserveExport']>>((requestId) => {
+        reserveExport: vi.fn((requestId: string) => {
             onReserve()
             target.dispatchEvent(new CustomEvent('risunest-android-saf-reserved', {detail: {requestId}}))
         }),
-        bindExport: vi.fn<NonNullable<AndroidSafJavascriptBridge['bindExport']>>(async () => true),
+        bindExport: vi.fn(async () => true),
         releaseExport: vi.fn(async () => true),
         getExportStatus: vi.fn(async (): Promise<string | null> => null),
     } satisfies AndroidSafJavascriptBridge

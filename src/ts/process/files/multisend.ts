@@ -6,7 +6,7 @@ import { reserveGeneration } from '../generationState';
 import { HypaProcesser } from '../memory/hypamemory';
 import { BufferToText as BufferToText, selectMultipleFile } from 'src/ts/util';
 import { InlayInputTooLargeError, postInlayAsset } from './inlays';
-import { openPoSaveTarget, type PoSaveTarget } from './poSaveTarget';
+import { openPoSaveTarget } from './poSaveTarget';
 import { alertError } from 'src/ts/alert';
 import { language } from 'src/lang';
 import {
@@ -31,7 +31,6 @@ async function sendPofile(arg:sendFileArg){
     const reservation = reserveGeneration()
     if (!reservation) return
     let completeLease: CompleteConversationLease | null = null
-    let saveTarget: PoSaveTarget | null = null
     try {
     const target = captureSelectedConversationTarget()
     if (target) completeLease = await acquireCompleteConversation('po-multisend', target)
@@ -73,7 +72,7 @@ async function sendPofile(arg:sendFileArg){
         mutationTarget = refreshedTarget
         return true
     }
-    saveTarget = await openPoSaveTarget('translated.po')
+    const saveTarget = await openPoSaveTarget('translated.po')
     if (!saveTarget) return
     const lines = arg.file.split('\n')
     for(let i=0;i<lines.length;i++){
@@ -158,7 +157,6 @@ async function sendPofile(arg:sendFileArg){
     } finally {
         completeLease?.release()
         reservation.release()
-        await saveTarget?.close()
     }
 }
 

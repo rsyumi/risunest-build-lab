@@ -10,6 +10,8 @@ use crate::external_storage::{
     previous_storage_tests::receiver_connection,
 };
 use crate::persistent_store::archive::ArchivedObject;
+use crate::persistent_store::device_store;
+use crate::persistent_store::lww::{self, ApplyReceive, Change, StageReceive};
 use crate::server_sync::{
     lww_client::LwwClient,
     lww_tests::{drain_publications, header, local, receive_available, LocalServerFixture},
@@ -428,6 +430,138 @@ fn cancelling_a_server_receive_while_it_fetches_the_archive_changes_nothing() {
     cancelled.store(false, AtomicOrdering::Release);
     receive_available(&cancellable, &mut f.b, &[]).expect("receive once nothing cancels it");
     assert_converged(&mut f.a, &mut f.b);
+}
+
+/// What reaches B's stored rows first after B starts again.
+#[derive(Clone, Copy, Debug)]
+enum FirstApply {
+    Drain,
+    AnotherReceive,
+}
+
+/// Stores A's next page on B without applying it, starts B again as an app that ends there
+/// does, which releases what it held, and lets `first` reach the stored rows before the
+/// receive takes up its page.
+fn apply_stored_page_after_restart(f: &mut Server, first: FirstApply) {
+    let stored = header(&f.b);
+    let page = f.cb.receive_page(&mut f.b, &stored).expect("receive the page");
+    f.b.lww_stage_receive(&page).expect("store the page");
+    let root = f.b.repository_root().to_owned();
+    let (_spare_root, spare) = local();
+    drop(std::mem::replace(&mut f.b, spare));
+    f.b = PersistentStore::open(&root).expect("start B again");
+    let header = header(&f.b);
+    match first {
+        FirstApply::Drain => {
+            f.b.lww_drain_deferred(&ApplyReceive { header, generating: Vec::new() }).expect("drain");
+        }
+        FirstApply::AnotherReceive => {
+            // A page of an external storage, which has its own progress.
+            let writer = "00000000-0000-4000-8000-000000000002";
+            let change = Change {
+                key: risunest_sync_wire::unit::UnitKey::new(&["root", "language"]).unwrap(),
+                stamp: risunest_sync_wire::stamp::Stamp {
+                    physical_ms: (device_store::now_ms().unwrap() as u64).into(),
+                    logical: 0,
+                    writer_id: writer.into(),
+                },
+                value: lww::inline(&json!("ja")).unwrap(),
+            };
+            f.b.lww_stage_receive(&StageReceive {
+                header: header.clone(),
+                changes: vec![change],
+                progress: lww::Progress { kind: "external".into(), cursor: 1.into(), writer_id: Some(writer.into()) },
+                admitted_time_upper_ms: u64::MAX.into(),
+            })
+            .expect("store another receive");
+            f.b.lww_apply_receive(&ApplyReceive { header: header.clone(), generating: Vec::new() })
+                .expect("apply another receive");
+            f.b.lww_finish_receive(&header).expect("finish another receive");
+        }
+    }
+}
+
+/// A and B hold the same owned character, and B's copy has a field and a conversation only
+/// B has.
+fn shared_with_local_content(f: &mut Server) -> Owned {
+    let owned = add_owned_character(&mut f.a);
+    add_owned_character(&mut f.b);
+    f.publish_a();
+    f.receive_b().expect("receive the character");
+    crate::server_sync::lww_tests::save(&mut f.b, &["character", CHARACTER, "privateOwn"], json!("retained"));
+    crate::server_sync::lww_tests::save(&mut f.b, &["exists", "conversation", CHARACTER, "local-chat"], json!(true));
+    owned
+}
+
+fn assert_local_only_content(store: &PersistentStore, owned: &Owned) {
+    assert_eq!(character(store).expect("the character is here")["privateOwn"], "retained");
+    assert!(store.read_conversation(CHARACTER, "local-chat", None).expect("read the conversation").is_some());
+    assert!(is_local(store, &owned.asset));
+}
+
+#[test]
+fn an_archive_a_drain_or_another_receive_reaches_first_after_a_restart_keeps_local_content() {
+    for first in [FirstApply::Drain, FirstApply::AnotherReceive] {
+        let mut f = Server::new();
+        let owned = shared_with_local_content(&mut f);
+        archive(&mut f.a);
+        f.publish_a();
+        apply_stored_page_after_restart(&mut f, first);
+        let own = archived(&f.b).expect("the character is archived on B");
+        assert_ne!(own.object_hash, own.shared_object_hash, "{first:?}: B archived its own copy");
+        assert!(own.asset_hashes.contains(&owned.asset));
+        f.receive_b().expect("take up the stored page");
+        assert_eq!(archived(&f.b), Some(own));
+        restore(&mut f.b);
+        assert_local_only_content(&f.b, &owned);
+    }
+}
+
+#[test]
+fn a_restore_a_drain_or_another_receive_reaches_first_after_a_restart_keeps_local_content() {
+    for first in [FirstApply::Drain, FirstApply::AnotherReceive] {
+        let mut f = Server::new();
+        let owned = shared_with_local_content(&mut f);
+        archive(&mut f.a);
+        f.publish_a();
+        f.receive_b().expect("receive the archive");
+        restore(&mut f.a);
+        f.publish_a();
+        apply_stored_page_after_restart(&mut f, first);
+        assert!(archived(&f.b).is_none(), "{first:?}: the character is restored on B");
+        assert_local_only_content(&f.b, &owned);
+        f.receive_b().expect("take up the stored page");
+        assert_local_only_content(&f.b, &owned);
+    }
+}
+
+#[test]
+fn a_drain_leaves_a_restore_whose_archive_is_not_here_to_its_receive() {
+    let mut f = Server::new();
+    let owned = shared_with_local_content(&mut f);
+    archive(&mut f.a);
+    f.publish_a();
+    f.receive_b().expect("receive the archive");
+    let own = archived(&f.b).expect("the character is archived on B");
+    restore(&mut f.a);
+    f.publish_a();
+    let stored = header(&f.b);
+    let page = f.cb.receive_page(&mut f.b, &stored).expect("receive the page");
+    f.b.lww_stage_receive(&page).expect("store the page");
+    let bytes = take_local_body(&f.b, &own.object_hash);
+    f.b.lww_drain_deferred(&ApplyReceive { header: header(&f.b), generating: Vec::new() }).expect("drain");
+    assert_eq!(archived(&f.b), Some(own), "the restore waits for its archive");
+    let status: String = f.b.connection.query_row(
+        "SELECT status FROM lww_receive_rows WHERE request_id=?1 AND json_extract(key,'$[0]')='archive'",
+        [&page.header.request_id],
+        |row| row.get(0),
+    )
+    .expect("read the archive row");
+    assert_eq!(status, "staged", "the row stays for its receive");
+    put_local_body(&f.b, &bytes);
+    f.receive_b().expect("take up the stored page");
+    assert!(archived(&f.b).is_none());
+    assert_local_only_content(&f.b, &owned);
 }
 
 // ---- External storage ----
