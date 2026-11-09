@@ -10,7 +10,6 @@ import {
     emptyNativeImportCounts,
     resolveNativeFileJobStage,
     type NativeFileJobDetail,
-    type NativeFileJobFailureOwner,
     type NativeFileJobStage,
     type NativeFileJobStatus,
     type NativeImportCounts,
@@ -31,12 +30,6 @@ it('orders account asset download after refresh and plugins and exposes separate
         officialAssets: { phase: 'downloading', state: 'running', counts: { required: 10, alreadyPresent: 2, installed: 3, missing: 1, failed: 1, notAttempted: 3 } },
     })
     const history: NativeFileJobStage[] = ['downloading-account-backup', 'reading-database', 'activating', 'cleaning-up', 'refreshing-app', 'reloading-plugins', 'checking-account-assets', 'downloading-account-assets']
-    // Once the database read meets cold items its total is unknown, and the bytes read still show.
-    const reading = buildNativeFileJobDialogModel(running({ format: 'library-backup', observedStages: history.slice(0, 2), status: status({
-        kind: 'restore-official-account-snapshot', detail: detail('reading-database', { stageCompleted: 3 * 1024 * 1024, stageTotal: undefined, stageUnit: 'bytes' }),
-    }) }), null, 2000)
-    expect([reading.overallPercent, reading.indeterminate, reading.overallText]).toEqual([null, true, '3.0 MiB'])
-    expect(reading.stages.find(row => row.stage === 'reading-database')).toMatchObject({ state: 'active', detail: '3.0 MiB' })
     const model = buildNativeFileJobDialogModel(running({ format: 'library-backup', status: current, observedStages: history }), null, 2000)
     expect(model.cancelEnabled).toBe(true)
     expect(model.cancelLabel).toBe(copy.stopAccountAssets)
@@ -244,18 +237,6 @@ describe('nativeFileJobDialogModel', () => {
         expect(failureReason('payload-too-large')).toBe(copy.reasonUnknown)
     })
 
-    it('names the item whose data a compatible export could not write', () => {
-        const location = (owner?: NativeFileJobFailureOwner) => buildNativeFileJobDialogModel(null, outcome({ kind: 'export', state: 'failed', error: {
-            code: 'unsupported-projection', message: 'synthetic detail', recoveryRequired: false, owner,
-        } }), 0).terminal?.location
-        expect(location({ kind: 'chat', name: 'Synthetic chat', character: 'Synthetic' }))
-            .toBe(fillTemplate(copy.failureOwners.chat, 'Synthetic', 'Synthetic chat'))
-        for (const kind of ['character', 'preset', 'module', 'persona'] as const) {
-            expect(location({ kind, name: 'Synthetic' })).toBe(fillTemplate(copy.failureOwners[kind], 'Synthetic'))
-        }
-        expect(location()).toBe('')
-    })
-
     it('asks to connect sync when a bound restore cannot reach its sync target', () => {
         const model = buildNativeFileJobDialogModel(null, outcome({ state: 'failed', error: { code: 'sync-unavailable', message: 'synthetic detail', recoveryRequired: false } }), 0)
         expect(model.terminal?.reason).toBe(languageEnglish.risuNest.backup.syncUnavailable)
@@ -272,17 +253,12 @@ describe('nativeFileJobDialogModel', () => {
         'converted-inlay-provenance', 'inlay-ids-remapped', 'asset-paths-remapped',
         'opaque-plugin-inlay-references-unverified', 'opaque-plugin-asset-references-unverified',
         'inlay-codec-playback-unverified', 'asset-playback-unverified',
-        'android-saf-unavailable', 'post-refresh-followup-failed', 'plugin-values-skipped:2', 'unknown-future-code'])
+        'android-saf-unavailable', 'post-refresh-followup-failed', 'unknown-future-code'])
     ('never uses a warning identifier as primary text: %s', code => {
         const model = buildNativeFileJobDialogModel(null, outcome({ warningCodes: [code] }), 0)
         expect(model.warnings[0]).not.toContain(code)
         expect(model.terminal?.details).toContain(`[${code}]`)
         if (code !== 'unknown-future-code') expect(model.warnings[0]).not.toBe(copy.warningUnknown)
-    })
-
-    it('names how many plugin values a restore skipped', () => {
-        const model = buildNativeFileJobDialogModel(null, outcome({ warningCodes: ['plugin-values-skipped:2'] }), 0)
-        expect(model.warnings).toEqual([copy.warningPluginValuesSkipped.replace('{0}', '2')])
     })
 
     it('shows the non-atomic save warning only while an Android save runs', () => {
@@ -944,60 +920,6 @@ describe('nativeFileJobDialogModel', () => {
             0,
         )
         expect(assetsMissing.terminal?.summary).toBe(copy.resultAssetsIncomplete)
-    })
-
-    it('presents a content batch by file and lists each file that was not imported', () => {
-        const batchState = { index: 2, total: 3, imported: 1, failures: [], warningCodes: [] }
-        const progress = buildNativeFileJobDialogModel(running({ format: 'content', source: { name: 'second.charx' }, batch: batchState }), null, 0)
-        expect(progress.subtitle).toBe(fillTemplate(copy.batchFile, 2, 3))
-        expect(progress.sourceName).toBe('second.charx')
-
-        const io = { code: 'io-error', message: 'synthetic read failure', recoveryRequired: false }
-        const refused = { code: 'unsupported-source', message: 'program.exe: unsupported-source', recoveryRequired: false }
-        const failed = buildNativeFileJobDialogModel(null, outcome({
-            format: 'content',
-            state: 'failed',
-            source: { name: 'third.charx', bytes: 10 },
-            error: io,
-            batch: { total: 3, imported: 1, failures: [{ name: 'first.png', error: io }, { name: 'program.exe', error: refused }] },
-        }), 0)
-        expect(failed).toMatchObject({
-            subtitle: fillTemplate(copy.batchFiles, 3),
-            sourceName: '',
-            sourceSize: '',
-            overallPercent: 33,
-            overallText: fillTemplate(copy.itemsOf, '1', '3'),
-            stages: [],
-            counters: [],
-        })
-        expect(failed.terminal).toMatchObject({
-            state: 'failed',
-            summary: fillTemplate(copy.resultBatchFailed, 2, 3),
-            reason: '',
-            failedFiles: [
-                { name: 'first.png', reason: copy.reasonIo },
-                { name: 'program.exe', reason: copy.reasonUnsupportedFormat },
-            ],
-            details: 'first.png: [io-error] synthetic read failure\nprogram.exe: [unsupported-source] program.exe: unsupported-source',
-        })
-
-        const cancelled = buildNativeFileJobDialogModel(null, outcome({
-            format: 'content', state: 'cancelled', batch: { total: 3, imported: 2, failures: [] },
-        }), 0)
-        expect(cancelled.terminal?.summary).toBe(fillTemplate(copy.resultBatchCancelled, 2, 3))
-        expect(cancelled.terminal?.failedFiles).toEqual([])
-
-        const partial = buildNativeFileJobDialogModel(null, outcome({
-            format: 'content', state: 'succeeded', batch: { total: 3, imported: 2, failures: [] },
-        }), 0)
-        expect(partial.terminal?.summary).toBe(fillTemplate(copy.resultBatchPartial, 2, 3))
-        const complete = buildNativeFileJobDialogModel(null, outcome({
-            format: 'content', state: 'succeeded', batch: { total: 3, imported: 3, failures: [] },
-        }), 0)
-        expect(complete.terminal?.summary).toBe(copy.resultSucceeded)
-
-        const single = buildNativeFileJobDialogModel(null, outcome({ format: 'content', state: 'failed', error: io }), 0)
-        expect(single.terminal).toMatchObject({ summary: copy.resultFailed, reason: copy.reasonIo, failedFiles: [] })
     })
 
     it('maps failure codes to user copy and never shows the code itself', () => {

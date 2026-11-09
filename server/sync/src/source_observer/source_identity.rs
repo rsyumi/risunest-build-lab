@@ -106,11 +106,6 @@ fn source_identity() -> (String, Vec<Value>) {
             include_bytes!("../../../../crates/sync-wire/src/lib.rs"),
         ),
         (
-            "crates/sync-wire/src/library_format.rs",
-            "normal-dependency",
-            include_bytes!("../../../../crates/sync-wire/src/library_format.rs"),
-        ),
-        (
             "crates/sync-wire/src/lww.rs",
             "normal-dependency",
             include_bytes!("../../../../crates/sync-wire/src/lww.rs"),

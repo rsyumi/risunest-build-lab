@@ -52,10 +52,10 @@ test('keeps plain live display windowed without acquiring history', async () => 
     expect(f.runtime.acquireCompleteConversation).not.toHaveBeenCalled()
 })
 
-test.each(['{{history}}', '{#history}}'])('holds a %s lease until explicitly released and releases once', async (source) => {
+test('holds a history lease until explicitly released and releases once', async () => {
     const f = fixture()
     const lease = await f.acquire({
-        source,
+        source: '{{history}}',
         character: null,
         signal: new AbortController().signal,
     })

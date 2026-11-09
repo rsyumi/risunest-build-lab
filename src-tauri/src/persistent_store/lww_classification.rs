@@ -22,7 +22,6 @@ pub(super) const ROOT_FIELDS: &[&str] = &[
     "askRemoval",
     "assetMaxDifference",
     "assetWidth",
-    "authorNotePresets",
     "autoContinueChat",
     "autoContinueMinTokens",
     "autoScrollToNewMessage",
@@ -383,7 +382,6 @@ pub(super) const CHARACTER_FIELDS: &[&str] = &[
 ];
 pub(super) const CONVERSATION_FIELDS: &[&str] = &[
     "GLGlobalVariables",
-    "authorNotePreset",
     "bindedPersona",
     "bookmarkNames",
     "bookmarks",

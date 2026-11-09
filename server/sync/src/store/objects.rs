@@ -591,7 +591,6 @@ mod tests {
         let registration = store.add_device().unwrap();
         let device = super::super::Device {
             id: registration.device_id,
-            format_level: None,
         };
         let good = b"synthetic good".to_vec();
         let digest = hash(&good);
@@ -621,7 +620,6 @@ mod tests {
         let registration = store.add_device().unwrap();
         let device = super::super::Device {
             id: registration.device_id,
-            format_level: None,
         };
         let small = b"synthetic base".to_vec();
         let large = vec![b'z'; SMALL_OBJECT_BYTES + 1];
@@ -645,7 +643,6 @@ mod tests {
         assert!(store.object_size(&hash(&small)).unwrap().is_none());
         let unknown = super::super::Device {
             id: "missing-device".into(),
-            format_level: None,
         };
         assert!(store.receive_frames(&unknown, &encoded).is_err());
         assert!(store.object_size(&hash(&small)).unwrap().is_none());
@@ -686,7 +683,6 @@ mod tests {
         let registration = store.add_device().unwrap();
         let device = super::super::Device {
             id: registration.device_id,
-            format_level: None,
         };
         let staging = directory.path().join("staging");
         std::fs::remove_dir(&staging).unwrap();
@@ -723,7 +719,6 @@ mod tests {
         let registration = store.add_device().unwrap();
         let device = super::super::Device {
             id: registration.device_id,
-            format_level: None,
         };
         let bytes = b"synthetic inline body".to_vec();
         let digest = hash(&bytes);
@@ -762,7 +757,6 @@ mod tests {
         let registration = store.add_device().unwrap();
         let device = super::super::Device {
             id: registration.device_id,
-            format_level: None,
         };
         assert_eq!(
             store
@@ -823,7 +817,6 @@ mod tests {
         let registration = store.add_device().unwrap();
         let device = super::super::Device {
             id: registration.device_id,
-            format_level: None,
         };
         let sizes = [64 * 1024, 64 * 1024 + 1, 256 * 1024, 256 * 1024 + 1];
         let bodies = sizes.map(|size| vec![0x5a; size]);
@@ -896,7 +889,6 @@ mod tests {
             let registration = store.add_device().unwrap();
             let device = super::super::Device {
                 id: registration.device_id,
-                format_level: None,
             };
             let bodies = (0..8)
                 .map(|index| vec![index; SMALL_OBJECT_BYTES + 1])
@@ -960,7 +952,6 @@ mod tests {
         let registration = store.add_device().unwrap();
         let device = super::super::Device {
             id: registration.device_id,
-            format_level: None,
         };
         let bodies = (0..8)
             .map(|index| vec![index; SMALL_OBJECT_BYTES + 1])
@@ -1103,7 +1094,6 @@ mod tests {
                     let store = Store::init(directory.path()).unwrap();
                     let device = super::super::Device {
                         id: store.add_device().unwrap().device_id,
-                        format_level: None,
                     };
                     upload(&store, &device, first, bytes).unwrap();
                     assert_readable(&store, bytes, &case);
@@ -1142,7 +1132,6 @@ mod tests {
         let store = Store::init(directory.path()).unwrap();
         let device = super::super::Device {
             id: store.add_device().unwrap().device_id,
-            format_level: None,
         };
         upload(&store, &device, Upload::Frame, bytes).unwrap();
         damage(&store, bytes, Held::Missing);
@@ -1176,7 +1165,6 @@ mod tests {
         let store = Store::init(directory.path()).unwrap();
         let device = super::super::Device {
             id: store.add_device().unwrap().device_id,
-            format_level: None,
         };
         upload(&store, &device, Upload::Chunked, bytes).unwrap();
         damage(&store, bytes, Held::Corrupt);
@@ -1204,7 +1192,6 @@ mod tests {
         let credential = store.add_device().unwrap();
         let device = super::super::Device {
             id: credential.device_id,
-            format_level: None,
         };
         let base = vec![b'a'; 2048];
         let mut target = base.clone();
@@ -1248,7 +1235,6 @@ mod tests {
         let credential = store.add_device().unwrap();
         let device = super::super::Device {
             id: credential.device_id,
-            format_level: None,
         };
         let head = store.head().unwrap();
         {
@@ -1318,7 +1304,6 @@ mod tests {
                 let registration = store.add_device().unwrap();
                 let device = super::super::Device {
                     id: registration.device_id,
-                    format_level: None,
                 };
                 let count = 64usize;
                 frame_metrics::SAMPLES

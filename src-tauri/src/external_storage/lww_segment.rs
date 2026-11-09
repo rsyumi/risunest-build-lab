@@ -336,18 +336,8 @@ pub(crate) fn merge(changes: &mut BTreeMap<String, Change>, incoming: Change) ->
                 true,
             );
         }
-        let remote = compared.map_err(|_| corrupt())? == risunest_sync_wire::unit::LwwDecision::ApplyRemote;
-        // The format level never falls, whatever order its stamps take.
-        let level = risunest_sync_wire::library_format::level;
-        let applies = if risunest_sync_wire::library_format::is_key(&incoming.key) {
-            match level(&incoming.value).cmp(&level(&previous.value)) {
-                std::cmp::Ordering::Equal => remote,
-                order => order == std::cmp::Ordering::Greater,
-            }
-        } else {
-            remote
-        };
-        if !applies {
+        let decision = compared.map_err(|_| corrupt())?;
+        if decision != risunest_sync_wire::unit::LwwDecision::ApplyRemote {
             return Ok(());
         }
     }

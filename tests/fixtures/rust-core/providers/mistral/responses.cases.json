@@ -1,0 +1,1133 @@
+{
+  "schema": 1,
+  "baseDb": {
+    "usePlainFetch": true,
+    "cohereAPIKey": "sk-synthetic-cohere",
+    "mistralKey": "sk-synthetic-mistral",
+    "proxyKey": "sk-synthetic-proxy",
+    "requestRetrys": 0,
+    "genTime": 1,
+    "useStreaming": false,
+    "applyAdditionalParamsToAll": false,
+    "additionalParams": [],
+    "maxResponse": 300,
+    "temperature": 80,
+    "top_k": 40,
+    "repetition_penalty": 1.1,
+    "min_p": 0.05,
+    "top_a": 0.2,
+    "top_p": 0.9,
+    "frequencyPenalty": 20,
+    "PresensePenalty": 30,
+    "thinkingTokens": 1024,
+    "reasoningEffort": 1,
+    "verbosity": 1,
+    "newOAIHandle": true,
+    "reverseProxyOobaMode": false,
+    "seperateParametersEnabled": false,
+    "seperateParametersByModel": false,
+    "extractJson": "",
+    "systemContentReplacement": "",
+    "systemRoleReplacement": "",
+    "forceReplaceUrl": "",
+    "customProxyRequestModel": "my-proxy-model",
+    "customAPIFormat": 4,
+    "enableCustomFlags": false,
+    "customFlags": [],
+    "localNetworkMode": false
+  },
+  "cases": [
+    {
+      "id": "content",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "choices": [
+              {
+                "message": {
+                  "role": "assistant",
+                  "content": "Hello there."
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "content-unicode",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "choices": [
+              {
+                "message": {
+                  "role": "assistant",
+                  "content": "日本語 😀 \"q\" \\ \n"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "content-empty",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "choices": [
+              {
+                "message": {
+                  "role": "assistant",
+                  "content": ""
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "content-null",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "choices": [
+              {
+                "message": {
+                  "role": "assistant",
+                  "content": null
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "content-missing",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "choices": [
+              {
+                "message": {
+                  "role": "assistant"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "second-choice-ignored",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "choices": [
+              {
+                "message": {
+                  "role": "assistant",
+                  "content": "First."
+                }
+              },
+              {
+                "message": {
+                  "role": "assistant",
+                  "content": "Second."
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "extra-fields",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "id": "x",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "Hi"
+                },
+                "finish_reason": "stop"
+              }
+            ],
+            "usage": {
+              "total_tokens": 3
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "choices-empty-fails",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "choices": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "choices-missing-fails",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "id": "x"
+          }
+        }
+      ]
+    },
+    {
+      "id": "choices-null-fails",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "choices": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "choices-string-fails",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "choices": "abc"
+          }
+        }
+      ]
+    },
+    {
+      "id": "choices-object-with-index-key",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "choices": {
+              "0": {
+                "message": {
+                  "role": "assistant",
+                  "content": "Indexed."
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "choice-without-message-fails",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "choices": [
+              {
+                "finish_reason": "stop"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "choice-null-fails",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "choices": [
+              null
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "message-null-fails",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "choices": [
+              {
+                "message": null
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "data-null-fails",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": null
+        }
+      ]
+    },
+    {
+      "id": "data-array-fails",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": [
+            1,
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "id": "data-string-fails",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": "text"
+        }
+      ]
+    },
+    {
+      "id": "data-number-fails",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": 5
+        }
+      ]
+    },
+    {
+      "id": "data-numbers-echo",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "text": "{\"x\":1.0,\"y\":1e21,\"z\":0.1,\"big\":12345678901234567890,\"s\":\"\\u00e9\",\"t\":[1,2,{\"a\":null}]}"
+        }
+      ]
+    },
+    {
+      "id": "content-bom",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "text": "﻿{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"Bom.\"}}]}"
+        }
+      ]
+    },
+    {
+      "id": "http-400-error-message",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 400,
+          "json": {
+            "error": {
+              "message": "Bad key.",
+              "type": "invalid_request_error"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "http-400-error-without-message",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 400,
+          "json": {
+            "error": {
+              "type": "invalid_request_error"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "http-400-error-message-empty",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 400,
+          "json": {
+            "error": {
+              "message": ""
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "http-400-error-string",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 400,
+          "json": {
+            "error": "plain"
+          }
+        }
+      ]
+    },
+    {
+      "id": "http-400-error-message-number",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 400,
+          "json": {
+            "error": {
+              "message": 5
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "http-400-error-message-array",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 400,
+          "json": {
+            "error": {
+              "message": [
+                "a",
+                "b"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "http-400-error-message-object",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 400,
+          "json": {
+            "error": {
+              "message": {
+                "a": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "http-400-no-error",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 400,
+          "json": {
+            "message": "invalid api token"
+          }
+        }
+      ]
+    },
+    {
+      "id": "http-500-json-null-throws",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 500,
+          "json": null
+        }
+      ]
+    },
+    {
+      "id": "http-500-json-number",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 500,
+          "json": 5
+        }
+      ]
+    },
+    {
+      "id": "http-401-text",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 401,
+          "text": "unauthorized"
+        }
+      ]
+    },
+    {
+      "id": "http-500-empty",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 500,
+          "text": ""
+        }
+      ]
+    },
+    {
+      "id": "http-500-html",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 500,
+          "text": "<html>oops</html>"
+        }
+      ]
+    },
+    {
+      "id": "http-200-not-json",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "text": "not json"
+        }
+      ]
+    },
+    {
+      "id": "http-200-empty-body",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "text": ""
+        }
+      ]
+    },
+    {
+      "id": "http-201-ok",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 201,
+          "json": {
+            "choices": [
+              {
+                "message": {
+                  "role": "assistant",
+                  "content": "Created."
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "http-302-with-choices",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 302,
+          "json": {
+            "choices": [
+              {
+                "message": {
+                  "role": "assistant",
+                  "content": "Redirected."
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "transport-error",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "throws": "fetch failed"
+        }
+      ]
+    },
+    {
+      "id": "http-error-long-message",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 400,
+          "json": {
+            "error": {
+              "message": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "content-number-declines",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "choices": [
+              {
+                "message": {
+                  "role": "assistant",
+                  "content": 5
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "declines": "response-content-not-text"
+    },
+    {
+      "id": "content-array-declines",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "choices": [
+              {
+                "message": {
+                  "role": "assistant",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "declines": "response-content-not-text"
+    },
+    {
+      "id": "content-object-declines",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "choices": [
+              {
+                "message": {
+                  "role": "assistant",
+                  "content": {
+                    "a": 1
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "declines": "response-content-not-text"
+    },
+    {
+      "id": "content-false-declines",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "choices": [
+              {
+                "message": {
+                  "role": "assistant",
+                  "content": false
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "declines": "response-content-not-text"
+    },
+    {
+      "id": "error-message-with-to-string-declines",
+      "model": "mistral-large-latest",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 400,
+          "json": {
+            "error": {
+              "message": {
+                "toString": 1
+              }
+            }
+          }
+        }
+      ],
+      "declines": "thrown"
+    }
+  ]
+}

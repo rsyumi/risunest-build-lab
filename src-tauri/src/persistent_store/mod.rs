@@ -1,12 +1,17 @@
+pub(crate) mod conversation_rebase;
+pub(crate) mod receive_evidence;
+pub(crate) mod receive_batches;
 pub(crate) mod archive;
-pub(crate) mod author_note;
+pub(crate) mod archive_reconcile;
 mod asset_alias_orphans;
 pub(crate) mod gallery;
+pub(crate) mod generation;
+pub(crate) mod script_access;
 pub(crate) mod asset_object_catalog;
 pub(crate) mod asset_residency;
 pub(crate) mod commands;
 pub(crate) mod commit;
-pub(crate) mod compaction;
+pub(crate) mod conflict_copy;
 pub(crate) mod content_capture;
 mod message_pages;
 #[cfg(test)]
@@ -40,7 +45,6 @@ mod preservation;
 mod query;
 mod record_apply;
 mod record_projection;
-mod replacement_scan;
 mod schema;
 #[cfg(test)]
 mod schema_contract_tests;
@@ -49,7 +53,6 @@ pub(crate) mod server_sync_projection;
 mod repair;
 mod snapshot;
 mod snapshot_archive;
-mod storage_breakdown;
 pub(crate) mod sync_selection;
 
 pub(crate) use asset_object_catalog::{AssetObjectCatalog, AssetObjectCatalogPage};
@@ -78,9 +81,6 @@ pub(super) const CONVERSATION_RANGE_MAX_LIMIT: i64 = 4_096;
 pub(super) const JAVASCRIPT_MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 pub(crate) const ASSET_GC_PRODUCT_PAGE_LIMIT: i64 = 128;
 const ASSET_GC_PRODUCT_MINIMUM_GRACE_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
-/// How long the objects of a superseded plugin value stay unreferenced before
-/// a sweep may delete them.
-const SUPERSEDED_OBJECT_GRACE_MS: i64 = 10 * 60 * 1_000;
 pub(crate) const MESSAGE_PAGE_SWEEP_LIMIT: usize = 1_024;
 
 /// The store whose message objects one sweep batch visits. Each keeps its own
@@ -138,12 +138,9 @@ pub(crate) enum StoreError {
         actual: i64,
     },
     SnapshotReleased,
+    SnapshotPinned { lease: String, reason: String },
     RawBodyUnavailable,
     CommitBusy,
-    /// A capture or another snapshot operation keeps asset GC from reading the asset
-    /// inventory. The renderer and server sync both report it as busy.
-    #[serde(rename = "library-operation-busy")]
-    AssetInventoryBusy,
     CommitDecode { message: String },
     Committed { revision: i64, message: String },
     Validation {
@@ -171,9 +168,9 @@ impl std::fmt::Display for StoreError {
             Self::SnapshotReleased => {
                 formatter.write_str("persistent revision snapshot has been released")
             }
+            Self::SnapshotPinned { lease, reason } => write!(formatter, "persistent revision snapshot {lease} is pinned by {reason}"),
             Self::RawBodyUnavailable => formatter.write_str("raw commit body unavailable"),
             Self::CommitBusy => formatter.write_str("previous commit is still finishing"),
-            Self::AssetInventoryBusy => formatter.write_str("asset inventory is held by another library operation"),
             Self::Committed { message, .. } | Self::CommitDecode { message } | Self::Validation { message } | Self::SchemaMismatch { message } | Self::Store { message } => formatter.write_str(message),
         }
     }
@@ -186,9 +183,9 @@ impl crate::native_log::CommandFailure for StoreError {
         match self {
             Self::RevisionConflict { .. } => "revision-conflict",
             Self::SnapshotReleased => "snapshot-released",
+            Self::SnapshotPinned { .. } => "snapshot-pinned",
             Self::RawBodyUnavailable => "raw-body-unavailable",
             Self::CommitBusy => "commit-busy",
-            Self::AssetInventoryBusy => "library-operation-busy",
             Self::CommitDecode { .. } => "commit-decode",
             Self::Committed { .. } => "committed",
             Self::Validation { .. } => "validation",
@@ -202,7 +199,7 @@ impl crate::native_log::CommandFailure for StoreError {
     }
     fn expected(&self) -> bool {
         match self {
-            Self::RevisionConflict { .. } | Self::CommitBusy | Self::AssetInventoryBusy | Self::SnapshotReleased => true,
+            Self::RevisionConflict { .. } | Self::CommitBusy | Self::SnapshotReleased | Self::SnapshotPinned { .. } => true,
             Self::Validation { message } => {
                 message == crate::data_health::CANCELLED
                     || message == archive::ARCHIVE_CANCELLED_MESSAGE
@@ -719,15 +716,6 @@ pub(crate) struct ConversationSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct AuthorNotePresetUsage {
-    pub(crate) character_id: String,
-    pub(crate) character_name: String,
-    pub(crate) conversation_id: String,
-    pub(crate) conversation_name: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
 pub(crate) struct ConversationPage {
     pub(crate) revision: i64,
     pub(crate) items: Vec<ConversationSummary>,
@@ -898,8 +886,6 @@ pub(crate) struct WorkingSetCommit {
     pub(crate) expected_revision: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) gallery_pending_fence: Option<[u8; 32]>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) device_plugin_fence: Option<device_store::plugin_gc::PluginGcFence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) root: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -956,6 +942,7 @@ pub(crate) struct StagingResult {
 pub(crate) struct SnapshotInfo {
     pub(crate) id: String,
     pub(crate) reason: String,
+    pub(crate) reclaimable_bytes: u64,
     pub(crate) bytes: u64,
     pub(crate) modified_at: u64,
 }
@@ -986,6 +973,7 @@ pub(crate) struct PersistentStore {
     gc_instance: String,
     gallery: gallery::GallerySession,
     revision_leases: HashMap<String, snapshot::RevisionReadLease>,
+    copy_continuations: conflict_copy::continuation::ContinuationState,
     active_readers: Arc<snapshot::ActiveReaderRegistry>,
     connection: Connection,
     repository_root: PathBuf,
@@ -997,6 +985,9 @@ pub(crate) struct PersistentStore {
     message_object_roots: MessageObjectRootsCache,
     status_library_roots: Arc<StatusLibraryRoots>,
     checked_representative_images: Arc<std::sync::Mutex<asset_residency::CheckedRepresentativeImages>>,
+    // The bound `waiting_for_admission` applies, and the one in force while it runs.
+    admission_wait: lww::AdmissionWait,
+    waiting_admission: Option<lww::AdmissionWait>,
 }
 
 /// Disk-backed roots each sweep target last read, kept while neither
@@ -1065,52 +1056,6 @@ impl MessageObjectRootsCache {
             }
         }
     }
-}
-
-/// Bodies of the pages server sync received and has not staged yet. Only its
-/// log names their objects, so a sweep reads them on every pass and never
-/// creates the log.
-fn received_page_bodies(repository_root: &Path) -> StoreResult<Vec<Value>> {
-    let path = crate::server_sync::lww_client::OperationLog::path(repository_root);
-    if !path.try_exists()? {
-        return Ok(Vec::new());
-    }
-    let log = crate::sqlite_open::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
-    log.busy_timeout(Duration::from_secs(5))?;
-    let present: bool = log.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='receive_pages')",
-        [],
-        |row| row.get(0),
-    )?;
-    if !present {
-        return Ok(Vec::new());
-    }
-    let mut statement = log.prepare("SELECT body FROM receive_pages")?;
-    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-    rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
-}
-
-fn mark_other_copies(other: &Connection, deleted: &[String], since: i64) -> StoreResult<()> {
-    if deleted.is_empty() {
-        return Ok(());
-    }
-    let transaction = other.unchecked_transaction()?;
-    message_pages::mark_unreferenced(&transaction, deleted.iter().map(String::as_str), since)?;
-    Ok(transaction.commit()?)
-}
-
-fn received_roots(
-    repository_root: &Path,
-    bodies: &[Value],
-    objects: &Connection,
-) -> StoreResult<Option<(message_pages::ObjectRoots, tempfile::TempDir)>> {
-    if bodies.is_empty() {
-        return Ok(None);
-    }
-    let scratch = crate::external_storage::leftovers::managed_scratch(repository_root, "message-roots-")
-        .map_err(|error| StoreError::Store { message: error.to_string() })?;
-    let roots = message_pages::json_roots(objects, bodies, crate::sqlite_open::open(scratch.path().join("roots.sqlite"))?)?;
-    Ok(Some((roots, scratch)))
 }
 
 /// One generation, held open for a diagnosis. It outlives the store mutex on purpose: a deep
@@ -1400,8 +1345,6 @@ pub(crate) struct StorageDeletionStats {
 pub(crate) struct PersistentStorageStats {
     pub(crate) snapshot_bytes: u64,
     pub(crate) database_bytes: u64,
-    /// Free pages of the library and device store files, which compaction returns.
-    pub(crate) database_reclaimable_bytes: u64,
     /// Every catalogued object, including those whose body is not on this device.
     pub(crate) asset_objects: StorageCountBytes,
     /// The object files this device stores.
@@ -1760,6 +1703,7 @@ impl PersistentStore {
             gc_instance: uuid::Uuid::new_v4().to_string(),
             gallery: gallery::GallerySession::default(),
             revision_leases: HashMap::new(),
+            copy_continuations: conflict_copy::continuation::ContinuationState::default(),
             active_readers,
             connection,
             repository_root: app_data_dir.to_owned(),
@@ -1769,7 +1713,10 @@ impl PersistentStore {
             message_object_roots: MessageObjectRootsCache::default(),
             status_library_roots: Arc::default(),
             checked_representative_images: Arc::default(),
+            admission_wait: lww::AdmissionWait::DEFAULT,
+            waiting_admission: None,
         };
+        if store.device_store.is_ok() { store.initialize_receive_history()?; }
         // A pending intent may still need its staging generation, so the sweep waits until
         // every intent recovery still runs has settled.
         if store.device_store.is_ok() && store.lww_recover_intents_at_open()? {
@@ -1792,6 +1739,7 @@ impl PersistentStore {
             gc_instance: uuid::Uuid::new_v4().to_string(),
             gallery: gallery::GallerySession::default(),
             revision_leases: HashMap::new(),
+            copy_continuations: conflict_copy::continuation::ContinuationState::default(),
             active_readers: Arc::clone(&self.active_readers),
             connection,
             repository_root: self.repository_root.clone(),
@@ -1801,6 +1749,8 @@ impl PersistentStore {
             message_object_roots: MessageObjectRootsCache::default(),
             status_library_roots: Arc::clone(&self.status_library_roots),
             checked_representative_images: Arc::clone(&self.checked_representative_images),
+            admission_wait: self.admission_wait,
+            waiting_admission: None,
         })
     }
 
@@ -1873,14 +1823,6 @@ impl PersistentStore {
     ) -> StoreResult<ConversationPage> {
         let (connection, target) = self.read_view(lease)?;
         query::query_conversations(connection, query, &target)
-    }
-
-    pub(crate) fn query_author_note_preset_usage(
-        &self,
-        preset_id: &str,
-    ) -> StoreResult<Vec<AuthorNotePresetUsage>> {
-        let (connection, target) = self.read_view(None)?;
-        query::query_author_note_preset_usage(connection, preset_id, &target)
     }
 
     pub(crate) fn read_conversation(
@@ -2259,7 +2201,7 @@ impl PersistentStore {
         &self,
         staging_id: &str,
     ) -> StoreResult<commit::StagedPluginPreview> {
-        commit::staged_plugin_preview(&self.connection, &self.repository_root, staging_id)
+        commit::staged_plugin_preview(&self.connection, staging_id)
     }
 
     pub(crate) fn staged_library_counts(&self, staging_id: &str) -> StoreResult<(u64, u64)> {
@@ -2319,7 +2261,6 @@ impl PersistentStore {
     ) -> StoreResult<RevisionResult> {
         let revision = commit::replace_preserve_repositories(
             &mut self.connection,
-            &self.repository_root,
             staging_id,
             expected_revision,
         )?;
@@ -2457,23 +2398,8 @@ impl PersistentStore {
         &mut self,
         prepared: PreparedReplaceCommit,
     ) -> StoreResult<RevisionResult> {
-        self.finish_prepared_replace_under(prepared, None)
-    }
-
-    /// Commits under `binding_authority` when the caller already recorded one for
-    /// this staging, so a binding switch since then fails with
-    /// `binding-authority-changed` instead of committing under another authority.
-    pub(crate) fn finish_prepared_replace_under(
-        &mut self,
-        prepared: PreparedReplaceCommit,
-        binding_authority: Option<&str>,
-    ) -> StoreResult<RevisionResult> {
         self.lww_prepared_replacement_revision(&prepared.staging_id, Some(prepared.revision))?;
-        let binding_authority = match binding_authority {
-            Some(authority) => risunest_sync_wire::stamp::DecimalU64::try_from(authority.to_owned()).map_err(lww::error)?,
-            None => self.lww_binding_authority()?,
-        };
-        let header=lww::Header{binding_authority,request_id:prepared.staging_id.clone()};
+        let header=lww::Header{binding_authority:self.lww_binding_authority()?,request_id:prepared.staging_id.clone()};
         self.lww_commit_replacement(&header,&prepared.staging_id)
     }
 
@@ -2504,7 +2430,15 @@ impl PersistentStore {
         Ok(LeaseResult { lease })
     }
 
+    fn ensure_revision_lease_unpinned(&self, lease: &str) -> StoreResult<()> {
+        if self.copy_continuations.pins(lease) {
+            return Err(StoreError::SnapshotPinned { lease: lease.into(), reason: "copy-continuation".into() });
+        }
+        Ok(())
+    }
+
     pub(crate) fn release_revision(&mut self, lease: &str) -> StoreResult<()> {
+        self.ensure_revision_lease_unpinned(lease)?;
         if !lease.starts_with("snapshot-") {
             return Err(StoreError::Validation {
                 message: "revision lease must be a snapshot lease".to_owned(),
@@ -2517,6 +2451,8 @@ impl PersistentStore {
     }
 
     pub(crate) fn release_all_revision_leases(&mut self) -> StoreResult<()> {
+        // Renderer teardown ends ownership of ephemeral recovery state, including unknown outcomes.
+        self.copy_continuations.clear();
         let mut first_error = None;
         for (_, reader) in self.revision_leases.drain() {
             if let Err(error) = snapshot::close_revision(reader) {
@@ -2598,6 +2534,7 @@ impl PersistentStore {
         &mut self,
         lease: &str,
     ) -> StoreResult<PreparedRisuSaveExport> {
+        self.ensure_revision_lease_unpinned(lease)?;
         if !lease.starts_with("snapshot-") {
             return Err(StoreError::Validation {
                 message: "revision lease must be a snapshot lease".to_owned(),
@@ -2642,6 +2579,7 @@ impl PersistentStore {
         lease: &str,
         expected_revision: i64,
     ) -> StoreResult<PreparedOfficialPublication> {
+        self.ensure_revision_lease_unpinned(lease)?;
         if !lease.starts_with("snapshot-") {
             return Err(StoreError::Validation {
                 message: "revision lease must be a snapshot lease".to_owned(),
@@ -2683,6 +2621,7 @@ impl PersistentStore {
             CasJobKind, CasObjectRole, CasReleaseOutcome, DurableCasJob,
         };
 
+        self.ensure_revision_lease_unpinned(lease)?;
         if !lease.starts_with("snapshot-") {
             return Err(StoreError::Validation {
                 message: "revision lease must be a snapshot lease".to_owned(),
@@ -2784,6 +2723,7 @@ impl PersistentStore {
         token: &str,
         account: &Value,
     ) -> StoreResult<kei::PreparedKeiUpload> {
+        self.ensure_revision_lease_unpinned(lease)?;
         let reader = self
             .revision_leases
             .remove(lease)
@@ -2815,6 +2755,7 @@ impl PersistentStore {
         token: &str,
         account: &Value,
     ) -> StoreResult<kei::PreparedKeiUpload> {
+        self.ensure_revision_lease_unpinned(lease)?;
         let reader = self
             .revision_leases
             .remove(lease)
@@ -2838,47 +2779,23 @@ impl PersistentStore {
     }
 
     pub(crate) fn checkpoint(&self, mode: CheckpointMode) -> StoreResult<()> {
-        // A truncate would wait out the busy timeout behind an active read lease. The
-        // committed frames stay in the WAL, so a passive checkpoint is all that can run.
-        let mode = if mode == CheckpointMode::Truncate && self.active_readers.active_count() > 0 {
-            CheckpointMode::Passive
-        } else {
-            mode
-        };
+        if mode == CheckpointMode::Truncate && self.active_readers.active_count() > 0 {
+            return Err(StoreError::Store {
+                message: "truncate checkpoint cannot run while an active read lease pins the WAL"
+                    .to_owned(),
+            });
+        }
         snapshot::checkpoint(&self.connection, mode)
     }
 
-    /// A save path's checkpoint: a truncate kept busy by a reader outside the lease
-    /// registry still leaves every commit in the WAL, so it checkpoints passively.
-    pub(crate) fn checkpoint_or_passive(&self, mode: CheckpointMode) -> StoreResult<()> {
-        match self.checkpoint(mode) {
-            Err(error) if mode == CheckpointMode::Truncate && checkpoint_was_busy(&error) => {
-                snapshot::checkpoint(&self.connection, CheckpointMode::Passive)
-            }
-            result => result,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn snapshot_create_keeping(
-        &mut self,
-        reason: &str,
-        keep: snapshot::KeepCount,
-    ) -> StoreResult<SnapshotCreated> {
-        snapshot::create(self, reason, keep)
-    }
-
-    #[cfg(test)]
     pub(crate) fn snapshot_create(&mut self, reason: &str) -> StoreResult<SnapshotCreated> {
-        self.snapshot_create_keeping(reason, snapshot::KeepCount::MAX)
+        snapshot::create(self, reason)
     }
 
-    #[cfg(test)]
     pub(crate) fn snapshot_list(&self) -> StoreResult<Vec<SnapshotInfo>> {
         snapshot::list(&self.snapshots_dir)
     }
 
-    #[cfg(test)]
     pub(crate) fn snapshot_delete(&self, id: &str) -> StoreResult<()> {
         snapshot_archive::Archive::open(&self.snapshots_dir)?.delete(id)
     }
@@ -2931,8 +2848,7 @@ impl PersistentStore {
         )?;
         let active_characters = query_count_bytes(
             &transaction,
-            // octet_length reads each value's stored length instead of the value itself.
-            "SELECT COUNT(*), COALESCE(SUM(octet_length(detail)), 0) FROM characters WHERE generation = ?1 AND trashed = 0",
+            "SELECT COUNT(*), COALESCE(SUM(length(detail)), 0) FROM characters WHERE generation = ?1 AND trashed = 0",
             [&active],
         )?;
         let trashed_count: i64 = transaction.query_row(
@@ -2989,9 +2905,8 @@ impl PersistentStore {
         drop(statement);
         transaction.commit()?;
         Ok(PersistentStorageStats {
-            snapshot_bytes: snapshot_archive::file_bytes(&self.snapshots_dir)?,
+            snapshot_bytes: snapshot_archive::Archive::open(&self.snapshots_dir)?.bytes()?,
             database_bytes,
-            database_reclaimable_bytes: self.database_pages()?.iter().map(|(_, pages)| pages.free_bytes).sum(),
             asset_objects,
             asset_bodies,
             missing_asset_bodies,
@@ -3028,34 +2943,25 @@ impl PersistentStore {
         let scan = cas.into_read_scan();
         // Unreferenced aliases are not holders, so their files show as the cleanup will treat them.
         let scope = asset_alias_orphans::OrphanAliasScope::Cleanup { now_ms };
-        let mut search = self.search_unreferenced_asset_aliases(&scope)?;
+        let search = self.search_unreferenced_asset_aliases(&scope)?;
+        let labelled = match &search {
+            Some(search) => self.collect_asset_gc_roots_without_unreferenced_aliases(search, true)?,
+            None => self.collect_labelled_asset_gc_roots(false, true)?,
+        };
+        // Only the holders that are small and explainable are kept for attribution; the library
+        // itself is the default answer and copying its root set would cost as much as it holds.
+        let holders = labelled
+            .iter()
+            .filter(|(label, _)| *label != "library")
+            .map(|(label, roots)| (*label, roots.object_hashes.clone()))
+            .collect();
         let residency = crate::server_sync::residency::Residency::open(&self.repository_root)
             .map_err(|error| std::io::Error::other(error.code))?;
-        let mark = |search: Option<&asset_alias_orphans::OrphanAliasSearch>| -> StoreResult<_> {
-            let labelled = match search {
-                Some(search) => self.collect_asset_gc_roots_without_unreferenced_aliases(search, true)?,
-                None => self.collect_labelled_asset_gc_roots(false, true)?,
-            };
-            // Only the holders that are small and explainable are kept for attribution; the library
-            // itself is the default answer and copying its root set would cost as much as it holds.
-            let holders: Vec<(&'static str, std::collections::BTreeSet<String>)> = labelled
-                .iter()
-                .filter(|(label, _)| *label != "library")
-                .map(|(label, roots)| (*label, roots.object_hashes.clone()))
-                .collect();
-            let marks = crate::asset_repository::migration_gc::mark_asset_roots_with_remote_scan(
-                &scan,
-                labelled.into_iter().map(|(_, roots)| roots),
-                |hash| residency.gc_size(hash),
-            )?;
-            Ok((holders, marks))
-        };
-        let (mut holders, mut marks) = mark(search.as_ref())?;
-        if let Some(found) = &mut search {
-            if self.keep_aliases_archives_name(found, &marks, &scope)? {
-                (holders, marks) = mark(Some(&*found))?;
-            }
-        }
+        let marks = crate::asset_repository::migration_gc::mark_asset_roots_with_remote_scan(
+            &scan,
+            labelled.into_iter().map(|(_, roots)| roots),
+            |hash| residency.gc_size(hash),
+        )?;
         let recent_orphan_objects = search
             .map(|search| search.orphans(&marks, &scope).1.into_iter().map(|alias| alias.object_hash).collect())
             .unwrap_or_default();
@@ -3262,38 +3168,13 @@ impl PersistentStore {
     /// One bounded pass over one store's message objects. Roots are read under the
     /// store lock and, for the store being swept, inside its write transaction, so
     /// a reference committed before the pass is seen. They are read again only
-    /// after a change on either connection or to the held leases; pages server
-    /// sync received and has not staged yet are read on every pass. Callers hold
-    /// native file admission so no replacement runs meanwhile. Copies of the
-    /// deleted objects in the other store are marked with the short grace before
-    /// the deletion commits, so a failed mark leaves the deletion to a later pass.
+    /// after a change on either connection or to the held leases. Callers hold
+    /// native file admission so no replacement runs meanwhile.
     pub(crate) fn sweep_message_page_objects(
         &mut self,
         target: MessageObjectStore,
         now_ms: i64,
         limit: usize,
-    ) -> StoreResult<message_pages::ObjectSweep> {
-        self.sweep_message_page_batch(target, now_ms, limit, true)
-    }
-
-    /// The next batch of a pass that `sweep_message_page_objects` began. The
-    /// pass already visited the marks past their grace, so this batch visits
-    /// only the objects after the cursor.
-    pub(crate) fn continue_message_page_sweep(
-        &mut self,
-        target: MessageObjectStore,
-        now_ms: i64,
-        limit: usize,
-    ) -> StoreResult<message_pages::ObjectSweep> {
-        self.sweep_message_page_batch(target, now_ms, limit, false)
-    }
-
-    fn sweep_message_page_batch(
-        &mut self,
-        target: MessageObjectStore,
-        now_ms: i64,
-        limit: usize,
-        expired_marks: bool,
     ) -> StoreResult<message_pages::ObjectSweep> {
         let Ok(device) = self.device_store.as_mut() else {
             return Ok(message_pages::ObjectSweep { wrapped: true, ..Default::default() });
@@ -3301,9 +3182,6 @@ impl PersistentStore {
         let mut lease_ids: Vec<String> = self.revision_leases.keys().cloned().collect();
         lease_ids.sort();
         let leases = self.revision_leases.values().map(|lease| &lease.connection);
-        let received = received_page_bodies(&self.repository_root)?;
-        let mut deleted = Vec::new();
-        let early = now_ms.saturating_sub(ASSET_GC_PRODUCT_MINIMUM_GRACE_MS - SUPERSEDED_OBJECT_GRACE_MS);
         if target == MessageObjectStore::Device {
             let transaction = device.transaction()?;
             let token = MessageObjectRootsToken::read(&self.connection, &transaction, lease_ids)?;
@@ -3311,17 +3189,13 @@ impl PersistentStore {
             let roots = self.message_object_roots.roots(target, token, &self.repository_root, |scratch| {
                 message_pages::object_roots(&self.connection, leases, &transaction, &transaction, scratch)
             })?;
-            let received = received_roots(&self.repository_root, &received, &transaction)?;
             let sweep = message_pages::sweep_objects(
                 &transaction,
-                &[roots].into_iter().chain(received.as_ref().map(|(roots, _)| roots)).collect::<Vec<_>>(),
+                roots,
                 now_ms,
                 ASSET_GC_PRODUCT_MINIMUM_GRACE_MS,
                 limit,
-                expired_marks,
-                &mut deleted,
             )?;
-            mark_other_copies(&self.connection, &deleted, early)?;
             transaction.commit()?;
             self.message_object_roots.committed(before, &self.connection, device.connection());
             return Ok(sweep);
@@ -3334,17 +3208,13 @@ impl PersistentStore {
         let roots = self.message_object_roots.roots(target, token, &self.repository_root, |scratch| {
             message_pages::object_roots(&transaction, leases, device.connection(), &transaction, scratch)
         })?;
-        let received = received_roots(&self.repository_root, &received, &transaction)?;
         let sweep = message_pages::sweep_objects(
             &transaction,
-            &[roots].into_iter().chain(received.as_ref().map(|(roots, _)| roots)).collect::<Vec<_>>(),
+            roots,
             now_ms,
             ASSET_GC_PRODUCT_MINIMUM_GRACE_MS,
             limit,
-            expired_marks,
-            &mut deleted,
         )?;
-        mark_other_copies(device.connection(), &deleted, early)?;
         transaction.commit()?;
         self.message_object_roots.committed(before, &self.connection, device.connection());
         Ok(sweep)
@@ -3810,11 +3680,8 @@ impl PersistentStore {
                 &self.repository_root,
             )?,
         ));
-        // A snapshot delete or restore can hold the archive for minutes, so GC stops here as it
-        // does during a capture instead of keeping the store waiting.
         roots.extend(
-            snapshot_archive::Archive::try_open(&self.snapshots_dir)?
-                .ok_or(StoreError::AssetInventoryBusy)?
+            snapshot_archive::Archive::open(&self.snapshots_dir)?
                 .roots()?
                 .into_iter()
                 .map(|set| ("snapshot", set)),

@@ -21,7 +21,6 @@
     })
 
     let selectedLang = $state("")
-    let markdownRoot = $state<HTMLElement>()
     $effect.pre(() => {
         selectedLang = defaultLang
     });
@@ -60,8 +59,8 @@
         {/each}
     </div>
     {#if markdown}
-        <div class="ml-2 max-w-full wrap-break-word text chat chattext prose" class:prose-invert={$ColorSchemeTypeStore} bind:this={markdownRoot}>
-            <DeferredMarkdown data={valueObject[selectedLang]} root={markdownRoot} />
+        <div class="ml-2 max-w-full wrap-break-word text chat chattext prose" class:prose-invert={$ColorSchemeTypeStore}>
+            <DeferredMarkdown data={valueObject[selectedLang]} />
         </div>
     {:else}
         <div class="ml-2 max-w-full wrap-break-word text chat chattext prose" class:prose-invert={$ColorSchemeTypeStore}>

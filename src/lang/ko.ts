@@ -60,7 +60,6 @@ export const languageKorean = {
             'toggle-preset-prompt-name-unmatched':
                 '이름이 일치하지 않는 토글 프리셋 프롬프트',
             'unavailable-persona-binding': '사용할 수 없는 페르소나 연결',
-            'missing-asset-references': '파일이 없는 첨부 파일 참조',
             'unsupported-inlay-references': '지원하지 않는 인레이 참조',
             'unsupported-option-value': '지원하지 않는 설정값',
             'unsupported-structural-field': '지원하지 않는 데이터 필드',
@@ -106,7 +105,6 @@ export const languageKorean = {
             damagedPluginStorage: (count: number) => `손상된 플러그인 저장 데이터 ${count}개는 복원되지 않습니다.`,
             oversizedPluginStorage: (count: number) => `크기가 너무 큰 플러그인 저장 데이터 ${count}개는 복원되지 않습니다.`,
             inlays: (count: number) => `지원하지 않는 인레이 ${count}개는 복원되지 않습니다.`,
-            missingAssets: (count: number) => `파일이 없는 첨부 파일 참조 ${count}개는 파일 없이 복원됩니다.`,
         },
         "recovery": {
             "dismiss": '기록 삭제',
@@ -170,36 +168,27 @@ export const languageKorean = {
     applyTogglePresetMismatchConfirm:
         '다른 프롬프트 프리셋에서 저장한 토글 프리셋입니다. 토글이 호환되지 않을 수 있습니다. 그래도 적용하시겠습니까?',
     togglePresetApplied: (name: string) => `"${name}" 프리셋을 적용했습니다.`,
-    saveNewPreset: '새 프리셋 저장',
+    saveNewTogglePreset: '새 프리셋 저장',
     togglePresetNamePrompt: '토글 프리셋 이름을 입력하세요',
-    presetSaved: (name: string) => `"${name}" 프리셋을 저장했습니다.`,
+    togglePresetSaved: (name: string) => `"${name}" 프리셋을 저장했습니다.`,
     importTogglePreset: '파일에서 불러오기',
     togglePresetImported: (name: string) => `"${name}" 프리셋을 불러왔습니다.`,
     togglePresetImportError: '올바른 토글 프리셋 파일이 아닙니다.',
-    presetActions: '프리셋 관리',
-    movePresetUp: '위로 이동',
-    movePresetDown: '아래로 이동',
+    togglePresetActions: '프리셋 관리',
+    moveTogglePresetUp: '위로 이동',
+    moveTogglePresetDown: '아래로 이동',
     overwriteTogglePreset: '덮어쓰기',
     overwriteTogglePresetConfirm: (name: string) => `"${name}" 프리셋을 현재 토글 값으로 덮어쓰시겠습니까?`,
     togglePresetOverwritten: (name: string) => `"${name}" 프리셋을 덮어썼습니다.`,
-    renamePreset: '이름 변경',
-    presetRenamed: (from: string, to: string) => `"${from}" 프리셋 이름을 바꿨으며, 새 이름은 "${to}"입니다.`,
-    duplicatePreset: '복제',
-    presetDuplicated: (name: string) => `"${name}" 프리셋으로 복제했습니다.`,
+    renameTogglePreset: '이름 변경',
+    togglePresetRenamed: (from: string, to: string) => `"${from}" 프리셋 이름을 바꿨으며, 새 이름은 "${to}"입니다.`,
+    duplicateTogglePreset: '복제',
+    togglePresetDuplicated: (name: string) => `"${name}" 프리셋으로 복제했습니다.`,
     exportTogglePreset: '내보내기',
     togglePresetExported: (name: string) => `"${name}" 프리셋을 내보냈습니다.`,
-    deletePreset: '삭제',
+    deleteTogglePreset: '삭제',
     deleteTogglePresetConfirm: (name: string) => `"${name}" 토글 프리셋을 삭제하시겠습니까?`,
-    presetDeleted: (name: string) => `"${name}" 프리셋을 삭제했습니다.`,
-    authorNotePresets: '작가의 노트 프리셋',
-    authorNoteStoredInChat: '채팅에 저장',
-    authorNotePresetsEmpty: '저장된 작가의 노트 프리셋이 없습니다.',
-    authorNotePresetNamePrompt: '작가의 노트 프리셋 이름을 입력하세요',
-    selectAuthorNotePresetConfirm: '현재 작가의 노트가 프리셋 내용으로 바뀝니다. 선택하시겠습니까?',
-    deleteAuthorNotePresetConfirm: (name: string) => `"${name}" 작가의 노트 프리셋을 삭제하시겠습니까?`,
-    deleteUsedAuthorNotePresetDescription:
-        '삭제할 경우 이 프리셋을 선택한 채팅의 작가의 노트도 함께 삭제됩니다. 이 프리셋은 다음 채팅에서 사용 중입니다.',
-    authorNotePresetUsageMore: (count: number) => `외 ${count}개`,
+    togglePresetDeleted: (name: string) => `"${name}" 프리셋을 삭제했습니다.`,
     responseCandidates: '응답 후보',
     newResponseCandidate: '새 응답 후보 생성',
     confirmNewResponseCandidate: '마지막 응답입니다. 새 응답을 생성해 후보에 추가하시겠습니까?',
@@ -872,14 +861,6 @@ export const languageKorean = {
     "SpacedView": "멀티플",
     "emphasizedView": "더블",
     "pluginWarn": "악성 플러그인 설치 시 문제가 생길 수 있습니다.",
-    "fetchLogConsent": "'{}' 플러그인이 로그를 가져오려고 합니다. 로그에 민감한 정보가 포함될 수 있습니다. 허용하시겠습니까?",
-    "getFullDatabaseConsent": "'{}' 플러그인이 전체 데이터베이스에 접근하려고 합니다. 민감한 정보가 노출될 수 있습니다. 허용하시겠습니까?",
-    "mainDomAccessConsent": "'{}' 플러그인이 앱 화면의 DOM에 접근하려고 합니다. 민감한 정보가 노출될 수 있습니다. 허용하시겠습니까?",
-    "replacerPermissionConsent": "'{}' 플러그인이 채팅 내용을 바꾸는 권한을 요청합니다. 대화 내용이 조작될 수 있습니다. 허용하시겠습니까?",
-    "providerPermissionConsent": "'{}' 플러그인이 모델 사용 권한을 요청합니다. 사용자가 요청하지 않은 API 호출이 일어날 수 있습니다. 허용하시겠습니까?",
-    "inlayPermissionConsent": "'{}' 플러그인이 인레이 접근 권한을 요청합니다. 플러그인이 인레이를 읽고 쓰고 수정할 수 있습니다. 허용하시겠습니까?",
-    "sendChatConsent": "'{}' 플러그인이 사용자 대신 채팅 메시지를 보내는 권한을 요청합니다. 보낸 메시지에 AI가 응답합니다. 허용하시겠습니까?",
-    "hostToolPermissionConsent": "'{}' 플러그인이 MCP를 포함한 도구 호출 권한을 요청합니다. 플러그인이 데이터를 읽거나 바꿀 수 있습니다. 허용하시겠습니까?",
     "resetAllPluginPermissions": "플러그인 권한 초기화",
     "resetAllPluginPermissionsConfirm": "모든 플러그인의 저장된 권한을 초기화하시겠습니까?\n\n다음에 플러그인이 권한을 요청할 때 다시 묻게 됩니다.",
     "resetAllPluginPermissionsDone": "플러그인 권한을 초기화했습니다",
@@ -1800,13 +1781,6 @@ export const languageKorean = {
     nanoGPTManualInput: "수동 입력",
     nanoGPTManualModelSelect: "수동 모델 선택",
     risuNest: {
-        moduleScope: {
-            info: '글로벌은 모든 채팅, 캐릭터는 이 캐릭터의 모든 채팅, 채팅은 현재 채팅에 모듈을 적용합니다.',
-            global: '글로벌',
-            character: '캐릭터',
-            chat: '채팅',
-            noMatch: '검색 결과가 없습니다.',
-        },
         appLock: {
             title: '앱 잠금',
             enable: '앱 잠금 사용',
@@ -1955,6 +1929,16 @@ export const languageKorean = {
             notice: '디스플레이 수정을 끄고 채팅을 열었습니다.',
             turnBackOn: '다시 켜기',
         },
+        receiveConflict: {
+            title: '저장하지 못한 대화 변경 사항',
+            unsaved: '현재 대화의 변경 사항이 저장되지 않았습니다. 앱을 종료하기 전에 처리 방법을 선택해주세요.',
+            archived: '보관된 캐릭터입니다. 열려 있는 대화의 변경 사항이 저장되지 않았습니다. 앱을 종료하기 전에 처리 방법을 선택해주세요.',
+            copyHelp: '저장하지 못한 대화를 새 캐릭터와 대화로 저장합니다.',
+            saveCopy: '새 캐릭터로 저장',
+            discard: '변경 사항 버리기',
+            discardConfirm: '저장하지 못한 대화 변경 사항을 버리고 현재 데이터를 불러오시겠습니까?',
+            failed: '작업을 완료하지 못했습니다. 다시 시도할 작업을 선택해주세요.',
+        },
         localSaveFailure: {
             failed: '변경 사항을 저장하지 못했습니다. 앱을 종료하기 전에 저장을 다시 시도해주세요.',
             invalid: '{0} 데이터를 저장하지 못했습니다. 해당 데이터를 확인한 후 저장을 다시 시도해주세요.',
@@ -1992,8 +1976,8 @@ export const languageKorean = {
             confirmApplicationHelp: '작업이 진행 중이거나 일부 데이터만 적용되었을 수 있어 편집을 잠시 멈췄습니다. 다시 확인하면 같은 작업을 확인하거나 이어서 처리합니다.',
             confirmApplication: '같은 작업 다시 확인',
             confirmApplicationFailed: '아직 결과를 확인하지 못했습니다. 연결과 저장 공간을 확인한 뒤 다시 시도해주세요.',
-            refreshTitle: '저장은 완료되었지만 화면을 새로 고쳐야 합니다',
-            refreshHelp: '변경 사항은 저장되어 있습니다. 저장된 데이터를 화면에 다시 불러올 때까지 편집이 잠시 중단됩니다.',
+            refreshTitle: '편집이 일시 중단되었습니다',
+            refreshHelp: '편집이 일시 중단되었습니다. 계속하려면 저장된 데이터를 다시 불러오세요.',
             refresh: '화면 새로 고침',
             refreshFailed: '저장된 데이터를 화면에 표시하지 못했습니다. 새로 고침을 다시 시도하거나 앱을 재시작해주세요.',
         },
@@ -2139,10 +2123,6 @@ export const languageKorean = {
             unsupportedApiVersionLoad:
                 '다음 플러그인은 지원하지 않는 플러그인 API 버전을 사용하므로 실행되지 않았습니다. API 3.0으로 업데이트된 버전을 설치하세요.\n\n{plugins}',
 
-            installViaPlugin: "'{source}' 플러그인이 '{plugin}' 플러그인을 설치하려고 합니다. 설치하시겠습니까?",
-            replaceViaPlugin: "'{source}' 플러그인이 '{plugin}' 플러그인의 코드를 교체하려고 합니다. 교체할 경우 '{plugin}' 플러그인에 저장된 데이터를 새 코드가 사용합니다. 교체하시겠습니까?",
-            replaceSelfViaPlugin: "'{plugin}' 플러그인이 자신의 코드를 교체하려고 합니다. 교체하시겠습니까?",
-
             "removeTitle": "플러그인을 삭제하시겠습니까?",
             "removeDescription": "플러그인 데이터를 함께 삭제할 경우 플러그인을 다시 설치해도 설정과 저장된 내용이 복원되지 않습니다. 플러그인 데이터를 유지하면 다시 설치했을 때 기존 내용을 그대로 사용할 수 있습니다.",
             "removeDataOption": "플러그인 데이터도 삭제",
@@ -2226,7 +2206,6 @@ export const languageKorean = {
         },
         startup: {
             storage: '저장소 여는 중',
-            compacting: '데이터베이스 압축 중 {0}%',
             data: '대화 데이터 준비 중',
             compatibility: '플러그인 호환 데이터 준비 중',
             plugins: '플러그인 준비 중',
@@ -2352,7 +2331,7 @@ export const languageKorean = {
             registrationRequired: '새 등록 코드 필요',
             blocked: '자동 동기화 중지됨',
             failed: '동기화 실패',
-            offlineNotice: '동기화 서버를 사용할 수 없으며, 앱이 열려 있는 동안 자동으로 다시 시도합니다.',
+            offlineNotice: 'Sync 서버를 사용할 수 없으며, 앱이 열려 있는 동안 자동으로 다시 시도합니다.',
             errorHelp:
                 '동기화를 마치지 못했습니다. 이 기기에서 고친 내용은 그대로 있습니다. 다시 시도하세요.',
             "connectRowHelpScan": '서버에서 만든 등록 코드를 붙여넣거나 QR 코드를 스캔하세요. 기기마다 별도의 등록 코드가 필요합니다.',
@@ -2463,6 +2442,9 @@ export const languageKorean = {
             pluginOutputCurrentChatOnly: '플러그인에 현재 채팅 기록만 전달',
             pluginOutputCurrentChatOnlyHelp:
                 '응답이 생성될 때 플러그인에 이 캐릭터의 다른 채팅 기록을 빼고 현재 채팅만 전달해 메모리 사용량을 줄이며, 다른 채팅 기록을 읽는 플러그인이 제대로 동작하지 않을 수 있습니다.',
+            nativeOllamaGeneration: 'Ollama 응답을 앱에서 생성',
+            nativeOllamaGenerationHelp:
+                'Ollama 응답을 앱에서 생성하며, 지원하지 않는 설정이 있는 경우 메시지 전송이 실패합니다.',
         },
         ui: {
             title: 'UI',
@@ -2474,7 +2456,7 @@ export const languageKorean = {
             scrollNavigation: '스크롤 네비게이션',
             scrollNavigationHelp: '스크롤할 때 우측 하단에 채팅간 이동 버튼을 표시합니다.',
             syncStatusUi: '동기화 UI 표시',
-            syncStatusUiHelp: '동기화 상태 아이콘을 표시하며, 동기화가 멈추거나 동기화 서버를 사용할 수 없거나 플러그인이 동기화를 기다리는 경우 알림을 표시합니다.',
+            syncStatusUiHelp: '동기화 상태 아이콘을 표시하며, 동기화가 멈추거나 플러그인이 동기화를 기다리는 경우 알림을 표시합니다.',
         },
         textEditor: {
             open: '팝업창에서 수정',
@@ -2597,12 +2579,6 @@ export const languageKorean = {
             counts: '캐릭터 {0}개 · 대화 {1}개 · 메시지 {2}개',
             subMetrics:
                 '채팅 첨부 {0} (이미지·미디어에 포함) · 플러그인 데이터 {1}',
-            automaticSnapshots: '자동 스냅샷',
-            automaticSnapshotsHelp:
-                '마지막 스냅샷을 만든 지 24시간이 지나면 새 스냅샷을 만듭니다.',
-            snapshotKeepCount: '스냅샷 보관 개수',
-            snapshotKeepCountHelp:
-                '스냅샷을 만들 때 이 개수를 넘으면 오래된 자동 스냅샷부터 삭제하며, 최대 {0}개까지 보관할 수 있습니다.',
             createSnapshotTitle: '스냅샷 만들기',
             createSnapshotHelp:
                 '지금 상태를 스냅샷으로 저장합니다.',
@@ -2630,20 +2606,6 @@ export const languageKorean = {
             gcDeletedResult: '삭제됨: {0}개 ({1})',
             gcConfirm:
                 '어디에서도 사용하지 않는 파일 {0}개({1})를 삭제합니다. 계속하시겠습니까?',
-            compactTitle: '데이터베이스 압축',
-            compactHelp: '데이터베이스에서 사용하지 않는 공간을 정리해 파일 크기를 줄이며, 앱이 다시 시작됩니다.',
-            compactReclaimable: '확보 가능 {0}',
-            compact: '압축',
-            compactConfirm:
-                '앱을 다시 시작해 데이터베이스를 압축하며, 시작이 평소보다 오래 걸릴 수 있습니다. 계속하시겠습니까?',
-            compactNoSpace: '저장 공간이 부족해 압축할 수 없습니다. {0} 이상 확보한 뒤 다시 시도하세요.',
-            compactRestartFailed: '앱을 다시 시작하지 못했습니다. 앱을 다시 시작하면 데이터베이스를 압축합니다.',
-            compactOffer:
-                '데이터베이스를 압축하면 {0}의 공간을 확보할 수 있습니다. 압축하면 앱이 다시 시작되며, 시작이 평소보다 오래 걸릴 수 있습니다. 지금 압축하시겠습니까?',
-            compacted: '데이터베이스를 압축해 {0}를 확보했습니다.',
-            compactStartNoSpace:
-                '저장 공간이 부족해 데이터베이스를 압축하지 못했습니다. {0} 이상 확보한 뒤 다시 시도하세요.',
-            compactFailed: '데이터베이스를 압축하지 못했습니다. 다시 시도하세요.',
             deleteSnapshotConfirm:
                 '이 스냅샷을 삭제하시겠습니까? 삭제하면 이 시점으로 되돌릴 수 없습니다.',
             deleteConflictBackupConfirm:
@@ -2885,8 +2847,6 @@ export const languageKorean = {
             currentItem: '현재: {0}',
             itemsOf: '{0} / {1}',
             itemsCount: '{0}개 항목',
-            batchFile: '파일 {0} / {1}',
-            batchFiles: '파일 {0}개',
             countCharacters: '캐릭터',
             countPresets: '프리셋',
             countAssets: '에셋',
@@ -2906,9 +2866,6 @@ export const languageKorean = {
                 '가져오기를 취소했습니다. 이미 저장된 첨부 파일 일부가 남아 있을 수 있습니다.',
             resultFailed:
                 '가져오기에 실패했습니다. 기존 데이터는 그대로입니다.',
-            resultBatchFailed: '파일 {1}개 중 {0}개를 가져오지 못했습니다.',
-            resultBatchCancelled: '가져오기를 취소했습니다. 파일 {1}개 중 {0}개를 가져왔습니다.',
-            resultBatchPartial: '파일 {1}개 중 {0}개를 가져왔습니다.',
             resultFailedAfterCommit:
                 '데이터는 가져왔지만 화면을 새로 고치지 못했습니다. 다른 변경을 하기 전에 화면 새로 고침을 선택해주세요.',
             resultActivationUnresolved: '복원 결과를 확인하지 못했습니다. 다른 변경을 하기 전에 화면 새로 고침을 선택해 결과를 확인해주세요.',
@@ -2931,9 +2888,6 @@ export const languageKorean = {
             reasonExportTooLarge: '{0} 크기가 너무 커서 내보내지 못했습니다.',
             reasonCompatibleDatabaseTooLarge: '데이터 크기가 너무 커서 호환 백업으로 내보내지 못했습니다. RisuNest 백업을 사용하세요.',
             reasonCompatibleUnsupportedValue: '대상 앱이 지원하지 않는 값이 있어 호환 백업으로 내보내지 못했습니다. RisuNest 백업을 사용하세요.',
-            failureOwners: {
-                character: '캐릭터: {0}', chat: '대화: {0}의 {1}', preset: '프리셋: {0}', module: '모듈: {0}', persona: '페르소나: {0}',
-            },
             tooLargeItems: {
                 root: '설정', preset: '프리셋', character: '캐릭터', conversation: '대화', message: '메시지', 'plugin-value': '플러그인 데이터',
                 record: '데이터 항목', backup: '백업 데이터', 'backup-entry': '백업 항목', card: '캐릭터 카드', module: '모듈', content: '카드 또는 모듈', 'owner-manifest': '추가 에셋 목록', 'compatible-database': '데이터',
@@ -2995,7 +2949,6 @@ export const languageKorean = {
             "warningProviderNotAtomic": '저장이 중단될 경우 선택한 위치에 불완전한 파일이 남을 수 있습니다.',
             "warningSafUnavailable": '파일 선택기를 사용할 수 없습니다. 사용할 수 있을 때 다시 시도해주세요.',
             "warningFollowupFailed": '데이터를 가져오고 화면을 새로 고쳤지만 플러그인을 다시 불러오지 못했습니다. 플러그인을 다시 불러오세요.',
-            "warningPluginValuesSkipped": '플러그인 값 {0}개를 복원하지 못했습니다. 앱을 업데이트한 뒤 다시 복원하세요.',
             "resultBackgroundExpired": '앱 전환 또는 화면 잠금 후 작업이 중단되었습니다. 다시 시도하세요.',
             "resultBackgroundExpiredPartial": '앱 전환 또는 화면 잠금 후 작업이 중단되었으며, 일부 변경 사항이 저장되었을 수 있습니다. 결과를 확인한 후 다시 시도하세요.',
         },
@@ -3221,17 +3174,6 @@ export const languageKorean = {
         registrationUsed: "이미 사용한 등록 코드로는 연결할 수 없습니다. 동기화 서버의 기기 등록에서 새 등록 코드를 만들어 입력하세요.",
         registrationUsedOnboarding: "이미 사용한 등록 코드로는 연결할 수 없습니다. 동기화 서버의 기기 등록에서 새 등록 코드를 만들어 입력해주세요.",
         bindingIncomplete: "연결이 완료되지 않았습니다. 연결하고 동기화를 눌러 연결을 마치세요.",
-        formatSwitchRequired: "데이터 형식 전환 필요",
-        formatSwitchRequiredHelp: "전환하기 전까지 이 기기의 동기화가 일시 중지됩니다. 다른 기기를 모두 최신 버전으로 업데이트한 뒤 데이터 형식을 전환하세요.",
-        formatSwitch: "전환",
-        formatSwitchTitle: "데이터 형식을 전환하시겠습니까?",
-        formatSwitchDescription: "전환하면 이 기기의 동기화를 다시 시작하며, 이전 버전 앱을 사용하는 기기는 업데이트하기 전까지 동기화할 수 없습니다. 전환한 뒤에는 되돌릴 수 없습니다.",
-        formatSwitchAcknowledge: "이전 버전 앱의 동기화가 중단되는 것을 이해했습니다.",
-        formatSwitchFailed: "데이터 형식을 전환하지 못했습니다. 다시 시도하세요.",
-        appUpdateRequired: "앱 업데이트 필요",
-        appUpdateRequiredHelp: "이 동기화를 계속하려면 앱을 업데이트하세요.",
-        serverUpdateRequired: "Sync 서버 업데이트 필요",
-        serverUpdateRequiredHelp: "Sync 서버를 최신 버전으로 업데이트하세요. 업데이트하기 전까지 이 기기의 동기화가 일시 중지됩니다.",
     },
     characterSelectionFailed: "캐릭터를 선택할 수 없습니다. 다시 시도해주세요.",
     navigationBlockedWhileEditingPaused: "편집이 잠시 중단되어 캐릭터를 선택할 수 없습니다.",

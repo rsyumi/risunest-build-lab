@@ -6,7 +6,6 @@ pub mod changes;
 pub mod delta;
 pub mod descriptor;
 pub mod head;
-pub mod library_format;
 pub mod payload;
 pub mod stream_delta;
 pub mod transfer;

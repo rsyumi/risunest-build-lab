@@ -173,6 +173,7 @@ vi.mock('./nativeRegexBatch', () => ({
 
 const {
     createPromptScriptOperationScope,
+    editProcessHasEffects,
     processScriptFull,
     resetScriptCache,
 } = await import('./scripts')
@@ -230,6 +231,31 @@ it('uses frozen capture script inputs without reading the live selected conversa
     expect(moduleMocks.getModuleRegexScripts).not.toHaveBeenCalled()
 })
 
+describe('editprocess effects', () => {
+    const editprocess = (output: string, flag = 'g'): customscript => ({ ...makeScript('x', output, flag), type: 'editprocess' })
+
+    afterEach(() => {
+        mocks.database.presetRegex = []
+        mocks.pluginV2.editprocess.clear()
+    })
+
+    it('finds a plugin handler or a script that injects or sets an emotion', () => {
+        expect(editProcessHasEffects(makeCharacter([editprocess('plain'), makeScript('x', '@@emo happy')]))).toBe(false)
+        expect(editProcessHasEffects(makeCharacter([editprocess('@@emo happy')]))).toBe(true)
+        expect(editProcessHasEffects(makeCharacter([editprocess('@@inject')]))).toBe(true)
+        expect(editProcessHasEffects(makeCharacter([editprocess('note', 'g<inject>')]))).toBe(true)
+
+        mocks.database.presetRegex = [editprocess('@@emo happy')]
+        expect(editProcessHasEffects(makeCharacter([]))).toBe(true)
+        mocks.database.presetRegex = []
+        moduleMocks.getModuleRegexScripts.mockReturnValueOnce([editprocess('@@inject')] as never[])
+        expect(editProcessHasEffects(makeCharacter([]))).toBe(true)
+
+        mocks.pluginV2.editprocess.add(async (data) => data)
+        expect(editProcessHasEffects(makeCharacter([]))).toBe(true)
+    })
+})
+
 const emptyResultWithAction = [
     makeScript('x', ''),
     makeScript('^$', '@@emo happy'),
@@ -281,8 +307,6 @@ describe('processScriptFull result caching', () => {
             expect((await rows).map((result) => result.data)).toEqual(Array.from({ length: 30 }, (_, i) => `<rendered ${i}>`))
             expect(alertToast).toHaveBeenCalledExactlyOnceWith(language.regexScriptTimeout)
             expect((await processScriptFull(char, '<row 0>', 'editdisplay', 0, {}, { cache: 'bypass' })).data).toBe('<rendered 0>')
-            // An edited row is a later display batch on other text.
-            expect((await processScriptFull(char, '<row 0> edited', 'editdisplay', 0, {}, { cache: 'bypass' })).data).toBe('<rendered 0> edited')
             const generation = {}
             const first = processScriptFull(char, '<output>', 'editoutput', 0, {}, { cache: 'bypass', regexGeneration: generation })
             await vi.advanceTimersByTimeAsync(20_000)
@@ -291,14 +315,6 @@ describe('processScriptFull result caching', () => {
                 cache: 'bypass', regexGeneration: generation, signal: new AbortController().signal,
             })).data).toBe('<saved> final')
             expect(alertToast).toHaveBeenCalledTimes(2)
-            // A stored message of a later generation still waits for the rule.
-            let finished = false
-            const next = processScriptFull(char, '<output> next', 'editoutput', 0, {}, { cache: 'bypass', regexGeneration: {} })
-                .finally(() => { finished = true })
-            await vi.advanceTimersByTimeAsync(9_999)
-            expect(finished).toBe(false)
-            await vi.advanceTimersByTimeAsync(1)
-            expect((await next).data).toBe('<saved> next')
         } finally { mocks.state.workerClient = null; vi.useRealTimers() }
     })
 

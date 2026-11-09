@@ -1,0 +1,1473 @@
+{
+  "schema": 1,
+  "generator": "benchmarks/rust-core-oracles/providers-horde.oracle.test.ts",
+  "fixtureSha256": "a2e9e8a3156b013f44135246937dee6b3d62278ba9adb981d379faba10260f94",
+  "tsSourceSha256": {
+    "src/ts/process/request/request.ts": "e9c47045779ac1011f2e5870faa0489d28a6bc50a139b4d24ce57e5aa62ca5c3",
+    "src/ts/process/request/shared.ts": "886da326d52400866db54da16ef203666892d8d5f68eba646bab86d12da640e1",
+    "src/ts/process/request/additionalParams.ts": "e8ff9cc9f87ef45796f76f07fbf4f6619aac97442c4b2351f35233c9a37f57d0",
+    "src/ts/process/templates/chatTemplate.ts": "d302dcdc22313a8f1961f96efe018e2fe3209daab5cf0bac6bd5fed5aca88ab7",
+    "src/ts/process/stringlize.ts": "f0877476b33d0e65ed41f320a626cf8a374986afc1dd215a21494fba5add9679",
+    "src/ts/util.ts": "45e8010d4ffd99cb4b08dbf67e47688e4dc3e904ef47ffce8f3ec8676525bc05",
+    "src/ts/model/modellist.ts": "1c4c97cf87d85b06d891531ef8ab65700a220840f116ba425173d0d8061033ae"
+  },
+  "node": "v24.12.0",
+  "vitest": "4.1.11",
+  "cases": [
+    {
+      "id": "basic",
+      "result": {
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "horde:::koboldcpp/Synth-7B",
+          "internalID": "koboldcpp/Synth-7B",
+          "format": 16,
+          "flags": [],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>user\nsystem: Be brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"error\":\"Preview body is not supported for Horde\"}"
+        },
+        "requests": [
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/async",
+            "method": "POST",
+            "headers": [
+              [
+                "content-type",
+                "application/json"
+              ],
+              [
+                "apikey",
+                "0000000000"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>user\\nsystem: Be brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"params\":{\"n\":1,\"max_context_length\":4100,\"max_length\":300,\"singleline\":false,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9},\"trusted_workers\":false,\"workerslow_workers\":true,\"_blacklist\":false,\"dry_run\":false,\"models\":[\"koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B\",\" koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B \"]}",
+            "signal": true
+          },
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/status/job-1",
+            "method": "GET",
+            "headers": [],
+            "body": null,
+            "signal": false
+          }
+        ],
+        "sleeps": [
+          2000
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "multi-turn",
+      "result": {
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "horde:::koboldcpp/Synth-7B",
+          "internalID": "koboldcpp/Synth-7B",
+          "format": 16,
+          "flags": [],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>user\nsystem: You are a narrator.<|im_end|>\n<|im_start|>user\nOpen the door.<|im_end|>\n<|im_start|>assistant\nThe door creaks open.<|im_end|>\n<|im_start|>user\nWalk in.<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"error\":\"Preview body is not supported for Horde\"}"
+        },
+        "requests": [
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/async",
+            "method": "POST",
+            "headers": [
+              [
+                "content-type",
+                "application/json"
+              ],
+              [
+                "apikey",
+                "0000000000"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>user\\nsystem: You are a narrator.<|im_end|>\\n<|im_start|>user\\nOpen the door.<|im_end|>\\n<|im_start|>assistant\\nThe door creaks open.<|im_end|>\\n<|im_start|>user\\nWalk in.<|im_end|>\\n<|im_start|>assistant\\n\",\"params\":{\"n\":1,\"max_context_length\":4100,\"max_length\":300,\"singleline\":false,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9},\"trusted_workers\":false,\"workerslow_workers\":true,\"_blacklist\":false,\"dry_run\":false,\"models\":[\"koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B\",\" koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B \"]}",
+            "signal": true
+          },
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/status/job-1",
+            "method": "GET",
+            "headers": [],
+            "body": null,
+            "signal": false
+          }
+        ],
+        "sleeps": [
+          2000
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "auto-model",
+      "result": {
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "horde:::auto",
+          "internalID": "auto",
+          "format": 16,
+          "flags": [],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>user\nsystem: Be brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"error\":\"Preview body is not supported for Horde\"}"
+        },
+        "requests": [
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/async",
+            "method": "POST",
+            "headers": [
+              [
+                "content-type",
+                "application/json"
+              ],
+              [
+                "apikey",
+                "0000000000"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>user\\nsystem: Be brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"params\":{\"n\":1,\"max_context_length\":4100,\"max_length\":300,\"singleline\":false,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9},\"trusted_workers\":false,\"workerslow_workers\":true,\"_blacklist\":false,\"dry_run\":false}",
+            "signal": true
+          },
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/status/job-1",
+            "method": "GET",
+            "headers": [],
+            "body": null,
+            "signal": false
+          }
+        ],
+        "sleeps": [
+          2000
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "auto-spaced-keeps-models",
+      "result": {
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "horde::: auto",
+          "internalID": " auto",
+          "format": 16,
+          "flags": [],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>user\nsystem: Be brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"error\":\"Preview body is not supported for Horde\"}"
+        },
+        "requests": [
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/async",
+            "method": "POST",
+            "headers": [
+              [
+                "content-type",
+                "application/json"
+              ],
+              [
+                "apikey",
+                "0000000000"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>user\\nsystem: Be brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"params\":{\"n\":1,\"max_context_length\":4100,\"max_length\":300,\"singleline\":false,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9},\"trusted_workers\":false,\"workerslow_workers\":true,\"_blacklist\":false,\"dry_run\":false,\"models\":[\" auto\",\"auto\",\"  auto\",\" auto \"]}",
+            "signal": true
+          },
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/status/job-1",
+            "method": "GET",
+            "headers": [],
+            "body": null,
+            "signal": false
+          }
+        ],
+        "sleeps": [
+          2000
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "spaced-model",
+      "result": {
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "horde:::  Synth Model  ",
+          "internalID": "  Synth Model  ",
+          "format": 16,
+          "flags": [],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>user\nsystem: Be brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"error\":\"Preview body is not supported for Horde\"}"
+        },
+        "requests": [
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/async",
+            "method": "POST",
+            "headers": [
+              [
+                "content-type",
+                "application/json"
+              ],
+              [
+                "apikey",
+                "0000000000"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>user\\nsystem: Be brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"params\":{\"n\":1,\"max_context_length\":4100,\"max_length\":300,\"singleline\":false,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9},\"trusted_workers\":false,\"workerslow_workers\":true,\"_blacklist\":false,\"dry_run\":false,\"models\":[\"  Synth Model  \",\"Synth Model\",\"   Synth Model  \",\"  Synth Model   \"]}",
+            "signal": true
+          },
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/status/job-1",
+            "method": "GET",
+            "headers": [],
+            "body": null,
+            "signal": false
+          }
+        ],
+        "sleeps": [
+          2000
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "extra-separator",
+      "result": {
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "horde:::first:::second",
+          "internalID": "first:::second",
+          "format": 16,
+          "flags": [],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>user\nsystem: Be brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"error\":\"Preview body is not supported for Horde\"}"
+        },
+        "requests": [
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/async",
+            "method": "POST",
+            "headers": [
+              [
+                "content-type",
+                "application/json"
+              ],
+              [
+                "apikey",
+                "0000000000"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>user\\nsystem: Be brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"params\":{\"n\":1,\"max_context_length\":4100,\"max_length\":300,\"singleline\":false,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9},\"trusted_workers\":false,\"workerslow_workers\":true,\"_blacklist\":false,\"dry_run\":false,\"models\":[\"first\",\"first\",\" first\",\"first \"]}",
+            "signal": true
+          },
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/status/job-1",
+            "method": "GET",
+            "headers": [],
+            "body": null,
+            "signal": false
+          }
+        ],
+        "sleeps": [
+          2000
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "empty-model-name",
+      "result": {
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "horde:::",
+          "internalID": "",
+          "format": 16,
+          "flags": [],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>user\nsystem: Be brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"error\":\"Preview body is not supported for Horde\"}"
+        },
+        "requests": [
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/async",
+            "method": "POST",
+            "headers": [
+              [
+                "content-type",
+                "application/json"
+              ],
+              [
+                "apikey",
+                "0000000000"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>user\\nsystem: Be brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"params\":{\"n\":1,\"max_context_length\":4100,\"max_length\":300,\"singleline\":false,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9},\"trusted_workers\":false,\"workerslow_workers\":true,\"_blacklist\":false,\"dry_run\":false,\"models\":[\"\",\"\",\" \",\" \"]}",
+            "signal": true
+          },
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/status/job-1",
+            "method": "GET",
+            "headers": [],
+            "body": null,
+            "signal": false
+          }
+        ],
+        "sleeps": [
+          2000
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "api-key",
+      "result": {
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "horde:::koboldcpp/Synth-7B",
+          "internalID": "koboldcpp/Synth-7B",
+          "format": 16,
+          "flags": [],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>user\nsystem: Be brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"error\":\"Preview body is not supported for Horde\"}"
+        },
+        "requests": [
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/async",
+            "method": "POST",
+            "headers": [
+              [
+                "content-type",
+                "application/json"
+              ],
+              [
+                "apikey",
+                "synthetic-horde-key"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>user\\nsystem: Be brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"params\":{\"n\":1,\"max_context_length\":4100,\"max_length\":300,\"singleline\":false,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9},\"trusted_workers\":false,\"workerslow_workers\":true,\"_blacklist\":false,\"dry_run\":false,\"models\":[\"koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B\",\" koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B \"]}",
+            "signal": true
+          },
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/status/job-1",
+            "method": "GET",
+            "headers": [],
+            "body": null,
+            "signal": false
+          }
+        ],
+        "sleeps": [
+          2000
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "api-key-two-units",
+      "result": {
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "horde:::koboldcpp/Synth-7B",
+          "internalID": "koboldcpp/Synth-7B",
+          "format": 16,
+          "flags": [],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>user\nsystem: Be brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"error\":\"Preview body is not supported for Horde\"}"
+        },
+        "requests": [
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/async",
+            "method": "POST",
+            "headers": [
+              [
+                "content-type",
+                "application/json"
+              ],
+              [
+                "apikey",
+                "0000000000"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>user\\nsystem: Be brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"params\":{\"n\":1,\"max_context_length\":4100,\"max_length\":300,\"singleline\":false,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9},\"trusted_workers\":false,\"workerslow_workers\":true,\"_blacklist\":false,\"dry_run\":false,\"models\":[\"koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B\",\" koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B \"]}",
+            "signal": true
+          },
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/status/job-1",
+            "method": "GET",
+            "headers": [],
+            "body": null,
+            "signal": false
+          }
+        ],
+        "sleeps": [
+          2000
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "api-key-three-units",
+      "result": {
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "horde:::koboldcpp/Synth-7B",
+          "internalID": "koboldcpp/Synth-7B",
+          "format": 16,
+          "flags": [],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>user\nsystem: Be brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"error\":\"Preview body is not supported for Horde\"}"
+        },
+        "requests": [
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/async",
+            "method": "POST",
+            "headers": [
+              [
+                "content-type",
+                "application/json"
+              ],
+              [
+                "apikey",
+                "abc"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>user\\nsystem: Be brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"params\":{\"n\":1,\"max_context_length\":4100,\"max_length\":300,\"singleline\":false,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9},\"trusted_workers\":false,\"workerslow_workers\":true,\"_blacklist\":false,\"dry_run\":false,\"models\":[\"koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B\",\" koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B \"]}",
+            "signal": true
+          },
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/status/job-1",
+            "method": "GET",
+            "headers": [],
+            "body": null,
+            "signal": false
+          }
+        ],
+        "sleeps": [
+          2000
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "settings-values",
+      "result": {
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "horde:::koboldcpp/Synth-7B",
+          "internalID": "koboldcpp/Synth-7B",
+          "format": 16,
+          "flags": [],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>user\nsystem: Be brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"error\":\"Preview body is not supported for Horde\"}"
+        },
+        "requests": [
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/async",
+            "method": "POST",
+            "headers": [
+              [
+                "content-type",
+                "application/json"
+              ],
+              [
+                "apikey",
+                "0000000000"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>user\\nsystem: Be brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"params\":{\"n\":1,\"max_context_length\":8292,\"max_length\":512,\"singleline\":false,\"temperature\":0,\"top_k\":0,\"top_p\":1},\"trusted_workers\":false,\"workerslow_workers\":true,\"_blacklist\":false,\"dry_run\":false,\"models\":[\"koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B\",\" koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B \"]}",
+            "signal": true
+          },
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/status/job-1",
+            "method": "GET",
+            "headers": [],
+            "body": null,
+            "signal": false
+          }
+        ],
+        "sleeps": [
+          2000
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "settings-fractions",
+      "result": {
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "horde:::koboldcpp/Synth-7B",
+          "internalID": "koboldcpp/Synth-7B",
+          "format": 16,
+          "flags": [],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>user\nsystem: Be brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"error\":\"Preview body is not supported for Horde\"}"
+        },
+        "requests": [
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/async",
+            "method": "POST",
+            "headers": [
+              [
+                "content-type",
+                "application/json"
+              ],
+              [
+                "apikey",
+                "0000000000"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>user\\nsystem: Be brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"params\":{\"n\":1,\"max_context_length\":1100.5,\"max_length\":300,\"singleline\":false,\"temperature\":0.75,\"top_k\":40,\"top_p\":0.95},\"trusted_workers\":false,\"workerslow_workers\":true,\"_blacklist\":false,\"dry_run\":false,\"models\":[\"koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B\",\" koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B \"]}",
+            "signal": true
+          },
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/status/job-1",
+            "method": "GET",
+            "headers": [],
+            "body": null,
+            "signal": false
+          }
+        ],
+        "sleeps": [
+          2000
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "max-tokens-argument-ignored",
+      "result": {
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "horde:::koboldcpp/Synth-7B",
+          "internalID": "koboldcpp/Synth-7B",
+          "format": 16,
+          "flags": [],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>user\nsystem: Be brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"error\":\"Preview body is not supported for Horde\"}"
+        },
+        "requests": [
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/async",
+            "method": "POST",
+            "headers": [
+              [
+                "content-type",
+                "application/json"
+              ],
+              [
+                "apikey",
+                "0000000000"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>user\\nsystem: Be brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"params\":{\"n\":1,\"max_context_length\":4100,\"max_length\":300,\"singleline\":false,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9},\"trusted_workers\":false,\"workerslow_workers\":true,\"_blacklist\":false,\"dry_run\":false,\"models\":[\"koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B\",\" koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B \"]}",
+            "signal": true
+          },
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/status/job-1",
+            "method": "GET",
+            "headers": [],
+            "body": null,
+            "signal": false
+          }
+        ],
+        "sleeps": [
+          2000
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "unicode-and-escapes",
+      "result": {
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "horde:::koboldcpp/Synth-7B",
+          "internalID": "koboldcpp/Synth-7B",
+          "format": 16,
+          "flags": [],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>user\nsystem: 日本語 😀<|im_end|>\n<|im_start|>user\n\"quoted\" \\ back\nline<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"error\":\"Preview body is not supported for Horde\"}"
+        },
+        "requests": [
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/async",
+            "method": "POST",
+            "headers": [
+              [
+                "content-type",
+                "application/json"
+              ],
+              [
+                "apikey",
+                "0000000000"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>user\\nsystem: 日本語 😀<|im_end|>\\n<|im_start|>user\\n\\\"quoted\\\" \\\\ back\\nline<|im_end|>\\n<|im_start|>assistant\\n\",\"params\":{\"n\":1,\"max_context_length\":4100,\"max_length\":300,\"singleline\":false,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9},\"trusted_workers\":false,\"workerslow_workers\":true,\"_blacklist\":false,\"dry_run\":false,\"models\":[\"koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B\",\" koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B \"]}",
+            "signal": true
+          },
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/status/job-1",
+            "method": "GET",
+            "headers": [],
+            "body": null,
+            "signal": false
+          }
+        ],
+        "sleeps": [
+          2000
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "empty-messages",
+      "result": {
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "horde:::koboldcpp/Synth-7B",
+          "internalID": "koboldcpp/Synth-7B",
+          "format": 16,
+          "flags": [],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"error\":\"Preview body is not supported for Horde\"}"
+        },
+        "requests": [
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/async",
+            "method": "POST",
+            "headers": [
+              [
+                "content-type",
+                "application/json"
+              ],
+              [
+                "apikey",
+                "0000000000"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>assistant\\n\",\"params\":{\"n\":1,\"max_context_length\":4100,\"max_length\":300,\"singleline\":false,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9},\"trusted_workers\":false,\"workerslow_workers\":true,\"_blacklist\":false,\"dry_run\":false,\"models\":[\"koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B\",\" koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B \"]}",
+            "signal": true
+          },
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/status/job-1",
+            "method": "GET",
+            "headers": [],
+            "body": null,
+            "signal": false
+          }
+        ],
+        "sleeps": [
+          2000
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "additional-number",
+      "result": {
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "horde:::koboldcpp/Synth-7B",
+          "internalID": "koboldcpp/Synth-7B",
+          "format": 16,
+          "flags": [],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>user\nsystem: Be brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"error\":\"Preview body is not supported for Horde\"}"
+        },
+        "requests": [
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/async",
+            "method": "POST",
+            "headers": [
+              [
+                "content-type",
+                "application/json"
+              ],
+              [
+                "apikey",
+                "0000000000"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>user\\nsystem: Be brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"params\":{\"n\":1,\"max_context_length\":4100,\"max_length\":300,\"singleline\":false,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9},\"trusted_workers\":false,\"workerslow_workers\":true,\"_blacklist\":false,\"dry_run\":false,\"models\":[\"koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B\",\" koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B \"],\"seed\":7}",
+            "signal": true
+          },
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/status/job-1",
+            "method": "GET",
+            "headers": [],
+            "body": null,
+            "signal": false
+          }
+        ],
+        "sleeps": [
+          2000
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "additional-nested",
+      "result": {
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "horde:::koboldcpp/Synth-7B",
+          "internalID": "koboldcpp/Synth-7B",
+          "format": 16,
+          "flags": [],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>user\nsystem: Be brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"error\":\"Preview body is not supported for Horde\"}"
+        },
+        "requests": [
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/async",
+            "method": "POST",
+            "headers": [
+              [
+                "content-type",
+                "application/json"
+              ],
+              [
+                "apikey",
+                "0000000000"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>user\\nsystem: Be brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"params\":{\"n\":2,\"max_context_length\":4100,\"max_length\":300,\"singleline\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9},\"trusted_workers\":false,\"workerslow_workers\":true,\"_blacklist\":false,\"dry_run\":false,\"models\":[\"koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B\",\" koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B \"]}",
+            "signal": true
+          },
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/status/job-1",
+            "method": "GET",
+            "headers": [],
+            "body": null,
+            "signal": false
+          }
+        ],
+        "sleeps": [
+          2000
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "additional-removes-prompt",
+      "result": {
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "horde:::koboldcpp/Synth-7B",
+          "internalID": "koboldcpp/Synth-7B",
+          "format": 16,
+          "flags": [],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>user\nsystem: Be brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"error\":\"Preview body is not supported for Horde\"}"
+        },
+        "requests": [
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/async",
+            "method": "POST",
+            "headers": [
+              [
+                "content-type",
+                "application/json"
+              ],
+              [
+                "apikey",
+                "0000000000"
+              ]
+            ],
+            "body": "{\"params\":{\"n\":1,\"max_context_length\":4100,\"max_length\":300,\"singleline\":false,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9},\"trusted_workers\":false,\"workerslow_workers\":true,\"_blacklist\":false,\"dry_run\":false,\"models\":[\"koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B\",\" koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B \"]}",
+            "signal": true
+          },
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/status/job-1",
+            "method": "GET",
+            "headers": [],
+            "body": null,
+            "signal": false
+          }
+        ],
+        "sleeps": [
+          2000
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "additional-header",
+      "result": {
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "horde:::koboldcpp/Synth-7B",
+          "internalID": "koboldcpp/Synth-7B",
+          "format": 16,
+          "flags": [],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>user\nsystem: Be brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"error\":\"Preview body is not supported for Horde\"}"
+        },
+        "requests": [
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/async",
+            "method": "POST",
+            "headers": [
+              [
+                "content-type",
+                "application/json"
+              ],
+              [
+                "apikey",
+                "override"
+              ],
+              [
+                "X-Test",
+                "on"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>user\\nsystem: Be brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"params\":{\"n\":1,\"max_context_length\":4100,\"max_length\":300,\"singleline\":false,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9},\"trusted_workers\":false,\"workerslow_workers\":true,\"_blacklist\":false,\"dry_run\":false,\"models\":[\"koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B\",\" koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B \"]}",
+            "signal": true
+          },
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/status/job-1",
+            "method": "GET",
+            "headers": [],
+            "body": null,
+            "signal": false
+          }
+        ],
+        "sleeps": [
+          2000
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "system-content-replacement",
+      "result": {
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "horde:::koboldcpp/Synth-7B",
+          "internalID": "koboldcpp/Synth-7B",
+          "format": 16,
+          "flags": [],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>user\nSys: Be brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"error\":\"Preview body is not supported for Horde\"}"
+        },
+        "requests": [
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/async",
+            "method": "POST",
+            "headers": [
+              [
+                "content-type",
+                "application/json"
+              ],
+              [
+                "apikey",
+                "0000000000"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>user\\nSys: Be brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"params\":{\"n\":1,\"max_context_length\":4100,\"max_length\":300,\"singleline\":false,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9},\"trusted_workers\":false,\"workerslow_workers\":true,\"_blacklist\":false,\"dry_run\":false,\"models\":[\"koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B\",\" koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B \"]}",
+            "signal": true
+          },
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/status/job-1",
+            "method": "GET",
+            "headers": [],
+            "body": null,
+            "signal": false
+          }
+        ],
+        "sleeps": [
+          2000
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "chat-template-llama3",
+      "result": {
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "horde:::koboldcpp/Synth-7B",
+          "internalID": "koboldcpp/Synth-7B",
+          "format": 16,
+          "flags": [],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\nsystem: You are a narrator.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nOpen the door.<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\nThe door creaks open.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nWalk in.<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"error\":\"Preview body is not supported for Horde\"}"
+        },
+        "requests": [
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/async",
+            "method": "POST",
+            "headers": [
+              [
+                "content-type",
+                "application/json"
+              ],
+              [
+                "apikey",
+                "0000000000"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\\n\\nsystem: You are a narrator.<|eot_id|><|start_header_id|>user<|end_header_id|>\\n\\nOpen the door.<|eot_id|><|start_header_id|>assistant<|end_header_id|>\\n\\nThe door creaks open.<|eot_id|><|start_header_id|>user<|end_header_id|>\\n\\nWalk in.<|eot_id|><|start_header_id|>assistant<|end_header_id|>\\n\\n\",\"params\":{\"n\":1,\"max_context_length\":4100,\"max_length\":300,\"singleline\":false,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9},\"trusted_workers\":false,\"workerslow_workers\":true,\"_blacklist\":false,\"dry_run\":false,\"models\":[\"koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B\",\" koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B \"]}",
+            "signal": true
+          },
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/status/job-1",
+            "method": "GET",
+            "headers": [],
+            "body": null,
+            "signal": false
+          }
+        ],
+        "sleeps": [
+          2000
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "submodel-mode",
+      "result": {
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "horde:::koboldcpp/Synth-7B",
+          "internalID": "koboldcpp/Synth-7B",
+          "format": 16,
+          "flags": [],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>user\nsystem: Be brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"error\":\"Preview body is not supported for Horde\"}"
+        },
+        "requests": [
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/async",
+            "method": "POST",
+            "headers": [
+              [
+                "content-type",
+                "application/json"
+              ],
+              [
+                "apikey",
+                "0000000000"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>user\\nsystem: Be brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"params\":{\"n\":1,\"max_context_length\":4100,\"max_length\":300,\"singleline\":false,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9},\"trusted_workers\":false,\"workerslow_workers\":true,\"_blacklist\":false,\"dry_run\":false,\"models\":[\"koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B\",\" koboldcpp/Synth-7B\",\"koboldcpp/Synth-7B \"]}",
+            "signal": true
+          },
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/status/job-1",
+            "method": "GET",
+            "headers": [],
+            "body": null,
+            "signal": false
+          }
+        ],
+        "sleeps": [
+          2000
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    },
+    {
+      "id": "reverse-proxy-throws",
+      "result": {
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "reverse_proxy",
+          "internalID": "my-proxy-model",
+          "format": 16,
+          "flags": [
+            "hasFullSystemPrompt",
+            "hasStreaming"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"error\":\"Preview body is not supported for Horde\"}"
+        },
+        "requests": [],
+        "sleeps": [],
+        "outcome": {
+          "type": "thrown",
+          "error": "TypeError: Cannot read properties of undefined (reading 'trim')"
+        }
+      }
+    },
+    {
+      "id": "custom-model",
+      "result": {
+        "names": {
+          "char": "Aria",
+          "user": "Mina"
+        },
+        "model": {
+          "id": "xcustom:::synth",
+          "internalID": "h",
+          "format": 16,
+          "flags": [],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null
+        },
+        "prompts": [
+          "<|im_start|>user\nsystem: Be brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        ],
+        "preview": {
+          "type": "success",
+          "result": "{\"error\":\"Preview body is not supported for Horde\"}"
+        },
+        "requests": [
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/async",
+            "method": "POST",
+            "headers": [
+              [
+                "content-type",
+                "application/json"
+              ],
+              [
+                "apikey",
+                "0000000000"
+              ]
+            ],
+            "body": "{\"prompt\":\"<|im_start|>user\\nsystem: Be brief.<|im_end|>\\n<|im_start|>user\\nHello<|im_end|>\\n<|im_start|>assistant\\n\",\"params\":{\"n\":1,\"max_context_length\":4100,\"max_length\":300,\"singleline\":false,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9},\"trusted_workers\":false,\"workerslow_workers\":true,\"_blacklist\":false,\"dry_run\":false,\"models\":[\"synth\",\"synth\",\" synth\",\"synth \"]}",
+            "signal": true
+          },
+          {
+            "url": "https://stablehorde.net/api/v2/generate/text/status/job-1",
+            "method": "GET",
+            "headers": [],
+            "body": null,
+            "signal": false
+          }
+        ],
+        "sleeps": [
+          2000
+        ],
+        "outcome": {
+          "type": "success",
+          "result": "ok"
+        }
+      }
+    }
+  ]
+}

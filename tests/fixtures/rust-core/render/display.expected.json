@@ -1,0 +1,1623 @@
+{
+  "schema": 1,
+  "generator": "benchmarks/rust-core-oracles/render-display.oracle.test.ts",
+  "fixtureSha256": "d366d9cf4c1641c63bd4ade682d0afdaa13af73e899e35513651057408657e27",
+  "tsSourceSha256": {
+    "src/ts/parser/parser.svelte.ts": "f7ece7a1a5fef0b1c39a739a21d0ce0cc3eb6a971d5a350b2ef0e0038f1e15d0",
+    "src/ts/parser/streamingThoughtPreview.ts": "235725b4bb0d1b6d8cb4db4e9cbcc28e53b84fb07815a47a640d7114de27d768",
+    "src/ts/process/caseUnicode.ts": "510e4e2c3ec8603240cd3ae33569d572a276e840afbf67ccb48bec574e3b2ca7",
+    "src/ts/process/files/inlayRenderSource.ts": "e2c773a335f777e77eceaf9f1ae88caed7ad67f79ad4d2f751ed549ee6b91e56",
+    "src/ts/process/files/imageGeometryRender.ts": "026f6736f0599b1d095c60573c4c8c03d5f0fd4b75a8e0b65061e68f3b87f2b1"
+  },
+  "node": "v24.12.0",
+  "vitest": "4.1.11",
+  "cases": [
+    {
+      "id": "quote-mark",
+      "result": {
+        "html": "<p><mark risu-mark=\"quote2\">“Hello <mark risu-mark=\"quote1\">‘world’</mark>,”</mark> she said.</p>\n<p><mark risu-mark=\"quote1\">‘It’s <mark risu-mark=\"quote2\">“fine”</mark>,’</mark> he said – <mark risu-mark=\"quote2\">“really”</mark>.</p>\n<blockquote>\n<p><mark risu-mark=\"quote2\">“Quoted <mark risu-mark=\"quote1\">‘inner’</mark> line”</mark></p>\n</blockquote>\n<ul>\n<li><mark risu-mark=\"quote2\">“item one”</mark></li>\n<li><mark risu-mark=\"quote1\">‘item two’</mark></li>\n</ul>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "quote-unformat",
+      "result": {
+        "html": "<p>“Hello ‘world’,” she said.</p>\n<p>‘It’s “fine”,’ he said – “really”.</p>\n<blockquote>\n<p>“Quoted ‘inner’ line”</p>\n</blockquote>\n<ul>\n<li>“item one”</li>\n<li>‘item two’</li>\n</ul>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "quote-blockquote",
+      "result": {
+        "html": "<p><br><br><mark risu-mark=\"blockquote2\">“Hello <mark risu-mark=\"quote1\">‘world’</mark>,”</mark><br><br> she said.</p>\n<p><br><br><mark risu-mark=\"blockquote1\">‘It’s <br><br><mark risu-mark=\"blockquote2\">“fine”</mark><br><br>,’</mark><br><br> he said – <br><br><mark risu-mark=\"blockquote2\">“really”</mark><br><br>.</p>\n<blockquote>\n<p><br><br><mark risu-mark=\"blockquote2\">“Quoted <mark risu-mark=\"quote1\">‘inner’</mark> line”</mark><br><br></p>\n</blockquote>\n<ul>\n<li><br><br><mark risu-mark=\"blockquote2\">“item one”</mark><br><br></li>\n<li><br><br><mark risu-mark=\"blockquote1\">‘item two’</mark><br><br></li>\n</ul>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "quote-unformat-over-blockquote",
+      "result": {
+        "html": "<p>“Hello ‘world’,” she said.</p>\n<p>‘It’s “fine”,’ he said – “really”.</p>\n<blockquote>\n<p>“Quoted ‘inner’ line”</p>\n</blockquote>\n<ul>\n<li>“item one”</li>\n<li>‘item two’</li>\n</ul>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "quote-custom-mark",
+      "result": {
+        "html": "<p><mark risu-mark=\"quote2\">«Hello <mark risu-mark=\"quote1\">‹world›</mark>,»</mark> she said.</p>\n<p><mark risu-mark=\"quote1\">‹It’s <mark risu-mark=\"quote2\">«fine»</mark>,›</mark> he said – <mark risu-mark=\"quote2\">«really»</mark>.</p>\n<blockquote>\n<p><mark risu-mark=\"quote2\">«Quoted <mark risu-mark=\"quote1\">‹inner›</mark> line»</mark></p>\n</blockquote>\n<ul>\n<li><mark risu-mark=\"quote2\">«item one»</mark></li>\n<li><mark risu-mark=\"quote1\">‹item two›</mark></li>\n</ul>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "quote-custom-unformat",
+      "result": {
+        "html": "<p>«Hello ‹world›,» she said.</p>\n<p>‹It’s «fine»,› he said – «really».</p>\n<blockquote>\n<p>«Quoted ‹inner› line»</p>\n</blockquote>\n<ul>\n<li>«item one»</li>\n<li>‹item two›</li>\n</ul>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "quote-custom-blockquote",
+      "result": {
+        "html": "<p><br><br><mark risu-mark=\"blockquote2\">«Hello <mark risu-mark=\"quote1\">‹world›</mark>,»</mark><br><br> she said.</p>\n<p><br><br><mark risu-mark=\"blockquote1\">‹It’s <br><br><mark risu-mark=\"blockquote2\">«fine»</mark><br><br>,›</mark><br><br> he said – <br><br><mark risu-mark=\"blockquote2\">«really»</mark><br><br>.</p>\n<blockquote>\n<p><br><br><mark risu-mark=\"blockquote2\">«Quoted <mark risu-mark=\"quote1\">‹inner›</mark> line»</mark><br><br></p>\n</blockquote>\n<ul>\n<li><br><br><mark risu-mark=\"blockquote2\">«item one»</mark><br><br></li>\n<li><br><br><mark risu-mark=\"blockquote1\">‹item two›</mark><br><br></li>\n</ul>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "quote-custom-without-data",
+      "result": {
+        "html": "<p><br><br><mark risu-mark=\"blockquote2\">“Hello <mark risu-mark=\"quote1\">‘world’</mark>,”</mark><br><br> she said.</p>\n<p><br><br><mark risu-mark=\"blockquote1\">‘It’s <br><br><mark risu-mark=\"blockquote2\">“fine”</mark><br><br>,’</mark><br><br> he said – <br><br><mark risu-mark=\"blockquote2\">“really”</mark><br><br>.</p>\n<blockquote>\n<p><br><br><mark risu-mark=\"blockquote2\">“Quoted <mark risu-mark=\"quote1\">‘inner’</mark> line”</mark><br><br></p>\n</blockquote>\n<ul>\n<li><br><br><mark risu-mark=\"blockquote2\">“item one”</mark><br><br></li>\n<li><br><br><mark risu-mark=\"blockquote1\">‘item two’</mark><br><br></li>\n</ul>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "quote-data-without-custom",
+      "result": {
+        "html": "<p><mark risu-mark=\"quote2\">“Hello <mark risu-mark=\"quote1\">‘world’</mark>,”</mark> she said.</p>\n<p><mark risu-mark=\"quote1\">‘It’s <mark risu-mark=\"quote2\">“fine”</mark>,’</mark> he said – <mark risu-mark=\"quote2\">“really”</mark>.</p>\n<blockquote>\n<p><mark risu-mark=\"quote2\">“Quoted <mark risu-mark=\"quote1\">‘inner’</mark> line”</mark></p>\n</blockquote>\n<ul>\n<li><mark risu-mark=\"quote2\">“item one”</mark></li>\n<li><mark risu-mark=\"quote1\">‘item two’</mark></li>\n</ul>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "quote-patterns-mark",
+      "result": {
+        "html": "<p>a <mark risu-mark=\"quote2\">[]b <mark risu-mark=\"quote1\"><<p>a <mark risu-mark=\"quote2\">[]b >c< d$</mark> e</p>\n></mark> d$</mark> e</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "quote-patterns-unformat",
+      "result": {
+        "html": "<p>a []b <<p>a []b >c< d$ e</p>\n> d$ e</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "quote-patterns-blockquote",
+      "result": {
+        "html": "<p>a <br><br><mark risu-mark=\"blockquote2\">[$&]b <mark risu-mark=\"quote1\"><b >c< d></mark> d$$</mark><br><br> e</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "quote-patterns-tail",
+      "result": {
+        "html": "<p>x <mark risu-mark=\"quote2\">$1y$0</mark> <mark risu-mark=\"quote1\">$<n>z</mark></p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "quote-placeholders-in-quotes",
+      "result": {
+        "html": "<p>a <mark risu-mark=\"quote2\"></mark>b</mark> <mark risu-mark=\"quote1\"></mark>c</mark></p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "quote-placeholders-in-quotes-blockquote",
+      "result": {
+        "html": "<p>a <br><br><mark risu-mark=\"blockquote2\">b</mark><br><br> <br><br><mark risu-mark=\"blockquote1\">c</mark><br><br></p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "quote-blockquote-lines",
+      "result": {
+        "html": "<p>“open<br>\nclose” and ‘one<br>\ntwo’</p>\n<p><br><br><mark risu-mark=\"blockquote2\">“” <mark risu-mark=\"quote1\">‘’</mark> “a”</mark><br><br> <br><br><mark risu-mark=\"blockquote2\">“<mark risu-mark=\"quote1\">‘b’</mark>”</mark><br><br> <br><br><mark risu-mark=\"blockquote1\">‘<br><br><mark risu-mark=\"blockquote2\">“c”</mark><br><br>’</mark><br><br></p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "quote-blockquote-unmatched",
+      "result": {
+        "html": "<p>&quot;a <br><br><mark risu-mark=\"blockquote1\">‘b <br><br><mark risu-mark=\"blockquote2\">“c”</mark><br><br> d’</mark><br><br> e</p>\n<p><br><br><mark risu-mark=\"blockquote1\">‘x &quot;y’</mark><br><br> z&quot;</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "quote-blockquote-astral",
+      "result": {
+        "html": {
+          "u": [
+            60,
+            112,
+            62,
+            60,
+            98,
+            114,
+            62,
+            60,
+            98,
+            114,
+            62,
+            60,
+            109,
+            97,
+            114,
+            107,
+            32,
+            114,
+            105,
+            115,
+            117,
+            45,
+            109,
+            97,
+            114,
+            107,
+            61,
+            34,
+            98,
+            108,
+            111,
+            99,
+            107,
+            113,
+            117,
+            111,
+            116,
+            101,
+            50,
+            34,
+            62,
+            8220,
+            55357,
+            56832,
+            8221,
+            60,
+            47,
+            109,
+            97,
+            114,
+            107,
+            62,
+            60,
+            98,
+            114,
+            62,
+            60,
+            98,
+            114,
+            62,
+            32,
+            60,
+            98,
+            114,
+            62,
+            60,
+            98,
+            114,
+            62,
+            60,
+            109,
+            97,
+            114,
+            107,
+            32,
+            114,
+            105,
+            115,
+            117,
+            45,
+            109,
+            97,
+            114,
+            107,
+            61,
+            34,
+            98,
+            108,
+            111,
+            99,
+            107,
+            113,
+            117,
+            111,
+            116,
+            101,
+            49,
+            34,
+            62,
+            8216,
+            55360,
+            56320,
+            8217,
+            60,
+            47,
+            109,
+            97,
+            114,
+            107,
+            62,
+            60,
+            98,
+            114,
+            62,
+            60,
+            98,
+            114,
+            62,
+            32,
+            60,
+            98,
+            114,
+            62,
+            60,
+            98,
+            114,
+            62,
+            60,
+            109,
+            97,
+            114,
+            107,
+            32,
+            114,
+            105,
+            115,
+            117,
+            45,
+            109,
+            97,
+            114,
+            107,
+            61,
+            34,
+            98,
+            108,
+            111,
+            99,
+            107,
+            113,
+            117,
+            111,
+            116,
+            101,
+            50,
+            34,
+            62,
+            8220,
+            97,
+            55357,
+            56832,
+            98,
+            8221,
+            60,
+            47,
+            109,
+            97,
+            114,
+            107,
+            62,
+            60,
+            98,
+            114,
+            62,
+            60,
+            98,
+            114,
+            62,
+            32,
+            60,
+            98,
+            114,
+            62,
+            60,
+            98,
+            114,
+            62,
+            60,
+            109,
+            97,
+            114,
+            107,
+            32,
+            114,
+            105,
+            115,
+            117,
+            45,
+            109,
+            97,
+            114,
+            107,
+            61,
+            34,
+            98,
+            108,
+            111,
+            99,
+            107,
+            113,
+            117,
+            111,
+            116,
+            101,
+            50,
+            34,
+            62,
+            8220,
+            55357,
+            8221,
+            60,
+            47,
+            109,
+            97,
+            114,
+            107,
+            62,
+            60,
+            98,
+            114,
+            62,
+            60,
+            98,
+            114,
+            62,
+            60,
+            47,
+            112,
+            62,
+            10
+          ]
+        },
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "quote-curly-source",
+      "result": {
+        "html": "<p><mark risu-mark=\"quote2\">“curly”</mark> and <mark risu-mark=\"quote1\">‘single’</mark> and &quot;mixed’ quotes’</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "quote-curly-unformat",
+      "result": {
+        "html": "<p>“curly” and ‘single’</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "unescape-private-use",
+      "result": {
+        "html": "<p>{a} (b) &lt; &gt; : ; <mark risu-mark=\"quote2\">“{”</mark></p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "unescape-in-code",
+      "result": {
+        "html": "<p><code>{code}</code></p>\n<pre><code>&lt;block&gt;\n</code></pre>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "math-inline",
+      "result": {
+        "html": "<p>Before <span class=\"katex\"><math xmlns=\"http://www.w3.org/1998/Math/MathML\"><semantics><mrow><msup><mi>x</mi><mn>2</mn></msup></mrow><annotation encoding=\"application/x-tex\">x^2</annotation></semantics></math></span> after</p>\n",
+        "math": [
+          [
+            "x^2",
+            "<span class=\"katex\"><math xmlns=\"http://www.w3.org/1998/Math/MathML\"><semantics><mrow><msup><mi>x</mi><mn>2</mn></msup></mrow><annotation encoding=\"application/x-tex\">x^2</annotation></semantics></math></span>"
+          ]
+        ],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "math-fraction",
+      "result": {
+        "html": "<p><span class=\"katex\"><math xmlns=\"http://www.w3.org/1998/Math/MathML\"><semantics><mrow><mfrac><mn>1</mn><mn>2</mn></mfrac></mrow><annotation encoding=\"application/x-tex\">\\frac{1}{2}</annotation></semantics></math></span> and <span class=\"katex\"><math xmlns=\"http://www.w3.org/1998/Math/MathML\"><semantics><mrow><msqrt><mi>a</mi></msqrt></mrow><annotation encoding=\"application/x-tex\">\\sqrt{a}</annotation></semantics></math></span></p>\n",
+        "math": [
+          [
+            "\\frac{1}{2}",
+            "<span class=\"katex\"><math xmlns=\"http://www.w3.org/1998/Math/MathML\"><semantics><mrow><mfrac><mn>1</mn><mn>2</mn></mfrac></mrow><annotation encoding=\"application/x-tex\">\\frac{1}{2}</annotation></semantics></math></span>"
+          ],
+          [
+            "\\sqrt{a}",
+            "<span class=\"katex\"><math xmlns=\"http://www.w3.org/1998/Math/MathML\"><semantics><mrow><msqrt><mi>a</mi></msqrt></mrow><annotation encoding=\"application/x-tex\">\\sqrt{a}</annotation></semantics></math></span>"
+          ]
+        ],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "math-error",
+      "result": {
+        "html": "<p><strong>b</strong> $$\\notARealCommand{x}$$ after</p>\n",
+        "math": [
+          [
+            "\\notARealCommand{x}",
+            null
+          ]
+        ],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "math-empty",
+      "result": {
+        "html": "<p>a <span class=\"katex\"><math xmlns=\"http://www.w3.org/1998/Math/MathML\"><semantics><mrow></mrow><annotation encoding=\"application/x-tex\"></annotation></semantics></math></span> b $$$ c</p>\n",
+        "math": [
+          [
+            "",
+            "<span class=\"katex\"><math xmlns=\"http://www.w3.org/1998/Math/MathML\"><semantics><mrow></mrow><annotation encoding=\"application/x-tex\"></annotation></semantics></math></span>"
+          ]
+        ],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "math-multiline",
+      "result": {
+        "html": "<p>first <span class=\"katex\"><math xmlns=\"http://www.w3.org/1998/Math/MathML\"><semantics><mrow><mi>a</mi><mi>b</mi></mrow><annotation encoding=\"application/x-tex\">a</p>\n<p>b</annotation></semantics></math></span> second</p>\n",
+        "math": [
+          [
+            "a\n\nb",
+            "<span class=\"katex\"><math xmlns=\"http://www.w3.org/1998/Math/MathML\"><semantics><mrow><mi>a</mi><mi>b</mi></mrow><annotation encoding=\"application/x-tex\">a\n\nb</annotation></semantics></math></span>"
+          ]
+        ],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "math-private-use",
+      "result": {
+        "html": "<p><span class=\"katex\"><math xmlns=\"http://www.w3.org/1998/Math/MathML\"><semantics><mrow><mi>x</mi><mo>+</mo><mo stretchy=\"false\">(</mo><mi>y</mi><mo stretchy=\"false\">)</mo></mrow><annotation encoding=\"application/x-tex\">{x} + (y)</annotation></semantics></math></span></p>\n",
+        "math": [
+          [
+            "{x} + (y)",
+            "<span class=\"katex\"><math xmlns=\"http://www.w3.org/1998/Math/MathML\"><semantics><mrow><mi>x</mi><mo>+</mo><mo stretchy=\"false\">(</mo><mi>y</mi><mo stretchy=\"false\">)</mo></mrow><annotation encoding=\"application/x-tex\">{x} + (y)</annotation></semantics></math></span>"
+          ]
+        ],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "math-typographer",
+      "result": {
+        "html": "<p><span class=\"katex\"><math xmlns=\"http://www.w3.org/1998/Math/MathML\"><semantics><mrow><mi>x</mi><mo>−</mo><mo>−</mo><mi>y</mi><mo stretchy=\"false\">(</mo><mi>c</mi><mo stretchy=\"false\">)</mo></mrow><annotation encoding=\"application/x-tex\">x – y ©</annotation></semantics></math></span> and <mark risu-mark=\"quote2\">“quoted”</mark></p>\n",
+        "math": [
+          [
+            "x -- y (c)",
+            "<span class=\"katex\"><math xmlns=\"http://www.w3.org/1998/Math/MathML\"><semantics><mrow><mi>x</mi><mo>−</mo><mo>−</mo><mi>y</mi><mo stretchy=\"false\">(</mo><mi>c</mi><mo stretchy=\"false\">)</mo></mrow><annotation encoding=\"application/x-tex\">x -- y (c)</annotation></semantics></math></span>"
+          ]
+        ],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "math-unclosed",
+      "result": {
+        "html": "<p>$$ alone and $ one</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "math-in-code",
+      "result": {
+        "html": "<p><code>&lt;span class=&quot;katex&quot;&gt;&lt;math xmlns=&quot;http://www.w3.org/1998/Math/MathML&quot;&gt;&lt;semantics&gt;&lt;mrow&gt;&lt;mi&gt;x&lt;/mi&gt;&lt;/mrow&gt;&lt;annotation encoding=&quot;application/x-tex&quot;&gt;x&lt;/annotation&gt;&lt;/semantics&gt;&lt;/math&gt;&lt;/span&gt;</code> and</p>\n<pre><code>&lt;span class=&quot;katex&quot;&gt;&lt;math xmlns=&quot;http://www.w3.org/1998/Math/MathML&quot;&gt;&lt;semantics&gt;&lt;mrow&gt;&lt;mi&gt;y&lt;/mi&gt;&lt;/mrow&gt;&lt;annotation encoding=&quot;application/x-tex&quot;&gt;y&lt;/annotation&gt;&lt;/semantics&gt;&lt;/math&gt;&lt;/span&gt;\n</code></pre>\n",
+        "math": [
+          [
+            "x",
+            "<span class=\"katex\"><math xmlns=\"http://www.w3.org/1998/Math/MathML\"><semantics><mrow><mi>x</mi></mrow><annotation encoding=\"application/x-tex\">x</annotation></semantics></math></span>"
+          ],
+          [
+            "y",
+            "<span class=\"katex\"><math xmlns=\"http://www.w3.org/1998/Math/MathML\"><semantics><mrow><mi>y</mi></mrow><annotation encoding=\"application/x-tex\">y</annotation></semantics></math></span>"
+          ]
+        ],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-closed",
+      "result": {
+        "html": "<details data-risu-thought><summary>Chain of Thoughts</summary>plan *this*</details>Answer",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-nested",
+      "result": {
+        "html": "<details data-risu-thought><summary>Chain of Thoughts</summary>a<Thoughts>b</Thoughts>c</details>d",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-unclosed-off",
+      "result": {
+        "html": "<p>x <Thoughts>still thinking <b>bold</b></p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-unclosed-collapsed",
+      "result": {
+        "html": "<p>x <details data-risu-thought data-risu-streaming-thought><summary>Chain of Thoughts</summary>still thinking</details></p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-closed-collapsed",
+      "result": {
+        "html": "<details data-risu-thought data-risu-streaming-thought><summary>Chain of Thoughts</summary>done</details>after",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-two",
+      "result": {
+        "html": "<details data-risu-thought><summary>Chain of Thoughts</summary>one</details> mid <details data-risu-thought><summary>Chain of Thoughts</summary>two</details> end",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-close-without-open",
+      "result": {
+        "html": "<p>a </Thoughts> b <Thoughts>c</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-recent-short",
+      "result": {
+        "html": "<p>before</p>\n<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"false\"><div class=\"x-risu-streaming-thought-text\">line one&#10;line two</div></div></div>\n<p>after</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-recent-streaming",
+      "result": {
+        "html": "<p>before</p>\n<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"true\"><div class=\"x-risu-streaming-thought-text\">step 8&#10;step 9&#10;step 10&#10;step 11</div></div></div>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-recent-long",
+      "result": {
+        "html": "<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"true\"><div class=\"x-risu-streaming-thought-text\">bc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def abc def &#10;&#10;xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx</div></div></div>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-recent-korean",
+      "result": {
+        "html": "<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"true\"><div class=\"x-risu-streaming-thought-text\">니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다. 생각을 정리하는 중입니다.</div></div></div>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-recent-orphan-mark",
+      "result": {
+        "html": "<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"true\"><div class=\"x-risu-streaming-thought-text\">yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy</div></div></div>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-recent-combining",
+      "result": {
+        "html": "<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"true\"><div class=\"x-risu-streaming-thought-text\">yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy</div></div></div>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-recent-emoji",
+      "result": {
+        "html": "<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"true\"><div class=\"x-risu-streaming-thought-text\">yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy</div></div></div>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-recent-crlf",
+      "result": {
+        "html": "<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"true\"><div class=\"x-risu-streaming-thought-text\">yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy</div></div></div>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-recent-cr",
+      "result": {
+        "html": "<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"true\"><div class=\"x-risu-streaming-thought-text\">yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy</div></div></div>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-recent-split-tag",
+      "result": {
+        "html": "<p>a</p>\n<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"false\"><div class=\"x-risu-streaming-thought-text\">body</div></div></div>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-recent-escapes",
+      "result": {
+        "html": "<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"false\"><div class=\"x-risu-streaming-thought-text\">a &amp; b &lt; c &gt; &quot;d&quot;&#13;&#10;e</div></div></div>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-recent-empty",
+      "result": {
+        "html": "<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"false\"><div class=\"x-risu-streaming-thought-text\">…</div></div></div>\n<p>tail</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-recent-none",
+      "result": {
+        "html": "<p>no thoughts here</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-recent-prepend-astral",
+      "result": {
+        "html": "<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"true\"><div class=\"x-risu-streaming-thought-text\">yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy</div></div></div>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-nosegmenter-combining",
+      "result": {
+        "html": "<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"true\"><div class=\"x-risu-streaming-thought-text\">éyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy</div></div></div>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-nosegmenter-hangul",
+      "result": {
+        "html": "<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"true\"><div class=\"x-risu-streaming-thought-text\">가나yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy</div></div></div>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-nosegmenter-low-surrogate",
+      "result": {
+        "html": "<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"true\"><div class=\"x-risu-streaming-thought-text\">yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy</div></div></div>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-nosegmenter-high-surrogate",
+      "result": {
+        "html": "<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"true\"><div class=\"x-risu-streaming-thought-text\">😀yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy</div></div></div>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-nosegmenter-emoji-modifier",
+      "result": {
+        "html": "<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"true\"><div class=\"x-risu-streaming-thought-text\">👍🏽yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy</div></div></div>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-nosegmenter-prepend-astral",
+      "result": {
+        "html": "<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"true\"><div class=\"x-risu-streaming-thought-text\">𑏑yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy</div></div></div>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-nosegmenter-short",
+      "result": {
+        "html": "<p>before</p>\n<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"false\"><div class=\"x-risu-streaming-thought-text\">line one&#10;line two</div></div></div>\n<p>after</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-before16-truncated",
+      "result": {
+        "html": "<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"true\"><div class=\"x-risu-streaming-thought-text\">나yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy</div></div></div>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-before16-short",
+      "result": {
+        "html": "<p>before</p>\n<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"false\"><div class=\"x-risu-streaming-thought-text\">line one&#10;line two</div></div></div>\n<p>after</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-unicode17-truncated",
+      "result": {
+        "html": "<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"true\"><div class=\"x-risu-streaming-thought-text\">byyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy</div></div></div>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-unicode17-prepend-astral",
+      "result": {
+        "html": "<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"true\"><div class=\"x-risu-streaming-thought-text\">yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy</div></div></div>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-from18-truncated",
+      "result": {
+        "html": "<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"true\"><div class=\"x-risu-streaming-thought-text\">byyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy</div></div></div>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "thought-from18-short",
+      "result": {
+        "html": "<p>before</p>\n<div class=\"x-risu-streaming-thought-preview\" role=\"note\" data-streaming-thought-preview><div class=\"x-risu-streaming-thought-label\">Chain of Thoughts</div><div class=\"x-risu-streaming-thought-window\" data-truncated=\"false\"><div class=\"x-risu-streaming-thought-text\">line one&#10;line two</div></div></div>\n<p>after</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "tool-call-named",
+      "result": {
+        "html": "<div class=\"x-risu-tool-call\">🛠️ Tool 'search' Called</div>\n<p>after</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "tool-call-unnamed",
+      "result": {
+        "html": "<div class=\"x-risu-tool-call\">🛠️ Tool 'unknown' Called</div>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "tool-call-patterns",
+      "result": {
+        "html": "<div class=\"x-risu-tool-call\">🛠️ Tool '{{tool}} Tool ' ' Called $' Called</div>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "tool-call-multiline",
+      "result": {
+        "html": "<p>x<div class=\"x-risu-tool-call\">🛠️ Tool <mark risu-mark=\"quote1\">‘multi<br>\nline’</mark> Called</div></p>\n<div class=\"x-risu-tool-call\">🛠️ Tool '' Called</div>\n<p>y</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "tool-call-empty",
+      "result": {
+        "html": "<p>&lt;tool_call&gt;&lt;/tool_call&gt; and &lt;tool_call&gt;</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "style-basic",
+      "result": {
+        "html": "<p><risu-style>2e61207b20636f6c6f723a207265643b207d</risu-style></p>\n<p>text</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "style-unicode",
+      "result": {
+        "html": "<p><risu-style>2e623a3a6166746572207b20636f6e74656e743a2022ed959ceab88020f09f9880223b207d</risu-style></p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "style-lone-surrogate",
+      "result": {
+        "html": "<p><risu-style>78efbfbd79</risu-style></p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "style-empty-and-unclosed",
+      "result": {
+        "html": "<style></style> mid <style>open",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "style-two",
+      "result": {
+        "html": "<p><risu-style>61</risu-style><risu-style>62</risu-style></p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "style-case",
+      "result": {
+        "html": "<STYLE>c</STYLE> <style >d</style>",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "style-multiline",
+      "result": {
+        "html": "<p>pre<br>\n<risu-style>0a2e63207b0a20206d617267696e3a20303b0a7d0a</risu-style><br>\npost</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "inlay-image",
+      "result": {
+        "html": "<p>see <img data-risu-inlay-id=\"img1\" data-risu-inlay-slot=\"0\" width=\"640\" height=\"480\" loading=\"lazy\"/> here</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": [
+          [
+            0,
+            "img1"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "inlay-image-reservation",
+      "result": {
+        "html": "<img data-risu-inlay-id=\"img1\" data-risu-inlay-slot=\"0\" width=\"640\" height=\"480\" data-risu-image-size=\"640 480\" style=\"--risu-image-width:640px;--risu-image-height:480px\" loading=\"lazy\"/>",
+        "math": [],
+        "highlights": [],
+        "registrations": [
+          [
+            0,
+            "img1"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "inlay-image-no-size",
+      "result": {
+        "html": "<img data-risu-inlay-id=\"img2\" data-risu-inlay-slot=\"0\" loading=\"lazy\"/>",
+        "math": [],
+        "highlights": [],
+        "registrations": [
+          [
+            0,
+            "img2"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "inlay-image-bad-size",
+      "result": {
+        "html": "<p><img data-risu-inlay-id=\"a\" data-risu-inlay-slot=\"0\" loading=\"lazy\"/> <img data-risu-inlay-id=\"b\" data-risu-inlay-slot=\"1\" loading=\"lazy\"/> <img data-risu-inlay-id=\"c\" data-risu-inlay-slot=\"2\" loading=\"lazy\"/></p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": [
+          [
+            0,
+            "a"
+          ],
+          [
+            1,
+            "b"
+          ],
+          [
+            2,
+            "c"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "inlay-inlayed",
+      "result": {
+        "html": "<div class=\"risu-inlay-image\"><img data-risu-inlay-id=\"img1\" data-risu-inlay-slot=\"0\" width=\"640\" height=\"480\" loading=\"lazy\"/></div>\n<p>text <div class=\"risu-inlay-image\"><img data-risu-inlay-id=\"img1\" data-risu-inlay-slot=\"1\" width=\"640\" height=\"480\" loading=\"lazy\"/></div></p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": [
+          [
+            0,
+            "img1"
+          ],
+          [
+            1,
+            "img1"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "inlay-video-audio",
+      "result": {
+        "html": "<p><video controls><source data-risu-inlay-id=\"v\" data-risu-inlay-slot=\"0\" type=\"video/mp4\"></video> <audio controls><source data-risu-inlay-id=\"a\" data-risu-inlay-slot=\"1\" type=\"audio/mpeg\"></audio> <audio controls><source data-risu-inlay-id=\"m\" data-risu-inlay-slot=\"2\"></audio></p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": [
+          [
+            0,
+            "v"
+          ],
+          [
+            1,
+            "a"
+          ],
+          [
+            2,
+            "m"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "inlay-signature-missing",
+      "result": {
+        "html": "<p>{{inlay::sig}} {{inlay::gone}}</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "inlay-hide-images",
+      "result": {
+        "html": " <div class=\"risu-inlay-image\"><video controls><source data-risu-inlay-id=\"v\" data-risu-inlay-slot=\"0\" type=\"video/webm\"></video></div>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": [
+          [
+            0,
+            "v"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "inlay-duplicates",
+      "result": {
+        "html": "<p><img data-risu-inlay-id=\"img1\" data-risu-inlay-slot=\"0\" width=\"640\" height=\"480\" loading=\"lazy\"/> <img data-risu-inlay-id=\"img1\" data-risu-inlay-slot=\"1\" width=\"640\" height=\"480\" loading=\"lazy\"/> <div class=\"risu-inlay-image\"><img data-risu-inlay-id=\"img1\" data-risu-inlay-slot=\"2\" width=\"640\" height=\"480\" loading=\"lazy\"/></div></p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": [
+          [
+            0,
+            "img1"
+          ],
+          [
+            1,
+            "img1"
+          ],
+          [
+            2,
+            "img1"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "inlay-escaped-id",
+      "result": {
+        "html": "<p>&lt;img data-risu-inlay-id=<mark risu-mark=\"quote2\">“a&quot;b'&lt;c&gt;&amp;{{inlay::a&quot;b’<c>&amp;$&amp;d}}amp;d”</mark> data-risu-inlay-slot=<mark risu-mark=\"quote2\">“0”</mark> width=<mark risu-mark=\"quote2\">“640”</mark> height=<mark risu-mark=\"quote2\">“480”</mark> loading=<mark risu-mark=\"quote2\">“lazy”</mark>/&gt;</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": [
+          [
+            0,
+            "a\"b'<c>&$&d"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "inlay-patterns-id",
+      "result": {
+        "html": "<p>x <img data-risu-inlay-id=\"px q\" data-risu-inlay-slot=\"0\" width=\"640\" height=\"480\" loading=\"lazy\"/> y <img data-risu-inlay-id=\"r{{inlay::r$'s}}#39;s\" data-risu-inlay-slot=\"1\" width=\"640\" height=\"480\" loading=\"lazy\"/> z</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": [
+          [
+            0,
+            "p$`q"
+          ],
+          [
+            1,
+            "r$'s"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "inlay-braces",
+      "result": {
+        "html": "<p><img data-risu-inlay-id=\"}\" data-risu-inlay-slot=\"0\" width=\"640\" height=\"480\" loading=\"lazy\"/>} <img data-risu-inlay-id=\"{{inlay::x\" data-risu-inlay-slot=\"1\" width=\"640\" height=\"480\" loading=\"lazy\"/> {{inlay::a<br>\nb}}</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": [
+          [
+            0,
+            "}"
+          ],
+          [
+            1,
+            "{{inlay::x"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "inlay-join",
+      "result": {
+        "html": "<p>X{{inlay::k}}</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "inlay-inside-skipped",
+      "result": {
+        "html": "<p>{{inlay::<img data-risu-inlay-id=\"a\" data-risu-inlay-slot=\"0\" width=\"640\" height=\"480\" loading=\"lazy\"/> x {{inlay::a}}</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": [
+          [
+            0,
+            "a"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "inlay-inside-markup",
+      "result": {
+        "html": "<p>&lt;img data-risu-inlay-id=<mark risu-mark=\"quote2\">“a<img data-risu-inlay-id=\"a{{inlay::a$&}}amp;\" data-risu-inlay-slot=\"1\" width=\"640\" height=\"480\" loading=\"lazy\"/>amp;”</mark> data-risu-inlay-slot=<mark risu-mark=\"quote2\">“0”</mark> width=<mark risu-mark=\"quote2\">“640”</mark> height=<mark risu-mark=\"quote2\">“480”</mark> loading=<mark risu-mark=\"quote2\">“lazy”</mark>/&gt; {{inlay::a$&amp;}}</p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": [
+          [
+            0,
+            "a$&"
+          ],
+          [
+            1,
+            "a$&"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "inlay-after-brace",
+      "result": {
+        "html": "<p>{{inlay::{{inlay::z}} {<img data-risu-inlay-id=\"a\" data-risu-inlay-slot=\"0\" width=\"640\" height=\"480\" loading=\"lazy\"/></p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": [
+          [
+            0,
+            "a"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "inlay-disposed-registry",
+      "result": {
+        "html": "<p><img data-risu-inlay-id=\"img1\" width=\"640\" height=\"480\" loading=\"lazy\"/> <div class=\"risu-inlay-image\"><video controls><source data-risu-inlay-id=\"vid1\" type=\"video/mp4\"></video></div></p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "inlay-many",
+      "result": {
+        "html": "<p><img data-risu-inlay-id=\"n0\" data-risu-inlay-slot=\"0\" width=\"640\" height=\"480\" loading=\"lazy\"/> <img data-risu-inlay-id=\"n1\" data-risu-inlay-slot=\"1\" width=\"640\" height=\"480\" loading=\"lazy\"/> <img data-risu-inlay-id=\"n2\" data-risu-inlay-slot=\"2\" width=\"640\" height=\"480\" loading=\"lazy\"/> <img data-risu-inlay-id=\"n3\" data-risu-inlay-slot=\"3\" width=\"640\" height=\"480\" loading=\"lazy\"/> <img data-risu-inlay-id=\"n4\" data-risu-inlay-slot=\"4\" width=\"640\" height=\"480\" loading=\"lazy\"/> <img data-risu-inlay-id=\"n5\" data-risu-inlay-slot=\"5\" width=\"640\" height=\"480\" loading=\"lazy\"/> <img data-risu-inlay-id=\"n6\" data-risu-inlay-slot=\"6\" width=\"640\" height=\"480\" loading=\"lazy\"/> <img data-risu-inlay-id=\"n7\" data-risu-inlay-slot=\"7\" width=\"640\" height=\"480\" loading=\"lazy\"/> <img data-risu-inlay-id=\"n8\" data-risu-inlay-slot=\"8\" width=\"640\" height=\"480\" loading=\"lazy\"/> <img data-risu-inlay-id=\"n9\" data-risu-inlay-slot=\"9\" width=\"640\" height=\"480\" loading=\"lazy\"/> <img data-risu-inlay-id=\"n10\" data-risu-inlay-slot=\"a\" width=\"640\" height=\"480\" loading=\"lazy\"/> <img data-risu-inlay-id=\"n11\" data-risu-inlay-slot=\"b\" width=\"640\" height=\"480\" loading=\"lazy\"/></p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": [
+          [
+            0,
+            "n0"
+          ],
+          [
+            1,
+            "n1"
+          ],
+          [
+            2,
+            "n2"
+          ],
+          [
+            3,
+            "n3"
+          ],
+          [
+            4,
+            "n4"
+          ],
+          [
+            5,
+            "n5"
+          ],
+          [
+            6,
+            "n6"
+          ],
+          [
+            7,
+            "n7"
+          ],
+          [
+            8,
+            "n8"
+          ],
+          [
+            9,
+            "n9"
+          ],
+          [
+            10,
+            "n10"
+          ],
+          [
+            11,
+            "n11"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "inlay-with-markdown",
+      "result": {
+        "html": "<p><em>caption</em> <div class=\"risu-inlay-image\"><img data-risu-inlay-id=\"img1\" data-risu-inlay-slot=\"0\" width=\"640\" height=\"480\" loading=\"lazy\"/></div></p>\n<p><mark risu-mark=\"quote2\">“quote”</mark></p>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": [
+          [
+            0,
+            "img1"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "highlight-js",
+      "result": {
+        "html": "<pre class=\"hljs\" x-hl-lang=\"js\"><code><span class=\"hljs-keyword\">const</span> a = <span class=\"hljs-number\">1</span> &lt; <span class=\"hljs-number\">2</span> &amp;&amp; <span class=\"hljs-string\">&quot;x&quot;</span>\n</code></pre>\n",
+        "math": [],
+        "highlights": [
+          [
+            "const a = 1 < 2 && \"x\"\n",
+            "javascript",
+            "<span class=\"hljs-keyword\">const</span> a = <span class=\"hljs-number\">1</span> &lt; <span class=\"hljs-number\">2</span> &amp;&amp; <span class=\"hljs-string\">&quot;x&quot;</span>\n"
+          ]
+        ],
+        "registrations": []
+      }
+    },
+    {
+      "id": "highlight-languages",
+      "result": {
+        "html": "<pre class=\"hljs\" x-hl-lang=\"py\"><code>x = <span class=\"hljs-number\">1</span> // python\n</code></pre>\n<pre class=\"hljs\" x-hl-lang=\"c\"><code>x = <span class=\"hljs-number\">1</span> <span class=\"hljs-comment\">// c</span>\n</code></pre>\n<pre class=\"hljs\" x-hl-lang=\"cpp\"><code>x = <span class=\"hljs-number\">1</span> <span class=\"hljs-comment\">// cpp</span>\n</code></pre>\n<pre class=\"hljs\" x-hl-lang=\"html\"><code>x = 1 // html\n</code></pre>\n<pre class=\"hljs\" x-hl-lang=\"svg\"><code>x = 1 // svg\n</code></pre>\n<pre class=\"hljs\" x-hl-lang=\"json\"><code>x = <span class=\"hljs-number\">1</span> <span class=\"hljs-comment\">// json</span>\n</code></pre>\n<pre class=\"hljs\" x-hl-lang=\"lua\"><code>x = <span class=\"hljs-number\">1</span> // lua\n</code></pre>\n<pre class=\"hljs\" x-hl-lang=\"md\"><code>x = 1 // md\n</code></pre>\n<pre class=\"hljs\" x-hl-lang=\"rs\"><code>x = <span class=\"hljs-number\">1</span> <span class=\"hljs-comment\">// rust</span>\n</code></pre>\n<pre class=\"hljs\" x-hl-lang=\"sh\"><code>x = 1 // shell\n</code></pre>\n<pre class=\"hljs\" x-hl-lang=\"ts\"><code>x = <span class=\"hljs-number\">1</span> <span class=\"hljs-comment\">// tsx</span>\n</code></pre>\n<pre class=\"hljs\" x-hl-lang=\"txt\"><code>x = 1 // txt\n</code></pre>\n<pre class=\"hljs\" x-hl-lang=\"vtt\"><code>x = 1 // vtt\n</code></pre>\n<pre class=\"hljs\" x-hl-lang=\"sh\"><code>x = 1 // bash\n</code></pre>\n<pre class=\"hljs\" x-hl-lang=\"css\"><code><span class=\"hljs-attribute\">x</span> = <span class=\"hljs-number\">1</span> // css\n</code></pre>\n<pre class=\"hljs\" x-hl-lang=\"cs\"><code>x = <span class=\"hljs-number\">1</span> <span class=\"hljs-comment\">// cs</span>\n</code></pre>\n<pre class=\"hljs\" x-hl-lang=\"dart\"><code>x = <span class=\"hljs-number\">1</span> <span class=\"hljs-comment\">// dart</span>\n</code></pre>\n<pre class=\"hljs\" x-hl-lang=\"java\"><code>x = <span class=\"hljs-number\">1</span> <span class=\"hljs-comment\">// java</span>\n</code></pre>\n<pre class=\"hljs\" x-hl-lang=\"yml\"><code><span class=\"hljs-string\">x</span> <span class=\"hljs-string\">=</span> <span class=\"hljs-number\">1</span> <span class=\"hljs-string\">//</span> <span class=\"hljs-string\">yaml</span>\n</code></pre>\n<pre class=\"hljs\" x-hl-lang=\"xml\"><code>x = 1 // xml\n</code></pre>\n",
+        "math": [],
+        "highlights": [
+          [
+            "x = 1 // python\n",
+            "python",
+            "x = <span class=\"hljs-number\">1</span> // python\n"
+          ],
+          [
+            "x = 1 // c\n",
+            "cpp",
+            "x = <span class=\"hljs-number\">1</span> <span class=\"hljs-comment\">// c</span>\n"
+          ],
+          [
+            "x = 1 // cpp\n",
+            "cpp",
+            "x = <span class=\"hljs-number\">1</span> <span class=\"hljs-comment\">// cpp</span>\n"
+          ],
+          [
+            "x = 1 // html\n",
+            "xml",
+            "x = 1 // html\n"
+          ],
+          [
+            "x = 1 // svg\n",
+            "xml",
+            "x = 1 // svg\n"
+          ],
+          [
+            "x = 1 // json\n",
+            "json",
+            "x = <span class=\"hljs-number\">1</span> <span class=\"hljs-comment\">// json</span>\n"
+          ],
+          [
+            "x = 1 // lua\n",
+            "lua",
+            "x = <span class=\"hljs-number\">1</span> // lua\n"
+          ],
+          [
+            "x = 1 // md\n",
+            "markdown",
+            "x = 1 // md\n"
+          ],
+          [
+            "x = 1 // rust\n",
+            "rust",
+            "x = <span class=\"hljs-number\">1</span> <span class=\"hljs-comment\">// rust</span>\n"
+          ],
+          [
+            "x = 1 // shell\n",
+            "shell",
+            "x = 1 // shell\n"
+          ],
+          [
+            "x = 1 // tsx\n",
+            "typescript",
+            "x = <span class=\"hljs-number\">1</span> <span class=\"hljs-comment\">// tsx</span>\n"
+          ],
+          [
+            "x = 1 // txt\n",
+            "plaintext",
+            "x = 1 // txt\n"
+          ],
+          [
+            "x = 1 // vtt\n",
+            "plaintext",
+            "x = 1 // vtt\n"
+          ],
+          [
+            "x = 1 // bash\n",
+            "bash",
+            "x = 1 // bash\n"
+          ],
+          [
+            "x = 1 // css\n",
+            "css",
+            "<span class=\"hljs-attribute\">x</span> = <span class=\"hljs-number\">1</span> // css\n"
+          ],
+          [
+            "x = 1 // cs\n",
+            "csharp",
+            "x = <span class=\"hljs-number\">1</span> <span class=\"hljs-comment\">// cs</span>\n"
+          ],
+          [
+            "x = 1 // dart\n",
+            "dart",
+            "x = <span class=\"hljs-number\">1</span> <span class=\"hljs-comment\">// dart</span>\n"
+          ],
+          [
+            "x = 1 // java\n",
+            "java",
+            "x = <span class=\"hljs-number\">1</span> <span class=\"hljs-comment\">// java</span>\n"
+          ],
+          [
+            "x = 1 // yaml\n",
+            "yaml",
+            "<span class=\"hljs-string\">x</span> <span class=\"hljs-string\">=</span> <span class=\"hljs-number\">1</span> <span class=\"hljs-string\">//</span> <span class=\"hljs-string\">yaml</span>\n"
+          ],
+          [
+            "x = 1 // xml\n",
+            "xml",
+            "x = 1 // xml\n"
+          ]
+        ],
+        "registrations": []
+      }
+    },
+    {
+      "id": "highlight-plain-unknown",
+      "result": {
+        "html": "<pre><code>+[--&gt;-[&gt;&gt;+&gt;-----&lt;&lt;]&lt;--&lt;---]&gt;-.\n</code></pre>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "highlight-error",
+      "result": {
+        "html": "<div class=\"risu-error\"><h1>Error</h1>Something &lt;failed&gt; &amp; stopped\n</div>\n",
+        "math": [],
+        "highlights": [],
+        "registrations": []
+      }
+    },
+    {
+      "id": "highlight-identical",
+      "result": {
+        "html": "<pre class=\"hljs\" x-hl-lang=\"js\"><code><span class=\"hljs-title function_\">same</span>()\n</code></pre>\n<pre class=\"hljs\" x-hl-lang=\"js\"><code><span class=\"hljs-title function_\">same</span>()\n</code></pre>\n<pre><code>same()\n</code></pre>\n<pre><code>same()\n</code></pre>\n",
+        "math": [],
+        "highlights": [
+          [
+            "same()\n",
+            "javascript",
+            "<span class=\"hljs-title function_\">same</span>()\n"
+          ],
+          [
+            "same()\n",
+            "javascript",
+            "<span class=\"hljs-title function_\">same</span>()\n"
+          ]
+        ],
+        "registrations": []
+      }
+    },
+    {
+      "id": "highlight-empty-code",
+      "result": {
+        "html": "<pre class=\"hljs\" x-hl-lang=\"js\"><code>&lt;/pre-hljs-placeholder&gt;\n<span class=\"language-xml\"><span class=\"hljs-tag\">&lt;<span class=\"hljs-name\">pre-hljs-placeholder</span> <span class=\"hljs-attr\">lang</span>=<span class=\"hljs-string\">&quot;js&quot;</span>&gt;</span>\n</span></code></pre>\n<pre class=\"hljs\" x-hl-lang=\"py\"><code>second\n</code></pre>\n",
+        "math": [],
+        "highlights": [
+          [
+            "</pre-hljs-placeholder>\n<pre-hljs-placeholder lang=\"js\">\n",
+            "javascript",
+            "&lt;/pre-hljs-placeholder&gt;\n<span class=\"language-xml\"><span class=\"hljs-tag\">&lt;<span class=\"hljs-name\">pre-hljs-placeholder</span> <span class=\"hljs-attr\">lang</span>=<span class=\"hljs-string\">&quot;js&quot;</span>&gt;</span>\n</span>"
+          ],
+          [
+            "second\n",
+            "python",
+            "second\n"
+          ]
+        ],
+        "registrations": []
+      }
+    },
+    {
+      "id": "highlight-lang-quote",
+      "result": {
+        "html": "<pre class=\"hljs\" x-hl-lang=\"js\"><code><span class=\"hljs-title function_\">quoted</span>()\n</code></pre>\n<pre class=\"hljs\" x-hl-lang=\"py\"><code>y<span class=\"hljs-string\">&quot;&gt;two()\n</span></code></pre>\n",
+        "math": [],
+        "highlights": [
+          [
+            "quoted()\n",
+            "javascript",
+            "<span class=\"hljs-title function_\">quoted</span>()\n"
+          ],
+          [
+            "y\">two()\n",
+            "python",
+            "y<span class=\"hljs-string\">&quot;&gt;two()\n</span>"
+          ]
+        ],
+        "registrations": []
+      }
+    },
+    {
+      "id": "highlight-code-close-tag",
+      "result": {
+        "html": "<pre class=\"hljs\" x-hl-lang=\"js\"><code>a </code></pre> b\n</pre-hljs-placeholder>\n",
+        "math": [],
+        "highlights": [
+          [
+            "a ",
+            "javascript",
+            "a "
+          ]
+        ],
+        "registrations": []
+      }
+    },
+    {
+      "id": "highlight-code-patterns",
+      "result": {
+        "html": "<pre><code>echo $$ $&amp; $' $` done\n</code></pre>\n<pre class=\"hljs\" x-hl-lang=\"js\"><code><span class=\"hljs-string\">&quot;$&amp;&quot;</span>\n</code></pre>\n",
+        "math": [],
+        "highlights": [
+          [
+            "\"$&\"\n",
+            "javascript",
+            "<span class=\"hljs-string\">&quot;$&amp;&quot;</span>\n"
+          ]
+        ],
+        "registrations": []
+      }
+    },
+    {
+      "id": "highlight-raw-placeholder",
+      "result": {
+        "html": "<p><pre class=\"hljs\" x-hl-lang=\"js\"><code><span class=\"hljs-title function_\">raw</span>()</code></pre></p>\n<p>text <pre-hljs-placeholder lang=\"a\nb\">x</pre-hljs-placeholder></p>\n",
+        "math": [],
+        "highlights": [
+          [
+            "raw()",
+            "javascript",
+            "<span class=\"hljs-title function_\">raw</span>()"
+          ]
+        ],
+        "registrations": []
+      }
+    },
+    {
+      "id": "highlight-with-quotes",
+      "result": {
+        "html": "<p>He said <br><br><mark risu-mark=\"blockquote2\">“run it”</mark><br><br>:</p>\n<pre class=\"hljs\" x-hl-lang=\"py\"><code><span class=\"hljs-built_in\">print</span>(<span class=\"hljs-string\">&quot;hi&quot;</span>)\n</code></pre>\n<p><br><br><mark risu-mark=\"blockquote1\">‘done’</mark><br><br></p>\n",
+        "math": [],
+        "highlights": [
+          [
+            "print(\"hi\")\n",
+            "python",
+            "<span class=\"hljs-built_in\">print</span>(<span class=\"hljs-string\">&quot;hi&quot;</span>)\n"
+          ]
+        ],
+        "registrations": []
+      }
+    },
+    {
+      "id": "mixed-message",
+      "result": {
+        "html": "<details data-risu-thought><summary>Chain of Thoughts</summary>The user wants a story.</details>\n# 장면 1\n<p><br><br><mark risu-mark=\"blockquote2\">“비가 오네,”</mark><br><br> 그녀가 말했다. <em>창밖을 본다</em> 😊</p>\n<div class=\"risu-inlay-image\"><img data-risu-inlay-id=\"img1\" data-risu-inlay-slot=\"0\" width=\"640\" height=\"480\" data-risu-image-size=\"640 480\" style=\"--risu-image-width:640px;--risu-image-height:480px\" loading=\"lazy\"/></div>\n<p><risu-style>2e782d726973752d61207b20636f6c6f723a20233838383b207d</risu-style></p>\n<p>Math: <span class=\"katex\"><math xmlns=\"http://www.w3.org/1998/Math/MathML\"><semantics><mrow><msup><mi>e</mi><mrow><mi>i</mi><mi>π</mi></mrow></msup><mo>+</mo><mn>1</mn><mo>=</mo><mn>0</mn></mrow><annotation encoding=\"application/x-tex\">e^{i\\pi} + 1 = 0</annotation></semantics></math></span> – done ©</p>\n<pre class=\"hljs\" x-hl-lang=\"js\"><code><span class=\"hljs-variable language_\">console</span>.<span class=\"hljs-title function_\">log</span>(<span class=\"hljs-string\">&quot;hi&quot;</span>)\n</code></pre>\n<div class=\"x-risu-tool-call\">🛠️ Tool 'lookup' Called</div>\n<ul>\n<li><br><br><mark risu-mark=\"blockquote1\">‘one’</mark><br><br>\n<ul>\n<li><br><br><mark risu-mark=\"blockquote2\">“two”</mark><br><br></li>\n</ul>\n</li>\n</ul>\n<p>{escaped}</p>\n",
+        "math": [
+          [
+            "e^{i\\pi} + 1 = 0",
+            "<span class=\"katex\"><math xmlns=\"http://www.w3.org/1998/Math/MathML\"><semantics><mrow><msup><mi>e</mi><mrow><mi>i</mi><mi>π</mi></mrow></msup><mo>+</mo><mn>1</mn><mo>=</mo><mn>0</mn></mrow><annotation encoding=\"application/x-tex\">e^{i\\pi} + 1 = 0</annotation></semantics></math></span>"
+          ]
+        ],
+        "highlights": [
+          [
+            "console.log(\"hi\")\n",
+            "javascript",
+            "<span class=\"hljs-variable language_\">console</span>.<span class=\"hljs-title function_\">log</span>(<span class=\"hljs-string\">&quot;hi&quot;</span>)\n"
+          ]
+        ],
+        "registrations": [
+          [
+            0,
+            "img1"
+          ]
+        ]
+      }
+    }
+  ]
+}

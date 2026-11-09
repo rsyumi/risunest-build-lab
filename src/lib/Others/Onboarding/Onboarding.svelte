@@ -24,7 +24,7 @@
     } from '@lucide/svelte'
 
     import { changeLanguage, language } from 'src/lang'
-    import { UI_LANGUAGES, uiLanguageFor } from 'src/lang/uiLanguages'
+    import { UI_LANGUAGES } from 'src/lang/uiLanguages'
     import { alertConfirm, alertError, alertNormal, openRisuAccountLogin } from 'src/ts/alert'
     import { restoreNativeOfficialAccountBackup } from 'src/ts/storage/sync/nativeOfficialAccountOperations'
     import { NativeAccountLoginError } from 'src/ts/storage/sync/nativeOfficialAccountFlow'
@@ -113,7 +113,8 @@
     const t = $derived(strings.risuNest.onboarding)
 
     {
-        const initialLanguage = uiLanguageFor(navigator.language)
+        const browserLangShort = navigator.language.split('-')[0]
+        const initialLanguage = UI_LANGUAGES.find((option) => option.value === browserLangShort)?.value ?? 'en'
         changeLanguage(initialLanguage)
         DBState.db.language = initialLanguage
     }
@@ -1645,9 +1646,7 @@
         gap: 12px;
         margin-top: 16px;
         padding: 12px 14px;
-        border-width: 1px;
-        border-style: solid;
-        border-color: color-mix(in srgb, var(--o-teal) 35%, transparent);
+        border: 1px solid color-mix(in srgb, var(--o-teal) 35%, transparent);
         border-radius: 14px;
         background: color-mix(in srgb, var(--o-teal) 8%, transparent);
     }
@@ -1908,9 +1907,7 @@
     .warnings {
         margin: 0 0 16px;
         padding: 10px 12px 10px 28px;
-        border-width: 1px;
-        border-style: solid;
-        border-color: color-mix(in srgb, var(--o-warn) 35%, transparent);
+        border: 1px solid color-mix(in srgb, var(--o-warn) 35%, transparent);
         border-radius: 10px;
         font-size: 12.5px;
         color: var(--o-warn);
@@ -2027,9 +2024,7 @@
         gap: 12px;
         margin-bottom: 14px;
         padding: 14px;
-        border-width: 1px;
-        border-style: solid;
-        border-color: color-mix(in srgb, var(--o-teal) 35%, transparent);
+        border: 1px solid color-mix(in srgb, var(--o-teal) 35%, transparent);
         border-radius: 14px;
         background: color-mix(in srgb, var(--o-teal) 8%, transparent);
     }

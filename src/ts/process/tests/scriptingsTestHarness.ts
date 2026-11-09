@@ -39,8 +39,14 @@ export function alertModule() {
     } satisfies Partial<typeof import('../../alert')>
 }
 
-export function tokenizerModule() {
-    return { tokenize: vi.fn() } satisfies Partial<typeof import('../../tokenizer')>
+/** A tokenizer whose list counts are zero. Trigger suites share it with the scripting suites. */
+export function tokenizerModule(overrides: Overrides<typeof import('../../tokenizer')> = {}) {
+    const module = {
+        tokenize: vi.fn(),
+        encodeCounts: vi.fn(async (texts: string[]) => texts.map(() => 0)),
+        tokenCounter: vi.fn(),
+    } satisfies Partial<typeof import('../../tokenizer')>
+    return { ...module, ...overrides }
 }
 
 export function utilModule() {
@@ -50,14 +56,12 @@ export function utilModule() {
         getUserIcon: vi.fn(),
         getUserName: vi.fn(),
         parseKeyValue: vi.fn(() => []),
-        pickHashRand: vi.fn(),
     } satisfies Partial<typeof import('../../util')>
 }
 
 /** An empty database with an empty current character and chat. */
 export function databaseModule(overrides: Overrides<DatabaseModule> = {}) {
     const module = {
-        appVer: 'test',
         getCurrentCharacter: vi.fn(() => ({}) as ReturnType<DatabaseModule['getCurrentCharacter']>),
         getCurrentChat: vi.fn(() => ({ message: [] }) as ReturnType<DatabaseModule['getCurrentChat']>),
         getDatabase: vi.fn(() => ({ characters: [] }) as ReturnType<DatabaseModule['getDatabase']>),

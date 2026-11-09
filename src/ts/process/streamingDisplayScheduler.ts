@@ -201,8 +201,6 @@ interface StreamingDisplayControllerOptions<T> {
     intervalMs?: number
     clock?: SchedulerClock
     onError?(error: unknown): void
-    /** Runs at finish once the latest snapshot is applied, before the strong mode's final semantic pass. */
-    beforeCompletion?(): Promise<void>
 }
 
 export interface StreamingDisplayController<T> {
@@ -240,7 +238,6 @@ export function createStreamingDisplayController<T = string>(
         },
         async finish() {
             await scheduler.finish()
-            if (!aborted) await options.beforeCompletion?.()
             if (mode === 'strong' && latest && !completedNormally && !aborted) {
                 completedNormally = true
                 const context: StreamingDisplayProcessContext = {
@@ -331,7 +328,6 @@ function createExactController<T>(
                 if (active) await active
             }
             if (failure !== null) throw failure.error
-            await options.beforeCompletion?.()
             status = 'closed'
         },
         async abort() {

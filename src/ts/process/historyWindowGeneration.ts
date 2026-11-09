@@ -120,6 +120,7 @@ export interface HistoryWindowPreparationInput {
     queryChatCount: number
     tokenBudget: number
     countTokens(text: string): Promise<number>
+    prefetchTokens?(texts: string[]): Promise<void>
     assertCurrent(): void
 }
 
@@ -147,6 +148,7 @@ export async function prepareHistoryWindow(
         reader: input.reader,
         tokenBudget: input.tokenBudget,
         countTokens: input.countTokens,
+        prefetchTokens: input.prefetchTokens,
         minimumMessages: input.memory === 'hypaV3' ? Math.max(1, input.queryChatCount) : 1,
         extendTo,
         assertCurrent: input.assertCurrent,

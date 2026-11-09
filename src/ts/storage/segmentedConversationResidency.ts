@@ -65,8 +65,6 @@ interface PinRecord extends RangeRecord {
 
 interface DirtyRecord extends ConversationDirtyMutation, RangeRecord {
     messageByteSizes: number[]
-    /** The version that recorded this range; later folded versions only rewrite its messages. */
-    firstSessionVersion: number
 }
 
 interface PersistentSequenceSpan {
@@ -434,34 +432,16 @@ export class SegmentedConversationResidency {
 
         this.messageCount += delta
         this.currentSessionVersion = input.sessionVersion
-        const last = this.dirtyRecords.at(-1)
-        const lastOffset = last ? input.start - last.start : -1
-        if (
-            last &&
-            delta === 0 &&
-            lastOffset >= 0 &&
-            lastOffset + replacement.length <= last.messages.length &&
-            last.startIndex === last.start &&
-            last.endIndex === last.start + last.messages.length
-        ) {
-            // A count-preserving edit inside the newest unsaved range rewrites that range.
-            for (let offset = 0; offset < replacement.length; offset++) {
-                last.messages[lastOffset + offset] = replacement[offset]
-                last.messageByteSizes[lastOffset + offset] = replacementByteSizes[offset]
-            }
-            last.sessionVersion = input.sessionVersion
-        } else {
-            this.dirtyRecords.push({
-                start: input.start,
-                deleteCount: input.deleteCount,
-                messages: replacement,
-                sessionVersion: input.sessionVersion,
-                firstSessionVersion: input.sessionVersion,
-                startIndex: input.start,
-                endIndex: input.start + replacement.length,
-                messageByteSizes: replacementByteSizes,
-            })
+        const dirty: DirtyRecord = {
+            start: input.start,
+            deleteCount: input.deleteCount,
+            messages: replacement,
+            sessionVersion: input.sessionVersion,
+            startIndex: input.start,
+            endIndex: input.start + replacement.length,
+            messageByteSizes: replacementByteSizes,
         }
+        this.dirtyRecords.push(dirty)
         for (let offset = 0; offset < replacement.length; offset++) {
             const message = replacement[offset]
             this.entries.set(input.start + offset, {
@@ -519,13 +499,9 @@ export class SegmentedConversationResidency {
             throw new RangeError('Conversation persisted data revision did not advance')
         }
         let nextBaseMessageCount = this.baseMessageCount
-        // A folded record whose versions straddle the acknowledged one is stored in an earlier
-        // state, so its count change is persisted and the rest rewrites its messages in place.
-        let partial: DirtyRecord | undefined
         for (const dirty of this.dirtyRecords) {
-            if (dirty.firstSessionVersion > sessionVersion) continue
+            if (dirty.sessionVersion > sessionVersion) continue
             nextBaseMessageCount += dirty.messages.length - dirty.deleteCount
-            if (dirty.sessionVersion > sessionVersion) partial = dirty
         }
         const remainingDirty = this.dirtyRecords.filter(
             (dirty) => dirty.sessionVersion > sessionVersion,
@@ -541,7 +517,7 @@ export class SegmentedConversationResidency {
             nextSequence = replaceSequenceRange(
                 nextSequence,
                 dirty.start,
-                dirty === partial ? dirty.messages.length : dirty.deleteCount,
+                dirty.deleteCount,
                 dirty.messages.length,
             )
         }
@@ -553,10 +529,6 @@ export class SegmentedConversationResidency {
         this.baseMessageCount = nextBaseMessageCount
         this.sequenceSpans = nextSequence
         this.acknowledgedVersion = sessionVersion
-        if (partial) {
-            partial.deleteCount = partial.messages.length
-            partial.firstSessionVersion = sessionVersion + 1
-        }
         for (let index = this.dirtyRecords.length - 1; index >= 0; index--) {
             if (this.dirtyRecords[index].sessionVersion <= sessionVersion) {
                 this.dirtyRecords.splice(index, 1)

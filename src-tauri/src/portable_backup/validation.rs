@@ -719,7 +719,6 @@ impl LibraryView<'_> {
             ));
             return Ok(());
         };
-        let mut sole_entries = std::collections::HashMap::new();
         for mut reference in references {
             // Native row identities stay separate from the upstream F0 display identities.
             if owner_kind == "preset" || owner_kind == "plugin" {
@@ -729,10 +728,10 @@ impl LibraryView<'_> {
             check(probe)?;
             counts.total += 1;
             if matches!(reference.status, F0ReferenceStatus::Invalid) {
-                report.note(in_sole_entry(
-                    reference_finding(codes::REFERENCE_INVALID, &reference, "reference value cannot be resolved"),
-                    root,
-                    &mut sole_entries,
+                report.note(reference_finding(
+                    codes::REFERENCE_INVALID,
+                    &reference,
+                    "reference value cannot be resolved",
                 ));
                 continue;
             }
@@ -741,10 +740,10 @@ impl LibraryView<'_> {
             }
             if !self.reference_present(&reference, root)? {
                 counts.expected_missing += 1;
-                report.note(in_sole_entry(
-                    reference_finding(codes::REFERENCE_MISSING, &reference, "reference has no target in this library"),
-                    root,
-                    &mut sole_entries,
+                report.note(reference_finding(
+                    codes::REFERENCE_MISSING,
+                    &reference,
+                    "reference has no target in this library",
                 ));
             }
         }
@@ -943,35 +942,9 @@ impl LibraryView<'_> {
 }
 
 fn reference_finding(code: &'static str, reference: &F0Reference, detail: &str) -> Finding {
-    let finding = Finding::new(code, &reference.owner_kind, &reference.owner_id, detail)
+    Finding::new(code, &reference.owner_kind, &reference.owner_id, detail)
         .at(&reference.source_path, reference.occurrence)
-        .targeting(&reference.target_kind, &reference.target_key);
-    match reference.metadata.get("tokenIndex").and_then(Value::as_u64) {
-        Some(token) if reference.target_kind == "inlay" => finding.in_token(token),
-        _ => finding,
-    }
-}
-
-/// Marks a finding whose owner is the one root entry that carries its identity, so a repair can
-/// find that entry again. Each owner is looked up once.
-fn in_sole_entry(
-    finding: Finding,
-    root: &Value,
-    known: &mut std::collections::HashMap<(String, String), bool>,
-) -> Finding {
-    use crate::data_health::repair::{root_collection, root_entry};
-    let owner = &finding.owner;
-    if root_collection(&owner.kind).is_none() {
-        return finding;
-    }
-    let sole = *known
-        .entry((owner.kind.clone(), owner.id.clone()))
-        .or_insert_with(|| root_entry(root, owner).is_some());
-    if sole {
-        finding.in_sole_entry()
-    } else {
-        finding
-    }
+        .targeting(&reference.target_kind, &reference.target_key)
 }
 
 fn named(value: &Value, collection: &str, field: &str, key: &str) -> bool {

@@ -1,0 +1,2367 @@
+{
+  "schema": 1,
+  "cases": [
+    {
+      "id": "json-card-full",
+      "receipt": {
+        "casSessionId": "wiring-json-card-full",
+        "format": "json-card",
+        "metadata": {
+          "spec": "chara_card_v3",
+          "spec_version": "3.0",
+          "data": {
+            "name": "Wiring Full",
+            "description": "Description.",
+            "personality": "Calm.",
+            "scenario": "A room.",
+            "first_mes": "Hello.",
+            "mes_example": "<START>",
+            "creator_notes": "Notes.",
+            "system_prompt": "System.",
+            "post_history_instructions": "After.",
+            "alternate_greetings": [
+              "Hi again."
+            ],
+            "tags": [
+              "synthetic"
+            ],
+            "creator": "oracle",
+            "character_version": "2",
+            "nickname": "Full",
+            "source": [
+              "local"
+            ],
+            "creation_date": 1700000000,
+            "modification_date": 1700000100,
+            "group_only_greetings": [],
+            "character_book": {
+              "scan_depth": 5,
+              "token_budget": 300,
+              "recursive_scanning": true,
+              "extensions": {
+                "risu_fullWordMatching": true
+              },
+              "entries": [
+                {
+                  "keys": [
+                    "alpha",
+                    "beta"
+                  ],
+                  "secondary_keys": [
+                    "gamma"
+                  ],
+                  "content": "Book entry.",
+                  "extensions": {
+                    "risu_case_sensitive": true
+                  },
+                  "enabled": true,
+                  "insertion_order": 3,
+                  "constant": false,
+                  "selective": true,
+                  "name": "Entry",
+                  "comment": "Entry",
+                  "case_sensitive": true,
+                  "use_regex": false
+                }
+              ]
+            },
+            "extensions": {
+              "risuai": {
+                "bias": [
+                  [
+                    "word",
+                    5
+                  ]
+                ],
+                "viewScreen": "emotion",
+                "customScripts": [
+                  {
+                    "comment": "regex",
+                    "in": "a",
+                    "out": "b",
+                    "type": "editdisplay"
+                  }
+                ],
+                "utilityBot": false,
+                "sdData": [
+                  [
+                    "always",
+                    "x"
+                  ]
+                ],
+                "triggerscript": [],
+                "additionalText": "More.",
+                "backgroundHTML": "<b>bg</b>",
+                "license": "",
+                "largePortrait": true,
+                "lorePlus": false,
+                "inlayViewScreen": false,
+                "defaultVariables": "a=1",
+                "lowLevelAccess": false,
+                "hideChatIcon": false
+              },
+              "depth_prompt": {
+                "depth": 4,
+                "prompt": "Depth."
+              },
+              "other_extension": {
+                "kept": 1
+              }
+            },
+            "assets": [
+              {
+                "type": "icon",
+                "uri": "ccdefault:",
+                "name": "main",
+                "ext": "png"
+              },
+              {
+                "type": "emotion",
+                "uri": "__asset:native-data-1",
+                "name": "happy",
+                "ext": "png"
+              },
+              {
+                "type": "x-risu-asset",
+                "uri": "__asset:native-data-2",
+                "name": "background",
+                "ext": "webp"
+              },
+              {
+                "type": "x-risu-asset",
+                "uri": "__asset:native-data-2",
+                "name": "background copy",
+                "ext": "webp"
+              }
+            ]
+          }
+        },
+        "assets": [
+          {
+            "referenceKey": "native-data-0",
+            "token": "native-data-0",
+            "logicalId": "assets/1111111111111111111111111111111111111111111111111111111111111111.png",
+            "objectHash": "1111111111111111111111111111111111111111111111111111111111111111",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "1111111111111111111111111111111111111111111111111111111111111111.png",
+            "ext": "png"
+          },
+          {
+            "referenceKey": "native-data-1",
+            "token": "native-data-1",
+            "logicalId": "assets/2222222222222222222222222222222222222222222222222222222222222222.png",
+            "objectHash": "2222222222222222222222222222222222222222222222222222222222222222",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "2222222222222222222222222222222222222222222222222222222222222222.png",
+            "ext": "png"
+          },
+          {
+            "referenceKey": "native-data-2",
+            "token": "native-data-2",
+            "logicalId": "assets/3333333333333333333333333333333333333333333333333333333333333333.webp",
+            "objectHash": "3333333333333333333333333333333333333333333333333333333333333333",
+            "byteSize": 4,
+            "mime": "",
+            "name": "3333333333333333333333333333333333333333333333333333333333333333.webp",
+            "ext": "webp"
+          }
+        ],
+        "portraitLogicalId": "assets/1111111111111111111111111111111111111111111111111111111111111111.png"
+      },
+      "native": "mapped"
+    },
+    {
+      "id": "charx-card-module",
+      "receipt": {
+        "casSessionId": "wiring-charx-card-module",
+        "format": "charx-card",
+        "metadata": {
+          "spec": "chara_card_v3",
+          "spec_version": "3.0",
+          "data": {
+            "name": "Wiring CharX",
+            "description": "From a CharX file.",
+            "first_mes": "Hi.",
+            "character_book": {
+              "scan_depth": 5,
+              "token_budget": 300,
+              "recursive_scanning": true,
+              "extensions": {
+                "risu_fullWordMatching": true
+              },
+              "entries": [
+                {
+                  "keys": [
+                    "alpha",
+                    "beta"
+                  ],
+                  "secondary_keys": [
+                    "gamma"
+                  ],
+                  "content": "Book entry.",
+                  "extensions": {
+                    "risu_case_sensitive": true
+                  },
+                  "enabled": true,
+                  "insertion_order": 3,
+                  "constant": false,
+                  "selective": true,
+                  "name": "Entry",
+                  "comment": "Entry",
+                  "case_sensitive": true,
+                  "use_regex": false
+                }
+              ]
+            },
+            "extensions": {
+              "risuai": {
+                "customScripts": [
+                  {
+                    "comment": "card regex"
+                  }
+                ],
+                "triggerscript": [
+                  {
+                    "comment": "card trigger"
+                  }
+                ]
+              }
+            },
+            "assets": [
+              {
+                "type": "icon",
+                "uri": "embeded://assets/icon/main.png",
+                "name": "main",
+                "ext": "png"
+              },
+              {
+                "type": "x-risu-asset",
+                "uri": "embeded://assets/other/image/extra.png",
+                "name": "extra",
+                "ext": "png"
+              }
+            ]
+          }
+        },
+        "assets": [
+          {
+            "referenceKey": "assets/icon/main.png",
+            "token": "assets/icon/main.png",
+            "logicalId": "assets/4444444444444444444444444444444444444444444444444444444444444444.png",
+            "objectHash": "4444444444444444444444444444444444444444444444444444444444444444",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "4444444444444444444444444444444444444444444444444444444444444444.png",
+            "ext": "png"
+          },
+          {
+            "referenceKey": "assets/other/image/extra.png",
+            "token": "assets/other/image/extra.png",
+            "logicalId": "assets/5555555555555555555555555555555555555555555555555555555555555555.png",
+            "objectHash": "5555555555555555555555555555555555555555555555555555555555555555",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "5555555555555555555555555555555555555555555555555555555555555555.png",
+            "ext": "png"
+          }
+        ],
+        "portraitLogicalId": "assets/4444444444444444444444444444444444444444444444444444444444444444.png",
+        "module": {
+          "trigger": [
+            {
+              "comment": "module trigger",
+              "type": "manual",
+              "conditions": [],
+              "effect": []
+            }
+          ],
+          "regex": [
+            {
+              "comment": "module regex",
+              "in": "x",
+              "out": "y",
+              "type": "editoutput"
+            }
+          ],
+          "lorebook": [
+            {
+              "key": "module key",
+              "secondkey": "",
+              "insertorder": 1,
+              "comment": "module lore",
+              "content": "Module.",
+              "mode": "normal",
+              "alwaysActive": false,
+              "selective": false
+            }
+          ]
+        }
+      },
+      "native": "mapped"
+    },
+    {
+      "id": "appended-charx-jpeg-module-without-lorebook",
+      "receipt": {
+        "casSessionId": "wiring-appended-charx-jpeg-module-without-lorebook",
+        "format": "appended-charx-jpeg",
+        "metadata": {
+          "spec": "chara_card_v3",
+          "spec_version": "3.0",
+          "data": {
+            "name": "Wiring JPEG",
+            "character_book": {
+              "scan_depth": 5,
+              "token_budget": 300,
+              "recursive_scanning": true,
+              "extensions": {
+                "risu_fullWordMatching": true
+              },
+              "entries": [
+                {
+                  "keys": [
+                    "alpha",
+                    "beta"
+                  ],
+                  "secondary_keys": [
+                    "gamma"
+                  ],
+                  "content": "Book entry.",
+                  "extensions": {
+                    "risu_case_sensitive": true
+                  },
+                  "enabled": true,
+                  "insertion_order": 3,
+                  "constant": false,
+                  "selective": true,
+                  "name": "Entry",
+                  "comment": "Entry",
+                  "case_sensitive": true,
+                  "use_regex": false
+                }
+              ]
+            },
+            "extensions": {
+              "risuai": {
+                "utilityBot": true
+              }
+            }
+          }
+        },
+        "assets": [],
+        "module": {
+          "trigger": [],
+          "regex": [
+            {
+              "comment": "only regex",
+              "in": "q",
+              "out": "r",
+              "type": "editinput"
+            }
+          ]
+        }
+      },
+      "native": "mapped"
+    },
+    {
+      "id": "json-card-minimal",
+      "receipt": {
+        "casSessionId": "wiring-json-card-minimal",
+        "format": "json-card",
+        "metadata": {
+          "spec": "chara_card_v3",
+          "spec_version": "3.0",
+          "data": {
+            "name": "Minimal",
+            "extensions": {}
+          }
+        },
+        "assets": []
+      },
+      "native": "mapped"
+    },
+    {
+      "id": "json-card-low-level-access",
+      "receipt": {
+        "casSessionId": "wiring-json-card-low-level-access",
+        "format": "json-card",
+        "metadata": {
+          "spec": "chara_card_v3",
+          "spec_version": "3.0",
+          "data": {
+            "name": "Low Level",
+            "extensions": {
+              "risuai": {
+                "lowLevelAccess": true
+              }
+            }
+          }
+        },
+        "assets": []
+      },
+      "native": {
+        "reason": "unsupported",
+        "name": "lowLevelAccess"
+      }
+    },
+    {
+      "id": "json-card-proto-key",
+      "receipt": {
+        "casSessionId": "wiring-json-card-proto-key",
+        "format": "json-card",
+        "metadata": {
+          "spec": "chara_card_v3",
+          "spec_version": "3.0",
+          "data": {
+            "name": "Proto",
+            "extensions": {
+              "risuai": {},
+              "custom": {
+                "__proto__": {
+                  "polluted": true
+                },
+                "plain": 1
+              }
+            }
+          }
+        },
+        "assets": []
+      },
+      "native": {
+        "reason": "unsupported",
+        "name": "protoKey"
+      }
+    },
+    {
+      "id": "json-card-missing-asset",
+      "receipt": {
+        "casSessionId": "wiring-json-card-missing-asset",
+        "format": "json-card",
+        "metadata": {
+          "spec": "chara_card_v3",
+          "spec_version": "3.0",
+          "data": {
+            "name": "Missing",
+            "extensions": {},
+            "assets": [
+              {
+                "type": "x-risu-asset",
+                "uri": "__asset:never-staged",
+                "name": "gone",
+                "ext": "png"
+              }
+            ]
+          }
+        },
+        "assets": []
+      },
+      "native": {
+        "reason": "invalid",
+        "name": "missingAsset"
+      }
+    },
+    {
+      "id": "json-card-data-uri",
+      "receipt": {
+        "casSessionId": "wiring-json-card-data-uri",
+        "format": "json-card",
+        "metadata": {
+          "spec": "chara_card_v3",
+          "spec_version": "3.0",
+          "data": {
+            "name": "Inline",
+            "extensions": {},
+            "assets": [
+              {
+                "type": "x-risu-asset",
+                "uri": "data:image/png;base64,AAAA",
+                "name": "inline",
+                "ext": "png"
+              }
+            ]
+          }
+        },
+        "assets": []
+      },
+      "native": {
+        "reason": "invalid",
+        "name": "dataUri"
+      }
+    },
+    {
+      "id": "json-card-ccdefault-without-portrait",
+      "receipt": {
+        "casSessionId": "wiring-json-card-ccdefault-without-portrait",
+        "format": "json-card",
+        "metadata": {
+          "spec": "chara_card_v3",
+          "spec_version": "3.0",
+          "data": {
+            "name": "No Portrait",
+            "extensions": {},
+            "assets": [
+              {
+                "type": "icon",
+                "uri": "ccdefault:",
+                "name": "main",
+                "ext": "png"
+              }
+            ]
+          }
+        },
+        "assets": []
+      },
+      "native": {
+        "reason": "invalid",
+        "name": "ccdefaultPortrait"
+      }
+    },
+    {
+      "id": "json-card-duplicate-asset-token",
+      "receipt": {
+        "casSessionId": "wiring-json-card-duplicate-asset-token",
+        "format": "json-card",
+        "metadata": {
+          "spec": "chara_card_v3",
+          "spec_version": "3.0",
+          "data": {
+            "name": "Duplicate",
+            "extensions": {}
+          }
+        },
+        "assets": [
+          {
+            "referenceKey": "native-data-0",
+            "token": "native-data-0",
+            "logicalId": "assets/6666666666666666666666666666666666666666666666666666666666666666.png",
+            "objectHash": "6666666666666666666666666666666666666666666666666666666666666666",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "6666666666666666666666666666666666666666666666666666666666666666.png",
+            "ext": "png"
+          },
+          {
+            "referenceKey": "native-data-0",
+            "token": "native-data-0",
+            "logicalId": "assets/7777777777777777777777777777777777777777777777777777777777777777.png",
+            "objectHash": "7777777777777777777777777777777777777777777777777777777777777777",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "7777777777777777777777777777777777777777777777777777777777777777.png",
+            "ext": "png"
+          }
+        ]
+      },
+      "native": {
+        "reason": "invalid",
+        "name": "duplicateAssetToken"
+      }
+    },
+    {
+      "id": "json-card-blank-asset-token",
+      "receipt": {
+        "casSessionId": "wiring-json-card-blank-asset-token",
+        "format": "json-card",
+        "metadata": {
+          "spec": "chara_card_v3",
+          "spec_version": "3.0",
+          "data": {
+            "name": "Blank Token",
+            "extensions": {}
+          }
+        },
+        "assets": [
+          {
+            "referenceKey": "  ",
+            "token": "  ",
+            "logicalId": "assets/6666666666666666666666666666666666666666666666666666666666666666.png",
+            "objectHash": "6666666666666666666666666666666666666666666666666666666666666666",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "6666666666666666666666666666666666666666666666666666666666666666.png",
+            "ext": "png"
+          }
+        ]
+      },
+      "native": {
+        "reason": "invalid",
+        "name": "assetToken"
+      }
+    },
+    {
+      "id": "json-card-blank-portrait",
+      "receipt": {
+        "casSessionId": "wiring-json-card-blank-portrait",
+        "format": "json-card",
+        "metadata": {
+          "spec": "chara_card_v3",
+          "spec_version": "3.0",
+          "data": {
+            "name": "Blank Portrait",
+            "extensions": {}
+          }
+        },
+        "assets": [],
+        "portraitLogicalId": "   "
+      },
+      "native": {
+        "reason": "invalid",
+        "name": "portraitLogicalId"
+      }
+    },
+    {
+      "id": "png-v3-embedded-assets",
+      "receipt": {
+        "casSessionId": "wiring-png-v3-embedded-assets",
+        "format": "png-card",
+        "metadata": {
+          "chara": "eyJzcGVjIjoiY2hhcmFfY2FyZF92MiIsInNwZWNfdmVyc2lvbiI6IjIuMCIsImRhdGEiOnsibmFtZSI6Iklnbm9yZWQgVjIiLCJleHRlbnNpb25zIjp7fX19",
+          "ccv3": "eyJzcGVjIjoiY2hhcmFfY2FyZF92MyIsInNwZWNfdmVyc2lvbiI6IjMuMCIsImRhdGEiOnsibmFtZSI6IldpcmluZyBQTkciLCJkZXNjcmlwdGlvbiI6IkZyb20gYSBQTkcuIiwiZmlyc3RfbWVzIjoiSGVsbG8gZnJvbSBQTkcuIiwiY2hhcmFjdGVyX2Jvb2siOnsic2Nhbl9kZXB0aCI6NSwidG9rZW5fYnVkZ2V0IjozMDAsInJlY3Vyc2l2ZV9zY2FubmluZyI6dHJ1ZSwiZXh0ZW5zaW9ucyI6eyJyaXN1X2Z1bGxXb3JkTWF0Y2hpbmciOnRydWV9LCJlbnRyaWVzIjpbeyJrZXlzIjpbImFscGhhIiwiYmV0YSJdLCJzZWNvbmRhcnlfa2V5cyI6WyJnYW1tYSJdLCJjb250ZW50IjoiQm9vayBlbnRyeS4iLCJleHRlbnNpb25zIjp7InJpc3VfY2FzZV9zZW5zaXRpdmUiOnRydWV9LCJlbmFibGVkIjp0cnVlLCJpbnNlcnRpb25fb3JkZXIiOjMsImNvbnN0YW50IjpmYWxzZSwic2VsZWN0aXZlIjp0cnVlLCJuYW1lIjoiRW50cnkiLCJjb21tZW50IjoiRW50cnkiLCJjYXNlX3NlbnNpdGl2ZSI6dHJ1ZSwidXNlX3JlZ2V4IjpmYWxzZX1dfSwiZXh0ZW5zaW9ucyI6eyJyaXN1YWkiOnsiY3VzdG9tU2NyaXB0cyI6W3siY29tbWVudCI6InBuZyByZWdleCIsImluIjoicCIsIm91dCI6InEiLCJ0eXBlIjoiZWRpdGRpc3BsYXkifV19fSwiYXNzZXRzIjpbeyJ0eXBlIjoiaWNvbiIsInVyaSI6ImNjZGVmYXVsdDoiLCJuYW1lIjoibWFpbiIsImV4dCI6InBuZyJ9LHsidHlwZSI6ImVtb3Rpb24iLCJ1cmkiOiJfX2Fzc2V0OjEiLCJuYW1lIjoic21pbGUiLCJleHQiOiJwbmcifSx7InR5cGUiOiJ4LXJpc3UtYXNzZXQiLCJ1cmkiOiJfX2Fzc2V0OjIiLCJuYW1lIjoic2NlbmUiLCJleHQiOiJwbmcifSx7InR5cGUiOiJ4LXJpc3UtYXNzZXQiLCJ1cmkiOiJlbWJlZGVkOi8vMiIsIm5hbWUiOiJzY2VuZSBieSBVUkkiLCJleHQiOiJwbmcifV19fQ=="
+        },
+        "assets": [
+          {
+            "referenceKey": "native-png-portrait",
+            "token": "native-png-portrait",
+            "logicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png",
+            "objectHash": "8888888888888888888888888888888888888888888888888888888888888888",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "8888888888888888888888888888888888888888888888888888888888888888.png",
+            "ext": "png"
+          },
+          {
+            "referenceKey": "1",
+            "token": "1",
+            "logicalId": "assets/9999999999999999999999999999999999999999999999999999999999999999.png",
+            "objectHash": "9999999999999999999999999999999999999999999999999999999999999999",
+            "byteSize": 4,
+            "mime": "",
+            "name": "9999999999999999999999999999999999999999999999999999999999999999.png",
+            "ext": "png"
+          },
+          {
+            "referenceKey": "2",
+            "token": "2",
+            "logicalId": "assets/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+            "objectHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "byteSize": 4,
+            "mime": "",
+            "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+            "ext": "png"
+          }
+        ],
+        "portraitLogicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png"
+      },
+      "native": "mapped"
+    },
+    {
+      "id": "png-v2-chara",
+      "receipt": {
+        "casSessionId": "wiring-png-v2-chara",
+        "format": "png-card",
+        "metadata": {
+          "chara": "eyJzcGVjIjoiY2hhcmFfY2FyZF92MiIsInNwZWNfdmVyc2lvbiI6IjIuMCIsImRhdGEiOnsibmFtZSI6IldpcmluZyBQTkcgVjIiLCJkZXNjcmlwdGlvbiI6Ik9sZGVyIGNhcmQuIiwiZmlyc3RfbWVzIjoiSGkuIiwiY2hhcmFjdGVyX3ZlcnNpb24iOjEuNSwiY2hhcmFjdGVyX2Jvb2siOnsic2Nhbl9kZXB0aCI6NSwidG9rZW5fYnVkZ2V0IjozMDAsInJlY3Vyc2l2ZV9zY2FubmluZyI6dHJ1ZSwiZXh0ZW5zaW9ucyI6eyJyaXN1X2Z1bGxXb3JkTWF0Y2hpbmciOnRydWV9LCJlbnRyaWVzIjpbeyJrZXlzIjpbImFscGhhIiwiYmV0YSJdLCJzZWNvbmRhcnlfa2V5cyI6WyJnYW1tYSJdLCJjb250ZW50IjoiQm9vayBlbnRyeS4iLCJleHRlbnNpb25zIjp7InJpc3VfY2FzZV9zZW5zaXRpdmUiOnRydWV9LCJlbmFibGVkIjp0cnVlLCJpbnNlcnRpb25fb3JkZXIiOjMsImNvbnN0YW50IjpmYWxzZSwic2VsZWN0aXZlIjp0cnVlLCJuYW1lIjoiRW50cnkiLCJjb21tZW50IjoiRW50cnkiLCJjYXNlX3NlbnNpdGl2ZSI6dHJ1ZSwidXNlX3JlZ2V4IjpmYWxzZX1dfSwiZXh0ZW5zaW9ucyI6eyJyaXN1YWkiOnsiZW1vdGlvbnMiOltbImhhcHB5IiwiX19hc3NldDoxIl1dLCJhZGRpdGlvbmFsQXNzZXRzIjpbWyJzY2VuZSIsIl9fYXNzZXQ6MiIsInBuZyJdXSwidXRpbGl0eUJvdCI6ZmFsc2UsInRyaWdnZXJzY3JpcHQiOltdfSwiZGVwdGhfcHJvbXB0Ijp7ImRlcHRoIjoyLCJwcm9tcHQiOiJEZXB0aC4ifX19fQ=="
+        },
+        "assets": [
+          {
+            "referenceKey": "native-png-portrait",
+            "token": "native-png-portrait",
+            "logicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png",
+            "objectHash": "8888888888888888888888888888888888888888888888888888888888888888",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "8888888888888888888888888888888888888888888888888888888888888888.png",
+            "ext": "png"
+          },
+          {
+            "referenceKey": "1",
+            "token": "1",
+            "logicalId": "assets/9999999999999999999999999999999999999999999999999999999999999999.png",
+            "objectHash": "9999999999999999999999999999999999999999999999999999999999999999",
+            "byteSize": 4,
+            "mime": "",
+            "name": "9999999999999999999999999999999999999999999999999999999999999999.png",
+            "ext": "png"
+          },
+          {
+            "referenceKey": "2",
+            "token": "2",
+            "logicalId": "assets/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+            "objectHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "byteSize": 4,
+            "mime": "",
+            "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+            "ext": "png"
+          }
+        ],
+        "portraitLogicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png"
+      },
+      "native": "mapped"
+    },
+    {
+      "id": "png-v2-character-version-exponent",
+      "receipt": {
+        "casSessionId": "wiring-png-v2-character-version-exponent",
+        "format": "png-card",
+        "metadata": {
+          "chara": "eyJzcGVjIjoiY2hhcmFfY2FyZF92MiIsInNwZWNfdmVyc2lvbiI6IjIuMCIsImRhdGEiOnsibmFtZSI6IkV4cG9uZW50IiwiY2hhcmFjdGVyX3ZlcnNpb24iOjFlKzIxLCJleHRlbnNpb25zIjp7fX19"
+        },
+        "assets": [
+          {
+            "referenceKey": "native-png-portrait",
+            "token": "native-png-portrait",
+            "logicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png",
+            "objectHash": "8888888888888888888888888888888888888888888888888888888888888888",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "8888888888888888888888888888888888888888888888888888888888888888.png",
+            "ext": "png"
+          }
+        ],
+        "portraitLogicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png"
+      },
+      "native": "mapped"
+    },
+    {
+      "id": "png-off-spec-card",
+      "receipt": {
+        "casSessionId": "wiring-png-off-spec-card",
+        "format": "png-card",
+        "metadata": {
+          "chara": "eyJuYW1lIjoiVGF2ZXJuIiwiZGVzY3JpcHRpb24iOiJPbGQgc3R5bGUuIiwicGVyc29uYWxpdHkiOiJQbGFpbi4iLCJzY2VuYXJpbyI6IiIsImZpcnN0X21lcyI6IkhleS4iLCJtZXNfZXhhbXBsZSI6IiJ9"
+        },
+        "assets": [
+          {
+            "referenceKey": "native-png-portrait",
+            "token": "native-png-portrait",
+            "logicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png",
+            "objectHash": "8888888888888888888888888888888888888888888888888888888888888888",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "8888888888888888888888888888888888888888888888888888888888888888.png",
+            "ext": "png"
+          }
+        ],
+        "portraitLogicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png"
+      },
+      "native": "mapped"
+    },
+    {
+      "id": "png-bom",
+      "receipt": {
+        "casSessionId": "wiring-png-bom",
+        "format": "png-card",
+        "metadata": {
+          "ccv3": "77u/eyJzcGVjIjoiY2hhcmFfY2FyZF92MyIsInNwZWNfdmVyc2lvbiI6IjMuMCIsImRhdGEiOnsibmFtZSI6IkJPTSIsImV4dGVuc2lvbnMiOnt9fX0="
+        },
+        "assets": [
+          {
+            "referenceKey": "native-png-portrait",
+            "token": "native-png-portrait",
+            "logicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png",
+            "objectHash": "8888888888888888888888888888888888888888888888888888888888888888",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "8888888888888888888888888888888888888888888888888888888888888888.png",
+            "ext": "png"
+          }
+        ],
+        "portraitLogicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png"
+      },
+      "native": "mapped"
+    },
+    {
+      "id": "png-trailing-bits",
+      "receipt": {
+        "casSessionId": "wiring-png-trailing-bits",
+        "format": "png-card",
+        "metadata": {
+          "ccv3": "eyJzcGVjIjoiY2hhcmFfY2FyZF92MyIsInNwZWNfdmVyc2lvbiI6IjMuMCIsImRhdGEiOnsibmFtZSI6IlRyYWlsaW5nIiwiZXh0ZW5zaW9ucyI6e319fR=="
+        },
+        "assets": [
+          {
+            "referenceKey": "native-png-portrait",
+            "token": "native-png-portrait",
+            "logicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png",
+            "objectHash": "8888888888888888888888888888888888888888888888888888888888888888",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "8888888888888888888888888888888888888888888888888888888888888888.png",
+            "ext": "png"
+          }
+        ],
+        "portraitLogicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png"
+      },
+      "native": "mapped"
+    },
+    {
+      "id": "png-lone-surrogate",
+      "receipt": {
+        "casSessionId": "wiring-png-lone-surrogate",
+        "format": "png-card",
+        "metadata": {
+          "ccv3": "eyJzcGVjIjoiY2hhcmFfY2FyZF92MyIsInNwZWNfdmVyc2lvbiI6IjMuMCIsImRhdGEiOnsibmFtZSI6IlN1cnJvZ2F0ZSBcdWRjMDAiLCJleHRlbnNpb25zIjp7fX19"
+        },
+        "assets": [
+          {
+            "referenceKey": "native-png-portrait",
+            "token": "native-png-portrait",
+            "logicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png",
+            "objectHash": "8888888888888888888888888888888888888888888888888888888888888888",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "8888888888888888888888888888888888888888888888888888888888888888.png",
+            "ext": "png"
+          }
+        ],
+        "portraitLogicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png"
+      },
+      "native": "mapped"
+    },
+    {
+      "id": "png-low-level-access",
+      "receipt": {
+        "casSessionId": "wiring-png-low-level-access",
+        "format": "png-card",
+        "metadata": {
+          "ccv3": "eyJzcGVjIjoiY2hhcmFfY2FyZF92MyIsInNwZWNfdmVyc2lvbiI6IjMuMCIsImRhdGEiOnsibmFtZSI6IlBORyBMb3cgTGV2ZWwiLCJleHRlbnNpb25zIjp7InJpc3VhaSI6eyJsb3dMZXZlbEFjY2VzcyI6dHJ1ZX19fX0="
+        },
+        "assets": [
+          {
+            "referenceKey": "native-png-portrait",
+            "token": "native-png-portrait",
+            "logicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png",
+            "objectHash": "8888888888888888888888888888888888888888888888888888888888888888",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "8888888888888888888888888888888888888888888888888888888888888888.png",
+            "ext": "png"
+          }
+        ],
+        "portraitLogicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png"
+      },
+      "native": {
+        "reason": "unsupported",
+        "name": "lowLevelAccess"
+      }
+    },
+    {
+      "id": "png-embeded-uri-without-chunk",
+      "receipt": {
+        "casSessionId": "wiring-png-embeded-uri-without-chunk",
+        "format": "png-card",
+        "metadata": {
+          "ccv3": "eyJzcGVjIjoiY2hhcmFfY2FyZF92MyIsInNwZWNfdmVyc2lvbiI6IjMuMCIsImRhdGEiOnsibmFtZSI6IkVtYmVkZGVkIFVSSSIsImV4dGVuc2lvbnMiOnt9LCJhc3NldHMiOlt7InR5cGUiOiJ4LXJpc3UtYXNzZXQiLCJ1cmkiOiJlbWJlZGVkOi8vYXNzZXRzL290aGVyL2ltYWdlL2xvc3QucG5nIiwibmFtZSI6Imxvc3QiLCJleHQiOiJwbmcifV19fQ=="
+        },
+        "assets": [
+          {
+            "referenceKey": "native-png-portrait",
+            "token": "native-png-portrait",
+            "logicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png",
+            "objectHash": "8888888888888888888888888888888888888888888888888888888888888888",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "8888888888888888888888888888888888888888888888888888888888888888.png",
+            "ext": "png"
+          }
+        ],
+        "portraitLogicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png"
+      },
+      "native": {
+        "reason": "invalid",
+        "name": "missingAsset"
+      }
+    },
+    {
+      "id": "png-v3-inline-data-uri",
+      "receipt": {
+        "casSessionId": "wiring-png-v3-inline-data-uri",
+        "format": "png-card",
+        "metadata": {
+          "ccv3": "eyJzcGVjIjoiY2hhcmFfY2FyZF92MyIsInNwZWNfdmVyc2lvbiI6IjMuMCIsImRhdGEiOnsibmFtZSI6IklubGluZSBWMyIsImV4dGVuc2lvbnMiOnt9LCJhc3NldHMiOlt7InR5cGUiOiJ4LXJpc3UtYXNzZXQiLCJ1cmkiOiJkYXRhOmltYWdlL3BuZztiYXNlNjQsYVc1c2FXNWxMWFl6IiwibmFtZSI6ImlubGluZSIsImV4dCI6InBuZyJ9XX19"
+        },
+        "assets": [
+          {
+            "referenceKey": "native-png-portrait",
+            "token": "native-png-portrait",
+            "logicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png",
+            "objectHash": "8888888888888888888888888888888888888888888888888888888888888888",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "8888888888888888888888888888888888888888888888888888888888888888.png",
+            "ext": "png"
+          }
+        ],
+        "portraitLogicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png"
+      },
+      "native": {
+        "reason": "invalid",
+        "name": "dataUri"
+      },
+      "ts": "stored"
+    },
+    {
+      "id": "png-v2-inline-emotion",
+      "receipt": {
+        "casSessionId": "wiring-png-v2-inline-emotion",
+        "format": "png-card",
+        "metadata": {
+          "chara": "eyJzcGVjIjoiY2hhcmFfY2FyZF92MiIsInNwZWNfdmVyc2lvbiI6IjIuMCIsImRhdGEiOnsibmFtZSI6IklubGluZSBWMiIsImV4dGVuc2lvbnMiOnsicmlzdWFpIjp7ImVtb3Rpb25zIjpbWyJzYWQiLCJhVzVzYVc1bExYWXkiXV19fX19"
+        },
+        "assets": [
+          {
+            "referenceKey": "native-png-portrait",
+            "token": "native-png-portrait",
+            "logicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png",
+            "objectHash": "8888888888888888888888888888888888888888888888888888888888888888",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "8888888888888888888888888888888888888888888888888888888888888888.png",
+            "ext": "png"
+          }
+        ],
+        "portraitLogicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png"
+      },
+      "native": {
+        "reason": "invalid",
+        "name": "assetReference"
+      },
+      "ts": "stored"
+    },
+    {
+      "id": "png-rcc",
+      "receipt": {
+        "casSessionId": "wiring-png-rcc",
+        "format": "png-card",
+        "metadata": {
+          "ccv3": "rcc||rccv1||F9QHk1As1owM4vhDy+0PLdFvNahllAg6BBO+E6g6b5c0acz7q4SODD1YqIRZB3TBuOF8JJsYuB78yCB//9vv6R46unc5T4PbqQwCzUaovA4KV+9y/KFhFlhTZLgZLjicygDLVoqx66YC||03029afc7848ced3d7c265e4a5e99d1cd40335667823c1cb61d03c090eca9ff3||eyJ1c2VQYXNzd29yZCI6ZmFsc2V9"
+        },
+        "assets": [
+          {
+            "referenceKey": "native-png-portrait",
+            "token": "native-png-portrait",
+            "logicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png",
+            "objectHash": "8888888888888888888888888888888888888888888888888888888888888888",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "8888888888888888888888888888888888888888888888888888888888888888.png",
+            "ext": "png"
+          }
+        ],
+        "portraitLogicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png"
+      },
+      "native": {
+        "reason": "unsupported",
+        "name": "rcc"
+      }
+    },
+    {
+      "id": "png-rcc-hash-mismatch",
+      "receipt": {
+        "casSessionId": "wiring-png-rcc-hash-mismatch",
+        "format": "png-card",
+        "metadata": {
+          "ccv3": "rcc||rccv1||F9QHk1As1owM4vhDy+0PLdFvNahllAg6BBO+E6g6b5c0acz7q4SODD1YqIRZB3TBuOF8JJsYuB78yCB//8rg5xwmuGY4CY3V7hEO3E21pggLSr5qvadhFuscSEph/hNPoIlEoFCMByI=||0000000000000000000000000000000000000000000000000000000000000000||eyJ1c2VQYXNzd29yZCI6ZmFsc2V9"
+        },
+        "assets": [
+          {
+            "referenceKey": "native-png-portrait",
+            "token": "native-png-portrait",
+            "logicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png",
+            "objectHash": "8888888888888888888888888888888888888888888888888888888888888888",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "8888888888888888888888888888888888888888888888888888888888888888.png",
+            "ext": "png"
+          }
+        ],
+        "portraitLogicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png"
+      },
+      "native": {
+        "reason": "unsupported",
+        "name": "rcc"
+      },
+      "ts": "error"
+    },
+    {
+      "id": "png-not-base64",
+      "receipt": {
+        "casSessionId": "wiring-png-not-base64",
+        "format": "png-card",
+        "metadata": {
+          "ccv3": "e30"
+        },
+        "assets": [
+          {
+            "referenceKey": "native-png-portrait",
+            "token": "native-png-portrait",
+            "logicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png",
+            "objectHash": "8888888888888888888888888888888888888888888888888888888888888888",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "8888888888888888888888888888888888888888888888888888888888888888.png",
+            "ext": "png"
+          }
+        ],
+        "portraitLogicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png"
+      },
+      "native": {
+        "reason": "invalid",
+        "name": "pngBase64"
+      }
+    },
+    {
+      "id": "png-not-utf8",
+      "receipt": {
+        "casSessionId": "wiring-png-not-utf8",
+        "format": "png-card",
+        "metadata": {
+          "ccv3": "e/99"
+        },
+        "assets": [
+          {
+            "referenceKey": "native-png-portrait",
+            "token": "native-png-portrait",
+            "logicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png",
+            "objectHash": "8888888888888888888888888888888888888888888888888888888888888888",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "8888888888888888888888888888888888888888888888888888888888888888.png",
+            "ext": "png"
+          }
+        ],
+        "portraitLogicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png"
+      },
+      "native": {
+        "reason": "invalid",
+        "name": "pngUtf8"
+      }
+    },
+    {
+      "id": "png-json-syntax",
+      "receipt": {
+        "casSessionId": "wiring-png-json-syntax",
+        "format": "png-card",
+        "metadata": {
+          "ccv3": "eyJzcGVjIjo="
+        },
+        "assets": [
+          {
+            "referenceKey": "native-png-portrait",
+            "token": "native-png-portrait",
+            "logicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png",
+            "objectHash": "8888888888888888888888888888888888888888888888888888888888888888",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "8888888888888888888888888888888888888888888888888888888888888888.png",
+            "ext": "png"
+          }
+        ],
+        "portraitLogicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png"
+      },
+      "native": {
+        "reason": "invalid",
+        "name": "json-syntax"
+      }
+    },
+    {
+      "id": "png-not-object",
+      "receipt": {
+        "casSessionId": "wiring-png-not-object",
+        "format": "png-card",
+        "metadata": {
+          "ccv3": "WzEsMl0="
+        },
+        "assets": [
+          {
+            "referenceKey": "native-png-portrait",
+            "token": "native-png-portrait",
+            "logicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png",
+            "objectHash": "8888888888888888888888888888888888888888888888888888888888888888",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "8888888888888888888888888888888888888888888888888888888888888888.png",
+            "ext": "png"
+          }
+        ],
+        "portraitLogicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png"
+      },
+      "native": {
+        "reason": "unsupported",
+        "name": "card"
+      },
+      "ts": "error"
+    },
+    {
+      "id": "png-ccv3-null",
+      "receipt": {
+        "casSessionId": "wiring-png-ccv3-null",
+        "format": "png-card",
+        "metadata": {
+          "ccv3": null,
+          "chara": "eyJzcGVjIjoiY2hhcmFfY2FyZF92MiIsInNwZWNfdmVyc2lvbiI6IjIuMCIsImRhdGEiOnsibmFtZSI6Ik51bGwgVjMiLCJkZXNjcmlwdGlvbiI6IkZyb20gY2hhcmEuIiwiZXh0ZW5zaW9ucyI6e319fQ=="
+        },
+        "assets": [
+          {
+            "referenceKey": "native-png-portrait",
+            "token": "native-png-portrait",
+            "logicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png",
+            "objectHash": "8888888888888888888888888888888888888888888888888888888888888888",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "8888888888888888888888888888888888888888888888888888888888888888.png",
+            "ext": "png"
+          }
+        ],
+        "portraitLogicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png"
+      },
+      "native": "mapped"
+    },
+    {
+      "id": "png-double-bom",
+      "receipt": {
+        "casSessionId": "wiring-png-double-bom",
+        "format": "png-card",
+        "metadata": {
+          "ccv3": "77u/77u/eyJzcGVjIjoiY2hhcmFfY2FyZF92MyIsInNwZWNfdmVyc2lvbiI6IjMuMCIsImRhdGEiOnsibmFtZSI6IlR3byBCT01zIiwiZXh0ZW5zaW9ucyI6e319fQ=="
+        },
+        "assets": [
+          {
+            "referenceKey": "native-png-portrait",
+            "token": "native-png-portrait",
+            "logicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png",
+            "objectHash": "8888888888888888888888888888888888888888888888888888888888888888",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "8888888888888888888888888888888888888888888888888888888888888888.png",
+            "ext": "png"
+          }
+        ],
+        "portraitLogicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png"
+      },
+      "native": {
+        "reason": "invalid",
+        "name": "json-syntax"
+      }
+    },
+    {
+      "id": "risum-full",
+      "receipt": {
+        "casSessionId": "wiring-risum-full",
+        "format": "risu-module",
+        "metadata": {
+          "5": "index key",
+          "type": "risuModule",
+          "name": "Wiring Module",
+          "description": "A synthetic module.",
+          "id": "stored-module-id",
+          "lorebook": [
+            {
+              "key": "alpha, beta",
+              "secondkey": "",
+              "insertorder": 100,
+              "comment": "Lore",
+              "content": "Lore content",
+              "mode": "normal",
+              "alwaysActive": false,
+              "selective": false
+            },
+            {
+              "key": "",
+              "secondkey": "",
+              "insertorder": 100,
+              "comment": "folder",
+              "content": "",
+              "mode": "folder",
+              "alwaysActive": false,
+              "selective": false,
+              "folder": "f"
+            }
+          ],
+          "regex": [
+            {
+              "comment": "regex",
+              "in": "a",
+              "out": "b",
+              "type": "editinput",
+              "ableFlag": false
+            }
+          ],
+          "trigger": [
+            {
+              "comment": "trigger",
+              "type": "start",
+              "conditions": [],
+              "effect": [
+                {
+                  "type": "v2Header",
+                  "code": "",
+                  "indent": 0
+                }
+              ]
+            }
+          ],
+          "lowLevelAccess": false,
+          "hideIcon": true,
+          "backgroundEmbedding": "<style>x</style>",
+          "assets": [
+            [
+              "asset one",
+              "",
+              "png"
+            ],
+            [
+              "asset two",
+              "",
+              "webp",
+              "extra slot",
+              {
+                "future": true
+              }
+            ]
+          ],
+          "namespace": "ns",
+          "customModuleToggle": "toggle=1",
+          "mcp": {
+            "url": "https://example.invalid/mcp"
+          },
+          "icon": "stored-icon",
+          "extra": {
+            "nested": [
+              1,
+              2.5,
+              1e+21,
+              12345678901234567000
+            ]
+          }
+        },
+        "assets": [
+          {
+            "position": 0,
+            "logicalId": "assets/1111111111111111111111111111111111111111111111111111111111111111.png",
+            "objectHash": "1111111111111111111111111111111111111111111111111111111111111111",
+            "byteSize": 4,
+            "mime": "",
+            "name": "",
+            "ext": "png"
+          },
+          {
+            "position": 1,
+            "logicalId": "assets/2222222222222222222222222222222222222222222222222222222222222222.webp",
+            "objectHash": "2222222222222222222222222222222222222222222222222222222222222222",
+            "byteSize": 4,
+            "mime": "",
+            "name": "",
+            "ext": "webp"
+          }
+        ],
+        "ownerHead": {
+          "present": true,
+          "manifestHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "entryCount": 2
+        }
+      },
+      "native": "mapped"
+    },
+    {
+      "id": "risum-no-assets",
+      "receipt": {
+        "casSessionId": "wiring-risum-no-assets",
+        "format": "risu-module",
+        "metadata": {
+          "name": "No assets",
+          "description": "d",
+          "id": "old",
+          "lorebook": [
+            {
+              "key": "alpha, beta",
+              "secondkey": "",
+              "insertorder": 100,
+              "comment": "Lore",
+              "content": "Lore content",
+              "mode": "normal",
+              "alwaysActive": false,
+              "selective": false
+            }
+          ]
+        },
+        "assets": [],
+        "ownerHead": {
+          "present": false,
+          "manifestHash": null,
+          "entryCount": 0
+        }
+      },
+      "native": "mapped"
+    },
+    {
+      "id": "risum-no-id",
+      "receipt": {
+        "casSessionId": "wiring-risum-no-id",
+        "format": "risu-module",
+        "metadata": {
+          "name": "No id",
+          "assets": [
+            [
+              "a",
+              "",
+              "png"
+            ]
+          ]
+        },
+        "assets": [
+          {
+            "position": 0,
+            "logicalId": "assets/3333333333333333333333333333333333333333333333333333333333333333.png",
+            "objectHash": "3333333333333333333333333333333333333333333333333333333333333333",
+            "byteSize": 4,
+            "mime": "",
+            "name": "",
+            "ext": "png"
+          }
+        ],
+        "ownerHead": {
+          "present": true,
+          "manifestHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "entryCount": 1
+        }
+      },
+      "native": "mapped"
+    },
+    {
+      "id": "risum-empty-assets",
+      "receipt": {
+        "casSessionId": "wiring-risum-empty-assets",
+        "format": "risu-module",
+        "metadata": {
+          "id": "first",
+          "name": "Empty assets",
+          "assets": []
+        },
+        "assets": [],
+        "ownerHead": {
+          "present": true,
+          "manifestHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "entryCount": 0
+        }
+      },
+      "native": "mapped"
+    },
+    {
+      "id": "risum-duplicate-payloads",
+      "receipt": {
+        "casSessionId": "wiring-risum-duplicate-payloads",
+        "format": "risu-module",
+        "metadata": {
+          "name": "Duplicates",
+          "assets": [
+            [
+              "a",
+              "",
+              "png"
+            ],
+            [
+              "b",
+              "",
+              "png"
+            ]
+          ]
+        },
+        "assets": [
+          {
+            "position": 0,
+            "logicalId": "assets/4444444444444444444444444444444444444444444444444444444444444444.png",
+            "objectHash": "4444444444444444444444444444444444444444444444444444444444444444",
+            "byteSize": 4,
+            "mime": "",
+            "name": "",
+            "ext": "png"
+          },
+          {
+            "position": 1,
+            "logicalId": "assets/4444444444444444444444444444444444444444444444444444444444444444.png",
+            "objectHash": "4444444444444444444444444444444444444444444444444444444444444444",
+            "byteSize": 4,
+            "mime": "",
+            "name": "",
+            "ext": "png"
+          }
+        ],
+        "ownerHead": {
+          "present": true,
+          "manifestHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "entryCount": 2
+        }
+      },
+      "native": "mapped"
+    },
+    {
+      "id": "risum-unicode",
+      "receipt": {
+        "casSessionId": "wiring-risum-unicode",
+        "format": "risu-module",
+        "metadata": {
+          "name": "모듈 🐿️",
+          "description": "설명",
+          "lorebook": [
+            {
+              "key": "키, 열쇠",
+              "secondkey": "",
+              "insertorder": 100,
+              "comment": "Lore",
+              "content": "내용 😀",
+              "mode": "normal",
+              "alwaysActive": false,
+              "selective": false
+            }
+          ],
+          "assets": [
+            [
+              "이름 😀",
+              "",
+              "png"
+            ]
+          ]
+        },
+        "assets": [
+          {
+            "position": 0,
+            "logicalId": "assets/5555555555555555555555555555555555555555555555555555555555555555.png",
+            "objectHash": "5555555555555555555555555555555555555555555555555555555555555555",
+            "byteSize": 4,
+            "mime": "",
+            "name": "",
+            "ext": "png"
+          }
+        ],
+        "ownerHead": {
+          "present": true,
+          "manifestHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "entryCount": 1
+        }
+      },
+      "native": "mapped"
+    },
+    {
+      "id": "risum-falsy-low-level-string-mcp",
+      "receipt": {
+        "casSessionId": "wiring-risum-falsy-low-level-string-mcp",
+        "format": "risu-module",
+        "metadata": {
+          "name": "Falsy",
+          "lowLevelAccess": 0,
+          "mcp": "stdio:x"
+        },
+        "assets": [],
+        "ownerHead": {
+          "present": false,
+          "manifestHash": null,
+          "entryCount": 0
+        }
+      },
+      "native": "mapped"
+    },
+    {
+      "id": "risum-low-level-access",
+      "receipt": {
+        "casSessionId": "wiring-risum-low-level-access",
+        "format": "risu-module",
+        "metadata": {
+          "name": "Low level",
+          "lowLevelAccess": true,
+          "assets": [
+            [
+              "a",
+              "",
+              "png"
+            ]
+          ]
+        },
+        "assets": [
+          {
+            "position": 0,
+            "logicalId": "assets/6666666666666666666666666666666666666666666666666666666666666666.png",
+            "objectHash": "6666666666666666666666666666666666666666666666666666666666666666",
+            "byteSize": 4,
+            "mime": "",
+            "name": "",
+            "ext": "png"
+          }
+        ],
+        "ownerHead": {
+          "present": true,
+          "manifestHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "entryCount": 1
+        }
+      },
+      "native": {
+        "reason": "unsupported",
+        "name": "lowLevelAccess"
+      }
+    },
+    {
+      "id": "risum-proto-key",
+      "receipt": {
+        "casSessionId": "wiring-risum-proto-key",
+        "format": "risu-module",
+        "metadata": {
+          "name": "Proto",
+          "extra": {
+            "__proto__": {
+              "polluted": true
+            },
+            "plain": 1
+          }
+        },
+        "assets": [],
+        "ownerHead": {
+          "present": false,
+          "manifestHash": null,
+          "entryCount": 0
+        }
+      },
+      "native": {
+        "reason": "unsupported",
+        "name": "protoKey"
+      }
+    },
+    {
+      "id": "risum-stdio",
+      "receipt": {
+        "casSessionId": "wiring-risum-stdio",
+        "format": "risu-module",
+        "metadata": {
+          "name": "Stdio",
+          "mcp": {
+            "url": "stdio:{\"command\":\"node\"}"
+          }
+        },
+        "assets": [],
+        "ownerHead": {
+          "present": false,
+          "manifestHash": null,
+          "entryCount": 0
+        }
+      },
+      "native": {
+        "reason": "invalid",
+        "name": "stdioMcp"
+      }
+    },
+    {
+      "id": "risum-stdio-low-level",
+      "receipt": {
+        "casSessionId": "wiring-risum-stdio-low-level",
+        "format": "risu-module",
+        "metadata": {
+          "name": "Stdio low level",
+          "lowLevelAccess": true,
+          "mcp": {
+            "url": "stdio:x"
+          }
+        },
+        "assets": [],
+        "ownerHead": {
+          "present": false,
+          "manifestHash": null,
+          "entryCount": 0
+        }
+      },
+      "native": {
+        "reason": "invalid",
+        "name": "stdioMcp"
+      }
+    },
+    {
+      "id": "risum-assets-null",
+      "receipt": {
+        "casSessionId": "wiring-risum-assets-null",
+        "format": "risu-module",
+        "metadata": {
+          "name": "Null assets",
+          "assets": null
+        },
+        "assets": [],
+        "ownerHead": {
+          "present": true,
+          "manifestHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "entryCount": 0
+        }
+      },
+      "native": {
+        "reason": "invalid",
+        "name": "assetMetadata"
+      }
+    },
+    {
+      "id": "risum-assets-object",
+      "receipt": {
+        "casSessionId": "wiring-risum-assets-object",
+        "format": "risu-module",
+        "metadata": {
+          "name": "Object assets",
+          "assets": {
+            "0": [
+              "a",
+              "",
+              "png"
+            ]
+          }
+        },
+        "assets": [],
+        "ownerHead": {
+          "present": true,
+          "manifestHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "entryCount": 0
+        }
+      },
+      "native": {
+        "reason": "invalid",
+        "name": "assetMetadata"
+      }
+    },
+    {
+      "id": "risum-assets-count-mismatch",
+      "receipt": {
+        "casSessionId": "wiring-risum-assets-count-mismatch",
+        "format": "risu-module",
+        "metadata": {
+          "name": "Mismatch",
+          "assets": [
+            [
+              "a",
+              "",
+              "png"
+            ]
+          ]
+        },
+        "assets": [],
+        "ownerHead": {
+          "present": true,
+          "manifestHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "entryCount": 0
+        }
+      },
+      "native": {
+        "reason": "invalid",
+        "name": "assetMetadata"
+      }
+    },
+    {
+      "id": "risum-tuple-short",
+      "receipt": {
+        "casSessionId": "wiring-risum-tuple-short",
+        "format": "risu-module",
+        "metadata": {
+          "name": "Short",
+          "assets": [
+            [
+              "a",
+              ""
+            ]
+          ]
+        },
+        "assets": [
+          {
+            "position": 0,
+            "logicalId": "assets/7777777777777777777777777777777777777777777777777777777777777777.png",
+            "objectHash": "7777777777777777777777777777777777777777777777777777777777777777",
+            "byteSize": 4,
+            "mime": "",
+            "name": "",
+            "ext": "png"
+          }
+        ],
+        "ownerHead": {
+          "present": true,
+          "manifestHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "entryCount": 1
+        }
+      },
+      "native": {
+        "reason": "invalid",
+        "name": "assetTuple"
+      }
+    },
+    {
+      "id": "module-json-card-full",
+      "receipt": {
+        "casSessionId": "wiring-module-json-card-full",
+        "format": "json-card",
+        "metadata": {
+          "spec": "chara_card_v3",
+          "spec_version": "3.0",
+          "data": {
+            "name": "Wiring Full",
+            "description": "Description.",
+            "personality": "Calm.",
+            "scenario": "A room.",
+            "first_mes": "Hello.",
+            "mes_example": "<START>",
+            "creator_notes": "Notes.",
+            "system_prompt": "System.",
+            "post_history_instructions": "After.",
+            "alternate_greetings": [
+              "Hi again."
+            ],
+            "tags": [
+              "synthetic"
+            ],
+            "creator": "oracle",
+            "character_version": "2",
+            "nickname": "Full",
+            "source": [
+              "local"
+            ],
+            "creation_date": 1700000000,
+            "modification_date": 1700000100,
+            "group_only_greetings": [],
+            "character_book": {
+              "scan_depth": 5,
+              "token_budget": 300,
+              "recursive_scanning": true,
+              "extensions": {
+                "risu_fullWordMatching": true
+              },
+              "entries": [
+                {
+                  "keys": [
+                    "alpha",
+                    "beta"
+                  ],
+                  "secondary_keys": [
+                    "gamma"
+                  ],
+                  "content": "Book entry.",
+                  "extensions": {
+                    "risu_case_sensitive": true
+                  },
+                  "enabled": true,
+                  "insertion_order": 3,
+                  "constant": false,
+                  "selective": true,
+                  "name": "Entry",
+                  "comment": "Entry",
+                  "case_sensitive": true,
+                  "use_regex": false
+                }
+              ]
+            },
+            "extensions": {
+              "risuai": {
+                "bias": [
+                  [
+                    "word",
+                    5
+                  ]
+                ],
+                "viewScreen": "emotion",
+                "customScripts": [
+                  {
+                    "comment": "regex",
+                    "in": "a",
+                    "out": "b",
+                    "type": "editdisplay"
+                  }
+                ],
+                "utilityBot": false,
+                "sdData": [
+                  [
+                    "always",
+                    "x"
+                  ]
+                ],
+                "triggerscript": [],
+                "additionalText": "More.",
+                "backgroundHTML": "<b>bg</b>",
+                "license": "",
+                "largePortrait": true,
+                "lorePlus": false,
+                "inlayViewScreen": false,
+                "defaultVariables": "a=1",
+                "lowLevelAccess": false,
+                "hideChatIcon": false
+              },
+              "depth_prompt": {
+                "depth": 4,
+                "prompt": "Depth."
+              },
+              "other_extension": {
+                "kept": 1
+              }
+            },
+            "assets": [
+              {
+                "type": "icon",
+                "uri": "ccdefault:",
+                "name": "main",
+                "ext": "png"
+              },
+              {
+                "type": "emotion",
+                "uri": "__asset:native-data-1",
+                "name": "happy",
+                "ext": "png"
+              },
+              {
+                "type": "x-risu-asset",
+                "uri": "__asset:native-data-2",
+                "name": "background",
+                "ext": "webp"
+              },
+              {
+                "type": "x-risu-asset",
+                "uri": "__asset:native-data-2",
+                "name": "background copy",
+                "ext": "webp"
+              }
+            ]
+          }
+        },
+        "assets": [
+          {
+            "referenceKey": "native-data-0",
+            "token": "native-data-0",
+            "logicalId": "assets/1111111111111111111111111111111111111111111111111111111111111111.png",
+            "objectHash": "1111111111111111111111111111111111111111111111111111111111111111",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "1111111111111111111111111111111111111111111111111111111111111111.png",
+            "ext": "png"
+          },
+          {
+            "referenceKey": "native-data-1",
+            "token": "native-data-1",
+            "logicalId": "assets/2222222222222222222222222222222222222222222222222222222222222222.png",
+            "objectHash": "2222222222222222222222222222222222222222222222222222222222222222",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "2222222222222222222222222222222222222222222222222222222222222222.png",
+            "ext": "png"
+          },
+          {
+            "referenceKey": "native-data-2",
+            "token": "native-data-2",
+            "logicalId": "assets/3333333333333333333333333333333333333333333333333333333333333333.webp",
+            "objectHash": "3333333333333333333333333333333333333333333333333333333333333333",
+            "byteSize": 4,
+            "mime": "",
+            "name": "3333333333333333333333333333333333333333333333333333333333333333.webp",
+            "ext": "webp"
+          }
+        ],
+        "portraitLogicalId": "assets/1111111111111111111111111111111111111111111111111111111111111111.png"
+      },
+      "destination": "module",
+      "native": "mapped",
+      "nativeModule": "mapped"
+    },
+    {
+      "id": "module-charx-card",
+      "receipt": {
+        "casSessionId": "wiring-module-charx-card",
+        "format": "charx-card",
+        "metadata": {
+          "spec": "chara_card_v3",
+          "spec_version": "3.0",
+          "data": {
+            "name": "Wiring CharX",
+            "description": "From a CharX file.",
+            "first_mes": "Hi.",
+            "character_book": {
+              "scan_depth": 5,
+              "token_budget": 300,
+              "recursive_scanning": true,
+              "extensions": {
+                "risu_fullWordMatching": true
+              },
+              "entries": [
+                {
+                  "keys": [
+                    "alpha",
+                    "beta"
+                  ],
+                  "secondary_keys": [
+                    "gamma"
+                  ],
+                  "content": "Book entry.",
+                  "extensions": {
+                    "risu_case_sensitive": true
+                  },
+                  "enabled": true,
+                  "insertion_order": 3,
+                  "constant": false,
+                  "selective": true,
+                  "name": "Entry",
+                  "comment": "Entry",
+                  "case_sensitive": true,
+                  "use_regex": false
+                }
+              ]
+            },
+            "extensions": {
+              "risuai": {
+                "customScripts": [
+                  {
+                    "comment": "card regex"
+                  }
+                ],
+                "triggerscript": [
+                  {
+                    "comment": "card trigger"
+                  }
+                ]
+              }
+            },
+            "assets": [
+              {
+                "type": "icon",
+                "uri": "embeded://assets/icon/main.png",
+                "name": "main",
+                "ext": "png"
+              },
+              {
+                "type": "x-risu-asset",
+                "uri": "embeded://assets/other/image/extra.png",
+                "name": "extra",
+                "ext": "png"
+              }
+            ]
+          }
+        },
+        "assets": [
+          {
+            "referenceKey": "assets/icon/main.png",
+            "token": "assets/icon/main.png",
+            "logicalId": "assets/4444444444444444444444444444444444444444444444444444444444444444.png",
+            "objectHash": "4444444444444444444444444444444444444444444444444444444444444444",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "4444444444444444444444444444444444444444444444444444444444444444.png",
+            "ext": "png"
+          },
+          {
+            "referenceKey": "assets/other/image/extra.png",
+            "token": "assets/other/image/extra.png",
+            "logicalId": "assets/5555555555555555555555555555555555555555555555555555555555555555.png",
+            "objectHash": "5555555555555555555555555555555555555555555555555555555555555555",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "5555555555555555555555555555555555555555555555555555555555555555.png",
+            "ext": "png"
+          }
+        ],
+        "portraitLogicalId": "assets/4444444444444444444444444444444444444444444444444444444444444444.png",
+        "module": {
+          "trigger": [
+            {
+              "comment": "module trigger",
+              "type": "manual",
+              "conditions": [],
+              "effect": []
+            }
+          ],
+          "regex": [
+            {
+              "comment": "module regex",
+              "in": "x",
+              "out": "y",
+              "type": "editoutput"
+            }
+          ],
+          "lorebook": [
+            {
+              "key": "module key",
+              "secondkey": "",
+              "insertorder": 1,
+              "comment": "module lore",
+              "content": "Module.",
+              "mode": "normal",
+              "alwaysActive": false,
+              "selective": false
+            }
+          ]
+        }
+      },
+      "destination": "module",
+      "native": "mapped",
+      "nativeModule": "mapped"
+    },
+    {
+      "id": "module-appended-charx-jpeg",
+      "receipt": {
+        "casSessionId": "wiring-module-appended-charx-jpeg",
+        "format": "appended-charx-jpeg",
+        "metadata": {
+          "spec": "chara_card_v3",
+          "spec_version": "3.0",
+          "data": {
+            "name": "Wiring JPEG",
+            "character_book": {
+              "scan_depth": 5,
+              "token_budget": 300,
+              "recursive_scanning": true,
+              "extensions": {
+                "risu_fullWordMatching": true
+              },
+              "entries": [
+                {
+                  "keys": [
+                    "alpha",
+                    "beta"
+                  ],
+                  "secondary_keys": [
+                    "gamma"
+                  ],
+                  "content": "Book entry.",
+                  "extensions": {
+                    "risu_case_sensitive": true
+                  },
+                  "enabled": true,
+                  "insertion_order": 3,
+                  "constant": false,
+                  "selective": true,
+                  "name": "Entry",
+                  "comment": "Entry",
+                  "case_sensitive": true,
+                  "use_regex": false
+                }
+              ]
+            },
+            "extensions": {
+              "risuai": {
+                "utilityBot": true
+              }
+            }
+          }
+        },
+        "assets": [],
+        "module": {
+          "trigger": [],
+          "regex": [
+            {
+              "comment": "only regex",
+              "in": "q",
+              "out": "r",
+              "type": "editinput"
+            }
+          ]
+        }
+      },
+      "destination": "module",
+      "native": "mapped",
+      "nativeModule": "mapped"
+    },
+    {
+      "id": "module-json-card-minimal",
+      "receipt": {
+        "casSessionId": "wiring-module-json-card-minimal",
+        "format": "json-card",
+        "metadata": {
+          "spec": "chara_card_v3",
+          "spec_version": "3.0",
+          "data": {
+            "name": "Minimal",
+            "extensions": {}
+          }
+        },
+        "assets": []
+      },
+      "destination": "module",
+      "native": "mapped",
+      "nativeModule": "mapped"
+    },
+    {
+      "id": "module-png-v3",
+      "receipt": {
+        "casSessionId": "wiring-module-png-v3",
+        "format": "png-card",
+        "metadata": {
+          "chara": "eyJzcGVjIjoiY2hhcmFfY2FyZF92MiIsInNwZWNfdmVyc2lvbiI6IjIuMCIsImRhdGEiOnsibmFtZSI6Iklnbm9yZWQgVjIiLCJleHRlbnNpb25zIjp7fX19",
+          "ccv3": "eyJzcGVjIjoiY2hhcmFfY2FyZF92MyIsInNwZWNfdmVyc2lvbiI6IjMuMCIsImRhdGEiOnsibmFtZSI6IldpcmluZyBQTkciLCJkZXNjcmlwdGlvbiI6IkZyb20gYSBQTkcuIiwiZmlyc3RfbWVzIjoiSGVsbG8gZnJvbSBQTkcuIiwiY2hhcmFjdGVyX2Jvb2siOnsic2Nhbl9kZXB0aCI6NSwidG9rZW5fYnVkZ2V0IjozMDAsInJlY3Vyc2l2ZV9zY2FubmluZyI6dHJ1ZSwiZXh0ZW5zaW9ucyI6eyJyaXN1X2Z1bGxXb3JkTWF0Y2hpbmciOnRydWV9LCJlbnRyaWVzIjpbeyJrZXlzIjpbImFscGhhIiwiYmV0YSJdLCJzZWNvbmRhcnlfa2V5cyI6WyJnYW1tYSJdLCJjb250ZW50IjoiQm9vayBlbnRyeS4iLCJleHRlbnNpb25zIjp7InJpc3VfY2FzZV9zZW5zaXRpdmUiOnRydWV9LCJlbmFibGVkIjp0cnVlLCJpbnNlcnRpb25fb3JkZXIiOjMsImNvbnN0YW50IjpmYWxzZSwic2VsZWN0aXZlIjp0cnVlLCJuYW1lIjoiRW50cnkiLCJjb21tZW50IjoiRW50cnkiLCJjYXNlX3NlbnNpdGl2ZSI6dHJ1ZSwidXNlX3JlZ2V4IjpmYWxzZX1dfSwiZXh0ZW5zaW9ucyI6eyJyaXN1YWkiOnsiY3VzdG9tU2NyaXB0cyI6W3siY29tbWVudCI6InBuZyByZWdleCIsImluIjoicCIsIm91dCI6InEiLCJ0eXBlIjoiZWRpdGRpc3BsYXkifV19fSwiYXNzZXRzIjpbeyJ0eXBlIjoiaWNvbiIsInVyaSI6ImNjZGVmYXVsdDoiLCJuYW1lIjoibWFpbiIsImV4dCI6InBuZyJ9LHsidHlwZSI6ImVtb3Rpb24iLCJ1cmkiOiJfX2Fzc2V0OjEiLCJuYW1lIjoic21pbGUiLCJleHQiOiJwbmcifSx7InR5cGUiOiJ4LXJpc3UtYXNzZXQiLCJ1cmkiOiJfX2Fzc2V0OjIiLCJuYW1lIjoic2NlbmUiLCJleHQiOiJwbmcifSx7InR5cGUiOiJ4LXJpc3UtYXNzZXQiLCJ1cmkiOiJlbWJlZGVkOi8vMiIsIm5hbWUiOiJzY2VuZSBieSBVUkkiLCJleHQiOiJwbmcifV19fQ=="
+        },
+        "assets": [
+          {
+            "referenceKey": "native-png-portrait",
+            "token": "native-png-portrait",
+            "logicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png",
+            "objectHash": "8888888888888888888888888888888888888888888888888888888888888888",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "8888888888888888888888888888888888888888888888888888888888888888.png",
+            "ext": "png"
+          },
+          {
+            "referenceKey": "1",
+            "token": "1",
+            "logicalId": "assets/9999999999999999999999999999999999999999999999999999999999999999.png",
+            "objectHash": "9999999999999999999999999999999999999999999999999999999999999999",
+            "byteSize": 4,
+            "mime": "",
+            "name": "9999999999999999999999999999999999999999999999999999999999999999.png",
+            "ext": "png"
+          },
+          {
+            "referenceKey": "2",
+            "token": "2",
+            "logicalId": "assets/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+            "objectHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "byteSize": 4,
+            "mime": "",
+            "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+            "ext": "png"
+          }
+        ],
+        "portraitLogicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png"
+      },
+      "destination": "module",
+      "native": "mapped",
+      "nativeModule": "mapped"
+    },
+    {
+      "id": "module-png-v2",
+      "receipt": {
+        "casSessionId": "wiring-module-png-v2",
+        "format": "png-card",
+        "metadata": {
+          "chara": "eyJzcGVjIjoiY2hhcmFfY2FyZF92MiIsInNwZWNfdmVyc2lvbiI6IjIuMCIsImRhdGEiOnsibmFtZSI6IldpcmluZyBQTkcgVjIiLCJkZXNjcmlwdGlvbiI6Ik9sZGVyIGNhcmQuIiwiZmlyc3RfbWVzIjoiSGkuIiwiY2hhcmFjdGVyX3ZlcnNpb24iOjEuNSwiY2hhcmFjdGVyX2Jvb2siOnsic2Nhbl9kZXB0aCI6NSwidG9rZW5fYnVkZ2V0IjozMDAsInJlY3Vyc2l2ZV9zY2FubmluZyI6dHJ1ZSwiZXh0ZW5zaW9ucyI6eyJyaXN1X2Z1bGxXb3JkTWF0Y2hpbmciOnRydWV9LCJlbnRyaWVzIjpbeyJrZXlzIjpbImFscGhhIiwiYmV0YSJdLCJzZWNvbmRhcnlfa2V5cyI6WyJnYW1tYSJdLCJjb250ZW50IjoiQm9vayBlbnRyeS4iLCJleHRlbnNpb25zIjp7InJpc3VfY2FzZV9zZW5zaXRpdmUiOnRydWV9LCJlbmFibGVkIjp0cnVlLCJpbnNlcnRpb25fb3JkZXIiOjMsImNvbnN0YW50IjpmYWxzZSwic2VsZWN0aXZlIjp0cnVlLCJuYW1lIjoiRW50cnkiLCJjb21tZW50IjoiRW50cnkiLCJjYXNlX3NlbnNpdGl2ZSI6dHJ1ZSwidXNlX3JlZ2V4IjpmYWxzZX1dfSwiZXh0ZW5zaW9ucyI6eyJyaXN1YWkiOnsiZW1vdGlvbnMiOltbImhhcHB5IiwiX19hc3NldDoxIl1dLCJhZGRpdGlvbmFsQXNzZXRzIjpbWyJzY2VuZSIsIl9fYXNzZXQ6MiIsInBuZyJdXSwidXRpbGl0eUJvdCI6ZmFsc2UsInRyaWdnZXJzY3JpcHQiOltdfSwiZGVwdGhfcHJvbXB0Ijp7ImRlcHRoIjoyLCJwcm9tcHQiOiJEZXB0aC4ifX19fQ=="
+        },
+        "assets": [
+          {
+            "referenceKey": "native-png-portrait",
+            "token": "native-png-portrait",
+            "logicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png",
+            "objectHash": "8888888888888888888888888888888888888888888888888888888888888888",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "8888888888888888888888888888888888888888888888888888888888888888.png",
+            "ext": "png"
+          },
+          {
+            "referenceKey": "1",
+            "token": "1",
+            "logicalId": "assets/9999999999999999999999999999999999999999999999999999999999999999.png",
+            "objectHash": "9999999999999999999999999999999999999999999999999999999999999999",
+            "byteSize": 4,
+            "mime": "",
+            "name": "9999999999999999999999999999999999999999999999999999999999999999.png",
+            "ext": "png"
+          },
+          {
+            "referenceKey": "2",
+            "token": "2",
+            "logicalId": "assets/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+            "objectHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "byteSize": 4,
+            "mime": "",
+            "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+            "ext": "png"
+          }
+        ],
+        "portraitLogicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png"
+      },
+      "destination": "module",
+      "native": "mapped",
+      "nativeModule": "mapped"
+    },
+    {
+      "id": "module-greetings-only",
+      "receipt": {
+        "casSessionId": "wiring-module-greetings-only",
+        "format": "json-card",
+        "metadata": {
+          "spec": "chara_card_v3",
+          "spec_version": "3.0",
+          "data": {
+            "name": "Greetings",
+            "first_mes": "",
+            "alternate_greetings": [
+              "One.",
+              "Two."
+            ],
+            "extensions": {}
+          }
+        },
+        "assets": []
+      },
+      "destination": "module",
+      "native": "mapped",
+      "nativeModule": "mapped"
+    },
+    {
+      "id": "module-unicode",
+      "receipt": {
+        "casSessionId": "wiring-module-unicode",
+        "format": "json-card",
+        "metadata": {
+          "spec": "chara_card_v3",
+          "spec_version": "3.0",
+          "data": {
+            "name": "모듈 카드 🐿️",
+            "description": "설명 😀",
+            "first_mes": "안녕",
+            "post_history_instructions": "노트",
+            "extensions": {}
+          }
+        },
+        "assets": []
+      },
+      "destination": "module",
+      "native": "mapped",
+      "nativeModule": "mapped"
+    },
+    {
+      "id": "module-greetings-string",
+      "receipt": {
+        "casSessionId": "wiring-module-greetings-string",
+        "format": "json-card",
+        "metadata": {
+          "spec": "chara_card_v3",
+          "spec_version": "3.0",
+          "data": {
+            "name": "Greeting string",
+            "first_mes": "Hi.",
+            "alternate_greetings": "Hey.",
+            "extensions": {}
+          }
+        },
+        "assets": []
+      },
+      "destination": "module",
+      "native": "mapped",
+      "nativeModule": {
+        "reason": "unsupported",
+        "name": "alternateGreetings"
+      }
+    },
+    {
+      "id": "module-low-level-access",
+      "receipt": {
+        "casSessionId": "wiring-module-low-level-access",
+        "format": "json-card",
+        "metadata": {
+          "spec": "chara_card_v3",
+          "spec_version": "3.0",
+          "data": {
+            "name": "Low Level",
+            "extensions": {
+              "risuai": {
+                "lowLevelAccess": true
+              }
+            }
+          }
+        },
+        "assets": []
+      },
+      "destination": "module",
+      "native": {
+        "reason": "unsupported",
+        "name": "lowLevelAccess"
+      },
+      "nativeModule": {
+        "reason": "unsupported",
+        "name": "lowLevelAccess"
+      }
+    },
+    {
+      "id": "module-proto-key",
+      "receipt": {
+        "casSessionId": "wiring-module-proto-key",
+        "format": "json-card",
+        "metadata": {
+          "spec": "chara_card_v3",
+          "spec_version": "3.0",
+          "data": {
+            "name": "Proto",
+            "extensions": {
+              "risuai": {},
+              "custom": {
+                "__proto__": {
+                  "polluted": true
+                },
+                "plain": 1
+              }
+            }
+          }
+        },
+        "assets": []
+      },
+      "destination": "module",
+      "native": {
+        "reason": "unsupported",
+        "name": "protoKey"
+      },
+      "nativeModule": {
+        "reason": "unsupported",
+        "name": "protoKey"
+      }
+    },
+    {
+      "id": "module-missing-asset",
+      "receipt": {
+        "casSessionId": "wiring-module-missing-asset",
+        "format": "json-card",
+        "metadata": {
+          "spec": "chara_card_v3",
+          "spec_version": "3.0",
+          "data": {
+            "name": "Missing",
+            "extensions": {},
+            "assets": [
+              {
+                "type": "x-risu-asset",
+                "uri": "__asset:never-staged",
+                "name": "gone",
+                "ext": "png"
+              }
+            ]
+          }
+        },
+        "assets": []
+      },
+      "destination": "module",
+      "native": {
+        "reason": "invalid",
+        "name": "missingAsset"
+      },
+      "nativeModule": {
+        "reason": "invalid",
+        "name": "missingAsset"
+      }
+    },
+    {
+      "id": "module-png-inline-data-uri",
+      "receipt": {
+        "casSessionId": "wiring-module-png-inline-data-uri",
+        "format": "png-card",
+        "metadata": {
+          "ccv3": "eyJzcGVjIjoiY2hhcmFfY2FyZF92MyIsInNwZWNfdmVyc2lvbiI6IjMuMCIsImRhdGEiOnsibmFtZSI6IklubGluZSBWMyIsImV4dGVuc2lvbnMiOnt9LCJhc3NldHMiOlt7InR5cGUiOiJ4LXJpc3UtYXNzZXQiLCJ1cmkiOiJkYXRhOmltYWdlL3BuZztiYXNlNjQsYVc1c2FXNWxMWFl6IiwibmFtZSI6ImlubGluZSIsImV4dCI6InBuZyJ9XX19"
+        },
+        "assets": [
+          {
+            "referenceKey": "native-png-portrait",
+            "token": "native-png-portrait",
+            "logicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png",
+            "objectHash": "8888888888888888888888888888888888888888888888888888888888888888",
+            "byteSize": 4,
+            "mime": "image/png",
+            "name": "8888888888888888888888888888888888888888888888888888888888888888.png",
+            "ext": "png"
+          }
+        ],
+        "portraitLogicalId": "assets/8888888888888888888888888888888888888888888888888888888888888888.png"
+      },
+      "destination": "module",
+      "native": {
+        "reason": "invalid",
+        "name": "dataUri"
+      },
+      "nativeModule": {
+        "reason": "invalid",
+        "name": "dataUri"
+      },
+      "ts": "stored"
+    }
+  ]
+}

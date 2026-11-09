@@ -85,9 +85,6 @@ function mockPublicGeneration(
         captureWindowedConversationMutationController: (target: never, chat: Chat, start: number) =>
             runtime.captureWindowedConversationMutationController(target, chat, start),
         flushPendingData: (reason: string) => runtime.flushPendingData(reason),
-        flushPendingDataLocallyForCheckpoint: (reason: string) => runtime.flushPendingDataLocallyForCheckpoint(reason),
-        capturesImmutableCharacters: () => runtime.capturesImmutableCharacters(),
-        pendingConversationMutationDiagnostics: () => runtime.pendingConversationMutationDiagnostics(),
         drainDeferredLwwReceives: vi.fn(async () => undefined),
     }))
     vi.doMock('./persistentDataStoreFactory', () => ({ getPersistentDataStore: () => fixture.store }))
@@ -105,13 +102,8 @@ function mockPublicGeneration(
             }),
         })),
     }))
-    vi.doMock('../tokenizer', () => ({
-        ChatTokenizer: class {
-            async tokenizeChat() { return 1 }
-            async tokenizeChats(chats: unknown[]) { return chats.length }
-        },
-        tokenize: vi.fn(async () => 1), tokenizeNum: vi.fn(async () => []),
-        hasObservableHistoryTokenizer: () => false, encodeWithTokenizer: vi.fn(async () => []),
+    vi.doMock('../tokenizer', async () => (await import('../process/tests/sendChatTestHarness')).tokenizerModule({
+        encodeWithTokenizer: vi.fn(async () => []),
     }))
     vi.doMock('../alert', () => ({ alertError: vi.fn(), alertToast: vi.fn() }))
     vi.doMock('../parser/chatML', () => ({ parseChatML: (value: string) => value }))
@@ -123,16 +115,7 @@ function mockPublicGeneration(
         isLastCharPunctuation: () => true, trimUntilPunctuation: (value: string) => value,
         parseToggleSyntax: () => [], prebuiltAssetCommand: '',
     }))
-    vi.doMock('../process/scripts', () => ({
-        createPromptScriptOperationScope: () => ({
-            assertOwnerCurrent: vi.fn(), adoptMessageId: vi.fn(),
-            parse: (_char: unknown, value: string) => value,
-            finish: vi.fn(), finishAfterError: vi.fn(), release: vi.fn(),
-        }),
-        processScript: vi.fn(async (_char: unknown, value: string) => value),
-        processScriptFull: vi.fn(async (_char: unknown, value: string) => ({ data: value, emoChanged: false })),
-        risuChatParser: (value: string) => value, resetScriptCache: vi.fn(),
-    }))
+    vi.doMock('../process/scripts', async () => (await import('../process/tests/sendChatTestHarness')).scriptsModule())
     vi.doMock('../process/triggers', () => ({
         runTrigger: vi.fn(async (_char: unknown, mode: string, arg: { chat: Chat }) =>
             mode === 'start' ? null : { chat: arg.chat }),

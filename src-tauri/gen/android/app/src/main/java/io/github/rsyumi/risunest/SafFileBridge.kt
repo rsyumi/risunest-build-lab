@@ -36,6 +36,7 @@ private val BACKUP_SOURCE_SUFFIXES = listOf(
   ".risudat",
   ".bin",
 )
+private val PRESET_SOURCE_SUFFIXES = listOf(".json", ".preset", ".risupreset", ".risup")
 private val NATIVE_FILE_JOB_SPOOL_SUFFIXES = BACKUP_SOURCE_SUFFIXES + listOf(
   ".charx",
   ".json",
@@ -82,6 +83,9 @@ private val MANAGED_CHARACTER_CARD_NAME = Regex(
 private val MANAGED_RISU_MODULE_NAME = Regex(
   "risu-module-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\\.risum",
 )
+private val MANAGED_PRESET_NAME = Regex(
+  "preset-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\\.(?:json|risup)",
+)
 private val MANAGED_DOWNLOAD_NAME = Regex(
   "risu-download-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\\.bin",
 )
@@ -116,7 +120,8 @@ internal data class SafSpoolReady(
 
 internal enum class SafContentImportDestination(val wireName: String) {
   CHARACTER("character"),
-  MODULE("module");
+  MODULE("module"),
+  PRESET("preset");
 
   companion object {
     fun fromWireName(value: String): SafContentImportDestination? = values().firstOrNull {
@@ -660,6 +665,9 @@ private val MANAGED_HANDOFF_KINDS = listOf(
   ManagedHandoffKind(MANAGED_RISU_MODULE_NAME, SafDestinationSourceKind.RISU_SAVE, true) { id ->
     listOf("risu-module-$id.risum")
   },
+  ManagedHandoffKind(MANAGED_PRESET_NAME, SafDestinationSourceKind.RISU_SAVE, true) { id ->
+    listOf("preset-$id.json", "preset-$id.risup")
+  },
   ManagedHandoffKind(MANAGED_DATASET_NAME, SafDestinationSourceKind.RISU_SAVE, true) { id ->
     listOf("risu-dataset-$id.json")
   },
@@ -853,7 +861,7 @@ private class SafSpoolException(
 ) : IOException(message, cause)
 
 internal fun safeSafDisplayName(name: String): String = safeDisplayName(name) { safe ->
-  NATIVE_FILE_JOB_SPOOL_SUFFIXES.firstOrNull { extension ->
+  (NATIVE_FILE_JOB_SPOOL_SUFFIXES + PRESET_SOURCE_SUFFIXES).firstOrNull { extension ->
     safe.endsWith(extension, ignoreCase = true)
   }?.let { extension -> safe.takeLast(extension.length) } ?: ""
 }
@@ -890,6 +898,7 @@ internal fun safeSafDestinationName(name: String): String {
     || safe.endsWith(".json", ignoreCase = true)
     || safe.endsWith(".png", ignoreCase = true)
     || safe.endsWith(".risum", ignoreCase = true)
+    || safe.endsWith(".risup", ignoreCase = true)
   ) safe else "$safe.risudat"
 }
 
@@ -1102,19 +1111,12 @@ internal fun jsonString(value: String): String = buildString {
   append('"')
 }
 
-internal fun isNativeContentSource(name: String): Boolean =
-  listOf(".json", ".png", ".charx", ".jpg", ".jpeg", ".risum", ".lorebook").any { name.endsWith(it, ignoreCase = true) }
-
-/** Splits picked documents into those to copy and a refusal for each file of another type. */
-internal fun <T : SafInputSource> partitionDocumentSources(
-  sources: List<T>,
-  content: Boolean,
-): Pair<List<T>, List<SafSpoolFailure>> {
-  val (supported, unsupported) = sources.partition {
-    if (content) isNativeContentSource(it.displayName) else it.displayName.endsWith(".bin", ignoreCase = true)
-  }
-  return supported to unsupported.map { SafSpoolFailure(it.displayName, "unsupported-source") }
-}
+internal fun isNativeContentSource(
+  name: String,
+  destination: SafContentImportDestination? = null,
+): Boolean = if (destination == SafContentImportDestination.PRESET) {
+  PRESET_SOURCE_SUFFIXES.any { name.endsWith(it, ignoreCase = true) }
+} else listOf(".json", ".png", ".charx", ".jpg", ".jpeg", ".risum", ".lorebook").any { name.endsWith(it, ignoreCase = true) }
 
 internal fun androidContentSourcePickedScript(requestId: String, batch: SafSpoolBatch): String =
   sourcePickedScript("risu-android-content-source-picked", requestId, batch)

@@ -1,0 +1,4498 @@
+{
+  "schema": 1,
+  "generator": "benchmarks/rust-core-oracles/providers-anthropic.oracle.test.ts",
+  "fixtureSha256": "e886f17cc460a206daa3cd52d7227fb10cd30bd34f64fad191f5a5fddcfc7281",
+  "tsSourceSha256": {
+    "src/ts/process/request/request.ts": "e9c47045779ac1011f2e5870faa0489d28a6bc50a139b4d24ce57e5aa62ca5c3",
+    "src/ts/process/request/shared.ts": "886da326d52400866db54da16ef203666892d8d5f68eba646bab86d12da640e1",
+    "src/ts/process/request/additionalParams.ts": "e8ff9cc9f87ef45796f76f07fbf4f6619aac97442c4b2351f35233c9a37f57d0",
+    "src/ts/process/request/anthropic.ts": "3d8769ec23df45405dd293e2ff6325d592f824e0976dde00c1dd4f94793e0aff",
+    "src/ts/util.ts": "45e8010d4ffd99cb4b08dbf67e47688e4dc3e904ef47ffce8f3ec8676525bc05",
+    "src/ts/globalApi.svelte.ts": "74c285e0038f8e1d033e267e1f3374fd925e1d3d73870cb97e811712e1ff2f0c",
+    "src/ts/model/types.ts": "676f450344e842cd5a4bddfbdb09cda220c351c98c07a5ab36f54b30a9441caf",
+    "src/ts/process/templates/jsonSchema.ts": "3306d98d052e2972e0d38344c8174e3e5ff83798a2f6694496240d9a958abef7"
+  },
+  "node": "v24.12.0",
+  "vitest": "4.1.11",
+  "cases": [
+    {
+      "id": "text-one-chunk",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "Hello world"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "text-chunk-per-event",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": "Hello"
+            },
+            {
+              "0": "Hello world"
+            },
+            {
+              "0": "Hello world"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "text-split-mid-line",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": "Hi"
+            },
+            {
+              "0": "Hi"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "text-chunk-ends-after-data-line",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": "A"
+            },
+            {
+              "0": "AB"
+            },
+            {
+              "0": "AB"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "text-last-line-without-newline",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            },
+            {
+              "0": "A"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "text-delta-legacy-type",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "Old"
+            },
+            {
+              "0": "Old"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "text-crlf",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "AB"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "text-with-event-lines",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "data-without-space-ignored",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": "B"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "malformed-json-ignored",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": "A"
+            },
+            {
+              "0": "A"
+            },
+            {
+              "0": "AB"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "json-null-and-number-lines",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": "A"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "unknown-delta-types-ignored",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": "A"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "delta-missing",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": "A"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "tool-use-events-ignored",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"},\"tools\":[{\"name\":\"lookup\",\"description\":\"Looks a word up.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"The word.\"}},\"required\":[\"query\"]}}]}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "message-events-ignored",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": "A"
+            },
+            {
+              "0": "A"
+            },
+            {
+              "0": "A"
+            },
+            {
+              "0": "A"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "text-delta-number",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "5"
+            },
+            {
+              "0": "5!"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "text-delta-null",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": "!"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "text-delta-missing",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": "!"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "text-delta-bool",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "true"
+            },
+            {
+              "0": "true!"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "text-delta-object-after-text-declines",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            },
+            {
+              "0": "A[object Object]"
+            },
+            {
+              "0": "A[object Object]!"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "text-delta-object-first-declines",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "[object Object]"
+            },
+            {
+              "0": "[object Object]!"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "thinking-then-text",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": "<Thoughts>\nHmm. "
+            },
+            {
+              "0": "<Thoughts>\nHmm. Yes."
+            },
+            {
+              "0": "<Thoughts>\nHmm. Yes.</Thoughts>\n\nAnswer."
+            },
+            {
+              "0": "<Thoughts>\nHmm. Yes.</Thoughts>\n\nAnswer."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "thinking-never-closed",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": "<Thoughts>\nHmm."
+            },
+            {
+              "0": "<Thoughts>\nHmm."
+            },
+            {
+              "0": "<Thoughts>\nHmm.</Thoughts>\n\n"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "thinking-text-thinking",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "<Thoughts>\nA"
+            },
+            {
+              "0": "<Thoughts>\nA</Thoughts>\n\nB"
+            },
+            {
+              "0": "<Thoughts>\nA</Thoughts>\n\nB<Thoughts>\nC"
+            },
+            {
+              "0": "<Thoughts>\nA</Thoughts>\n\nB<Thoughts>\nC"
+            },
+            {
+              "0": "<Thoughts>\nA</Thoughts>\n\nB<Thoughts>\nC</Thoughts>\n\n"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "thinking-legacy-type",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "<Thoughts>\nOld"
+            },
+            {
+              "0": "<Thoughts>\nOld</Thoughts>\n\nB"
+            },
+            {
+              "0": "<Thoughts>\nOld</Thoughts>\n\nB"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "thinking-delta-missing-field",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "<Thoughts>\n"
+            },
+            {
+              "0": "<Thoughts>\n</Thoughts>\n\nB"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "redacted-thinking",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "<Thoughts>\n\n{{redacted_thinking}}\n"
+            },
+            {
+              "0": "<Thoughts>\n\n{{redacted_thinking}}\n</Thoughts>\n\nB"
+            },
+            {
+              "0": "<Thoughts>\n\n{{redacted_thinking}}\n</Thoughts>\n\nB"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "thinking-open-tag-lost-on-replay",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "<Thoughts>\nA"
+            },
+            {
+              "0": "<Thoughts>\nAB"
+            },
+            {
+              "0": "<Thoughts>\nAB</Thoughts>\n\nC"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "thinking-single-chunk-without-blank-line",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": "</Thoughts>\n\n"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "thinking-only-then-more-chunks",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "<Thoughts>\nA"
+            },
+            {
+              "0": "<Thoughts>\nAB"
+            },
+            {
+              "0": "<Thoughts>\nABC"
+            },
+            {
+              "0": "<Thoughts>\nABC</Thoughts>\n\n"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "error-event",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            },
+            {
+              "0": "AError:Boom."
+            },
+            {
+              "0": "AError:Boom.B"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "error-event-without-message",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "Error:undefined"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "error-event-without-error",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "Error:undefined"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "error-event-empty-message",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "Error:"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "error-event-zero-message",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "Error:0"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "error-event-null-message",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "Error:null"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "error-event-number-message-dropped",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": "A"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "error-event-object-message-dropped",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": "A"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "error-event-after-thinking",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "<Thoughts>\nA"
+            },
+            {
+              "0": "<Thoughts>\nAError:Boom."
+            },
+            {
+              "0": "<Thoughts>\nAError:Boom.</Thoughts>\n\n"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "error-event-overloaded-without-retry-setting-is-dropped",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "error-event-overloaded-with-retry-setting-is-dropped",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "error-event-overloaded-after-text-is-dropped",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            },
+            {
+              "0": "A"
+            },
+            {
+              "0": "AB"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "error-event-overloaded-lowercase-is-dropped",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "error-event-overloaded-inside-a-sentence-is-dropped",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "error-event-not-overload-with-retry-setting",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "Error:Other."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "multibyte-split-between-chunks",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": "é����"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "multibyte-whole",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "Café 😀  "
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "byte-order-mark-at-start",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            },
+            {
+              "0": "AB"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "byte-order-mark-in-later-chunk",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "A"
+            },
+            {
+              "0": "AB"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "invalid-utf8-byte",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "a�b"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "empty-body",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": []
+        }
+      }
+    },
+    {
+      "id": "empty-chunks",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": "A"
+            },
+            {
+              "0": "A"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "only-blank-lines",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "many-events",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "012345678901234567890123456789"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "long-text-split-in-small-chunks",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": ""
+            },
+            {
+              "0": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "http-500-json-body",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "{\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"Internal.\"}}"
+        }
+      }
+    },
+    {
+      "id": "http-401-plain-body",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "unauthorized"
+        }
+      }
+    },
+    {
+      "id": "http-404-empty-body",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": ""
+        }
+      }
+    },
+    {
+      "id": "http-429-body-with-bom",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "slow down"
+        }
+      }
+    },
+    {
+      "id": "http-400-invalid-utf8",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "bad �"
+        }
+      }
+    },
+    {
+      "id": "http-500-huge-body-is-bounded",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "fail",
+          "result": "hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh"
+        }
+      }
+    },
+    {
+      "id": "http-200-json-body-is-read-as-events",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": ""
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "http-200-plain-body-is-read-as-events",
+      "result": {
+        "model": {
+          "id": "claude-opus-4-6",
+          "internalID": "claude-opus-4-6",
+          "format": 2,
+          "flags": [
+            "hasImageInput",
+            "hasFirstSystemPrompt",
+            "hasStreaming",
+            "claudeThinking",
+            "claudeAdaptiveThinking"
+          ],
+          "parameters": [
+            "temperature",
+            "top_k",
+            "top_p",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 1,
+          "mainImageInput": true
+        },
+        "requests": [
+          {
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-ant-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-opus-4-6\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_k\":40,\"top_p\":0.9,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "Plain"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "stream-with-reverse-proxy",
+      "result": {
+        "model": {
+          "id": "reverse_proxy",
+          "internalID": "claude-proxy-model",
+          "format": 2,
+          "flags": [
+            "hasFullSystemPrompt",
+            "hasStreaming"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4,
+          "mainImageInput": false
+        },
+        "requests": [
+          {
+            "url": "https://proxy.example.test/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-proxy-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"claude-proxy-model\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_p\":0.9,\"frequency_penalty\":0.2,\"presence_penalty\":0.3,\"repetition_penalty\":1.1,\"min_p\":0.05,\"top_a\":0.2,\"top_k\":40,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "Proxied."
+            },
+            {
+              "0": "Proxied."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "stream-with-custom-model",
+      "result": {
+        "model": {
+          "id": "xcustom:::one",
+          "internalID": "my-claude",
+          "format": 2,
+          "flags": [
+            "hasFirstSystemPrompt"
+          ],
+          "parameters": [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_a",
+            "top_k",
+            "thinking_tokens"
+          ],
+          "endpoint": null,
+          "keyIdentifier": null,
+          "provider": 4,
+          "mainImageInput": false
+        },
+        "requests": [
+          {
+            "url": "https://llm.example.test/v1/messages",
+            "method": "POST",
+            "headers": [
+              [
+                "Content-Type",
+                "application/json"
+              ],
+              [
+                "x-api-key",
+                "sk-custom-synthetic"
+              ],
+              [
+                "anthropic-version",
+                "2023-06-01"
+              ],
+              [
+                "accept",
+                "application/json"
+              ],
+              [
+                "anthropic-dangerous-direct-browser-access",
+                "true"
+              ]
+            ],
+            "body": "{\"model\":\"my-claude\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}],\"system\":\"Be brief.\",\"max_tokens\":300,\"stream\":true,\"temperature\":0.8,\"top_p\":0.9,\"frequency_penalty\":0.2,\"presence_penalty\":0.3,\"repetition_penalty\":1.1,\"min_p\":0.05,\"top_a\":0.2,\"top_k\":40,\"thinking\":{\"budget_tokens\":1024,\"type\":\"enabled\",\"display\":\"summarized\"}}"
+          }
+        ],
+        "toolCalls": [],
+        "outcome": {
+          "type": "streaming",
+          "snapshots": [
+            {
+              "0": "Custom."
+            },
+            {
+              "0": "Custom."
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

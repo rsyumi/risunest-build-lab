@@ -1,0 +1,16 @@
+{"schema": 1, "cases": [
+{"id":"cl100k_base","tokenizer":"cl100k_base","file":"node_modules/@dqbd/tiktoken/encoders/cl100k_base.json"},
+{"id":"o200k_base","tokenizer":"o200k_base","file":"src/etc/o200k_base.json"},
+{"id":"mistral","tokenizer":"mistral","file":"public/token/mistral/tokenizer.model"},
+{"id":"llama","tokenizer":"llama","file":"public/token/llama/llama.model"},
+{"id":"novelai","tokenizer":"novelai","file":"public/token/nai/nerdstash_v2.model"},
+{"id":"claude","tokenizer":"claude","file":"public/token/claude/claude.json"},
+{"id":"novellist","tokenizer":"novellist","file":"public/token/trin/spiece.model"},
+{"id":"llama3","tokenizer":"llama3","file":"public/token/llama/llama3.json"},
+{"id":"gemma","tokenizer":"gemma","file":"public/token/gemma/gemma4.json"},
+{"id":"cohere","tokenizer":"cohere","file":"public/token/cohere/tokenizer.json"},
+{"id":"deepseek","tokenizer":"deepseek","file":"public/token/deepseek/tokenizer.json"},
+{"id":"deepseek-v4","tokenizer":"deepseek-v4","file":"public/token/deepseek/v4/tokenizer.json"},
+{"id":"glm4","tokenizer":"glm4","file":"public/token/glm4/tokenizer.json"},
+{"id":"glm5","tokenizer":"glm5","file":"public/token/glm5/tokenizer.json"}
+]}

@@ -1,12 +1,10 @@
 use super::{
     cache::Cache,
-    client::{response_code, response_error, RequestAttempt, ServerClient, ServerConfig},
-    library_format::{LibraryFormat, LEVEL},
+    client::{response_error, ServerClient, ServerConfig},
     progress::Step,
     transfer::Transfer,
     Result, SyncError,
 };
-#[cfg(test)]
 use crate::persistent_store::lww::ApplyReceive;
 use crate::persistent_store::{
     lww::{
@@ -16,7 +14,6 @@ use crate::persistent_store::{
 };
 use risunest_sync_wire::{
     canonical,
-    library_format::{self, EMPTY_LIBRARY, PRECONDITION_HEADER},
     lww::{
         AckRequest, CancelOperationRequest, ChangesPage, OperationReceipt, PushReceipt,
         PushRequest, StatePage, StatePin, TimeSample, UnitChange,
@@ -53,14 +50,58 @@ pub(crate) struct ReceivePage {
 }
 fn receive_page_more() -> bool { true }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReceiveDescriptor {
+    #[serde(flatten)]
+    pub(crate) header: Header,
+    pub(crate) incoming_keys: Vec<risunest_sync_wire::unit::UnitKey>,
+    pub(crate) progress: Progress,
+    pub(crate) received_units: usize,
+    pub(crate) receive_frontier: Option<DecimalU64>,
+    pub(crate) more: bool,
+    pub(crate) has_body_references: bool,
+    pub(crate) has_representative_references: bool,
+}
+impl ReceivePage {
+    fn descriptor(&self) -> ReceiveDescriptor {
+        let has_body_references = self.page.changes.iter().any(|change| {
+            let key = change.key.components();
+            match &change.value {
+                UnitValue::Inline { .. } => matches!(key[0].as_str(), "asset" | "inlay"),
+                UnitValue::Object { descriptor, .. } if key[0] != "messages" =>
+                    !descriptor.dependencies.is_empty() || descriptor.dependency_root.is_some() || descriptor.relation_root.is_some(),
+                _ => false,
+            }
+        });
+        let has_representative_references = self.page.changes.iter().any(|change| {
+            let key = change.key.components();
+            match key[0].as_str() {
+                "character" => matches!(key[2].as_str(), "image" | "trashTime"),
+                "exists" => key[1] == "character",
+                "archive" | "asset" => true,
+                "order" => key[1] == "characters",
+                _ => false,
+            }
+        });
+        ReceiveDescriptor {
+            header: self.page.header.clone(),
+            incoming_keys: self.page.changes.iter().map(|change| change.key.clone()).collect(),
+            progress: self.page.progress.clone(),
+            received_units: self.page.changes.len(),
+            receive_frontier: self.receive_frontier,
+            more: self.more,
+            has_body_references,
+            has_representative_references,
+        }
+    }
+}
+
 pub(crate) struct OperationLog(pub(crate) Connection);
 impl OperationLog {
-    pub(crate) fn path(root: &Path) -> std::path::PathBuf {
-        root.join("server-sync/lww-operations.sqlite")
-    }
     pub(crate) fn open(root: &Path) -> Result<Self> {
         std::fs::create_dir_all(root.join("server-sync"))?;
-        let db = crate::sqlite_open::open(Self::path(root))?;
+        let db = crate::sqlite_open::open(root.join("server-sync/lww-operations.sqlite"))?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS publications(id TEXT PRIMARY KEY, digest TEXT NOT NULL, body BLOB NOT NULL, intent TEXT NOT NULL, receipt TEXT,acknowledged INTEGER NOT NULL DEFAULT 0); CREATE INDEX IF NOT EXISTS pending_publications ON publications(id) WHERE receipt IS NULL; CREATE INDEX IF NOT EXISTS unacknowledged_publications ON publications(id) WHERE acknowledged=0;")?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS bootstrap(authority TEXT PRIMARY KEY,pin TEXT NOT NULL,after_key TEXT,cursor TEXT NOT NULL); CREATE TABLE IF NOT EXISTS receive_pages(authority TEXT PRIMARY KEY,body TEXT NOT NULL,next_key TEXT,bootstrap INTEGER NOT NULL,done INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS configurations(slot TEXT PRIMARY KEY,config TEXT NOT NULL); CREATE TABLE IF NOT EXISTS bindings(id TEXT PRIMARY KEY,body TEXT NOT NULL); CREATE TABLE IF NOT EXISTS claims(id TEXT PRIMARY KEY,body TEXT NOT NULL);")?;
         Ok(Self(db))
@@ -220,7 +261,7 @@ fn now_ms() -> Result<u64> {
 fn observe_dependency_purposes(key: &risunest_sync_wire::unit::UnitKey, hashes: &[String]) {
     use crate::asset_repository::body_io::{register_object_purpose, BodyPurpose};
     let purpose = match key.components()[0].as_str() {
-        "messages" | "plugin-local" => BodyPurpose::Control,
+        "messages" => BodyPurpose::Control,
         "archive" => BodyPurpose::Asset,
         _ => return,
     };
@@ -254,22 +295,6 @@ fn observe_descriptor_purposes(
 type ClockKey = (std::path::PathBuf, String, String);
 static CLOCKS: std::sync::Mutex<std::collections::BTreeMap<ClockKey, (Instant, AdmittedClock)>> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
-/// Libraries seen at this client's format level, by address and library,
-/// until a reply reports another level or comes from a server without levels.
-static CURRENT_FORMAT: std::sync::Mutex<BTreeSet<(String, String)>> = std::sync::Mutex::new(BTreeSet::new());
-/// Forgets a library seen at this client's level when a reply reports another
-/// level, or succeeds without the level headers, so the next check reads it again.
-pub(crate) fn observe_library_format(endpoint: &str, library_id: &str, status: u16, format: Option<LibraryFormat>) {
-    let changed = match format {
-        Some(format) => format.level != LEVEL,
-        None => (200..300).contains(&status),
-    };
-    if changed {
-        if let Ok(mut current) = CURRENT_FORMAT.lock() {
-            current.remove(&(endpoint.to_owned(), library_id.to_owned()));
-        }
-    }
-}
 pub(crate) struct LwwClient {
     pub client: ServerClient,
     pub log: OperationLog,
@@ -382,76 +407,6 @@ impl LwwClient {
             clocks.insert(self.clock_key(), (sent, admitted));
         }
         Ok(upper.into())
-    }
-    fn format_key(&self) -> (String, String) {
-        let config = self.client.config();
-        (config.endpoint, config.library_id)
-    }
-    /// Fails unless the library is at this client's format level. An empty
-    /// library is switched to it, and with `switch` any library below it is.
-    pub(crate) fn require_library_format(&self, store: &mut PersistentStore, switch: bool) -> Result<()> {
-        if !switch && CURRENT_FORMAT.lock().is_ok_and(|current| current.contains(&self.format_key())) {
-            return Ok(());
-        }
-        let (head, format) = self.client.head_with_format()?;
-        if let Some(format) = format {
-            if format.level < LEVEL && format.max >= LEVEL && (switch || head.seq.as_str() == "0") {
-                return self.push_library_format(store, !switch);
-            }
-        }
-        self.accept_library_format(format)
-    }
-    /// The format check of a bound device, outside a send or receive.
-    pub(crate) fn check_library_format(&self, store: &mut PersistentStore, header: &Header, switch: bool) -> Result<()> {
-        self.check()?;
-        if store.lww_binding_authority()? != header.binding_authority {
-            return Err(SyncError::new("binding-authority-changed", 409));
-        }
-        self.require_library_format(store, switch)
-    }
-    fn accept_library_format(&self, format: Option<LibraryFormat>) -> Result<()> {
-        let code = match format {
-            None => "sync-server-update-required",
-            Some(format) if format.level == LEVEL => {
-                if let Ok(mut current) = CURRENT_FORMAT.lock() {
-                    current.insert(self.format_key());
-                }
-                return Ok(());
-            }
-            Some(format) if format.level > LEVEL => "app-update-required",
-            Some(format) if format.max < LEVEL => "sync-server-update-required",
-            Some(_) => "library-format-switch-required",
-        };
-        Err(SyncError::new(code, 409))
-    }
-    /// Pushes this client's level alone, with `empty_only` only into a library
-    /// that holds nothing else. A push whose changes all lose still succeeds,
-    /// so only the level its reply reports confirms the switch.
-    fn push_library_format(&self, store: &mut PersistentStore, empty_only: bool) -> Result<()> {
-        let stamp = store.lww_reserve_stamp()?;
-        let request = PushRequest {
-            library_id: self.client.config().library_id,
-            writer_id: stamp.writer_id.clone(),
-            operation_id: uuid::Uuid::new_v4().to_string(),
-            changes: vec![UnitChange { key: library_format::key(), stamp, value: library_format::value(LEVEL)? }],
-        };
-        let headers = if empty_only { vec![(PRECONDITION_HEADER, EMPTY_LIBRARY.to_owned())] } else { Vec::new() };
-        match self.client.request_ambiguous_mutation(
-            reqwest::Method::POST,
-            "push",
-            Some(canonical::encode(&request)?),
-            &headers,
-            MAX_METADATA_BYTES,
-        )? {
-            RequestAttempt::Response(reply)
-                if (200..300).contains(&reply.status)
-                    || (empty_only && response_code(&reply).as_deref() == Some("library-not-empty")) =>
-            {
-                self.accept_library_format(reply.library_format)
-            }
-            RequestAttempt::Response(reply) => Err(response_error(reply)),
-            RequestAttempt::Failure { error, .. } => Err(error),
-        }
     }
     /// The client for the registration that sent a publication. The current
     /// address asks for it when that registration is the one in use.
@@ -646,7 +601,6 @@ impl LwwClient {
         if entries.is_empty() {
             return Ok(None);
         }
-        self.require_library_format(store, false)?;
         let mut admitted = self.admission()?;
         if entries
             .iter()
@@ -806,25 +760,19 @@ impl LwwClient {
             &[],
             MAX_METADATA_BYTES,
         );
-        // A cancelled publication fails as its request did, so a busy or
-        // unreachable server stays retryable and a refusal does not.
         let failure = match &reply {
             Ok(super::client::RequestAttempt::Response(reply))
                 if reply.status == 413 && publication.request.changes.len() == 1 =>
             {
-                Some(SyncError::new("unit-too-large", 413))
+                Some("unit-too-large".into())
             }
             Ok(super::client::RequestAttempt::Response(reply))
                 if !(200..300).contains(&reply.status) =>
             {
-                Some(SyncError::new(
+                Some(
                     super::client::response_code(reply)
-                        .unwrap_or_else(|| "server-response-error".into()),
-                    reply.status,
-                ))
-            }
-            Ok(super::client::RequestAttempt::Failure { error, .. }) | Err(error) => {
-                Some(SyncError::new(error.code.clone(), error.status))
+                        .unwrap_or_else(|| "server-unreachable".into()),
+                )
             }
             _ => None,
         };
@@ -846,13 +794,12 @@ impl LwwClient {
                 lane.items_done(publication.entries.len());
                 Ok(Some(receipt))
             }
-            OperationReceipt::Rejected { error, .. } if error == "operation-cancelled" => {
-                Err(failure.unwrap_or_else(|| SyncError::new("server-unreachable", 503)))
-            }
             OperationReceipt::Rejected { error, .. } => Err(SyncError::new(
                 if error == "clock-skew" {
                     self.forget_clock();
                     error
+                } else if error == "operation-cancelled" {
+                    failure.unwrap_or_else(|| "server-unreachable".into())
                 } else {
                     error
                 },
@@ -1052,6 +999,10 @@ impl LwwClient {
         self.receive_page_with_frontier(store, header).map(|page| page.page)
     }
 
+    pub(crate) fn receive_descriptor(&self, store: &mut PersistentStore, header: &Header) -> Result<ReceiveDescriptor> {
+        Ok(self.receive_page_with_frontier(store, header)?.descriptor())
+    }
+
     pub(crate) fn receive_page_with_frontier(
         &self,
         store: &mut PersistentStore,
@@ -1079,7 +1030,6 @@ impl LwwClient {
             self.prepare_archive_bodies(store, &page.page.changes)?;
             return Ok(page);
         }
-        self.require_library_format(store, false)?;
         self.client.lane().step(Step::Listing);
         let upper = self.admission()?;
         let cursor = store
@@ -1319,6 +1269,32 @@ impl LwwClient {
             received_units,
         })
     }
+    pub(crate) fn apply_stored_receive(&self, store: &mut PersistentStore, request: &ApplyReceive) -> Result<ApplyResult> {
+        self.apply_stored_receive_with_baseline(store, request, None)
+    }
+    pub(crate) fn apply_stored_receive_with_baseline(&self, store: &mut PersistentStore, request: &ApplyReceive,
+        baseline: Option<&crate::persistent_store::receive_evidence::NativeReceiveEvidence>) -> Result<ApplyResult> {
+        (|| {
+            self.check()?;
+            if store.lww_binding_authority()? != request.header.binding_authority {
+                return Err(SyncError::new("binding-authority-changed", 409));
+            }
+            let body: Option<String> = self.log.0.query_row(
+                "SELECT body FROM receive_pages WHERE authority=?1",
+                [request.header.binding_authority.0.to_string()], |row| row.get(0),
+            ).optional()?;
+            let body = body.ok_or_else(|| SyncError::new("receive-page-missing", 409))?;
+            let page: ReceivePage = serde_json::from_str(&body)
+                .map_err(|_| SyncError::new("receive-page-integrity", 409))?;
+            if page.page.header != request.header {
+                return Err(SyncError::new("receive-page-changed", 409));
+            }
+            store.lww_stage_receive(&page.page)?;
+            Ok(())
+        })().map_err(|mut failure: SyncError| { failure.receive_not_applied = Some(true); failure })?;
+        Ok(store.lww_apply_receive_recorded_with_baseline(request, baseline)?)
+    }
+
     pub(crate) fn finish_receive(&self, store: &PersistentStore, header: &Header) -> Result<()> {
         self.check()?;
         self.client.lane().step(Step::Confirming);
@@ -1351,6 +1327,8 @@ impl LwwClient {
         }
         store.server_assert_receive_finished(&page)?;
         self.acknowledge_cursor(page.progress.cursor)?;
+        // Native history settles before its stored page goes, so a failed settle is retried with the page.
+        store.settle_native_receive_transport(&self.log.0, header)?;
         if boot && done {
             let pin: String = self.log.0.query_row(
                 "SELECT pin FROM bootstrap WHERE authority=?1",
@@ -1382,6 +1360,7 @@ impl LwwClient {
         }
         tx.execute("DELETE FROM receive_pages WHERE authority=?1", [&authority])?;
         tx.commit()?;
+        store.clear_native_receive_receipt(header)?;
         Ok(())
     }
     pub(crate) fn acknowledge_cursor(&self, cursor: DecimalU64) -> Result<()> {
@@ -1448,10 +1427,6 @@ impl LwwClient {
                 }
                 cache.put(&body)?;
                 store.lww_put_object(descriptor_hash, &body)?;
-                // Message pages and plugin value parts are applied from the
-                // object store, never fetched later as remote assets.
-                let stored_dependencies =
-                    matches!(change.key.components()[0].as_str(), "messages" | "plugin-local");
                 if matches!(change.key.components()[0].as_str(), "messages" | "archive") {
                     controls.insert(descriptor.object_hash.clone());
                 } else if large_unit(&change.key) {
@@ -1459,7 +1434,7 @@ impl LwwClient {
                 } else {
                     remote.insert(descriptor.object_hash.clone());
                 }
-                if stored_dependencies {
+                if change.key.components()[0] == "messages" {
                     controls.extend(descriptor.dependencies.iter().cloned());
                 } else {
                     remote.extend(descriptor.dependencies.iter().cloned());
@@ -1472,7 +1447,7 @@ impl LwwClient {
                         transfer.download_reference_tree(vec![(root.clone(), vec![])])?;
                     #[cfg(test)]
                     observe_dependency_purposes(&change.key, &dependencies);
-                    if stored_dependencies {
+                    if change.key.components()[0] == "messages" {
                         controls.extend(dependencies);
                     } else {
                         remote.extend(dependencies);
@@ -1750,4 +1725,65 @@ fn wire_compare(
         super::hash_metrics::incomplete();
     }
     result
+}
+
+#[cfg(test)]
+mod receive_descriptor_tests {
+    use super::*;
+    use risunest_sync_wire::{descriptor::RecordDescriptor, stamp::Stamp};
+
+    fn descriptor(key: &[&str], value: UnitValue) -> ReceiveDescriptor {
+        ReceivePage {
+            page: StageReceive {
+                header: Header { binding_authority: 7.into(), request_id: "receive-descriptor".into() },
+                changes: vec![Change {
+                    key: risunest_sync_wire::unit::UnitKey::new(key).unwrap(),
+                    stamp: Stamp { physical_ms: 1.into(), logical: 0, writer_id: "writer".into() },
+                    value,
+                }],
+                progress: Progress { kind: "server".into(), cursor: 9.into(), writer_id: None },
+                admitted_time_upper_ms: 2.into(),
+            },
+            receive_frontier: Some(12.into()),
+            more: true,
+        }.descriptor()
+    }
+
+    #[test]
+    fn descriptor_returns_only_identity_projection_keys_and_receive_progress() {
+        let value = UnitValue::inline(&serde_json::to_vec(&"synthetic-content".repeat(1000)).unwrap()).unwrap();
+        let result = descriptor(&["root", "username"], value);
+        assert_eq!(serde_json::to_value(result).unwrap(), serde_json::json!({
+            "bindingAuthority": "7", "requestId": "receive-descriptor",
+            "incomingKeys": ["[\"root\",\"username\"]"],
+            "progress": { "kind": "server", "cursor": "9", "writerId": null },
+            "receivedUnits": 1, "receiveFrontier": "12", "more": true,
+            "hasBodyReferences": false, "hasRepresentativeReferences": false,
+        }));
+    }
+
+    #[test]
+    fn descriptor_preserves_body_and_representative_hydration_decisions() {
+        for (key, body, representative) in [
+            (vec!["asset", "assets/synthetic.png"], true, true),
+            (vec!["inlay", "synthetic"], true, false),
+            (vec!["character", "character", "image"], false, true),
+            (vec!["character", "character", "trashTime"], false, true),
+            (vec!["exists", "character", "character"], false, true),
+            (vec!["archive", "character"], false, true),
+            (vec!["order", "characters"], false, true),
+            (vec!["character", "character", "name"], false, false),
+        ] {
+            let received = descriptor(&key, UnitValue::inline(b"null").unwrap());
+            assert_eq!((received.has_body_references, received.has_representative_references), (body, representative), "{key:?}");
+        }
+        for root in [false, true] {
+            let mut record = RecordDescriptor::content("a".repeat(64));
+            if root { record.relation_root = Some("b".repeat(64)); }
+            else { record.dependencies.push("b".repeat(64)); }
+            let object = UnitValue::Object { descriptor_hash: "c".repeat(64), descriptor: record };
+            assert!(descriptor(&["character", "character", "description"], object.clone()).has_body_references);
+            assert!(!descriptor(&["messages", "character", "conversation"], object).has_body_references);
+        }
+    }
 }

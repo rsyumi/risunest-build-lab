@@ -216,7 +216,7 @@ impl Drop for ResponseServer {
 fn directory() -> risunest_sync_connect::Directory {
     risunest_sync_connect::Directory {
         base_url: "https://registry.example".into(),
-        uuid: uuid::Uuid::new_v4().to_string(),
+        uuid: "12345678-1234-4234-9234-123456789abc".into(),
         key: "A".repeat(43),
     }
 }

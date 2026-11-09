@@ -19,8 +19,6 @@ pub mod workload;
 
 pub use risunest_sync_wire::PROTOCOL_ID;
 pub const STORE_FORMAT_ID: &str = "risunest-sync-store/v1";
-/// The highest library format level this server accepts.
-pub const LIBRARY_FORMAT_MAX_LEVEL: u64 = 2;
 
 pub fn resolve_data_root(path: &std::path::Path) -> Result<std::path::PathBuf> {
     if !path.is_absolute() {

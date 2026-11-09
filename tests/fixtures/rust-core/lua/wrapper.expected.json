@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "generator": "benchmarks/rust-core-oracles/lua-edit.oracle.test.ts",
+  "fixtureSha256": "0726472e19479e3bdcd33f049e443211383135ee17ef701e18c2ac5597404349",
+  "tsSourceSha256": {
+    "src/ts/process/scriptings.ts": "0dc9ea13f6fad9e20ac62cfd94b0ecfba1388eeb07c13b0e28ab7b7e4abd4298",
+    "src/ts/process/luaCodeWrapper.ts": "dbd536ad7f5f48bfc2bf7df4d48baae71d2ff9c2de3d118b24e6d2f88e4aa81f",
+    "src/ts/process/luaRuntime.ts": "7a0ad48421ce5f05abec45fa5ad867e15704e212105595ceb358c9ea81583f46",
+    "public/lua/json.lua": "89a5c26188288e882bbe62834102671cbb485d78e82cef69d191affc8792df29"
+  },
+  "node": "v24.12.0",
+  "vitest": "4.1.11",
+  "cases": [
+    {
+      "id": "empty-code",
+      "result": "0878584a53e2cab22fd90058a0ce14030cbd23ba055f014b95d8d100b45b4bba"
+    }
+  ]
+}

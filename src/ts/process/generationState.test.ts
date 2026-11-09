@@ -1,6 +1,30 @@
 import { expect, it, vi } from 'vitest'
 import { get } from 'svelte/store'
-import { bindGenerationRegexOwner, getGenerationRegexScope, doingChat, generationCancellation, reserveGeneration, setGenerationBackground } from './generationState'
+import { allowNativeGenerationNavigation, isNativeGenerationNavigationAllowed, bindGenerationRegexOwner, getGenerationRegexScope, doingChat, generationCancellation, reserveGeneration, setGenerationBackground } from './generationState'
+
+it('scopes native navigation allowance to its reservation and release identity', () => {
+    const first = reserveGeneration()!
+    expect(isNativeGenerationNavigationAllowed()).toBe(false)
+    const oldRelease = allowNativeGenerationNavigation(first)
+    const currentRelease = allowNativeGenerationNavigation(first)
+    oldRelease()
+    expect(isNativeGenerationNavigationAllowed()).toBe(true)
+    currentRelease()
+    expect(isNativeGenerationNavigationAllowed()).toBe(false)
+    const lateRelease = allowNativeGenerationNavigation(first)
+    first.release()
+    expect(isNativeGenerationNavigationAllowed()).toBe(false)
+    const second = reserveGeneration()!
+    try {
+        allowNativeGenerationNavigation(first)
+        expect(isNativeGenerationNavigationAllowed()).toBe(false)
+        const release = allowNativeGenerationNavigation(second)
+        lateRelease()
+        expect(isNativeGenerationNavigationAllowed()).toBe(true)
+        release()
+        expect(isNativeGenerationNavigationAllowed()).toBe(false)
+    } finally { second.release() }
+})
 
 it('shares regex timeouts only with the owning generation and conversation', () => {
     const first = reserveGeneration()!

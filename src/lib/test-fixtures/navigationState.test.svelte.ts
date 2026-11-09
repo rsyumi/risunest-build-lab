@@ -4,7 +4,6 @@ export const navigationDBState = $state({
     db: {
         characters: [],
         characterOrder: [],
-        modules: [],
         menuSideBar: true,
         roundIcons: false,
     } as Database,

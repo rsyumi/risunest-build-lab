@@ -588,7 +588,7 @@ describe('complete AssetRepository BlobStore facade', () => {
         expect(cas.readObjectRange).toHaveBeenCalledWith(assetHash, {
             start: 1,
             endExclusive: 3,
-        }, alias.size, undefined)
+        }, alias.size)
         expect(cas.statObject).not.toHaveBeenCalled()
 
         vi.mocked(cas.readObjectRange).mockResolvedValueOnce(null)

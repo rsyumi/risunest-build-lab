@@ -2,13 +2,13 @@ import { spawnSync } from 'node:child_process'
 import { access } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { discoverTestEntries, nodeTestExceptions, selectNodeTests } from '../tests/suiteOwnership.mjs'
+import { discoverNodeTestEntries, nodeTestExceptions, selectNodeTests } from '../tests/suiteOwnership.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 // Benchmark harness tests run only on request, never in `pnpm test:node` or CI.
 const harness = process.argv.includes('--harness')
 try {
-  const files = await discoverTestEntries(root, harness ? 'benchmarks' : 'tests')
+  const files = await discoverNodeTestEntries(root, harness)
   for (const path of nodeTestExceptions) {
     await access(resolve(root, path))
     if (!files.includes(path)) files.push(path)

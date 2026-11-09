@@ -47,14 +47,6 @@ pub(crate) struct Owner {
 pub(crate) struct Locator {
     pub(crate) source_path: String,
     pub(crate) occurrence: u64,
-    /// Which inlay token of the text at `source_path` this is. A diagnosis written before tokens
-    /// were numbered has none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) token: Option<u64>,
-    /// The owner is kept inside the root, and exactly one entry there carried its identity when
-    /// the library was scanned. A diagnosis written before owners were marked has none.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub(crate) sole_entry: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -106,25 +98,7 @@ impl Finding {
         self.locator = Some(Locator {
             source_path: source_path.into(),
             occurrence,
-            token: None,
-            sole_entry: false,
         });
-        self
-    }
-
-    /// Marks the located owner as the one entry of its root collection that carries its identity.
-    pub(crate) fn in_sole_entry(mut self) -> Self {
-        if let Some(locator) = &mut self.locator {
-            locator.sole_entry = true;
-        }
-        self
-    }
-
-    /// Names the inlay token of the located text. A finding without a locator has no text.
-    pub(crate) fn in_token(mut self, token: u64) -> Self {
-        if let Some(locator) = &mut self.locator {
-            locator.token = Some(token);
-        }
         self
     }
 

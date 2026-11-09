@@ -26,17 +26,14 @@ pub use transfers::TransferRequest;
 pub use uploads::{UploadManifest, UploadProgress, UPLOAD_CHUNK_BYTES};
 
 use crate::{Error, Result};
-use risunest_sync_wire::{canonical, hash, library_format, validate_id, RemoteHead};
+use risunest_sync_wire::{canonical, hash, validate_id, RemoteHead};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Mutex, MutexGuard,
-    },
+    sync::{Mutex, MutexGuard},
 };
 
 pub struct Store {
@@ -52,8 +49,6 @@ pub struct Store {
     temporary_paths: Mutex<BTreeSet<PathBuf>>,
     media_signer: risunest_sync_connect::media::MediaSigner,
     heads: tokio::sync::watch::Sender<u64>,
-    /// The library format level, read at open and raised by accepted level pushes.
-    format_level: AtomicU64,
     _owner: OwnerLock,
 }
 
@@ -101,28 +96,6 @@ pub struct DeviceCredential {
 #[derive(Clone, Debug)]
 pub struct Device {
     pub id: String,
-    /// The library format level the request declared; released clients send none.
-    pub format_level: Option<u64>,
-}
-impl Device {
-    /// Work the server continues for a device after its request was admitted.
-    pub(crate) fn resumed(id: String) -> Self {
-        Self {
-            id,
-            format_level: Some(crate::LIBRARY_FORMAT_MAX_LEVEL),
-        }
-    }
-}
-
-/// Admits a request by the format level it declared. Every client may use a
-/// level 1 library; a higher one admits only clients that understand it.
-pub fn admit_format(level: u64, declared: Option<u64>) -> Result<()> {
-    match declared {
-        _ if level <= 1 => Ok(()),
-        None => Err(Error::new("server-incompatible", 409)),
-        Some(declared) if declared < level => Err(Error::new("app-update-required", 409)),
-        Some(_) => Ok(()),
-    }
 }
 
 #[derive(Serialize)]
@@ -350,7 +323,6 @@ impl Store {
             return Err(Error::new("incompatible-store", 409));
         }
         schema::verify(&db)?;
-        let format_level = Self::stored_format(&db)?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_size_limit=67108864;")?;
         db.execute(
             "UPDATE uploads SET state=CASE WHEN id IN (SELECT upload FROM upload_jobs) THEN 'queued' ELSE 'open' END WHERE state='finalizing'",
@@ -381,7 +353,6 @@ impl Store {
             temporary_paths: Mutex::new(BTreeSet::new()),
             media_signer,
             heads: tokio::sync::watch::Sender::new(0),
-            format_level: AtomicU64::new(format_level),
             _owner: owner,
         };
         store
@@ -402,19 +373,6 @@ impl Store {
     }
     pub fn head(&self) -> Result<RemoteHead> {
         Self::read_head(&*self.reader()?)
-    }
-    /// The library format level as of the last accepted level push. Store
-    /// operations check the level they read themselves.
-    pub fn library_format(&self) -> u64 {
-        self.format_level.load(Ordering::SeqCst)
-    }
-    pub(super) fn stored_format(db: &Connection) -> Result<u64> {
-        match lww::read_unit(db, library_format::KEY)? {
-            None => Ok(1),
-            Some(unit) => {
-                library_format::level(&unit.value).ok_or(Error::new("corrupt-metadata", 503))
-            }
-        }
     }
     pub fn device_head(&self, device: &Device) -> Result<RemoteHead> {
         let db = self.reader()?;
@@ -516,11 +474,8 @@ impl Store {
                 |r| r.get(0),
             )
             .optional()?;
-        id.map(|id| Device {
-            id,
-            format_level: None,
-        })
-        .ok_or(Error::new("unauthorized", 401))
+        id.map(|id| Device { id })
+            .ok_or(Error::new("unauthorized", 401))
     }
     /// Fails once the device's registration has been revoked.
     pub fn require_registered(&self, device: &Device) -> Result<()> {
@@ -536,9 +491,7 @@ impl Store {
         if !exists {
             return Err(Error::new("unauthorized", 401));
         }
-        // The level is read in the operation's own snapshot, so a switch that
-        // commits after the request was admitted still stops it.
-        admit_format(Self::stored_format(db)?, device.format_level)
+        Ok(())
     }
 }
 

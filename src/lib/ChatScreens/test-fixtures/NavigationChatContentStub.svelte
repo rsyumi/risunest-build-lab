@@ -1,8 +1,10 @@
 <script lang="ts">
     let {
         openChatList = $bindable(false),
+        openModuleList = $bindable(false),
     }: {
         openChatList?: boolean
+        openModuleList?: boolean
     } = $props()
 </script>
 

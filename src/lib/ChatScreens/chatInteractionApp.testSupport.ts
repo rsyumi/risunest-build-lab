@@ -5,10 +5,14 @@ import type { Database, Message, character } from 'src/ts/storage/database.svelt
 export const interactionCharacterId = 'synthetic-interaction-owner'
 export const interactionConversationId = 'synthetic-interaction-chat'
 
-export async function bootChatInteractionApp() {
+export async function bootChatInteractionApp(options: {
+    realChat?: boolean
+    extraCharacters?: readonly { characterId: string; conversationId: string }[]
+} = {}) {
     vi.resetModules()
     // Each boot needs the probe compiled against its own Svelte module graph.
-    vi.doMock('./Chat.svelte', async () => ({ default: (await import('./ChatMountProbe.test.svelte')).default }))
+    if (options.realChat) vi.doUnmock('./Chat.svelte')
+    else vi.doMock('./Chat.svelte', async () => ({ default: (await import('./ChatMountProbe.test.svelte')).default }))
     // Vite evaluates cyclic imports asynchronously. Flush root effects only once
     // the graph is initialized, as in the synchronously bundled application.
     vi.useFakeTimers({ toFake: ['queueMicrotask'] })
@@ -41,10 +45,14 @@ export async function bootChatInteractionApp() {
         chats: [{ id: interactionConversationId, name: 'Synthetic selected chat', folderId: 'folder-a',
             note: '', localLore: [], bookmarks: ['interaction-123'], bookmarkNames: {}, message: messages }],
     } as unknown as character
+    const seededCharacters = [owner, ...(options.extraCharacters ?? []).map(({ characterId, conversationId }): character => ({
+        ...structuredClone(owner), chaId: characterId, name: 'Synthetic navigation target', chatFolders: [],
+        chats: [{ id: conversationId, name: 'Synthetic other chat', note: '', localLore: [], message: [] }],
+    }))]
     const raw = factory.getRawPersistentDataStore()
     await raw.open()
     const prepared = await preparation.prepareDatabaseForBootstrap({
-        characters: [owner], characterOrder: [interactionCharacterId], streamingDisplayOptimizationMode: 'balanced',
+        characters: seededCharacters, characterOrder: seededCharacters.map(value => value.chaId), streamingDisplayOptimizationMode: 'balanced',
     } as unknown as Database)
     await raw.replaceFromDatabase(prepared.database, 0)
     const runtime = runtimeModule.getPersistentDataRuntime()

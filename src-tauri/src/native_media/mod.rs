@@ -7,8 +7,7 @@ use image::codecs::webp::WebPDecoder;
 use image::imageops::FilterType;
 use image::metadata::{LoopCount, Orientation};
 use image::{
-    AnimationDecoder, ColorType, Delay, DynamicImage, ImageDecoder, ImageFormat, ImageReader,
-    RgbaImage,
+    AnimationDecoder, Delay, DynamicImage, ImageDecoder, ImageFormat, ImageReader, RgbaImage,
 };
 use serde::{
     de::{self, Visitor},
@@ -27,7 +26,6 @@ use tauri::http::{
 use tauri::{AppHandle, Manager};
 
 pub(crate) mod ipc;
-mod canvas;
 mod animation_policy;
 mod thumbnail;
 
@@ -669,35 +667,24 @@ fn encode_inlay_image<'a>(
             FilterType::Lanczos3,
         );
     }
-    let (output_width, output_height) = (decoded.width(), decoded.height());
-    // Encoding the decoded pixels directly avoids holding a converted copy beside them.
+    let rgba = decoded.into_rgba8();
+    let (output_width, output_height) = rgba.dimensions();
     let (encoded, mime, ext) = match options.format {
         InlayEncodeFormat::Original => unreachable!(),
         InlayEncodeFormat::Png => {
-            let image = match decoded.color() {
-                ColorType::L8 | ColorType::La8 | ColorType::Rgb8 | ColorType::Rgba8 => decoded,
-                _ => DynamicImage::ImageRgba8(decoded.into_rgba8()),
-            };
             let mut value = Vec::new();
-            image
+            DynamicImage::ImageRgba8(rgba)
                 .write_to(&mut Cursor::new(&mut value), ImageFormat::Png)
                 .map_err(|error| format!("failed to encode PNG Inlay image: {error}"))?;
             (value, "image/png", "png")
         }
-        InlayEncodeFormat::Webp => {
-            let value = if decoded.color().has_alpha() {
-                let rgba = decoded.into_rgba8();
-                webp::Encoder::from_rgba(rgba.as_raw(), output_width, output_height)
-                    .encode(options.quality as f32)
-                    .to_vec()
-            } else {
-                let rgb = decoded.into_rgb8();
-                webp::Encoder::from_rgb(rgb.as_raw(), output_width, output_height)
-                    .encode(options.quality as f32)
-                    .to_vec()
-            };
-            (value, "image/webp", "webp")
-        }
+        InlayEncodeFormat::Webp => (
+            webp::Encoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height())
+                .encode(options.quality as f32)
+                .to_vec(),
+            "image/webp",
+            "webp",
+        ),
     };
     let metadata = InlayImageMetadata {
         key: id.to_owned(),

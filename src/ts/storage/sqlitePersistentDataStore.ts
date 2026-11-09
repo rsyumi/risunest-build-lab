@@ -1,3 +1,4 @@
+import type { ConversationHistoryMapping, ConversationHistoryRebaseRequest } from './conversationJournalRebase'
 import { stableSelectionRoot, projectSelectionIndexes } from './persistentSelectionBoundary'
 import { jsonByteLength, prepareNativePersistenceValue, type PayloadTooLargeKind } from './nativePersistenceValue'
 import { invoke } from '@tauri-apps/api/core'
@@ -6,6 +7,7 @@ import { nativeCommitTransport, STAGED_REQUEST_BYTES, type NativeCommitTransport
 import type { Chat, Database, botPreset } from './database.svelte'
 import {
     nativePersistentRevisionLease,
+    hasNativePersistentRevisionLease,
     type NativePersistentRevisionLease,
 } from './nativePersistentExport'
 import {
@@ -16,6 +18,10 @@ import {
     type PluginStorageValueQuery,
     type PluginStorageValuePage,
     type ArchivePreview,
+    type ArchiveHistoryWitness,
+    type NativeReceiveEvidence,
+    type ArchiveReconcileRequest,
+    type ArchiveReconcileResult,
     type AssetAlias,
     type AssetAliasIdentity,
     type AssetAliasKind,
@@ -30,7 +36,6 @@ import {
     type ContentChangeKey,
     type ContentChangeWindow,
     type ConversationPage,
-    type AuthorNotePresetUsage,
     type ConversationQuery,
     type ConversationMessageMetadataWindow,
     type ConversationWindow,
@@ -102,7 +107,7 @@ async function invokeStore<T>(command: string, args?: Record<string, unknown>): 
 }
 
 async function invokeArchiveOperation<T>(
-    command: 'pds_archive_character' | 'pds_restore_character',
+    command: 'pds_archive_character' | 'pds_restore_character' | 'pds_hydrate_archive_reconcile' | 'pds_reconcile_archived_character',
     args: Record<string, unknown>,
     signal?: AbortSignal,
 ): Promise<T> {
@@ -306,10 +311,6 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
         return invokeStore('pds_query_conversations', { query: input })
     }
 
-    queryAuthorNotePresetUsage(presetId: string): Promise<AuthorNotePresetUsage[]> {
-        return invokeStore('pds_query_author_note_preset_usage', { presetId })
-    }
-
     readConversation(
         characterId: string,
         conversationId: string,
@@ -427,6 +428,24 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
         return invokeStore('pds_lww_drain_deferred', { request })
     }
 
+    readNativeReceiveEvidence(lease: PersistentRevisionLease): Promise<NativeReceiveEvidence> {
+        if (!hasNativePersistentRevisionLease(lease)) return Promise.reject(new Error('Receive evidence requires a native revision lease'))
+        return invokeStore('pds_read_native_receive_evidence', { lease: lease[nativePersistentRevisionLease] })
+    }
+
+    archiveReconcileHistories(lease: PersistentRevisionLease, characterId: string, conversationIds: string[]): Promise<ArchiveHistoryWitness[]> {
+        if (!hasNativePersistentRevisionLease(lease)) return Promise.reject(new Error('Archive reconciliation requires a native revision lease'))
+        return invokeStore('pds_archive_reconcile_histories', { lease: lease[nativePersistentRevisionLease], characterId, conversationIds: [...conversationIds] })
+    }
+
+    hydrateArchiveReconcile(characterId: string, signal?: AbortSignal): Promise<void> {
+        return invokeArchiveOperation('pds_hydrate_archive_reconcile', { characterId }, signal)
+    }
+
+    reconcileArchivedCharacter(request: ArchiveReconcileRequest, signal?: AbortSignal): Promise<ArchiveReconcileResult> {
+        return invokeArchiveOperation('pds_reconcile_archived_character', { request: prepareNativePersistenceValue(request, 'commit') }, signal)
+    }
+
     archivePreview(characterId: string): Promise<ArchivePreview> {
         return invokeStore('pds_archive_preview', { characterId })
     }
@@ -523,6 +542,17 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
         return (revision === undefined
             ? invokeStore<Database>('pds_materialize', {})
             : invokeStore<Database>('pds_materialize', { revision })).then(projectSelectionIndexes)
+    }
+
+    rebaseConversationHistory(request: ConversationHistoryRebaseRequest): Promise<ConversationHistoryMapping> {
+        if (!hasNativePersistentRevisionLease(request.baseline) || !hasNativePersistentRevisionLease(request.current)) {
+            throw new TypeError('Native conversation reconciliation requires native revision leases')
+        }
+        return invokeStore('pds_rebase_conversation_history', { request: {
+            baselineLease: request.baseline[nativePersistentRevisionLease], currentLease: request.current[nativePersistentRevisionLease],
+            baselineRevision: request.baseline.revision, currentRevision: request.current.revision,
+            characterId: request.characterId, conversationId: request.conversationId,
+        } })
     }
 
     async acquireRevision(revision: DataRevision): Promise<PersistentRevisionLease> {

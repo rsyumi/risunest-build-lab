@@ -37,6 +37,7 @@ function chatScreenDependencyStubs(): Plugin {
         './BackgroundDom.svelte',
         '../UI/GUI/SideBarArrow.svelte',
         '../Others/ChatList.svelte',
+        '../Setting/Pages/Module/ModuleChatMenu.svelte',
     ])
     return {
         name: 'risunest-ui-visual-chat-screen-stubs',

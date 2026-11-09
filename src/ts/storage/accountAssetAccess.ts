@@ -1,4 +1,4 @@
-import type { BlobReadOptions, BlobStore, BlobWriteMetadata } from './blobStore'
+import type { BlobStore, BlobWriteMetadata } from './blobStore'
 import type { AccountStorage } from './accountStorage'
 
 export type OfficialAccountAssetReader = (key: string) => Promise<Uint8Array | null>
@@ -29,9 +29,8 @@ export async function readActiveAsset(
     blobStore: BlobStore,
     key: string,
     mode: { officialAccount: boolean, tauri: boolean },
-    options?: BlobReadOptions,
 ): Promise<Uint8Array | null> {
-    let value = await blobStore.read(key, undefined, options)
+    let value = await blobStore.read(key)
     if (value === null
         && mode.officialAccount
         && isAccountAssetKey(key)

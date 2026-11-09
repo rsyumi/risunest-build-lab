@@ -1,10 +1,6 @@
 use super::{
     character_json_export::{self, JsonAssetSource, FALLBACK_PORTRAIT},
-    available_payload::open_available_payload,
-    error::{
-        asset_missing, cancelled, destination_error_with, invalid_input, io_error, job_error,
-        store_error,
-    },
+    error::{cancelled, destination_error_with, invalid_input, io_error, job_error, store_error},
     JobControl, JobPhase, JobProgress, JobResultSummary, NativeJobError,
 };
 use crate::asset_repository::PayloadCas;
@@ -13,6 +9,7 @@ use crate::persistent_store::{
     export::{self, destination},
     PreparedRisuSaveExport, StoreResult,
 };
+use crate::server_sync::residency::RemotePayloadAccess;
 #[cfg(test)]
 use base64::Engine as _;
 use base64::{engine::general_purpose::STANDARD, write::EncoderWriter};
@@ -319,7 +316,6 @@ where
                 &metadata,
                 reader,
                 &repository,
-                job,
             )?;
             let portrait = portrait_bytes(&projected.value, reader, &repository, job)?;
             let portrait = super::portrait_rendition::apply(portrait, rendition)?;
@@ -518,7 +514,7 @@ fn portrait_bytes(
     repository: &PayloadCas,
     job: &JobControl,
 ) -> Result<Vec<u8>, NativeJobError> {
-    let Some(key) = character_json_export::available_portrait_key(character, reader, repository, job)? else {
+    let Some(key) = character_json_export::available_portrait_key(character, reader, repository)? else {
         return Ok(FALLBACK_PORTRAIT.to_vec());
     };
     let alias =
@@ -540,8 +536,10 @@ fn read_verified_object(
     size: u64,
     job: &JobControl,
 ) -> Result<Vec<u8>, NativeJobError> {
-    let mut source = open_available_payload(repository, hash, job, io_error)?
-        .ok_or_else(|| asset_missing("pinned character asset payload is missing"))?;
+    let mut source = repository
+        .open_available_object(hash)
+        .map_err(io_error)?
+        .ok_or_else(|| invalid_input("pinned character asset payload is missing"))?;
     super::verified_read::read_verified_bytes(
         &mut source,
         hash,
@@ -569,8 +567,10 @@ fn write_asset_text_chunk(
             *size,
             Some(hash),
             Box::new(
-                open_available_payload(repository, hash, job, io_error)?
-                    .ok_or_else(|| asset_missing("pinned character asset payload is missing"))?,
+                repository
+                    .open_available_object(hash)
+                    .map_err(io_error)?
+                    .ok_or_else(|| invalid_input("pinned character asset payload is missing"))?,
             ),
         ),
         JsonAssetSource::FallbackPortrait => (
@@ -1106,37 +1106,6 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code, "cancelled");
         assert_eq!(fs::read(destination).unwrap(), b"previous PNG");
-
-        // A cancel requested while a portrait only the Sync server holds downloads stops it.
-        use crate::server_sync::residency::test_remote;
-        let (directory, mut store, revision, metadata) = publication_fixture();
-        let cas = PayloadCas::new(directory.path()).unwrap();
-        let held = cas.prepare_bytes(&synthetic_png()).unwrap().content_hash;
-        test_remote::keep_only_on_server(directory.path(), &held);
-        let prepared = store.prepare_risu_save_export(revision).unwrap();
-        let owned = directory.path().join("owned");
-        fs::create_dir(&owned).unwrap();
-        let job = JobRegistry::default()
-            .create(JobKind::ExportCharacterCard)
-            .unwrap();
-        let cancelling = job.clone();
-        test_remote::on_fetch(directory.path(), move || {
-            cancelling.request_cancel().unwrap();
-        });
-        let error = export_character_png(
-            prepared,
-            "png-publication",
-            metadata,
-            &owned,
-            &directory.path().join("handoffs"),
-            None,
-            &job,
-            None,
-        )
-        .unwrap_err();
-        assert_eq!(error.code, "cancelled");
-        assert_eq!(test_remote::fetched(directory.path()), 1);
-        assert!(cas.stat_object(&held).unwrap().is_none());
     }
 
     #[test]

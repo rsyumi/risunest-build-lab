@@ -543,10 +543,9 @@ fn capture(
                 if index != position {
                     return Err(codec_error("noncontiguous conversation messages"));
                 }
-                let body: String = tx.prepare_cached(
+                let body: String = tx.query_row(
                     "SELECT value FROM messages WHERE generation=?1 AND character_id=?2
                     AND conversation_id=?3 AND message_index=?4",
-                )?.query_row(
                     params![generation, character, conversation, position as i64],
                     |r| r.get(0),
                 )?;
@@ -731,8 +730,8 @@ fn stage_pages(
             if index as i64 != position {
                 return Err(codec_error("noncontiguous conversation messages"));
             }
-            let body: String = tx.prepare_cached("SELECT value FROM messages WHERE generation=?1 AND character_id=?2
-                AND conversation_id=?3 AND message_index=?4")?.query_row(params![generation, character, conversation, position],
+            let body: String = tx.query_row("SELECT value FROM messages WHERE generation=?1 AND character_id=?2
+                AND conversation_id=?3 AND message_index=?4", params![generation, character, conversation, position],
                 |row| row.get(0))?;
             let body = payload_value::canonicalize(body.as_bytes()).map_err(codec_error)?;
             if {
@@ -826,10 +825,9 @@ fn next_hash(
         )));
     }
     // Upstream import staging may have inserted messages without a computed cache.
-    let body: String = tx.prepare_cached(
+    let body: String = tx.query_row(
         "SELECT value FROM messages WHERE generation=?1 AND character_id=?2
         AND conversation_id=?3 AND message_index=?4",
-    )?.query_row(
         params![generation, character, conversation, index],
         |r| r.get(0),
     )?;
@@ -1370,17 +1368,6 @@ pub(super) fn object_roots<'a>(
     Ok(roots)
 }
 
-/// Every unit value found inside `bodies`, which no store table holds, such as
-/// received pages that are not staged yet.
-pub(super) fn json_roots(objects: &Connection, bodies: &[Value], scratch: Connection) -> StoreResult<ObjectRoots> {
-    let mut roots = ObjectRoots::new(scratch)?;
-    for body in bodies {
-        roots.json(objects, body)?;
-    }
-    roots.scratch.execute_batch("COMMIT")?;
-    Ok(roots)
-}
-
 /// Collects the objects that library rows visible on `db` reference: page
 /// indexes and manifests of every generation, unit values in every unit table,
 /// and hashes kept by staged restores and external storage captures.
@@ -1426,7 +1413,7 @@ fn library_object_roots(db: &Connection, objects: &Connection, roots: &mut Objec
 
 /// Collects the objects that unfinished device rows in `schema` on `db`
 /// reference: device units, staged receives, unfinished intents with their
-/// rows, unpublished proofs, and the parts of structure-form plugin values.
+/// rows, and unpublished proofs.
 fn device_object_roots(db: &Connection, schema: &str, objects: &Connection, roots: &mut ObjectRoots) -> StoreResult<()> {
     for sql in [
         format!("SELECT value FROM {schema}.lww_units WHERE json_extract(value,'$.kind')='object'"),
@@ -1436,7 +1423,6 @@ fn device_object_roots(db: &Connection, schema: &str, objects: &Connection, root
     ] {
         unit_value_roots(db, objects, &sql, roots)?;
     }
-    super::device_store::plugin_values::structure::row_parts(db, schema, |hash| roots.insert(hash))?;
     for sql in [
         format!("SELECT body FROM {schema}.lww_receive WHERE finished=0"),
         format!("SELECT body FROM {schema}.lww_intents WHERE complete=0"),
@@ -1471,60 +1457,17 @@ pub(crate) struct ObjectSweep {
     pub(crate) wrapped: bool,
 }
 
-/// Visits up to `limit` objects of the store that `tx` writes: first, when
-/// `expired_marks` is set, those whose mark is older than `grace_ms`, wherever
-/// they are, then those after its stored cursor. An object none of `roots`
-/// references is marked the first time and deleted once it has stayed
-/// unreferenced for `grace_ms`; a referenced object loses its mark. Deleted
-/// hashes are added to `deleted`.
+/// Visits up to `limit` objects of the store that `tx` writes, after its stored
+/// cursor. An object nothing references is marked the first time and deleted
+/// once it has stayed unreferenced for `grace_ms`; a referenced object loses
+/// its mark.
 pub(super) fn sweep_objects(
     tx: &Transaction<'_>,
-    roots: &[&ObjectRoots],
+    roots: &ObjectRoots,
     now_ms: i64,
     grace_ms: i64,
     limit: usize,
-    expired_marks: bool,
-    deleted: &mut Vec<String>,
 ) -> StoreResult<ObjectSweep> {
-    let referenced = |hash: &str| -> StoreResult<bool> {
-        for roots in roots {
-            if roots.contains(hash)? {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    };
-    let mut sweep = ObjectSweep::default();
-    // Without an index this reads every mark, so a pass of several batches
-    // reads them in its first batch only.
-    let expired: Vec<(String, Option<i64>)> = if expired_marks {
-        let mut statement = tx.prepare(
-            "SELECT m.hash,length(o.body) FROM message_page_object_marks m
-            LEFT JOIN message_page_objects o ON o.hash=m.hash
-            WHERE m.unreferenced_since<=?1 LIMIT ?2",
-        )?;
-        let rows = statement.query_map(params![now_ms.saturating_sub(grace_ms), limit as i64], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        rows.collect::<Result<_, _>>()?
-    } else {
-        Vec::new()
-    };
-    for (hash, size) in &expired {
-        match size {
-            Some(size) if !referenced(hash)? => {
-                tx.execute("DELETE FROM message_page_objects WHERE hash=?1", [hash])?;
-                sweep.deleted += 1;
-                sweep.deleted_bytes += u64::try_from(*size).unwrap_or(0);
-                deleted.push(hash.clone());
-            }
-            _ => {
-                tx.execute("DELETE FROM message_page_object_marks WHERE hash=?1", [hash])?;
-            }
-        }
-    }
-    let limit = limit - expired.len();
-    if limit == 0 {
-        return Ok(sweep);
-    }
     let after: Option<String> = tx
         .query_row("SELECT after_hash FROM message_page_sweep_cursor WHERE singleton=1", [], |row| row.get(0))
         .optional()?;
@@ -1532,13 +1475,14 @@ pub(super) fn sweep_objects(
         let mut statement = tx.prepare(
             "SELECT o.hash,length(o.body),m.unreferenced_since FROM message_page_objects o
             LEFT JOIN message_page_object_marks m ON m.hash=o.hash
-            WHERE o.hash>coalesce(?1,'') ORDER BY o.hash LIMIT ?2",
+            WHERE ?1 IS NULL OR o.hash>?1 ORDER BY o.hash LIMIT ?2",
         )?;
         let rows = statement.query_map(params![after, limit as i64], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
         rows.collect::<Result<_, _>>()?
     };
+    let mut sweep = ObjectSweep::default();
     for (hash, size, mark) in &candidates {
-        if referenced(hash)? {
+        if roots.contains(hash)? {
             if mark.is_some() {
                 tx.execute("DELETE FROM message_page_object_marks WHERE hash=?1", [hash])?;
             }
@@ -1553,7 +1497,6 @@ pub(super) fn sweep_objects(
                 tx.execute("DELETE FROM message_page_objects WHERE hash=?1", [hash])?;
                 sweep.deleted += 1;
                 sweep.deleted_bytes += u64::try_from(*size).unwrap_or(0);
-                deleted.push(hash.clone());
             }
             Some(_) => {}
         }
@@ -1573,59 +1516,6 @@ pub(super) fn sweep_objects(
     Ok(sweep)
 }
 
-/// Marks the objects among `hashes` that this store holds as unreferenced since
-/// `since`, keeping an older mark. A sweep still deletes only what it finds
-/// unreferenced.
-pub(super) fn mark_unreferenced<'a>(db: &Connection, hashes: impl IntoIterator<Item = &'a str>, since: i64) -> StoreResult<()> {
-    let mut statement = db.prepare_cached(
-        "INSERT INTO message_page_object_marks(hash,unreferenced_since)
-        SELECT ?1,?2 WHERE EXISTS(SELECT 1 FROM message_page_objects WHERE hash=?1)
-        ON CONFLICT(hash) DO UPDATE SET unreferenced_since=min(unreferenced_since,excluded.unreferenced_since)",
-    )?;
-    for hash in hashes {
-        statement.execute(params![hash, since])?;
-    }
-    Ok(())
-}
-
-/// The objects `value` names in `db`: its descriptor, its object, its
-/// dependencies with the nodes and leaves of its dependency tree, and the nodes
-/// of its relation tree, the same set a sweep roots for it. `None` when a tree
-/// node is missing or unreadable here, since what it names is then unknown.
-pub(super) fn named_objects(db: &Connection, value: &UnitValue) -> StoreResult<Option<std::collections::BTreeSet<String>>> {
-    use risunest_sync_wire::descriptor::ReferencePage;
-    use std::collections::BTreeSet;
-    let mut named = BTreeSet::new();
-    let UnitValue::Object { descriptor_hash, descriptor } = value else {
-        return Ok(Some(named));
-    };
-    named.insert(descriptor_hash.clone());
-    named.insert(descriptor.object_hash.clone());
-    named.extend(descriptor.dependencies.iter().cloned());
-    let mut visited = BTreeSet::new();
-    for (root, relations) in [(&descriptor.dependency_root, false), (&descriptor.relation_root, true)] {
-        let mut pending: Vec<String> = root.iter().cloned().collect();
-        while let Some(node) = pending.pop() {
-            if !visited.insert(node.clone()) {
-                continue;
-            }
-            let Ok(Some(body)) = object_body(db, &node) else {
-                return Ok(None);
-            };
-            let Ok(page) = risunest_sync_wire::canonical::decode::<ReferencePage>(&body, risunest_sync_wire::MAX_METADATA_BYTES) else {
-                return Ok(None);
-            };
-            named.insert(node);
-            match page {
-                ReferencePage::Branches { children } => pending.extend(children),
-                ReferencePage::Objects { hashes } if !relations => named.extend(hashes),
-                _ => {}
-            }
-        }
-    }
-    Ok(Some(named))
-}
-
 /// A marked object may be collected soon, so callers that would otherwise skip
 /// fetching it treat it as absent and put it again, which clears the mark.
 pub(super) fn retained_object_present(db: &Connection, hash: &str) -> StoreResult<bool> {
@@ -1635,14 +1525,6 @@ pub(super) fn retained_object_present(db: &Connection, hash: &str) -> StoreResul
             [hash],
             |row| row.get::<_, bool>(0),
         )?)
-}
-
-/// Whether `db` holds a verified body for `hash`, clearing a mark on it first
-/// so that a sweep keeps it from now on, as storing it again would.
-pub(super) fn keep_verified_object(db: &Connection, hash: &str) -> StoreResult<bool> {
-    risunest_sync_wire::validate_hash(hash).map_err(codec_error)?;
-    db.execute("DELETE FROM message_page_object_marks WHERE hash=?1", [hash])?;
-    verified_object_present(db, hash)
 }
 
 fn sql_u64(value: i64, index: usize) -> rusqlite::Result<u64> {

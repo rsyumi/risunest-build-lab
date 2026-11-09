@@ -3,7 +3,7 @@
 use super::{RevisionResult, StoreError, StoreResult};
 use crate::asset_repository::PayloadCas;
 use flate2::{bufread::GzDecoder, write::GzEncoder, Compression};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,7 +11,7 @@ use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 
 const ARCHIVE_PAYLOAD_VERSION: u32 = 1;
-const MAX_DECODED_ARCHIVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub(super) const MAX_DECODED_ARCHIVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub(crate) const ARCHIVE_CANCELLED_MESSAGE: &str = "character archive operation cancelled";
 pub(crate) const ARCHIVE_DATA_MISSING_MESSAGE: &str = "character archive data is missing";
 pub(crate) const ARCHIVE_DATA_UNAVAILABLE_MESSAGE: &str = "character archive data could not be fetched";
@@ -150,25 +150,6 @@ pub(super) fn read_archived_object(
         .flatten()
         .map(|stored| serde_json::from_str(&stored).map_err(StoreError::from))
         .transpose()
-}
-
-/// Hands the decompressed JSON text of the archive in `file` to `write` in pieces, until it ends
-/// or `write` returns false.
-pub(super) fn read_payload_text(
-    file: std::fs::File,
-    mut write: impl FnMut(&[u8]) -> io::Result<bool>,
-) -> StoreResult<()> {
-    let mut decoder = GzDecoder::new(BufReader::new(file)).take(MAX_DECODED_ARCHIVE_BYTES.saturating_add(1));
-    let mut buffer = vec![0; 64 * 1024];
-    loop {
-        let read = decoder.read(&mut buffer)?;
-        if decoder.limit() == 0 {
-            return validation("archived character exceeds the decoded size limit");
-        }
-        if read == 0 || !write(&buffer[..read])? {
-            return Ok(());
-        }
-    }
 }
 
 /// Brings the one stored body an archive or a restore reads (the owner manifest it lists, or the
@@ -317,11 +298,11 @@ pub(super) fn preview(
     })
 }
 
-struct ArchivePayloadMetadata {
+pub(super) struct ArchivePayloadMetadata {
     name: String,
     character_type: String,
-    conversation_count: i64,
-    message_count: i64,
+    pub(super) conversation_count: i64,
+    pub(super) message_count: i64,
 }
 
 struct ArchiveSizeWriter<W> {
@@ -488,7 +469,7 @@ fn decompress_bounded(bytes: &[u8], max_bytes: u64) -> StoreResult<ArchivePayloa
 const RESTORE_CONVERSATIONS: &str = "archive_restore_conversations";
 const RESTORE_MESSAGES: &str = "archive_restore_messages";
 
-struct StagedArchivePayload {
+pub(super) struct StagedArchivePayload {
     version: u32,
     character_id: String,
     detail: Value,
@@ -851,7 +832,7 @@ impl<'de> Visitor<'de> for MessagesVisitor<'_> {
     }
 }
 
-fn create_restore_staging(connection: &Connection, scratch_root: &std::path::Path) -> StoreResult<tempfile::TempDir> {
+pub(super) fn create_restore_staging(connection: &Connection, scratch_root: &std::path::Path) -> StoreResult<tempfile::TempDir> {
     let staging = crate::external_storage::leftovers::local_scratch(scratch_root, "archive-restore-")?;
     connection.execute("ATTACH DATABASE ?1 AS archive_restore", [staging.path().join("restore.sqlite").to_string_lossy().as_ref()])?;
     let created = (|| -> StoreResult<()> {
@@ -885,7 +866,7 @@ fn create_restore_staging(connection: &Connection, scratch_root: &std::path::Pat
     Ok(staging)
 }
 
-fn clear_restore_staging(connection: &Connection) -> StoreResult<()> {
+pub(super) fn clear_restore_staging(connection: &Connection) -> StoreResult<()> {
     connection.execute_batch("DETACH DATABASE archive_restore")?;
     Ok(())
 }
@@ -1004,6 +985,167 @@ pub(super) fn archive_character_with_cancellation_lww(
         is_cancelled, context, MAX_DECODED_ARCHIVE_BYTES)
 }
 
+fn write_archive_object(
+    connection: &Connection,
+    cas: &PayloadCas,
+    generation: &str,
+    character_id: &str,
+    is_cancelled: &dyn Fn() -> bool,
+    shared: bool,
+    max_decoded_bytes: u64,
+) -> StoreResult<(tempfile::NamedTempFile, ArchivePayloadMetadata)> {
+    let mut staging = cas.create_ipc_staging_file()?;
+    let metadata = {
+        let mut encoder = GzEncoder::new(
+            CancellationAwareIo::new(staging.as_file_mut(), is_cancelled),
+            Compression::default(),
+        );
+        // serde_json writes token by token and the encoder deflates on every write. into_inner
+        // drains the buffer without a sync flush, so the archive bytes and hashes stay the same.
+        let mut buffered = io::BufWriter::with_capacity(64 * 1024, &mut encoder);
+        let metadata = write_payload_to(
+            connection,
+            generation,
+            character_id,
+            &mut buffered,
+            is_cancelled,
+            shared,
+            max_decoded_bytes,
+        )?;
+        buffered.into_inner().map_err(|error| StoreError::from(error.into_error()))?;
+        encoder.finish()?;
+        metadata
+    };
+    ensure_not_cancelled(is_cancelled)?;
+    staging.as_file_mut().seek(SeekFrom::Start(0))?;
+    Ok((staging, metadata))
+}
+
+pub(super) fn prepare_archive_object(
+    connection: &Connection,
+    cas: &PayloadCas,
+    generation: &str,
+    character_id: &str,
+    is_cancelled: &dyn Fn() -> bool,
+    shared: bool,
+    max_decoded_bytes: u64,
+) -> StoreResult<(crate::asset_repository::PreparedPayload, ArchivePayloadMetadata)> {
+    let (mut staging, metadata) = write_archive_object(connection, cas, generation, character_id, is_cancelled, shared, max_decoded_bytes)?;
+    let mut reader = CancellationAwareIo::new(staging.as_file_mut(), is_cancelled);
+    let prepared = cas.prepare_reader(&mut reader)?;
+    ensure_not_cancelled(is_cancelled)?;
+    Ok((prepared, metadata))
+}
+
+pub(super) fn stage_archive_object(
+    connection: &Connection,
+    cas: &PayloadCas,
+    generation: &str,
+    character_id: &str,
+    is_cancelled: &dyn Fn() -> bool,
+    shared: bool,
+) -> StoreResult<(crate::asset_repository::StagedPayload, ArchivePayloadMetadata)> {
+    use sha2::{Digest, Sha256};
+    let (mut staging, metadata) = write_archive_object(connection, cas, generation, character_id, is_cancelled, shared, MAX_DECODED_ARCHIVE_BYTES)?;
+    let mut hash = Sha256::new();
+    let mut length = 0u64;
+    let mut bytes = [0u8; 64 * 1024];
+    loop {
+        ensure_not_cancelled(is_cancelled)?;
+        let read = staging.as_file_mut().read(&mut bytes)?;
+        if read == 0 { break; }
+        hash.update(&bytes[..read]);
+        length = length.checked_add(read as u64).ok_or_else(|| StoreError::Validation { message: "archive payload size overflow".into() })?;
+    }
+    staging.as_file_mut().seek(SeekFrom::Start(0))?;
+    let staged = cas.stage_reader_expected(&mut CancellationAwareIo::new(staging.as_file_mut(), is_cancelled), &hex::encode(hash.finalize()), length)?;
+    ensure_not_cancelled(is_cancelled)?;
+    Ok((staged, metadata))
+}
+
+pub(super) struct PreparedArchivedCharacter {
+    marker: String,
+    encoded: String,
+}
+
+pub(super) fn prepare_archived_character(
+    connection: &mut Connection,
+    cas: &PayloadCas,
+    generation: &str,
+    character_id: &str,
+    now_ms: i64,
+    is_cancelled: &dyn Fn() -> bool,
+    context: Option<&super::lww::ArchiveContext<'_>>,
+    max_decoded_bytes: u64,
+) -> StoreResult<PreparedArchivedCharacter> {
+    let asset_hashes = super::snapshot::collect_character_asset_hashes(
+        connection,
+        cas,
+        generation,
+        character_id,
+    )?;
+    let shared_asset_hashes=if let Some(incoming)=context.and_then(|c|c.incoming){super::lww::archive_metadata(connection,&incoming.value)?.shared_asset_hashes}else{super::snapshot::collect_shared_character_asset_hashes(connection,cas,generation,character_id)?};
+    let (prepared, metadata) = prepare_archive_object(connection, cas, generation, character_id, is_cancelled, false, max_decoded_bytes)?;
+    super::AssetObjectCatalog::new(connection).register(
+        &[super::asset_object_catalog::AssetObjectRegistration {
+            object_hash: prepared.content_hash.clone(),
+            byte_size: prepared.byte_size,
+        }],
+        now_ms,
+    )?;
+    let shared_object_hash=if let Some(incoming)=context.and_then(|c|c.incoming){super::lww::archive_metadata(connection,&incoming.value)?.object_hash}else{
+        let (object, _) = prepare_archive_object(connection, cas, generation, character_id, is_cancelled, true, max_decoded_bytes)?;
+        super::AssetObjectCatalog::new(connection).register(&[super::asset_object_catalog::AssetObjectRegistration{object_hash:object.content_hash.clone(),byte_size:object.byte_size}],now_ms)?;object.content_hash
+    };
+    let archived = ArchivedObject {
+        object_hash: prepared.content_hash,
+        shared_object_hash,
+        archived_at: now_ms,
+        conversation_count: metadata.conversation_count,
+        message_count: metadata.message_count,
+        asset_hashes,
+        shared_asset_hashes,
+        identity_remap: Vec::new(),
+    };
+    prepared_archive_character(character_id, archived, &metadata)
+}
+
+pub(super) fn prepared_archive_character(
+    character_id: &str,
+    archived: ArchivedObject,
+    metadata: &ArchivePayloadMetadata,
+) -> StoreResult<PreparedArchivedCharacter> {
+    let encoded = serde_json::to_string(&archived)?;
+    let marker = serde_json::to_string(&marker_detail(
+        character_id,
+        &metadata.name,
+        &metadata.character_type,
+    ))?;
+
+    Ok(PreparedArchivedCharacter { marker, encoded })
+}
+
+pub(super) fn install_archived_character(
+    transaction: &Transaction<'_>,
+    generation: &str,
+    character_id: &str,
+    prepared: &PreparedArchivedCharacter,
+    is_cancelled: &dyn Fn() -> bool,
+) -> StoreResult<()> {
+    ensure_not_cancelled(is_cancelled)?;
+    super::commit::delete_character_contents(transaction, generation, character_id)?;
+    let updated = transaction.execute(
+        "UPDATE characters
+         SET detail = ?3, archived_object = ?4, conversation_count = 0
+         WHERE generation = ?1 AND character_id = ?2",
+        params![generation, character_id, prepared.marker, prepared.encoded],
+    )?;
+    if updated != 1 {
+        return validation(format!("Character {character_id} does not exist"));
+    }
+    Ok(())
+}
+
 pub(super) fn archive_character_with_limit(
     connection: &mut Connection,
     cas: &PayloadCas,
@@ -1027,67 +1169,7 @@ pub(super) fn archive_character_with_limit(
             actual: actual_revision,
         });
     }
-    let asset_hashes = super::snapshot::collect_character_asset_hashes(
-        connection,
-        cas,
-        &generation,
-        character_id,
-    )?;
-    let shared_asset_hashes=if let Some(incoming)=context.and_then(|c|c.incoming){super::lww::archive_metadata(connection,&incoming.value)?.shared_asset_hashes}else{super::snapshot::collect_shared_character_asset_hashes(connection,cas,&generation,character_id)?};
-    let mut staging = cas.create_ipc_staging_file()?;
-    let metadata = {
-        let mut encoder = GzEncoder::new(
-            CancellationAwareIo::new(staging.as_file_mut(), is_cancelled),
-            Compression::default(),
-        );
-        // serde_json writes token by token and the encoder deflates on every write. into_inner
-        // drains the buffer without a sync flush, so the archive bytes and hashes stay the same.
-        let mut buffered = io::BufWriter::with_capacity(64 * 1024, &mut encoder);
-        let metadata = write_payload_to(
-            connection,
-            &generation,
-            character_id,
-            &mut buffered,
-            is_cancelled,
-            false,
-            max_decoded_bytes,
-        )?;
-        buffered.into_inner().map_err(|error| StoreError::from(error.into_error()))?;
-        encoder.finish()?;
-        metadata
-    };
-    ensure_not_cancelled(is_cancelled)?;
-    staging.as_file_mut().seek(SeekFrom::Start(0))?;
-    let mut reader = CancellationAwareIo::new(staging.as_file_mut(), is_cancelled);
-    let prepared = cas.prepare_reader(&mut reader)?;
-    ensure_not_cancelled(is_cancelled)?;
-    super::AssetObjectCatalog::new(connection).register(
-        &[super::asset_object_catalog::AssetObjectRegistration {
-            object_hash: prepared.content_hash.clone(),
-            byte_size: prepared.byte_size,
-        }],
-        now_ms,
-    )?;
-    let shared_object_hash=if let Some(incoming)=context.and_then(|c|c.incoming){super::lww::archive_metadata(connection,&incoming.value)?.object_hash}else{
-        let mut shared=cas.create_ipc_staging_file()?;let mut encoder=GzEncoder::new(CancellationAwareIo::new(shared.as_file_mut(),is_cancelled),Compression::default());let mut buffered=io::BufWriter::with_capacity(64*1024,&mut encoder);write_payload_to(connection,&generation,character_id,&mut buffered,is_cancelled,true,max_decoded_bytes)?;buffered.into_inner().map_err(|error|StoreError::from(error.into_error()))?;encoder.finish()?;shared.as_file_mut().seek(SeekFrom::Start(0))?;let object=cas.prepare_reader(&mut CancellationAwareIo::new(shared.as_file_mut(),is_cancelled))?;
-        super::AssetObjectCatalog::new(connection).register(&[super::asset_object_catalog::AssetObjectRegistration{object_hash:object.content_hash.clone(),byte_size:object.byte_size}],now_ms)?;object.content_hash
-    };
-    let archived = ArchivedObject {
-        object_hash: prepared.content_hash,
-        shared_object_hash,
-        archived_at: now_ms,
-        conversation_count: metadata.conversation_count,
-        message_count: metadata.message_count,
-        asset_hashes,
-        shared_asset_hashes,
-        identity_remap: Vec::new(),
-    };
-    let encoded = serde_json::to_string(&archived)?;
-    let marker = serde_json::to_string(&marker_detail(
-        character_id,
-        &metadata.name,
-        &metadata.character_type,
-    ))?;
+    let prepared = prepare_archived_character(connection, cas, &generation, character_id, now_ms, is_cancelled, context, max_decoded_bytes)?;
 
     super::commit::incremental_commit(
         connection,
@@ -1100,21 +1182,180 @@ pub(super) fn archive_character_with_limit(
             Ok(())
         },
         |transaction, generation, ()| {
-            ensure_not_cancelled(is_cancelled)?;
-            super::commit::delete_character_contents(transaction, generation, character_id)?;
-            let updated = transaction.execute(
-                "UPDATE characters
-                 SET detail = ?3, archived_object = ?4, conversation_count = 0
-                 WHERE generation = ?1 AND character_id = ?2",
-                params![generation, character_id, marker, encoded],
-            )?;
-            if updated != 1 {
-                return validation(format!("Character {character_id} does not exist"));
-            }
+            install_archived_character(transaction, generation, character_id, &prepared, is_cancelled)?;
             super::lww::record_archive_state(transaction,generation,character_id,context,false)?;
             Ok(())
         },
     )
+}
+
+/// This device's own payload for a received archive flip, staged and not yet published.
+pub(super) struct StagedIncomingArchive {
+    local: crate::asset_repository::StagedPayload,
+    metadata: ArchivePayloadMetadata,
+    shared: ArchivedObject,
+}
+
+/// Runs outside every write guard. The caller proves the library revision is unchanged before
+/// it installs the result.
+pub(super) fn stage_incoming_archive(
+    connection: &Connection,
+    cas: &PayloadCas,
+    generation: &str,
+    character_id: &str,
+    incoming: &risunest_sync_wire::unit::UnitValue,
+) -> StoreResult<StagedIncomingArchive> {
+    if let Some(manifest) = owner_manifest_hash(connection, character_id)? {
+        if cas.stat_object(&manifest)?.is_none() {
+            return Err(super::lww::error("archive-manifest-missing"));
+        }
+    }
+    let shared = super::lww::archive_metadata(connection, incoming)?;
+    let (local, metadata) = stage_archive_object(connection, cas, generation, character_id, &|| false, false)?;
+    Ok(StagedIncomingArchive { local, metadata, shared })
+}
+
+/// Publishes the staged payload under the held repository guard and installs it in the caller's
+/// transaction, so the archive pointer and its catalog row commit together.
+pub(super) fn install_incoming_archive(
+    transaction: &Transaction<'_>,
+    cas: &PayloadCas,
+    generation: &str,
+    character_id: &str,
+    staged: StagedIncomingArchive,
+    job: &mut crate::asset_repository::job_pins::DurableCasJob,
+    repository: &std::sync::MutexGuard<'_, ()>,
+) -> StoreResult<()> {
+    let asset_hashes = super::snapshot::collect_character_asset_hashes(transaction, cas, generation, character_id)?;
+    job.record_page_publication(std::slice::from_ref(&staged.local), repository)?;
+    let local = cas.publish_staged(staged.local)?;
+    super::asset_object_catalog::register_in_transaction(transaction, &[super::asset_object_catalog::AssetObjectRegistration {
+        object_hash: local.content_hash.clone(), byte_size: local.byte_size,
+    }], super::device_store::now_ms()?)?;
+    let archived = ArchivedObject {
+        object_hash: local.content_hash,
+        shared_object_hash: staged.shared.object_hash,
+        archived_at: staged.shared.archived_at,
+        conversation_count: staged.metadata.conversation_count,
+        message_count: staged.metadata.message_count,
+        asset_hashes,
+        shared_asset_hashes: staged.shared.shared_asset_hashes,
+        identity_remap: Vec::new(),
+    };
+    let prepared = prepared_archive_character(character_id, archived, &staged.metadata)?;
+    install_archived_character(transaction, generation, character_id, &prepared, &|| false)
+}
+
+pub(super) fn stage_archive_payload(
+    connection: &Connection,
+    file: std::fs::File,
+    character_id: &str,
+    archived: &ArchivedObject,
+    is_cancelled: &dyn Fn() -> bool,
+) -> StoreResult<StagedArchivePayload> {
+    let mut payload = stage_payload(connection, file, is_cancelled)?;
+    for remap in &archived.identity_remap {
+        let owner = payload.character_id.clone();
+        remap.character(&mut payload.detail);
+        payload.character_id = payload.detail.get("chaId").and_then(Value::as_str)
+            .ok_or_else(|| StoreError::Validation { message: "archived character identity is missing".into() })?.to_owned();
+        let mut query = connection.prepare("SELECT ordinal,detail FROM archive_restore.archive_restore_conversations ORDER BY ordinal")?;
+        let mut rows = query.query([])?;
+        while let Some(row) = rows.next()? {
+            ensure_not_cancelled(is_cancelled)?;
+            let ordinal: i64 = row.get(0)?;
+            let raw: String = row.get(1)?;
+            let mut detail: Value = serde_json::from_str(&raw)?;
+            remap.chat(&owner, &mut detail);
+            connection.execute("UPDATE archive_restore.archive_restore_conversations SET conversation_id=?2,detail=?3 WHERE ordinal=?1", params![ordinal, detail["id"].as_str(), serde_json::to_string(&detail)?])?;
+        }
+    }
+    ensure_not_cancelled(is_cancelled)?;
+    if payload.version != ARCHIVE_PAYLOAD_VERSION {
+        return validation("archived character payload version is unsupported");
+    }
+    if payload.character_id != character_id {
+        return validation(format!(
+            "Archived character {character_id} holds another character"
+        ));
+    }
+    if payload.conversation_count != archived.conversation_count
+        || payload.message_count != archived.message_count
+    {
+        return validation(format!(
+            "Archived character {character_id} counts do not match its stored data"
+        ));
+    }
+    Ok(payload)
+}
+
+pub(super) fn restore_staged_rows(
+    transaction: &Transaction<'_>,
+    generation: &str,
+    character_id: &str,
+    payload: &StagedArchivePayload,
+    is_cancelled: &dyn Fn() -> bool,
+) -> StoreResult<()> {
+    let detail = serde_json::to_string(&payload.detail)?;
+    let recent_at = payload
+        .detail
+        .get("lastInteraction")
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+
+    ensure_not_cancelled(is_cancelled)?;
+    let inserted_conversations = transaction.execute(
+        "INSERT INTO conversations (
+            generation, character_id, conversation_id, configured_index, recent_at,
+            name, message_count, detail
+         )
+         SELECT ?1, ?2, conversation_id, configured_index, recent_at,
+                name, message_count, detail
+         FROM archive_restore.archive_restore_conversations
+         ",
+        params![generation, character_id],
+    )?;
+    if inserted_conversations as i64 != payload.conversation_count {
+        return validation("archived character conversation staging is incomplete");
+    }
+    ensure_not_cancelled(is_cancelled)?;
+    let inserted_messages = transaction.execute(
+        "INSERT INTO messages (
+            generation, character_id, conversation_id, message_index,
+            message_id, value
+         )
+         SELECT ?1, ?2, conversations.conversation_id, messages.message_index,
+                messages.message_id, messages.value
+         FROM archive_restore.archive_restore_messages AS messages
+         JOIN archive_restore.archive_restore_conversations AS conversations
+           ON conversations.ordinal = messages.conversation_ordinal
+         ",
+        params![generation, character_id],
+    )?;
+    if inserted_messages as i64 != payload.message_count {
+        return validation("archived character message staging is incomplete");
+    }
+    ensure_not_cancelled(is_cancelled)?;
+    let updated = transaction.execute(
+        "UPDATE characters
+         SET detail = ?3, archived_object = NULL, conversation_count = ?4, recent_at = ?5
+         WHERE generation = ?1 AND character_id = ?2",
+        params![
+            generation,
+            character_id,
+            detail,
+            payload.conversation_count,
+            recent_at,
+        ],
+    )?;
+    if updated != 1 {
+        return validation(format!("Character {character_id} does not exist"));
+    }
+    transaction.execute_batch(
+        "DROP TABLE archive_restore.archive_restore_messages;
+         DROP TABLE archive_restore.archive_restore_conversations;",
+    )?;
+    Ok(())
 }
 
 pub(super) fn restore_character_with_cancellation_lww(
@@ -1143,45 +1384,7 @@ pub(super) fn restore_character_with_cancellation_lww(
     };
     let _staging = create_restore_staging(connection, cas.repository_root())?;
     let result = (|| {
-        let mut payload = stage_payload(connection, file, is_cancelled)?;
-        for remap in &archived.identity_remap {
-            let owner = payload.character_id.clone();
-            remap.character(&mut payload.detail);
-            payload.character_id = payload.detail.get("chaId").and_then(Value::as_str)
-                .ok_or_else(|| StoreError::Validation { message: "archived character identity is missing".into() })?.to_owned();
-            let mut query = connection.prepare("SELECT ordinal,detail FROM archive_restore.archive_restore_conversations ORDER BY ordinal")?;
-            let mut rows = query.query([])?;
-            while let Some(row) = rows.next()? {
-                ensure_not_cancelled(is_cancelled)?;
-                let ordinal: i64 = row.get(0)?;
-                let raw: String = row.get(1)?;
-                let mut detail: Value = serde_json::from_str(&raw)?;
-                remap.chat(&owner, &mut detail);
-                connection.execute("UPDATE archive_restore.archive_restore_conversations SET conversation_id=?2,detail=?3 WHERE ordinal=?1", params![ordinal, detail["id"].as_str(), serde_json::to_string(&detail)?])?;
-            }
-        }
-        ensure_not_cancelled(is_cancelled)?;
-        if payload.version != ARCHIVE_PAYLOAD_VERSION {
-            return validation("archived character payload version is unsupported");
-        }
-        if payload.character_id != character_id {
-            return validation(format!(
-                "Archived character {character_id} holds another character"
-            ));
-        }
-        if payload.conversation_count != archived.conversation_count
-            || payload.message_count != archived.message_count
-        {
-            return validation(format!(
-                "Archived character {character_id} counts do not match its stored data"
-            ));
-        }
-        let detail = serde_json::to_string(&payload.detail)?;
-        let recent_at = payload
-            .detail
-            .get("lastInteraction")
-            .and_then(Value::as_i64)
-            .unwrap_or_default();
+        let payload = stage_archive_payload(connection, file, character_id, &archived, is_cancelled)?;
 
         super::commit::incremental_commit(
             connection,
@@ -1194,58 +1397,7 @@ pub(super) fn restore_character_with_cancellation_lww(
                 Ok(())
             },
             |transaction, generation, ()| {
-                ensure_not_cancelled(is_cancelled)?;
-                let inserted_conversations = transaction.execute(
-                    "INSERT INTO conversations (
-                        generation, character_id, conversation_id, configured_index, recent_at,
-                        name, message_count, detail
-                     )
-                     SELECT ?1, ?2, conversation_id, configured_index, recent_at,
-                            name, message_count, detail
-                     FROM archive_restore.archive_restore_conversations
-                     ",
-                    params![generation, character_id],
-                )?;
-                if inserted_conversations as i64 != payload.conversation_count {
-                    return validation("archived character conversation staging is incomplete");
-                }
-                ensure_not_cancelled(is_cancelled)?;
-                let inserted_messages = transaction.execute(
-                    "INSERT INTO messages (
-                        generation, character_id, conversation_id, message_index,
-                        message_id, value
-                     )
-                     SELECT ?1, ?2, conversations.conversation_id, messages.message_index,
-                            messages.message_id, messages.value
-                     FROM archive_restore.archive_restore_messages AS messages
-                     JOIN archive_restore.archive_restore_conversations AS conversations
-                       ON conversations.ordinal = messages.conversation_ordinal
-                     ",
-                    params![generation, character_id],
-                )?;
-                if inserted_messages as i64 != payload.message_count {
-                    return validation("archived character message staging is incomplete");
-                }
-                ensure_not_cancelled(is_cancelled)?;
-                let updated = transaction.execute(
-                    "UPDATE characters
-                     SET detail = ?3, archived_object = NULL, conversation_count = ?4, recent_at = ?5
-                     WHERE generation = ?1 AND character_id = ?2",
-                    params![
-                        generation,
-                        character_id,
-                        detail,
-                        payload.conversation_count,
-                        recent_at,
-                    ],
-                )?;
-                if updated != 1 {
-                    return validation(format!("Character {character_id} does not exist"));
-                }
-                transaction.execute_batch(
-                    "DROP TABLE archive_restore.archive_restore_messages;
-                     DROP TABLE archive_restore.archive_restore_conversations;",
-                )?;
+                restore_staged_rows(transaction, generation, character_id, &payload, is_cancelled)?;
                 super::lww::record_archive_state(transaction,generation,character_id,context,true)?;
                 Ok(())
             },

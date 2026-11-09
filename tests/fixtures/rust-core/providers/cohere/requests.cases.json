@@ -1,0 +1,2156 @@
+{
+  "schema": 1,
+  "baseDb": {
+    "usePlainFetch": true,
+    "cohereAPIKey": "sk-synthetic-cohere",
+    "mistralKey": "sk-synthetic-mistral",
+    "proxyKey": "sk-synthetic-proxy",
+    "requestRetrys": 0,
+    "genTime": 1,
+    "useStreaming": false,
+    "applyAdditionalParamsToAll": false,
+    "additionalParams": [],
+    "maxResponse": 300,
+    "temperature": 80,
+    "top_k": 40,
+    "repetition_penalty": 1.1,
+    "min_p": 0.05,
+    "top_a": 0.2,
+    "top_p": 0.9,
+    "frequencyPenalty": 20,
+    "PresensePenalty": 30,
+    "thinkingTokens": 1024,
+    "reasoningEffort": 1,
+    "verbosity": 1,
+    "newOAIHandle": true,
+    "reverseProxyOobaMode": false,
+    "seperateParametersEnabled": false,
+    "seperateParametersByModel": false,
+    "extractJson": "",
+    "systemContentReplacement": "",
+    "systemRoleReplacement": "",
+    "forceReplaceUrl": "",
+    "customProxyRequestModel": "my-proxy-model",
+    "customAPIFormat": 8,
+    "enableCustomFlags": false,
+    "customFlags": [],
+    "localNetworkMode": false
+  },
+  "cases": [
+    {
+      "id": "basic",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "multi-turn",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ]
+    },
+    {
+      "id": "no-system-user-first",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey."
+        },
+        {
+          "role": "user",
+          "content": "Again"
+        }
+      ]
+    },
+    {
+      "id": "only-user-message-throws",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "empty-messages-throws",
+      "model": "cohere-command-r",
+      "messages": []
+    },
+    {
+      "id": "system-only-throws",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Only system."
+        }
+      ]
+    },
+    {
+      "id": "assistant-last",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey there."
+        }
+      ]
+    },
+    {
+      "id": "function-last",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": "Checking."
+        },
+        {
+          "role": "function",
+          "content": "result",
+          "name": "lookup"
+        }
+      ]
+    },
+    {
+      "id": "two-trailing-non-user",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": "One."
+        },
+        {
+          "role": "assistant",
+          "content": "Two."
+        }
+      ]
+    },
+    {
+      "id": "trailing-system",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": "One."
+        },
+        {
+          "role": "system",
+          "content": "Reminder."
+        }
+      ]
+    },
+    {
+      "id": "no-user-message-fails",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "Hey."
+        }
+      ]
+    },
+    {
+      "id": "assistant-and-system-without-user-fails",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "assistant",
+          "content": "Hey."
+        }
+      ]
+    },
+    {
+      "id": "system-in-history",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "system",
+          "content": "Aside."
+        },
+        {
+          "role": "assistant",
+          "content": "Hey."
+        },
+        {
+          "role": "user",
+          "content": "Again"
+        }
+      ]
+    },
+    {
+      "id": "function-in-history-dropped",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "function",
+          "content": "result",
+          "name": "lookup"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey."
+        },
+        {
+          "role": "user",
+          "content": "Again"
+        }
+      ]
+    },
+    {
+      "id": "empty-contents-filtered",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": ""
+        },
+        {
+          "role": "user",
+          "content": ""
+        }
+      ]
+    },
+    {
+      "id": "empty-user-last",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey."
+        },
+        {
+          "role": "user",
+          "content": ""
+        }
+      ]
+    },
+    {
+      "id": "empty-system-skips-preamble",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": ""
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey."
+        },
+        {
+          "role": "user",
+          "content": "Again"
+        }
+      ]
+    },
+    {
+      "id": "preamble-without-history",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        }
+      ]
+    },
+    {
+      "id": "preamble-with-history",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey."
+        },
+        {
+          "role": "user",
+          "content": "Again"
+        }
+      ]
+    },
+    {
+      "id": "unicode-and-escapes",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "日本語 😀"
+        },
+        {
+          "role": "user",
+          "content": "\"quoted\" \\ back\nline  "
+        }
+      ]
+    },
+    {
+      "id": "system-content-replacement",
+      "model": "cohere-command-r",
+      "db": {
+        "systemContentReplacement": "Sys: {{slot}}",
+        "systemRoleReplacement": "user"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "tool-call-marker-stays-text",
+      "model": "cohere-command-r",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        },
+        {
+          "role": "assistant",
+          "content": "A<tool_call>k1</tool_call>B"
+        },
+        {
+          "role": "user",
+          "content": "Again"
+        }
+      ]
+    },
+    {
+      "id": "model-cohere-command-r-03-2024",
+      "model": "cohere-command-r-03-2024",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "model-cohere-command-r-plus-04-2024",
+      "model": "cohere-command-r-plus-04-2024",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "model-cohere-command-r-08-2024",
+      "model": "cohere-command-r-08-2024",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "model-cohere-command-r-plus",
+      "model": "cohere-command-r-plus",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "model-cohere-command-r-plus-08-2024",
+      "model": "cohere-command-r-plus-08-2024",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "max-tokens-is-not-sent",
+      "model": "cohere-command-r",
+      "maxTokens": 77,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "stream-flag-is-ignored",
+      "model": "cohere-command-r",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "temperature-disabled",
+      "model": "cohere-command-r",
+      "db": {
+        "temperature": -1000
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "penalties-disabled",
+      "model": "cohere-command-r",
+      "db": {
+        "frequencyPenalty": -1000,
+        "PresensePenalty": -1000
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "top-k-zero-kept",
+      "model": "cohere-command-r",
+      "db": {
+        "top_k": 0
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "separate-parameters-model",
+      "model": "cohere-command-r",
+      "db": {
+        "seperateParametersEnabled": true,
+        "seperateParameters": {
+          "model": {
+            "temperature": 50,
+            "top_k": 10,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.5,
+            "frequency_penalty": 10,
+            "presence_penalty": 10,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "submodel": {
+            "temperature": 60,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "memory": {
+            "temperature": 61,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "emotion": {
+            "temperature": 62,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "translate": {
+            "temperature": 63,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "otherAx": {
+            "temperature": 70,
+            "top_k": 12,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.7,
+            "frequency_penalty": 12,
+            "presence_penalty": 12,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "overrides": {
+            "cohere-command-r": {
+              "temperature": 30,
+              "top_k": 5,
+              "repetition_penalty": 1,
+              "min_p": 0,
+              "top_a": 0,
+              "top_p": 0.3,
+              "frequency_penalty": -1000,
+              "presence_penalty": -1000,
+              "thinking_tokens": 0,
+              "reasoning_effort": 1,
+              "verbosity": 1
+            }
+          }
+        }
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "separate-parameters-submodel",
+      "model": "cohere-command-r",
+      "db": {
+        "seperateParametersEnabled": true,
+        "seperateParameters": {
+          "model": {
+            "temperature": 50,
+            "top_k": 10,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.5,
+            "frequency_penalty": 10,
+            "presence_penalty": 10,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "submodel": {
+            "temperature": 60,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "memory": {
+            "temperature": 61,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "emotion": {
+            "temperature": 62,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "translate": {
+            "temperature": 63,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "otherAx": {
+            "temperature": 70,
+            "top_k": 12,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.7,
+            "frequency_penalty": 12,
+            "presence_penalty": 12,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "overrides": {
+            "cohere-command-r": {
+              "temperature": 30,
+              "top_k": 5,
+              "repetition_penalty": 1,
+              "min_p": 0,
+              "top_a": 0,
+              "top_p": 0.3,
+              "frequency_penalty": -1000,
+              "presence_penalty": -1000,
+              "thinking_tokens": 0,
+              "reasoning_effort": 1,
+              "verbosity": 1
+            }
+          }
+        }
+      },
+      "mode": "submodel",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "separate-parameters-memory",
+      "model": "cohere-command-r",
+      "db": {
+        "seperateParametersEnabled": true,
+        "seperateParameters": {
+          "model": {
+            "temperature": 50,
+            "top_k": 10,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.5,
+            "frequency_penalty": 10,
+            "presence_penalty": 10,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "submodel": {
+            "temperature": 60,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "memory": {
+            "temperature": 61,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "emotion": {
+            "temperature": 62,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "translate": {
+            "temperature": 63,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "otherAx": {
+            "temperature": 70,
+            "top_k": 12,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.7,
+            "frequency_penalty": 12,
+            "presence_penalty": 12,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "overrides": {
+            "cohere-command-r": {
+              "temperature": 30,
+              "top_k": 5,
+              "repetition_penalty": 1,
+              "min_p": 0,
+              "top_a": 0,
+              "top_p": 0.3,
+              "frequency_penalty": -1000,
+              "presence_penalty": -1000,
+              "thinking_tokens": 0,
+              "reasoning_effort": 1,
+              "verbosity": 1
+            }
+          }
+        }
+      },
+      "mode": "memory",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "separate-parameters-by-model-missing-throws",
+      "model": "cohere-command-r",
+      "db": {
+        "seperateParametersEnabled": true,
+        "seperateParameters": {
+          "model": {
+            "temperature": 50,
+            "top_k": 10,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.5,
+            "frequency_penalty": 10,
+            "presence_penalty": 10,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "submodel": {
+            "temperature": 60,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "memory": {
+            "temperature": 61,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "emotion": {
+            "temperature": 62,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "translate": {
+            "temperature": 63,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "otherAx": {
+            "temperature": 70,
+            "top_k": 12,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.7,
+            "frequency_penalty": 12,
+            "presence_penalty": 12,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "overrides": {
+            "cohere-command-r": {
+              "temperature": 30,
+              "top_k": 5,
+              "repetition_penalty": 1,
+              "min_p": 0,
+              "top_a": 0,
+              "top_p": 0.3,
+              "frequency_penalty": -1000,
+              "presence_penalty": -1000,
+              "thinking_tokens": 0,
+              "reasoning_effort": 1,
+              "verbosity": 1
+            }
+          }
+        },
+        "seperateParametersByModel": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "separate-parameters-by-model",
+      "model": "cohere-command-r",
+      "db": {
+        "seperateParametersEnabled": true,
+        "seperateParameters": {
+          "model": {
+            "temperature": 50,
+            "top_k": 10,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.5,
+            "frequency_penalty": 10,
+            "presence_penalty": 10,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "submodel": {
+            "temperature": 60,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "memory": {
+            "temperature": 61,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "emotion": {
+            "temperature": 62,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "translate": {
+            "temperature": 63,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "otherAx": {
+            "temperature": 70,
+            "top_k": 12,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.7,
+            "frequency_penalty": 12,
+            "presence_penalty": 12,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "overrides": {
+            "cohere-command-r": {
+              "temperature": 33,
+              "top_k": 6,
+              "repetition_penalty": 1,
+              "min_p": 0,
+              "top_a": 0,
+              "top_p": 0.33,
+              "frequency_penalty": 5,
+              "presence_penalty": 5,
+              "thinking_tokens": 0,
+              "reasoning_effort": 1,
+              "verbosity": 1
+            }
+          }
+        },
+        "seperateParametersByModel": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-number",
+      "model": "cohere-command-r",
+      "db": {
+        "additionalParams": [
+          [
+            "seed",
+            "7"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-string-and-bool",
+      "model": "cohere-command-r",
+      "db": {
+        "additionalParams": [
+          [
+            "user",
+            "\"abc\""
+          ],
+          [
+            "return_prompt",
+            "false"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-json",
+      "model": "cohere-command-r",
+      "db": {
+        "additionalParams": [
+          [
+            "metadata",
+            "json::{\"a\":1}"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-nested",
+      "model": "cohere-command-r",
+      "db": {
+        "additionalParams": [
+          [
+            "connectors.0",
+            "json::{\"id\":\"web\"}"
+          ],
+          [
+            "x.y",
+            "1"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-header",
+      "model": "cohere-command-r",
+      "db": {
+        "additionalParams": [
+          [
+            "header::X-Test",
+            "on"
+          ],
+          [
+            "header::Authorization",
+            "Bearer other"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-none-removes",
+      "model": "cohere-command-r",
+      "db": {
+        "additionalParams": [
+          [
+            "safety_mode",
+            "{{none}}"
+          ],
+          [
+            "k",
+            "{{none}}"
+          ],
+          [
+            "header::Content-Type",
+            "{{none}}"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-overrides-body-keys",
+      "model": "cohere-command-r",
+      "db": {
+        "additionalParams": [
+          [
+            "message",
+            "replaced"
+          ],
+          [
+            "chat_history",
+            "json::[]"
+          ],
+          [
+            "safety_mode",
+            "CONTEXTUAL"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-null-and-text",
+      "model": "cohere-command-r",
+      "db": {
+        "additionalParams": [
+          [
+            "x",
+            "null"
+          ],
+          [
+            "y",
+            "plain text"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-applies-to-every-model",
+      "model": "cohere-command-r-plus-04-2024",
+      "db": {
+        "additionalParams": [
+          [
+            "seed",
+            "9"
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "additional-ignored-when-empty-value",
+      "model": "cohere-command-r",
+      "db": {
+        "additionalParams": [
+          [
+            "seed",
+            ""
+          ]
+        ]
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "cohere-key-in-header",
+      "model": "cohere-command-r",
+      "db": {
+        "cohereAPIKey": "sk-other"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "reverse-proxy",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/v1/chat"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "reverse-proxy-query-url",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://Proxy.Example.test:8443/a b?x=1#f"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "reverse-proxy-no-url-declines",
+      "model": "reverse_proxy",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "url-form"
+    },
+    {
+      "id": "reverse-proxy-userinfo-declines",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://u:p@proxy.example.test/chat"
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "url-form"
+    },
+    {
+      "id": "reverse-proxy-model-params",
+      "model": "reverse_proxy",
+      "db": {
+        "forceReplaceUrl": "https://proxy.example.test/chat",
+        "seperateParametersEnabled": true,
+        "seperateParameters": {
+          "model": {
+            "temperature": 50,
+            "top_k": 10,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.5,
+            "frequency_penalty": 10,
+            "presence_penalty": 10,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "submodel": {
+            "temperature": 60,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "memory": {
+            "temperature": 61,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "emotion": {
+            "temperature": 62,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "translate": {
+            "temperature": 63,
+            "top_k": 11,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.6,
+            "frequency_penalty": 11,
+            "presence_penalty": 11,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "otherAx": {
+            "temperature": 70,
+            "top_k": 12,
+            "repetition_penalty": 1,
+            "min_p": 0,
+            "top_a": 0,
+            "top_p": 0.7,
+            "frequency_penalty": 12,
+            "presence_penalty": 12,
+            "thinking_tokens": 0,
+            "reasoning_effort": 1,
+            "verbosity": 1
+          },
+          "overrides": {
+            "reverse_proxy": {
+              "temperature": 44,
+              "top_k": 4,
+              "repetition_penalty": 1,
+              "min_p": 0,
+              "top_a": 0,
+              "top_p": 0.44,
+              "frequency_penalty": 4,
+              "presence_penalty": 4,
+              "thinking_tokens": 0,
+              "reasoning_effort": 1,
+              "verbosity": 1
+            }
+          }
+        },
+        "seperateParametersByModel": true
+      },
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "custom-model",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 8,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "custom-model-no-url",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "key": "sk-synthetic-custom",
+          "format": 8,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "custom-model-no-key-uses-cohere-key",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "format": 8,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "custom-model-empty-key-kept",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "",
+          "format": 8,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "custom-model-params",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 8,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": "seed=9\nheader::X-Custom=yes"
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    },
+    {
+      "id": "raw-assistant-last-with-history",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 8,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "A"
+        },
+        {
+          "role": "assistant",
+          "content": "B"
+        },
+        {
+          "role": "user",
+          "content": "C"
+        },
+        {
+          "role": "assistant",
+          "content": "D"
+        }
+      ]
+    },
+    {
+      "id": "raw-function-last-with-history",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 8,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "content": "A"
+        },
+        {
+          "role": "assistant",
+          "content": "B"
+        },
+        {
+          "role": "user",
+          "content": "C"
+        },
+        {
+          "role": "assistant",
+          "content": "D"
+        },
+        {
+          "role": "function",
+          "content": "E",
+          "name": "lookup"
+        }
+      ]
+    },
+    {
+      "id": "raw-system-last-with-history",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 8,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "content": "A"
+        },
+        {
+          "role": "assistant",
+          "content": "B"
+        },
+        {
+          "role": "user",
+          "content": "C"
+        },
+        {
+          "role": "system",
+          "content": "D"
+        }
+      ]
+    },
+    {
+      "id": "raw-three-trailing",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 8,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "S"
+        },
+        {
+          "role": "user",
+          "content": "A"
+        },
+        {
+          "role": "assistant",
+          "content": "B"
+        },
+        {
+          "role": "user",
+          "content": "C"
+        },
+        {
+          "role": "assistant",
+          "content": "D"
+        },
+        {
+          "role": "system",
+          "content": "E"
+        },
+        {
+          "role": "function",
+          "content": "F",
+          "name": "lookup"
+        }
+      ]
+    },
+    {
+      "id": "raw-system-first-only-user",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 8,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "S"
+        },
+        {
+          "role": "user",
+          "content": "A"
+        }
+      ]
+    },
+    {
+      "id": "raw-system-in-history",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 8,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "S"
+        },
+        {
+          "role": "user",
+          "content": "A"
+        },
+        {
+          "role": "system",
+          "content": "M"
+        },
+        {
+          "role": "assistant",
+          "content": "B"
+        },
+        {
+          "role": "user",
+          "content": "C"
+        }
+      ]
+    },
+    {
+      "id": "raw-function-in-history",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 8,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "content": "A"
+        },
+        {
+          "role": "function",
+          "content": "M",
+          "name": "lookup"
+        },
+        {
+          "role": "assistant",
+          "content": "B"
+        },
+        {
+          "role": "user",
+          "content": "C"
+        }
+      ]
+    },
+    {
+      "id": "raw-no-user-fails",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 8,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "S"
+        },
+        {
+          "role": "assistant",
+          "content": "B"
+        }
+      ]
+    },
+    {
+      "id": "raw-only-assistant-fails",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 8,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "B"
+        }
+      ]
+    },
+    {
+      "id": "raw-only-system-throws",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 8,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": "S"
+        }
+      ]
+    },
+    {
+      "id": "raw-empty-contents",
+      "model": "xcustom:::one",
+      "customModels": [
+        {
+          "id": "xcustom:::one",
+          "name": "One",
+          "internalId": "my-model",
+          "url": "https://llm.example.test/v1/chat",
+          "key": "sk-synthetic-custom",
+          "format": 8,
+          "flags": [
+            6
+          ],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "content": ""
+        },
+        {
+          "role": "user",
+          "content": ""
+        },
+        {
+          "role": "assistant",
+          "content": ""
+        },
+        {
+          "role": "user",
+          "content": ""
+        }
+      ]
+    },
+    {
+      "id": "other-format-declines",
+      "model": "gpt4o",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "declines": "format"
+    }
+  ]
+}

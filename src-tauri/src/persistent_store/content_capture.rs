@@ -138,6 +138,7 @@ impl PersistentStore {
         consumer: &str,
         lease: &str,
     ) -> StoreResult<PreparedContentCapture> {
+        self.ensure_revision_lease_unpinned(lease)?;
         if capture_id.is_empty() || consumer.is_empty() {
             return Err(missing_source("capture identity"));
         }

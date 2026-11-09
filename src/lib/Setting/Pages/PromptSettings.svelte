@@ -3,6 +3,7 @@
     import { language } from "src/lang";
     import PromptDataItem from "src/lib/UI/PromptDataItem.svelte";
     import { tokenizePreset, type PromptItem } from "src/ts/process/prompt";
+    import { countTogether } from "src/ts/tokenizer";
     import { templateCheck } from "src/ts/process/templates/templateCheck";
     
     import { DBState } from 'src/ts/stores.svelte';
@@ -35,8 +36,12 @@
   let { onGoBack = () => {}, mode = 'independent', subMenu = $bindable(0) }: Props = $props();
 
     async function executeTokenize(prest: PromptItem[]){
-        tokens = await tokenizePreset(prest, true)
-        extokens = await tokenizePreset(prest, false)
+        const [constant, extended] = await countTogether(
+            () => tokenizePreset(prest, true),
+            () => tokenizePreset(prest, false),
+        )
+        tokens = constant
+        extokens = extended
     }
 
     $effect.pre(() => {

@@ -1,0 +1,328 @@
+{
+  "schema": 1,
+  "generator": "benchmarks/rust-core-oracles/ir.oracle.test.ts",
+  "fixtureSha256": "0e89a3eaa0f4273f926ccf310133c6bf761919a5919fd80e7a58a792161d551b",
+  "tsSourceSha256": {},
+  "node": "v24.12.0",
+  "vitest": "4.1.11",
+  "cases": [
+    {
+      "id": "undefined",
+      "result": {
+        "undefined": true
+      }
+    },
+    {
+      "id": "null",
+      "result": {
+        "text": "null"
+      }
+    },
+    {
+      "id": "true",
+      "result": {
+        "text": "true"
+      }
+    },
+    {
+      "id": "false",
+      "result": {
+        "text": "false"
+      }
+    },
+    {
+      "id": "number-zero",
+      "result": {
+        "text": "0"
+      }
+    },
+    {
+      "id": "number-negative-zero",
+      "result": {
+        "text": "0"
+      }
+    },
+    {
+      "id": "number-nan",
+      "result": {
+        "text": "null"
+      }
+    },
+    {
+      "id": "number-infinity",
+      "result": {
+        "text": "null"
+      }
+    },
+    {
+      "id": "number-negative-infinity",
+      "result": {
+        "text": "null"
+      }
+    },
+    {
+      "id": "number-exponent-21",
+      "result": {
+        "text": "1e+21"
+      }
+    },
+    {
+      "id": "number-small",
+      "result": {
+        "text": "1e-7"
+      }
+    },
+    {
+      "id": "number-fraction",
+      "result": {
+        "text": "1.5"
+      }
+    },
+    {
+      "id": "number-negative-fraction",
+      "result": {
+        "text": "-1.5"
+      }
+    },
+    {
+      "id": "number-integer",
+      "result": {
+        "text": "123456789"
+      }
+    },
+    {
+      "id": "number-sum",
+      "result": {
+        "text": "0.30000000000000004"
+      }
+    },
+    {
+      "id": "number-min-subnormal",
+      "result": {
+        "text": "5e-324"
+      }
+    },
+    {
+      "id": "number-max",
+      "result": {
+        "text": "1.7976931348623157e+308"
+      }
+    },
+    {
+      "id": "number-hundred",
+      "result": {
+        "text": "100"
+      }
+    },
+    {
+      "id": "number-exponent-20",
+      "result": {
+        "text": "100000000000000000000"
+      }
+    },
+    {
+      "id": "number-tiny",
+      "result": {
+        "text": "1.23e-18"
+      }
+    },
+    {
+      "id": "number-safe-limit",
+      "result": {
+        "text": "9007199254740992"
+      }
+    },
+    {
+      "id": "string-empty",
+      "result": {
+        "text": "\"\""
+      }
+    },
+    {
+      "id": "string-ascii",
+      "result": {
+        "text": "\"abc\""
+      }
+    },
+    {
+      "id": "string-isolated-high",
+      "result": {
+        "text": "\"\\ud800\""
+      }
+    },
+    {
+      "id": "string-isolated-low",
+      "result": {
+        "text": "\"\\udc00\""
+      }
+    },
+    {
+      "id": "string-pair",
+      "result": {
+        "text": "\"😀\""
+      }
+    },
+    {
+      "id": "string-reversed-pair",
+      "result": {
+        "text": "\"\\ude00\\ud83d\""
+      }
+    },
+    {
+      "id": "string-controls",
+      "result": {
+        "text": "\"\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\b\\t\\n\\u000b\\f\\r\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\""
+      }
+    },
+    {
+      "id": "string-quote-backslash-slash",
+      "result": {
+        "text": "\"\\\"\\\\/\""
+      }
+    },
+    {
+      "id": "string-delete",
+      "result": {
+        "text": "\"\""
+      }
+    },
+    {
+      "id": "string-line-separators",
+      "result": {
+        "text": "\"  \""
+      }
+    },
+    {
+      "id": "string-noncharacters",
+      "result": {
+        "text": "\"￾￿\""
+      }
+    },
+    {
+      "id": "string-hangul-emoji",
+      "result": {
+        "text": "\"한국어 😀\""
+      }
+    },
+    {
+      "id": "string-isolated-inside",
+      "result": {
+        "text": "\"a\\ud800b\""
+      }
+    },
+    {
+      "id": "string-high-at-end",
+      "result": {
+        "text": "\"ab\\udbff\""
+      }
+    },
+    {
+      "id": "string-high-high-low",
+      "result": {
+        "text": "\"\\ud800𐀀\""
+      }
+    },
+    {
+      "id": "string-escapes-and-isolated",
+      "result": {
+        "text": "\"\\n\\ud800\\\"\\t\""
+      }
+    },
+    {
+      "id": "array-empty",
+      "result": {
+        "text": "[]"
+      }
+    },
+    {
+      "id": "array-undefined",
+      "result": {
+        "text": "[null]"
+      }
+    },
+    {
+      "id": "array-mixed-undefined",
+      "result": {
+        "text": "[1,null,2,null]"
+      }
+    },
+    {
+      "id": "array-nonfinite",
+      "result": {
+        "text": "[null,null,0]"
+      }
+    },
+    {
+      "id": "array-nested",
+      "result": {
+        "text": "[[],[[\"x\"]]]"
+      }
+    },
+    {
+      "id": "object-empty",
+      "result": {
+        "text": "{}"
+      }
+    },
+    {
+      "id": "object-undefined",
+      "result": {
+        "text": "{}"
+      }
+    },
+    {
+      "id": "object-undefined-first",
+      "result": {
+        "text": "{\"b\":1}"
+      }
+    },
+    {
+      "id": "object-undefined-middle",
+      "result": {
+        "text": "{\"a\":1,\"c\":2}"
+      }
+    },
+    {
+      "id": "object-undefined-last",
+      "result": {
+        "text": "{\"a\":1}"
+      }
+    },
+    {
+      "id": "object-escaped-keys",
+      "result": {
+        "text": "{\"\\\"\":1,\"\\n\":2,\"\\ud800\":3,\"\":4}"
+      }
+    },
+    {
+      "id": "object-proto-key",
+      "result": {
+        "text": "{\"__proto__\":{\"x\":1}}"
+      }
+    },
+    {
+      "id": "object-index-keys",
+      "result": {
+        "text": "{\"0\":\"a\",\"1\":\"b\",\"10\":\"c\",\"x\":\"d\",\"01\":\"e\"}"
+      }
+    },
+    {
+      "id": "object-nested-undefined",
+      "result": {
+        "text": "{\"list\":[null,{\"kept\":null}]}"
+      }
+    },
+    {
+      "id": "object-key-order",
+      "result": {
+        "text": "{\"zeta\":1,\"alpha\":2,\"mid\":3}"
+      }
+    },
+    {
+      "id": "depth-20",
+      "result": {
+        "text": "[{\"k\":[{\"k\":[{\"k\":[{\"k\":[{\"k\":[{\"k\":[{\"k\":[{\"k\":[{\"k\":[{\"k\":1}]}]}]}]}]}]}]}]}]}]"
+      }
+    }
+  ]
+}

@@ -10,15 +10,13 @@ import { appVer } from 'src/ts/appVersion'
 
 const testUA = vi.hoisted(() => {
     const value = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
-    Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: {} })
     Object.defineProperty(navigator, 'userAgent', { configurable: true, value })
     return value
 })
-const header = `RisuNest ${versionData.version} (RisuAI ${appVer}) | OS: Windows (NT 10.0.26100) | Device: Synthetic PC (x86_64) | UA: ${testUA}\n\n`
+const header = `RisuNest ${versionData.version} (RisuAI ${appVer}) | OS: Windows NT 10.0 | Device: Unknown | UA: ${testUA}\n\n`
 
-// One handler per native command; each receives the arguments the product sent with that command.
+// One handler per native_log_* command; each receives the arguments the product sent with that command.
 const commands = vi.hoisted(() => ({
-    diagnostic_device_info: vi.fn(),
     native_log_tail: vi.fn(),
     native_log_file_path: vi.fn(),
     native_log_set_file_enabled: vi.fn(),
@@ -30,8 +28,6 @@ vi.mock('@tauri-apps/api/core', async (importOriginal) => ({
         ? commands[command as keyof typeof commands](args)
         : Promise.reject(new Error(`unexpected command ${command}`))),
 }))
-
-vi.mock('@tauri-apps/plugin-os', () => ({ arch: () => 'x86_64', type: () => 'windows', version: () => '10.0.26100' }))
 
 import { language } from 'src/lang'
 import RisuNestLogViewer from './RisuNestLogViewer.svelte'
@@ -50,7 +46,6 @@ describe('RisuNestLogViewer', () => {
         consoleLog.clear()
         localStorage.clear()
         loadDeviceSettings(createLocalDeviceMarkers(localStorage))
-        commands.diagnostic_device_info.mockResolvedValue({ model: 'Synthetic PC', arch: 'x86_64' })
         commands.native_log_tail.mockReset()
         commands.native_log_file_path.mockReset()
         commands.native_log_set_file_enabled.mockReset()
@@ -93,10 +88,8 @@ describe('RisuNestLogViewer', () => {
         await tick()
     }
 
-    it('waits for loaded device details on the first view and copy while keeping entries off the page', async () => {
-        let resolveDevice!: (device: { model: string; arch: string }) => void
-        commands.diagnostic_device_info.mockImplementation(() => new Promise(resolve => { resolveDevice = resolve }))
-        commands.native_log_tail.mockResolvedValue([
+    it('fetches a fresh tail for view while keeping native entries off the page', async () => {
+        commands.native_log_tail.mockResolvedValueOnce([
             { tsMs: 0, level: 'warn', target: 'native', message: 'older' },
             { tsMs: 1_000, level: 'error', target: 'native', message: 'newer' },
         ])
@@ -108,15 +101,7 @@ describe('RisuNestLogViewer', () => {
         expect(target.textContent).not.toContain('older')
 
         target.querySelector<HTMLButtonElement>('[data-view-log]')!.click()
-        target.querySelector<HTMLButtonElement>('[data-copy-log]')!.click()
         await settleAction()
-        expect(dialogs).toEqual([])
-        expect(navigator.clipboard.writeText).not.toHaveBeenCalled()
-        resolveDevice({ model: 'Synthetic PC', arch: 'x86_64' })
-        await settleAction()
-        expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
-            header + '[1970-01-01T00:00:01.000Z] [error] [native] newer\n[1970-01-01T00:00:00.000Z] [warn] [native] older',
-        )
 
         expect(commands.native_log_tail).toHaveBeenCalledWith({ limit: 500 })
         expect(wrappedDialogs).toEqual([true])

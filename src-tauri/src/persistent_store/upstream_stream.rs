@@ -19,9 +19,6 @@ pub(crate) struct RootSpool {
     cancelled: Arc<AtomicBool>,
 }
 
-const MEMBERS_IN_ORDER: &str = "SELECT key,value FROM members WHERE field=?1 AND value IS NOT NULL
-    ORDER BY array_index IS NULL,array_index,rowid";
-
 fn invalid(message: &str) -> StoreError {
     StoreError::Validation { message: message.to_owned() }
 }
@@ -52,7 +49,6 @@ impl RootSpool {
         db.execute_batch("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-2048;
             CREATE TABLE fields (key TEXT UNIQUE NOT NULL, kind INTEGER NOT NULL, value TEXT, array_index INTEGER);
             CREATE TABLE members (field TEXT NOT NULL, key TEXT NOT NULL, value TEXT, array_index INTEGER, UNIQUE(field,key));
-            CREATE INDEX members_order ON members(field,array_index IS NULL,array_index);
             CREATE TABLE identities (scope TEXT NOT NULL, id TEXT NOT NULL, PRIMARY KEY(scope,id));")?;
         Ok(Self { db, _file: file, cancelled })
     }
@@ -62,9 +58,8 @@ impl RootSpool {
         Ok(())
     }
 
-    pub(super) fn from_stored(connection: &Connection, repository_root: &Path, generation: &str) -> StoreResult<Self> {
-        let scratch=crate::external_storage::leftovers::scratch_directory(repository_root)?;
-        let root=Self::new_in(Some(&scratch),Arc::new(AtomicBool::new(false)))?;
+    pub(super) fn from_stored(connection: &Connection, generation: &str) -> StoreResult<Self> {
+        let root=Self::new(Arc::new(AtomicBool::new(false)))?;
         let rowid=connection.query_row("SELECT rowid FROM root WHERE generation=?1",[generation],|r|r.get(0))?;
         let blob=connection.blob_open(MAIN_DB,"root","value",rowid,true)?;
         let mut decoder=serde_json::Deserializer::from_reader(BufReader::with_capacity(64*1024,blob));
@@ -81,13 +76,10 @@ impl RootSpool {
         raw.map(|raw|decode(&raw)).transpose()
     }
 
-    pub(super) fn visit_value_texts(&self, mut visit: impl FnMut(&str) -> StoreResult<()>) -> StoreResult<()> {
+    pub(super) fn visit_values(&self, mut visit: impl FnMut(Value) -> StoreResult<()>) -> StoreResult<()> {
         let mut statement=self.db.prepare("SELECT value FROM fields WHERE kind=1 UNION ALL SELECT value FROM members WHERE value IS NOT NULL")?;
         let mut rows=statement.query([])?;
-        while let Some(row)=rows.next()? {
-            self.check_cancelled()?;
-            visit(row.get_ref(0)?.as_str().map_err(rusqlite::Error::from)?)?;
-        }
+        while let Some(row)=rows.next()? { self.check_cancelled()?; visit(decode(&row.get::<_,String>(0)?)?)?; }
         Ok(())
     }
 
@@ -156,10 +148,9 @@ impl RootSpool {
         Ok(())
     }
 
-    /// Members are read from `members_order` as the walk advances, so `visit`
-    /// may replace or remove the member it is given but must not add members to `field`.
     pub(crate) fn visit(&self, field: &str, mut visit: impl FnMut(&str, Value) -> StoreResult<()>) -> StoreResult<()> {
-        let mut statement = self.db.prepare(MEMBERS_IN_ORDER)?;
+        let mut statement = self.db.prepare("SELECT key,value FROM members WHERE field=?1 AND value IS NOT NULL
+            ORDER BY array_index IS NULL,array_index,rowid")?;
         let mut rows = statement.query([field])?;
         while let Some(row) = rows.next()? {
             self.check_cancelled()?;
@@ -237,7 +228,8 @@ impl RootSpool {
         } else {
             writer.write_all(if kind == FieldKind::Array { b"[" } else { b"{" })?;
             let mut first = true;
-            let mut statement = self.db.prepare(MEMBERS_IN_ORDER)?;
+            let mut statement = self.db.prepare("SELECT key,value FROM members WHERE field=?1 AND value IS NOT NULL
+                ORDER BY array_index IS NULL,array_index,rowid")?;
             let mut rows = statement.query([key])?;
             while let Some(row) = rows.next()? {
                 self.check_cancelled()?;
@@ -488,33 +480,11 @@ mod tests {
         assert_eq!(kind,"text"); assert!(valid);
         assert_eq!(streamed.read_root(None).unwrap().value,before);
         assert_eq!(streamed.revision().unwrap(),0);
-        let replay=RootSpool::from_stored(&streamed.connection,second.path(),&b).unwrap();
+        let replay=RootSpool::from_stored(&streamed.connection,&b).unwrap();
         assert_eq!(replay.record_by_id("personas","persona-two").unwrap().unwrap()["name"],"edited");
-        let scratch=replay._file.as_ref().unwrap().path().to_path_buf();
-        assert!(scratch.starts_with(second.path().join("external-storage").join("scratch")),"{scratch:?}");
-        drop(replay);
-        assert!(!scratch.exists());
         streamed.replace_commit(&b,Some(0)).unwrap();
         assert_eq!(streamed.revision().unwrap(),1);
         assert_eq!(streamed.materialize(None).unwrap()["temperature"],0.8);
-    }
-
-    #[test]
-    fn member_reads_keep_member_order_without_sorting_values() {
-        let root=RootSpool::new(Arc::new(AtomicBool::new(false))).unwrap();
-        root.begin("object",FieldKind::Object).unwrap();
-        for key in ["b","10","removed","2","4294967295","01","0"] { root.put_member("object",key,Some(&json!(key))).unwrap(); }
-        root.remove_member("object","removed").unwrap();
-        let mut keys=Vec::new();
-        root.visit("object",|key,_| { keys.push(key.to_owned()); Ok(()) }).unwrap();
-        assert_eq!(keys,["0","2","10","b","4294967295","01"]);
-        let mut text=Vec::new();
-        root.write_root(&mut text,false).unwrap();
-        assert_eq!(String::from_utf8(text).unwrap(),r#"{"object":{"0":"0","2":"2","10":"10","b":"b","4294967295":"4294967295","01":"01"}}"#);
-        // A sorter would hold every member value, in RAM under Android's SQLITE_TEMP_STORE=3.
-        let plan=root.db.prepare(&format!("EXPLAIN QUERY PLAN {MEMBERS_IN_ORDER}")).unwrap()
-            .query_map(["object"],|row| row.get::<_,String>(3)).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
-        assert!(!plan.iter().any(|step| step.contains("USE TEMP B-TREE")),"{plan:?}");
     }
 
     #[test]
@@ -590,16 +560,8 @@ mod tests {
             root.put_member("botPresets",&index.to_string(),Some(&json!({"id":format!("preset-{index}"),"body":body}))).unwrap();
         }
         store.replace_put_upstream_stream(&stage,&root).unwrap();
-        let scratch=directory.path().join("external-storage").join("scratch");
-        std::fs::create_dir_all(scratch.parent().unwrap()).unwrap();
-        if scratch.is_dir() { std::fs::remove_dir(&scratch).unwrap(); }
-        std::fs::write(&scratch,b"synthetic unavailable scratch").unwrap();
-        assert!(store.replace_preserve_repositories(&stage,Some(0)).is_err());
-        assert!(commit::staged_plugin_preview(&store.connection,directory.path(),&stage).is_err());
-        std::fs::remove_file(&scratch).unwrap();
         store.replace_preserve_repositories(&stage,Some(0)).unwrap();
-        let preview=commit::staged_plugin_preview(&store.connection,directory.path(),&stage).unwrap();
-        assert_eq!(std::fs::read_dir(&scratch).unwrap().count(),0);
+        let preview=commit::staged_plugin_preview(&store.connection,&stage).unwrap();
         assert_eq!(preview.plugin_names,(0..128).map(|index|format!("plugin-{index}")).collect::<Vec<_>>());
         assert!(preview.values.is_empty());
         let root_bytes:i64=store.connection.query_row("SELECT length(CAST(value AS BLOB)) FROM root WHERE generation=?1",[&stage],|r|r.get(0)).unwrap();
@@ -620,11 +582,11 @@ mod tests {
             (json!("[{\"name\":\"Synthetic\"},{\"name\":\"\"},{\"name\":\"Synthetic\"}]"),vec!["Synthetic","Synthetic"]),
         ] {
             store.replace_put_root(&stage,&json!({"plugins":value})).unwrap();
-            assert_eq!(commit::staged_plugin_preview(&store.connection,directory.path(),&stage).unwrap().plugin_names,names);
+            assert_eq!(commit::staged_plugin_preview(&store.connection,&stage).unwrap().plugin_names,names);
         }
         for value in [json!(true),json!(7)] {
             store.replace_put_root(&stage,&json!({"plugins":value})).unwrap();
-            assert!(commit::staged_plugin_preview(&store.connection,directory.path(),&stage).is_err());
+            assert!(commit::staged_plugin_preview(&store.connection,&stage).is_err());
         }
     }
 }

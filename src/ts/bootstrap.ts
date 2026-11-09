@@ -16,6 +16,7 @@ import { setDatabase, getDatabase, type Database } from "./storage/database.svel
 import { getStartupExclusions, loadDeviceSettings } from "./storage/deviceSettings";
 import { recordNativeLogError, setNativeLogFileEnabled } from "./nativeLog";
 import { generationDiagnostics } from './generationDiagnostics'
+import { createNativeGenerationPort } from './storage/nativeGeneration'
 import { registerRuntimeErrorHandlers } from "./runtimeErrors";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { MobileGUI, botMakerMode, selectedCharID, loadedStore, LoadingStatusState, bootFailure } from "./stores.svelte";
@@ -95,7 +96,6 @@ import { withPersistentRevisionLease } from "./storage/persistentRecordIterator"
 import {
     initializePersistentStorage,
 } from "./storage/persistentStorageRuntime";
-import { compactRequestedStoreAtStart, showStoreCompactionNotice } from "./storage/storeCompaction";
 import {
     acknowledgeRecoveredNativeRestores,
     reconcileNativeFileJobsBeforeBootstrap,
@@ -146,7 +146,7 @@ import {
     NativeFileJobError,
     runNativeOfficialAccountSnapshotRestore,
 } from "./storage/nativeFileJobs";
-import { createNativeOfficialAssetPublisher, createNativeOfficialPublicationJobPublisher } from "./storage/sync/nativeOfficialPublicationJob";
+import { createNativeOfficialPublicationJobPublisher } from "./storage/sync/nativeOfficialPublicationJob";
 import {
     createNativeOfficialPublicationRecovery,
     type NativeOfficialPublicationRecovery,
@@ -167,6 +167,7 @@ import {
     type RetainableReplacementFence,
 } from './storage/retainableReplacementFence'
 
+const NATIVE_GENERATION_EXIT_CLOSE_MILLIS = 1_500
 const appWindow = isTauri ? getCurrentWebviewWindow() : null
 let disposeLifecycleCommitListeners: (() => void) | undefined
 let disposeMacosLifecycle: (() => void) | undefined
@@ -237,10 +238,6 @@ export async function loadData() {
         }
 
         await transition('persistent-storage', language.risuNest.startup.storage)
-        const storeCompaction = isTauri
-            ? await compactRequestedStoreAtStart((text) => { LoadingStatusState.text = text })
-            : null
-        LoadingStatusState.text = language.risuNest.startup.storage
         await initializePersistentStorage()
         if (isTauri) {
             stage = 'device-settings'
@@ -283,6 +280,7 @@ export async function loadData() {
         if (recoveredNativeFileJobs.libraryRestoreCommitted) holdServerSyncAfterRestore()
         const recoveredNativeRestoreJobs =
             recoveredNativeFileJobs.pendingRestoreAcknowledgements
+        configurePersistentDataRuntime({ nativeGeneration: isTauri ? createNativeGenerationPort() : null })
         const runtime = getPersistentDataRuntime()
         const { flush: flushLifecycle, flushForLifecycle } = createLifecycleFlush({
             runtime,
@@ -468,9 +466,6 @@ export async function loadData() {
             ledger: officialAssetLedger,
             association: createOfficialAssociationMarkers(associationStorage),
             nativeDatabasePublisher,
-            nativeAssetPublisher: isTauri
-                ? createNativeOfficialAssetPublisher({ account: accountStorage, baseUrl: hubURL })
-                : undefined,
             getAccountId: isTauri ? getNativeAccountId : undefined,
             flushPublicationMetadata: nativeDatabasePublisher
                 ? flushNativeOfficialMetadata
@@ -697,8 +692,11 @@ export async function loadData() {
         let heldExitRevision: number | undefined
         let heldExitFence: RetainableReplacementFence | undefined
         let selectedExitDrain: SyncExitDrainAdapter | null = null
+        const closeNativeGenerationsForExit = () =>
+            runtime.closeNativeGenerations(NATIVE_GENERATION_EXIT_CLOSE_MILLIS)
         const syncExitCoordinator = createSyncExitCoordinator({
             async acquireEditFence() {
+                await closeNativeGenerationsForExit()
                 const token = await runtime.capturePersistentMutationToken(
                     'normal-exit-fence',
                     { publishOfficial: false },
@@ -710,7 +708,10 @@ export async function loadData() {
                 heldExitFence = fence
                 return fence
             },
-            flushLocal: () => runtime.flushPendingDataLocally('normal-exit'),
+            flushLocal: async () => {
+                await closeNativeGenerationsForExit()
+                await runtime.flushPendingDataLocally('normal-exit')
+            },
             checkpointLocal: async () => {
                 if (!isTauri) return
                 const { checkpointNativePersistentStore } = await import(
@@ -975,10 +976,6 @@ export async function loadData() {
                 void import('./plugins/defaultPluginBootstrap.svelte')
                     .then(({ startDefaultPluginBootstrap }) => startDefaultPluginBootstrap())
                     .catch(error => console.error('Default plugin bootstrap failed', error))
-            }
-            if (isTauri) {
-                await showStoreCompactionNotice(storeCompaction)
-                    .catch(error => console.error('Store compaction notice failed', error))
             }
             if (isTauri && !isTauriAndroid && await takeRendererRecovery()) {
                 // A dialog replaces the toast, so it waits for queued dialogs.

@@ -35,7 +35,6 @@ import {
 } from './nativeFileJobs'
 import { runNativePreparedContentRoute } from './nativePreparedContentRoute'
 import { listenRecoveredAndroidRisuSavePublications } from './risuSaveFileRoute'
-import { createPortableExportIntentStore } from './deviceBackup/job'
 
 let disposeSpoolListener: (() => void) | undefined
 
@@ -137,6 +136,10 @@ export async function importAndroidOpenedPreparedContent(
 export async function importAndroidCharacterSpool(
     source: AndroidSpoolReady,
 ): Promise<NativeAndroidCharacterSpoolResult<string>> {
+    if (source.importDestination === 'preset') {
+        if (!await discardAndroidSafSource(source.token)) throw new NativeFileJobError('discard-failed', 'Interrupted preset source cleanup failed')
+        return { kind: 'declined' }
+    }
     const replayDestination = source.importDestination
         ?? (/\.lorebook$/i.test(source.displayName) ? 'module'
             : /\.json$/i.test(source.displayName) ? 'auto' : null)
@@ -276,15 +279,7 @@ export function registerAndroidRisuSaveRoute(): void {
             getStatus: getAndroidSafExportStatus,
             acknowledge: acknowledgeAndroidSafExport,
             listen: listenAndroidSafDestinationEvents,
-            isActive: (requestId) => {
-                if (isAndroidSafDestinationRequestActive(requestId)) return true
-                try {
-                    const intent = createPortableExportIntentStore().read()
-                    return intent?.publication === 'android-saf' && intent.requestId === requestId
-                } catch {
-                    return false
-                }
-            },
+            isActive: isAndroidSafDestinationRequestActive,
         },
     )
 

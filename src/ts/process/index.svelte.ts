@@ -4,21 +4,20 @@ import { registerGeneratingConversation } from '../storage/generatingConversatio
 import { openGenerationRequestPhase } from './generationRequestPhase'
 import { noteGenerationMessage, noteGenerationStarted } from './generationEnd'
 import { boundedGenerationFallbackReason } from './boundedGenerationAdmission'
-import { generationDiagnostics, type GenerationDiagnosticAdmission, type GenerationDiagnosticFallback, type GenerationDiagnosticOutcome, type GenerationDiagnosticPhase, type GenerationDiagnosticPhaseDetails, type GenerationDiagnosticTrace, type GenerationFailureReason, type GenerationSavePath } from '../generationDiagnostics'
+import { generationDiagnostics, type GenerationDiagnosticAdmission, type GenerationDiagnosticFallback, type GenerationDiagnosticOutcome, type GenerationDiagnosticPhase, type GenerationDiagnosticPhaseDetails, type GenerationDiagnosticTrace, type GenerationSavePath } from '../generationDiagnostics'
 import { get, writable } from "svelte/store";
 import { type character, type MessageGenerationInfo, type Chat, type MessagePresetInfo, activatePresetOverride, setCurrentChat, type Message } from "../storage/database.svelte";
 import { DBState } from '../stores.svelte';
 import { CharEmotion, selectedCharID } from "../stores.svelte";
-import { ChatTokenizer, encodeWithTokenizer, tokenize, tokenizeNum } from "../tokenizer";
+import { ChatTokenizer, prefetchTokenIds, tokenCounter, tokenize, tokenizeNum } from "../tokenizer";
 import { language } from "../../lang";
 import { alertError, alertToast, alertNormal } from "../alert";
 import { parseChatML } from "../parser/chatML";
 import { loadLoreBookV3Prompt } from "./lorebook.svelte";
-import { effectiveAuthorNote } from "../authorNotePresets";
 import { findCharacterbyId, getAuthorNoteDefaultText, getPersonaPrompt, getUserName, isLastCharPunctuation, trimUntilPunctuation, parseToggleSyntax, prebuiltAssetCommand } from "../util";
 import { requestChatData } from "./request/request";
 import { stableDiff } from "./stableDiff";
-import { createPromptScriptOperationScope, processScript, processScriptFull, risuChatParser, type PromptScriptOperationScope } from "./scripts";
+import { createPromptScriptOperationScope, editProcessHasEffects, processScript, processScriptFull, risuChatParser, type PromptScriptOperationScope } from "./scripts";
 import { exampleMessage } from "./exampleMessages";
 import { sayTTS } from "./tts";
 import { supaMemory } from "./memory/supaMemory";
@@ -46,11 +45,14 @@ import { createProductionPluginChatOutputProjector } from '../plugins/pluginData
 import { activatePresetChainForRequest } from "./presetChain";
 import {
     joinGenerationSignal,
+    allowNativeGenerationNavigation,
+    allowNativeGenerationMessageEdit,
     bindGenerationRegexOwner,
     reserveGeneration,
     type GenerationReservation,
 } from './generationState'
 import {
+    getPersistentDataRuntime,
     acknowledgeGenerationCompletion,
     drainDeferredLwwReceives,
     assertPersistentMutationAllowed,
@@ -62,14 +64,11 @@ import {
     captureWindowedConversationMutationController,
     captureSelectedConversationTarget,
     flushPendingData,
-    flushPendingDataLocallyForCheckpoint,
-    capturesImmutableCharacters,
-    pendingConversationMutationDiagnostics,
     getActiveConversationSession,
     invalidateActiveConversationSession,
 } from '../storage/persistentDataRuntime.svelte'
 import { getPersistentDataStore } from '../storage/persistentDataStoreFactory'
-import { ensureCurrentConversationMessageIds, writeConversationMetadata } from '../conversationMutations'
+import { ensureCurrentConversationMessageIds } from '../conversationMutations'
 import { PersistentMutationFencedError } from '../storage/saveCoordinator'
 import { requireCurrentConversationSession } from '../storage/activeConversationSession'
 import {
@@ -101,10 +100,11 @@ import {
     type WindowedConversationMutationController,
 } from '../storage/activeWorkingSet.svelte'
 import { notifyIOSGenerationComplete } from "../iosNative";
-import { isTauriIOS, isTauriAndroid, isTauriDesktop } from "../platform";
+import { isTauri, isTauriIOS, isTauriAndroid, isTauriDesktop } from "../platform";
 import { notifyDesktop } from "../desktopNotifications";
 import { planChatParserHistory } from '../chatParserHistory'
-import { getDeviceSettings } from '../storage/deviceSettings'
+import { getDeviceSettings, getNativeOllamaGeneration } from '../storage/deviceSettings'
+import { runNativeOllamaRoute } from './nativeOllamaRoute'
 import { cloneConversationMetadata, isMetadataOnlySelectedConversation } from '../storage/selectedConversationLifecycle'
 import {
     attachHistoryWindow,
@@ -232,16 +232,9 @@ interface GenerationCompletionLifecycle {
     diagnostics: GenerationDiagnosticTrace
     admission: GenerationDiagnosticAdmission
     diagnosticOutcome?: GenerationDiagnosticOutcome
-    /** Why the open phase is failing; recorded only with a failed exit. */
-    diagnosticReason?: GenerationFailureReason
     enterDiagnosticPhase(phase: GenerationDiagnosticPhase, details?: GenerationDiagnosticPhaseDetails): void
     finishDiagnosticPhase(outcome?: GenerationDiagnosticOutcome): void
     savePath(): GenerationSavePath
-}
-
-function preparationFailed(lifecycle: GenerationCompletionLifecycle, reason: GenerationFailureReason): false {
-    lifecycle.diagnosticReason = reason
-    return false
 }
 
 function diagnosticFallback(reason: string | null): GenerationDiagnosticFallback {
@@ -289,8 +282,7 @@ async function acknowledgeGenerationWithDiagnostics(lifecycle: GenerationComplet
             const matchingAuthority = authority?.characterId === lifecycle.generationTarget?.characterId
                 && authority?.conversationId === lifecycle.generationTarget?.conversationId
             lifecycle.diagnostics.persistence({
-                boundary: 'final', savePath, ...pendingConversationMutationDiagnostics(),
-                dirtyRecords: matchingSession ? session.pinCount('dirty') : undefined,
+                boundary: 'final', savePath,
                 acknowledgedRevision: !authorityCurrent ? undefined : matchingSession ? session.storeRevision
                     : matchingAuthority ? authority?.storeRevision : undefined,
             })
@@ -442,16 +434,16 @@ async function prepareGenerationHistoryWindow(
     const conversation = owner?.chats[owner.chatPage]
     if (!owner || owner.chaId !== target.characterId || conversation?.id !== target.conversationId) return null
     const hypaSettings = memory === 'hypaV3' ? getCurrentHypaV3Preset().settings : null
+    // A remote or plugin tokenizer would see every older message, so the window walk counts locally.
+    const windowTokens = hasObservableHistoryTokenizer() ? tokenCounter('o200k_base') : tokenCounter()
     const preparation = {
         memory,
         conversation: cloneConversationMetadata(conversation),
         preserveOrphanedMemory: hypaSettings?.preserveOrphanedMemory ?? false,
         queryChatCount: hypaSettings?.queryChatCount ?? 0,
         tokenBudget: DBState.db.maxContext * getDeviceSettings().generationHistoryLimitMultiplier,
-        // A remote or plugin tokenizer would see every older message, so the window walk counts locally.
-        countTokens: hasObservableHistoryTokenizer()
-            ? async (text: string) => (await encodeWithTokenizer(text, 'o200k_base')).length
-            : tokenize,
+        countTokens: (text: string) => windowTokens.count(text),
+        prefetchTokens: (texts: string[]) => windowTokens.prefetch(texts),
     }
     const select = async (
         reader: HistoryWindowReader,
@@ -698,6 +690,7 @@ export async function sendChat(arg:{
     usedContinueTokens?:number,
     preview?:boolean
     previewPrompt?:boolean
+    nativeIntent?: 'ordinary'
     /** A chat-screen send, which may load only recent messages when the device option is on. */
     historyLimit?:boolean
 } = {}, inheritedReservation?: GenerationReservation):Promise<boolean> {
@@ -773,9 +766,7 @@ export async function sendChat(arg:{
             diagnostics.phase(phase, 'enter', details)
         },
         finishDiagnosticPhase(outcome = 'ok') {
-            if (activeDiagnosticPhase) diagnostics.phase(activeDiagnosticPhase, 'exit', {
-                outcome, reason: outcome === 'failed' ? lifecycle.diagnosticReason : undefined,
-            })
+            if (activeDiagnosticPhase) diagnostics.phase(activeDiagnosticPhase, 'exit', { outcome })
             activeDiagnosticPhase = null
         },
         savePath() {
@@ -796,7 +787,75 @@ export async function sendChat(arg:{
     let generationReturned = false
     const background = reservation.background
     let generationSignal: ReturnType<typeof joinGenerationSignal> | undefined
+    // The native route reads the whole stored conversation, so a send whose history window applies stays on this route.
+    let nativeRouteSelected = isTauri && DBState.db.aiModel === 'ollama-hosted' && getNativeOllamaGeneration()
+        && getHistoryWindowMemoryMode(arg.historyLimit) === null
+    const isCompletionCurrent = () => nativeRouteSelected ? isAuthorityCurrent() : lifecycle.isTargetCurrent()
     try {
+        if (nativeRouteSelected) {
+            if (arg.nativeIntent !== 'ordinary' || arg.continue || arg.preview || arg.previewPrompt || lifecycle.reroll) {
+                throw new Error('Native Ollama generation supports ordinary Send only')
+            }
+            if (!lifecycle.generationTarget || !initialConversation) throw new Error('No conversation selected for native generation')
+            const runtime = getPersistentDataRuntime()
+            const presetId = DBState.db.botPresets[DBState.db.botPresetsId]?.['id']
+            if (typeof presetId !== 'string') throw new Error('No preset selected for native generation')
+            enteredGeneration = true
+            const restoreStarted = noteGenerationStarted(lifecycle.generationTarget)
+            lifecycle.releaseGeneration = releaseGeneration = registerGeneratingConversation(lifecycle.generationTarget)
+            generationSignal = joinGenerationSignal(arg.signal, background?.signal)
+            if (background) lifecycle.onProgress = completed => background.progress(completed)
+            const result = await runNativeOllamaRoute({
+                runtime, target: lifecycle.generationTarget, effectivePresetId: presetId, authorityEpoch,
+                signal: generationSignal.signal, isPreparationTargetCurrent: isTargetCurrent,
+                residentNullishIndices: () => {
+                    if (isMetadataOnlySelectedConversation(initialConversation)) {
+                        return (runtime.getActiveConversationViewportSource()?.captureResidentRows?.() ?? [])
+                            .filter(row => row.message.chatId == null).map(row => row.absoluteIndex).slice(0, 128)
+                    }
+                    const indices: number[] = []
+                    for (let index = 0; index < initialConversation.message.length && indices.length < 128; index++) {
+                        if (initialConversation.message[index].chatId == null) indices.push(index)
+                    }
+                    return indices
+                },
+                onProgress: lifecycle.onProgress,
+                onPrepared: (ticket, status) => {
+                    const releaseNavigation = allowNativeGenerationNavigation(reservation)
+                    const releaseMessageEdit = allowNativeGenerationMessageEdit(reservation, {
+                        runtime, ticket, status, target: lifecycle.generationTarget!, authorityEpoch,
+                        signal: generationSignal?.signal,
+                    })
+                    return { releaseMessageEdit, releaseNavigation }
+                },
+            })
+            if ('refused' in result) {
+                // The refusal came before any native effect, so this send takes the TS route as if it never tried.
+                restoreStarted()
+                releaseGeneration?.()
+                releaseGeneration = null
+                lifecycle.releaseGeneration = undefined
+                generationSignal.release()
+                generationSignal = undefined
+                lifecycle.onProgress = undefined
+                enteredGeneration = false
+                nativeRouteSelected = false
+            } else {
+                generationReturned = true
+                releaseGeneration?.()
+                releaseGeneration = null
+                lifecycle.acknowledgementAttempted = true
+                await drainDeferredLwwReceives(authorityEpoch)
+                lifecycle.responseCompleted = result.completed
+                lifecycle.diagnosticOutcome = result.completed ? 'ok' : 'aborted'
+                if (result.completed) {
+                    runtime.assertPersistentMutationAllowed(authorityEpoch)
+                    lifecycle.onProgress?.(3)
+                    await notifyGenerationCompletion(result.message)
+                }
+                return result.completed
+            }
+        }
         lifecycle.enterDiagnosticPhase('history-materialization')
         const initialTarget = captureSelectedConversationTarget()
         const mayUseBoundedHistory = (DBState.db.hypaV3 || getHistoryWindowMemoryMode(arg.historyLimit) !== null)
@@ -830,12 +889,12 @@ export async function sendChat(arg:{
         lifecycle.diagnosticOutcome ??= result ? 'ok' : 'failed'
         return lifecycle.isTargetCurrent() && result
     } catch (error) {
-        lifecycle.diagnosticReason ??= error instanceof PersistentMutationFencedError ? 'fenced' : 'error'
+        if (nativeRouteSelected) generationReturned = true
         if (generationSignal?.signal?.aborted || arg.signal?.aborted) {
             generationReturned = true
             return false
         }
-        if (!arg.preview && (error instanceof PersistentMutationFencedError || !lifecycle.isTargetCurrent())) {
+        if (!nativeRouteSelected && !arg.preview && (error instanceof PersistentMutationFencedError || !lifecycle.isTargetCurrent())) {
             generationReturned = true
             return false
         }
@@ -849,7 +908,7 @@ export async function sendChat(arg:{
         try {
             settledSavePath = lifecycle.savePath()
             lifecycle.finishDiagnosticPhase(generationSignal?.signal?.aborted || arg.signal?.aborted ? 'aborted'
-                : !lifecycle.isTargetCurrent() ? 'stale' : lifecycle.diagnosticOutcome ?? 'failed')
+                : !isCompletionCurrent() ? 'stale' : lifecycle.diagnosticOutcome ?? 'failed')
         } catch {}
         try {
             releaseGeneration?.()
@@ -884,7 +943,7 @@ export async function sendChat(arg:{
         } finally {
             try {
                 const outcome = generationSignal?.signal?.aborted || arg.signal?.aborted ? 'aborted'
-                    : !lifecycle.isTargetCurrent() ? 'stale' : lifecycle.diagnosticOutcome ?? 'failed'
+                    : !isCompletionCurrent() ? 'stale' : lifecycle.diagnosticOutcome ?? 'failed'
                 lifecycle.finishDiagnosticPhase(outcome)
                 diagnostics.phase('settled', 'enter')
                 diagnostics.phase('settled', 'exit', { outcome, savePath: settledSavePath })
@@ -947,29 +1006,21 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     function runCurrentChatFunction(chat:Chat){
         if (!lifecycle.isTargetCurrent()) throw new PersistentMutationFencedError()
         const controller = conversationResources.windowedController
-        if (controller?.chat !== chat) {
-            return runCurrentChatParserPass({
-                chat,
-                database: DBState.db,
-                ownerCharacterId: nowChatroom.chaId,
-                parserCharacter: currentChar,
-                session: controller ? null : getActiveConversationSession(),
-                parser: risuChatParser,
-            })
-        }
-        // The window is parsed in order without copying it, and the rows the parser changed are
-        // written as one range, so a stale controller publishes none of them.
-        const messages = chat.message.slice()
-        const parsed = messages.map((message) => {
-            const data = risuChatParser(message.data, { chara: currentChar, runVar: true })
-            return data === message.data ? message : { ...message, data }
+        const source = controller?.chat === chat ? structuredClone(chat) : chat
+        const parsed = runCurrentChatParserPass({
+            chat: source,
+            database: DBState.db,
+            ownerCharacterId: nowChatroom.chaId,
+            parserCharacter: currentChar,
+            session: controller ? null : getActiveConversationSession(),
+            parser: risuChatParser,
         })
-        const start = parsed.findIndex((message, index) => message !== messages[index])
-        if (start === -1) return chat
-        let end = parsed.length
-        while (parsed[end - 1] === messages[end - 1]) end--
-        if (!controller.applyRange(start, end - start, parsed.slice(start, end), end - start === 1 ? 'edit' : 'replace-range')) {
-            throw new PersistentMutationFencedError()
+        if (!controller) return parsed
+        for (let index = 0; index < parsed.message.length; index++) {
+            if (JSON.stringify(parsed.message[index]) === JSON.stringify(chat.message[index])) continue
+            if (!controller.applyRange(index, 1, [parsed.message[index]], 'edit')) {
+                throw new PersistentMutationFencedError()
+            }
         }
         return chat
     }
@@ -1220,7 +1271,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     if (interactionAuthority) {
         if (interactionAuthority.characterId !== nowChatroom.chaId
             || interactionAuthority.conversationId !== nowChatroom.chats[nowChatroom.chatPage]?.id
-            || !recordSelectedCharacterLastInteraction(interactionAuthority, nowChatroom.lastInteraction, interactionTime)) return preparationFailed(lifecycle, 'conversation-changed')
+            || !recordSelectedCharacterLastInteraction(interactionAuthority, nowChatroom.lastInteraction, interactionTime)) return false
         nowChatroom.lastInteraction = interactionTime
     } else if (characterDetailWritable()) {
         nowChatroom.lastInteraction = interactionTime
@@ -1234,7 +1285,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             nowChatroom.chaId,
             historyWindow ? nowChatroom.chats[selectedChat] : selectedConversation,
         )
-    ) return preparationFailed(lifecycle, 'conversation-changed')
+    ) return false
     if (!boundedChat) {
         ensureCurrentConversationMessageIds(
             nowChatroom,
@@ -1386,11 +1437,10 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     let beforeDescriptionPrompts:OpenAIChat[] = []
     let afterDescriptionPrompts:OpenAIChat[] = []
 
-    const authorNote = effectiveAuthorNote(DBState.db.authorNotePresets, currentChat)
-    if(authorNote){
+    if(currentChat.note){
         unformated.authorNote.push({
             role: 'system',
-            content: risuChatParser(authorNote, {chara: currentChar})
+            content: risuChatParser(currentChat.note, {chara: currentChar})
         })
     }
     else if(getAuthorNoteDefaultText() !== ''){
@@ -1618,11 +1668,14 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
         return pmt
     }
 
+    const templateTokens = tokenizer.countBatch()
     if(promptTemplate){
         const template = promptTemplate
 
         async function tokenizeChatArray(chats:OpenAIChat[]){
-            currentTokens += await tokenizer.tokenizeChats(chats)
+            for(const chat of chats){
+                currentTokens += await templateTokens.add(chat)
+            }
         }
 
         for(const card of template){
@@ -1764,9 +1817,12 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     else{
         for(const key in unformated){
             const chats = unformated[key] as OpenAIChat[]
-            currentTokens += await tokenizer.tokenizeChats(chats)
+            for(const chat of chats){
+                currentTokens += await templateTokens.add(chat)
+            }
         }
     }
+    for(const rest of await templateTokens.settle()) currentTokens += rest
     
     const examples = exampleMessage(currentChar, getUserName())
 
@@ -1849,7 +1905,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
         if (!historyWindow) setCurrentChat(currentChat)
         currentTokens += triggerResult.tokens
         if(triggerResult.stopSending){
-            return preparationFailed(lifecycle, 'trigger-stop')
+            return false
         }
     }
 
@@ -1904,6 +1960,9 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
                 : promptHistorySelection,
         )).entries
         : iteratePromptHistoryTargets(promptHistory, promptHistorySelection)
+    // A plugin or a script that injects into the conversation or sets an emotion keeps what it did when a count fails,
+    // so each message is counted before the next one runs.
+    const historyTokens = tokenizer.countBatch({ inline: editProcessHasEffects(nowChatroom) })
     for(const entry of promptHistoryEntries){
         promptScriptOperationScope.assertOwnerCurrent()
         const { relativeIndex: index } = entry
@@ -2092,8 +2151,9 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             delete chat.multimodals
         }
         chats.push(chat)
-        currentTokens += await tokenizer.tokenizeChat(chat)
+        currentTokens += await historyTokens.add(chat)
     }
+    for(const rest of await historyTokens.settle()) currentTokens += rest
     promptScriptOperationScope?.finish()
     promptScriptOperationScope = null
     } catch (error) {
@@ -2119,21 +2179,16 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
         return (v.pos === 'depth' && v.depth > 0) || v.pos === 'reverse_depth'
     })
 
+    const depthTokens = tokenizer.countBatch()
     for(const depthPrompt of depthPrompts){
         const chat:OpenAIChat = {
             role: depthPrompt.role,
             content: risuChatParser(resolvePosition(depthPrompt.prompt), {chara: currentChar})
         }
-        currentTokens += await tokenizer.tokenizeChat(chat)
+        currentTokens += await depthTokens.add(chat)
     }
+    for(const rest of await depthTokens.settle()) currentTokens += rest
     
-    // A session-owned chat records memory state through its session, so the save covers it.
-    const writeChatMetadata = (chat: Chat, values: Partial<Omit<Chat, 'message'>>) =>
-        writeConversationMetadata(nowChatroom, chat, getActiveConversationSession(), values)
-    const writeMemoryMetadata = (values: Partial<Omit<Chat, 'message'>>) => {
-        writeChatMetadata(currentChat, values)
-        writeChatMetadata(DBState.db.characters[selectedChar].chats[selectedChat], values)
-    }
     if(nowChatroom.supaMemory && (DBState.db.supaModelType !== 'none' || DBState.db.hanuraiEnable || DBState.db.hypav2 || DBState.db.hypaV3)){
         stageTimings.stage1Duration = Date.now() - stageTimings.stage1Start
         chatProcessStage.set(2)
@@ -2146,7 +2201,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             })
 
             if(hn === false){
-                return preparationFailed(lifecycle, 'memory-failed')
+                return false
             }
 
             chats = hn.chats
@@ -2159,11 +2214,12 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
                 if (abortSignal.aborted) return false
                 console.log(sp)
                 throwError(sp.error)
-                return preparationFailed(lifecycle, 'memory-failed')
+                return false
             }
             chats = sp.chats
             currentTokens = sp.currentTokens
-            writeMemoryMetadata({ hypaV2Data: sp.memory ?? currentChat.hypaV2Data })
+            currentChat.hypaV2Data = sp.memory ?? currentChat.hypaV2Data
+            DBState.db.characters[selectedChar].chats[selectedChat].hypaV2Data = currentChat.hypaV2Data
 
             currentChat = DBState.db.characters[selectedChar].chats[selectedChat];
             console.log("[Expected to be updated] chat's HypaV2Data: ", currentChat.hypaV2Data)
@@ -2189,29 +2245,29 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             if(sp.error){
                 // Save new summary
                 if (sp.memory) {
+                    currentChat.hypaV3Data = sp.memory
                     if (conversationResources.windowedController) {
-                        currentChat.hypaV3Data = sp.memory
                         if (!conversationResources.windowedController.applyRange(
                             0, 0, [], 'update-metadata',
                         )) throw new PersistentMutationFencedError()
                     } else {
-                        writeMemoryMetadata({ hypaV3Data: sp.memory })
+                        DBState.db.characters[selectedChar].chats[selectedChat].hypaV3Data = currentChat.hypaV3Data
                     }
                 }
                 if (abortSignal.aborted) return false
                 console.log(sp)
                 throwError(sp.error)
-                return preparationFailed(lifecycle, 'memory-failed')
+                return false
             }
             chats = sp.chats
             currentTokens = sp.currentTokens
+            currentChat.hypaV3Data = sp.memory ?? currentChat.hypaV3Data
             if (conversationResources.windowedController) {
-                currentChat.hypaV3Data = sp.memory ?? currentChat.hypaV3Data
                 if (!conversationResources.windowedController.applyRange(
                     0, 0, [], 'update-metadata',
                 )) throw new PersistentMutationFencedError()
             } else {
-                writeMemoryMetadata({ hypaV3Data: sp.memory ?? currentChat.hypaV3Data })
+                DBState.db.characters[selectedChar].chats[selectedChat].hypaV3Data = currentChat.hypaV3Data
                 currentChat = DBState.db.characters[selectedChar].chats[selectedChat];
             }
             if (abortSignal.aborted) return false
@@ -2223,13 +2279,14 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             })
             if(sp.error){
                 throwError(sp.error)
-                return preparationFailed(lifecycle, 'memory-failed')
+                return false
             }
             chats = sp.chats
             currentTokens = sp.currentTokens
-            writeMemoryMetadata({ supaMemoryData: sp.memory ?? currentChat.supaMemoryData })
+            currentChat.supaMemoryData = sp.memory ?? currentChat.supaMemoryData
+            DBState.db.characters[selectedChar].chats[selectedChat].supaMemoryData = currentChat.supaMemoryData
             console.log(currentChat.supaMemoryData)
-            writeChatMetadata(currentChat, { lastMemory: sp.lastId ?? currentChat.lastMemory })
+            currentChat.lastMemory = sp.lastId ?? currentChat.lastMemory;
         }
         stageTimings.stage2Duration = Date.now() - stageTimings.stage2Start
         chatProcessStage.set(1)
@@ -2240,13 +2297,13 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             if(chats.length <= 1){
                 throwError(language.errors.toomuchtoken + "\n\nRequired Tokens: " + currentTokens)
 
-                return preparationFailed(lifecycle, 'token-limit')
+                return false
             }
 
             currentTokens -= await tokenizer.tokenizeChat(chats[0])
             chats.splice(0, 1)
         }
-        writeChatMetadata(currentChat, { lastMemory: chats[0].memo })
+        currentChat.lastMemory = chats[0].memo
     }
 
     let biases:[string,number][] = DBState.db.bias.concat(currentChar.bias).map((v) => {
@@ -2596,16 +2653,18 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
     //token rechecking
     let inputTokens = 0
 
+    const formatedTokens = tokenizer.countBatch()
     for(const chat of formated){
-        inputTokens += await tokenizer.tokenizeChat(chat)
+        inputTokens += await formatedTokens.add(chat)
     }
+    for(const rest of await formatedTokens.settle()) inputTokens += rest
 
     if(inputTokens > maxContextTokens){
         let pointer = 0
         while(inputTokens > maxContextTokens){
             if(pointer >= formated.length){
                 throwError(language.errors.toomuchtoken + "\n\nAt token rechecking. Required Tokens: " + inputTokens)
-                return preparationFailed(lifecycle, 'token-limit')
+                return false
             }
             if(formated[pointer].removable){
                 inputTokens -= await tokenizer.tokenizeChat(formated[pointer])
@@ -2920,11 +2979,6 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             },
             onProviderFailure: throwError,
         },
-        checkpoint: {
-            savePath: () => lifecycle.savePath(),
-            capturesImmutableCharacters,
-            flush: () => flushPendingDataLocallyForCheckpoint('generation-checkpoint'),
-        },
     })
     if (!responseApplication) {
         lifecycle.diagnosticOutcome = abortSignal.aborted ? 'aborted' : req.type === 'fail' ? 'failed' : 'stale'
@@ -3123,9 +3177,10 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             }
 
             let emobias:{[key:number]:number} = {}
+            const emotionIds = await prefetchTokenIds([...emotionList, ...tempEmotion.map((emo) => emo[0])])
 
             for(const emo of emotionList){
-                const tokens = await tokenizeNum(emo)
+                const tokens = emotionIds.get(emo) ?? await tokenizeNum(emo)
                 for(const token of tokens){
                     emobias[token] = 10
                 }
@@ -3134,7 +3189,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             for(let i =0;i<tempEmotion.length;i++){
                 const emo = tempEmotion[i]
 
-                const tokens = await tokenizeNum(emo[0])
+                const tokens = emotionIds.get(emo[0]) ?? await tokenizeNum(emo[0])
                 const modifier = 20 - ((tempEmotion.length - (i + 1)) * (20/4))
 
                 for(const token of tokens){

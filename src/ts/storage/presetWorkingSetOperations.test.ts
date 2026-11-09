@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DBState } from '../stores.svelte'
-import { readPresetBodies, type Database, type botPreset } from './database.svelte'
+import { importPreset, readPresetBodies, type Database, type botPreset } from './database.svelte'
 import {
     createPresetWorkingSetController,
     capturePresetNames,
@@ -8,9 +8,9 @@ import {
     readPersistentPresetBodies,
 } from './presetWorkingSetOperations'
 
-vi.mock('../util', () => ({
+vi.mock('../util', async () => ({
     checkNullish: (value: unknown) => value === null || value === undefined,
-    decryptBuffer: vi.fn(), encryptBuffer: vi.fn(), selectSingleFile: vi.fn(),
+    decryptBuffer: (await import('../bufferCrypto')).decryptBuffer, encryptBuffer: (await import('../bufferCrypto')).encryptBuffer, selectSingleFile: vi.fn(),
 }))
 vi.mock('../alert', () => ({ alertNormal: vi.fn() }))
 vi.mock('../gui/colorscheme', () => ({ defaultColorScheme: {} }))
@@ -126,6 +126,36 @@ describe('store-backed preset operations', () => {
         expect(persisted[added].id).toMatch(/^[0-9a-f-]{36}$/)
         expect(persisted[added].id).not.toBe('file-id')
         expect(incoming.id).toBe('file-id')
+    })
+
+    it('appends one prepared identity and saves active mirrors without changing selection', async () => {
+        const incoming = { ...preset('Prepared', 'native body'), id: 'native-final-id', extension: { retained: true } }
+        live.doNotChangeFallbackModels = true
+        persisted[0].fallbackModels = { model: ['protected'] } as never
+        const index = await controller.appendPreparedPreset(incoming)
+        expect(index).toBe(2)
+        expect(persisted[2]).toEqual(incoming)
+        expect(persisted[2]).not.toBe(incoming)
+        expect(persisted[0].mainPrompt).toBe('edited active first')
+        expect(persisted[0].fallbackModels).toEqual({ model: ['protected'] })
+        expect(live.botPresetsId).toBe(0)
+        expect(live.mainPrompt).toBe('edited active first')
+        const reopened = JSON.parse(JSON.stringify(persisted))
+        expect(reopened[2].id).toBe('native-final-id')
+        await expect(controller.appendPreparedPreset(incoming)).rejects.toThrow('already exists')
+        expect(persisted).toHaveLength(3)
+    })
+
+    it('leaves presets and active mirrors unchanged on failed or cancelled prepared append', async () => {
+        const before = JSON.stringify({ live, persisted })
+        const incoming = { ...preset('Prepared', 'native body'), id: 'native-final-id' }
+        failCommit = true
+        await expect(controller.appendPreparedPreset(incoming)).rejects.toThrow('commit failed')
+        expect(JSON.stringify({ live, persisted })).toBe(before)
+        const abort = new AbortController()
+        abort.abort()
+        await expect(controller.appendPreparedPreset(incoming, abort.signal)).rejects.toMatchObject({ name: 'AbortError' })
+        expect(JSON.stringify({ live, persisted })).toBe(before)
     })
 
     it('does not alter the live working set when persistence fails before publication', async () => {
@@ -294,4 +324,101 @@ it.each(['unchanged', 'replace-during-read'] as const)('reads a preset after its
     if (mode === 'unchanged') await expect(task).resolves.toEqual([preset('X', 'B')])
     else await expect(task).rejects.toThrow('Preset list changed')
     expect(DBState.db.botPresets[1].mainPrompt).toBe(mode === 'unchanged' ? 'B' : 'C')
+})
+
+it('honors cancellation inside queued preparation and returns a committed append after late cancellation', async () => {
+    const abort = new AbortController()
+    let pendingAbort = abort
+    const stored = [{ id: 'active', name: 'Active' }] as botPreset[]
+    const live = { botPresetsId: 0, botPresets: stored } as Database
+    let cancelBeforeMutation = true
+    const controller = createPresetWorkingSetController({
+        getDatabase: () => live, captureCurrentPreset: () => null, applyPreset: () => {},
+        mutatePersistentPresets: async (_reason, mutate) => {
+            if (cancelBeforeMutation) pendingAbort.abort()
+            await mutate({ root: live, presets: stored })
+            pendingAbort.abort()
+        },
+    })
+    await expect(controller.appendPreparedPreset({ id: 'prepared', name: 'Prepared' } as botPreset, abort.signal)).rejects.toMatchObject({ name: 'AbortError' })
+    expect(stored).toHaveLength(1)
+    cancelBeforeMutation = false
+    pendingAbort = new AbortController()
+    const committed = await controller.appendPreparedPreset({ id: 'prepared', name: 'Prepared' } as botPreset, pendingAbort.signal)
+    expect(committed).toBe(1)
+    expect(stored.map(preset => preset.id)).toEqual(['active', 'prepared'])
+    expect(live.botPresetsId).toBe(0)
+})
+
+it('persists a prepared append with active mirrors and reopens the same preset identity', async () => {
+    const [{ IDBFactory, IDBKeyRange }, { IndexedDbPersistentDataStore }, { createPersistentDataRuntime, capturePersistentRoot }] = await Promise.all([
+        import('fake-indexeddb'), import('./indexedDbPersistentDataStore'), import('./persistentDataRuntime'),
+    ])
+    const indexedDB = new IDBFactory()
+    const name = `prepared-preset-${crypto.randomUUID()}`
+    const store = new IndexedDbPersistentDataStore(name, indexedDB, IDBKeyRange)
+    await store.open()
+    let live = {
+        characters: [], botPresetsId: 0, botPresets: [{ id: 'active', name: 'Active', mainPrompt: 'stored active', extension: { retained: 'stored' } }],
+        mainPrompt: 'stored active', pluginCustomStorage: {},
+    } as unknown as Database
+    await store.replaceFromDatabase(live)
+    const runtime = createPersistentDataRuntime({
+        store, prepareDatabase: async database => database,
+        state: {
+            captureRoot: () => capturePersistentRoot(live), capturePresets: () => live.botPresets,
+            captureSelectedCharacter: () => null, captureCharacter: () => null, getSelectedCharacterId: () => null,
+            replaceDatabase: database => { live = structuredClone(database) }, publishCharacter: () => {}, publishConversation: () => {},
+        },
+    })
+    await runtime.initializeActiveWorkingSet(live)
+    live.mainPrompt = 'edited active mirror'
+    const controller = createPresetWorkingSetController({
+        getDatabase: () => live,
+        captureCurrentPreset: () => ({ ...live.botPresets[0], mainPrompt: live.mainPrompt }),
+        applyPreset: () => { throw new Error('Prepared import must not activate the preset') },
+        mutatePersistentPresets: (reason, mutate) => runtime.mutatePersistentPresets(reason, mutate),
+    })
+    const incoming = { id: 'native-final-identity', name: 'Imported', mainPrompt: 'native body', extension: { retained: 'incoming' } } as unknown as botPreset
+    await expect(controller.appendPreparedPreset(incoming)).resolves.toBe(1)
+    const reopened = new IndexedDbPersistentDataStore(name, indexedDB, IDBKeyRange)
+    await reopened.open()
+    const catalog = await reopened.queryPresets()
+    expect(catalog.items.map(preset => preset.id)).toEqual(['active', 'native-final-identity'])
+    const active = await reopened.readPreset('active')
+    const imported = await reopened.readPreset('native-final-identity')
+    expect(active?.value).toMatchObject({ mainPrompt: 'edited active mirror', extension: { retained: 'stored' } })
+    expect(imported?.value).toEqual(incoming)
+    expect((await reopened.readRoot()).value.botPresetsId).toBe('active')
+    expect(live.botPresetsId).toBe(0)
+    expect(live.mainPrompt).toBe('edited active mirror')
+})
+
+it('cancels legacy fallback after real binary decryption without appending a preset', async () => {
+    const [{ webcrypto }, codec, msgpack, fflate] = await Promise.all([
+        import('node:crypto'), import('../bufferCrypto'), import('msgpackr/index-no-eval'), import('fflate'),
+    ])
+    const crypto = webcrypto as unknown as Crypto
+    vi.stubGlobal('window', { crypto })
+    try {
+        const encrypted = new Uint8Array(await codec.encryptBuffer(msgpack.encode({ name: 'Synthetic', mainPrompt: 'must not append' }), 'risupreset'))
+        const bytes = fflate.compressSync(msgpack.encode({ presetVersion: 2, type: 'preset', preset: encrypted }))
+        const abort = new AbortController()
+        const decrypt = crypto.subtle.decrypt.bind(crypto.subtle)
+        const delayed = vi.spyOn(crypto.subtle, 'decrypt').mockImplementation(async (...args) => {
+            const plaintext = await decrypt(...args)
+            abort.abort()
+            return plaintext
+        })
+        runtime.mutatePersistentPresets.mockClear()
+        const { importPreparedNativePreset } = await import('./nativePresetImportRoute')
+        await expect(importPreparedNativePreset({
+            displayName: 'synthetic.risupreset', sourceBytes: bytes.length,
+            nativeMapping: { outcome: 'declined', reason: 'unsupported', name: 'synthetic' },
+            readSource: async () => bytes, release: async () => {},
+        }, { append: async () => { throw new Error('Must use legacy decoder') }, importLegacy: importPreset }, { signal: abort.signal })).rejects.toMatchObject({ name: 'AbortError' })
+        expect(delayed).toHaveBeenCalledOnce()
+        expect(runtime.mutatePersistentPresets).not.toHaveBeenCalled()
+        delayed.mockRestore()
+    } finally { vi.unstubAllGlobals() }
 })

@@ -1,0 +1,427 @@
+{
+  "schema": 1,
+  "baseDb": {
+    "usePlainFetch": true,
+    "koboldURL": "http://kobold.example.test:5001",
+    "instructChatTemplate": "chatml",
+    "username": "Mina",
+    "maxContext": 4000,
+    "maxResponse": 300,
+    "temperature": 80,
+    "top_k": 40,
+    "repetition_penalty": 1.1,
+    "min_p": 0.05,
+    "top_a": 0.2,
+    "top_p": 0.9,
+    "frequencyPenalty": 20,
+    "PresensePenalty": 30,
+    "thinkingTokens": 1024,
+    "reasoningEffort": 1,
+    "verbosity": 1,
+    "seperateParametersEnabled": false,
+    "seperateParametersByModel": false,
+    "applyAdditionalParamsToAll": false,
+    "additionalParams": [],
+    "systemContentReplacement": "",
+    "systemRoleReplacement": "",
+    "proxyKey": "sk-synthetic-proxy",
+    "forceReplaceUrl": "",
+    "customProxyRequestModel": "my-proxy-model",
+    "customAPIFormat": 14,
+    "enableCustomFlags": false,
+    "customFlags": [],
+    "localNetworkMode": false
+  },
+  "cases": [
+    {
+      "id": "text",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "results": [
+              {
+                "text": "Hello there."
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "text-unicode",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "results": [
+              {
+                "text": "안녕 😀\n"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "text-empty",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "results": [
+              {
+                "text": ""
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "extra-results-ignored",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "results": [
+              {
+                "text": "first"
+              },
+              {
+                "text": "second"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "status-201-ok",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 201,
+          "json": {
+            "results": [
+              {
+                "text": "created"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "text-number-declines",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "results": [
+              {
+                "text": 7
+              }
+            ]
+          }
+        }
+      ],
+      "declines": "result-text-not-text"
+    },
+    {
+      "id": "text-missing-declines",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "results": [
+              {}
+            ]
+          }
+        }
+      ],
+      "declines": "result-text-not-text"
+    },
+    {
+      "id": "results-missing-throws",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "other": 1
+          }
+        }
+      ],
+      "declines": "thrown"
+    },
+    {
+      "id": "results-empty-throws",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": {
+            "results": []
+          }
+        }
+      ],
+      "declines": "thrown"
+    },
+    {
+      "id": "json-null-throws",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "json": null
+        }
+      ],
+      "declines": "thrown"
+    },
+    {
+      "id": "http-error-object",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 500,
+          "json": {
+            "detail": {
+              "msg": "boom",
+              "type": "server"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "http-error-string",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 503,
+          "json": "Server busy"
+        }
+      ]
+    },
+    {
+      "id": "http-error-array",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 422,
+          "json": [
+            1,
+            "two"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "http-error-not-json",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 502,
+          "text": "Bad gateway"
+        }
+      ]
+    },
+    {
+      "id": "ok-not-json",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 200,
+          "text": "not json"
+        }
+      ]
+    },
+    {
+      "id": "ok-empty-body",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 200,
+          "text": ""
+        }
+      ]
+    },
+    {
+      "id": "transport-error",
+      "model": "kobold",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "throws": "fetch failed"
+        }
+      ]
+    }
+  ]
+}

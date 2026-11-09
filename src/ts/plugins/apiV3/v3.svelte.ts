@@ -144,7 +144,7 @@ function getPluginDatabaseAccess(owner: string, storage: PluginOwnerStorage): Pl
             if (!Object.prototype.hasOwnProperty.call(database, 'plugins')) return database
             return {
                 ...database,
-                plugins: await handlePluginInstallViaPlugin(database.plugins as RisuPlugin[], owner, 'setDatabase'),
+                plugins: await handlePluginInstallViaPlugin(database.plugins as RisuPlugin[]),
             }
         },
         snapshot: <T>(value: T) => $state.snapshot(value) as T,
@@ -498,7 +498,6 @@ type SafeMutationRecordObject = {
     type: string;
     target: SafeElement;
     addedNodes: SafeElement[];
-    removedNodes: SafeElement[];
 }
 
 class SafeClassArray<T> {
@@ -523,12 +522,10 @@ class SafeMutationRecord{
     #type: string;
     #target: SafeElement;
     #addedNodes: SafeClassArray<SafeElement>;
-    #removedNodes: SafeClassArray<SafeElement>;
-    constructor(type: string, target: SafeElement, addedNodes: SafeElement[], removedNodes: SafeElement[]) {
+    constructor(type: string, target: SafeElement, addedNodes: SafeElement[]) {
         this.#type = type;
         this.#target = target;
         this.#addedNodes = new SafeClassArray<SafeElement>(addedNodes);
-        this.#removedNodes = new SafeClassArray<SafeElement>(removedNodes);
     }
     getType(): string {
         return this.#type;
@@ -538,9 +535,6 @@ class SafeMutationRecord{
     }
     getAddedNodes(): SafeClassArray<SafeElement> {
         return this.#addedNodes;
-    }
-    getRemovedNodes(): SafeClassArray<SafeElement> {
-        return this.#removedNodes;
     }
 }
 
@@ -577,8 +571,7 @@ class SafeMutationObserver {
                 safeClassed.push(new SafeMutationRecord(
                     record.type,
                     record.target,
-                    record.addedNodes,
-                    record.removedNodes,
+                    record.addedNodes
                 ));
             }
             callback(safeClassed);
@@ -664,11 +657,11 @@ const unloadV3Plugin = async (pluginName: string) => {
     }
 }
 
-type PluginPermission = 'fetchLogs' | 'db' | 'mainDom' | 'replacer' | 'provider' | 'sendChat' | 'inlay' | 'hostTools'
+type PluginPermission = 'fetchLogs' | 'db' | 'mainDom' | 'replacer' | 'provider' | 'sendChat' | 'inlay'
 
 const permissionWrites = new Mutex()
 let permissionEpoch = 0
-const periodicPermissions = new Set<PluginPermission>(['db', 'replacer', 'provider', 'inlay', 'hostTools'])
+const periodicPermissions = new Set<PluginPermission>(['db', 'replacer', 'provider', 'inlay'])
 const permissionReconfirmInterval = 7 * 24 * 60 * 60 * 1000
 interface PluginPermissionContext {
     name: string
@@ -723,7 +716,6 @@ const getPluginPermission = async (context: PluginPermissionContext, permissionD
         : permissionDesc === 'provider' ? language.providerPermissionConsent.replace("{}", pluginName)
         : permissionDesc === 'sendChat' ? language.sendChatConsent.replace("{}", pluginName)
         : permissionDesc === 'inlay' ? language.inlayPermissionConsent.replace("{}", pluginName)
-        : permissionDesc === 'hostTools' ? language.hostToolPermissionConsent.replace("{}", pluginName)
         : null
     if (!alertTitle || context.signal.aborted || epoch !== permissionEpoch) return false
     const granted = await alertConfirm(alertTitle)
@@ -797,7 +789,6 @@ const makeRisuaiAPIV3 = (
         chatView: chatViewEvents.forOwner(plugin.name),
         generationEnd: generationEndEvents.forOwner(plugin.name),
         hasDatabasePermission: () => getPluginPermission(permissionContext, 'db', 'periodically'),
-        hasHostToolPermission: () => getPluginPermission(permissionContext, 'hostTools', 'periodically'),
         lifetimeSignal: pluginLifetime.signal,
     })
     const fullObjectContext = (): PluginFullObjectCallContext => ({
@@ -935,13 +926,13 @@ const makeRisuaiAPIV3 = (
         setDatabase: (database: Record<string, unknown>) =>
             databaseAccess.setDatabase(database, allowedDbKeys),
         loadPlugins: oldApis.loadPlugins,
-        readImage: (path: string) => oldApis.readImage(path, { background: true }),
+        readImage: oldApis.readImage,
         readInlay: async (id: string) => {
             const conf = await getPluginPermission(permissionContext, 'inlay', 'periodically');
             if(!conf){
                 return null;
             }
-            return await getInlayAsset(id, { background: true });
+            return await getInlayAsset(id);
         },
         saveAsset: oldApis.saveAsset,
         //Same functionality, but new implementation
@@ -996,7 +987,7 @@ const makeRisuaiAPIV3 = (
         risunestOnGenerationEnd: (callback?: unknown) =>
             risunest.onGenerationEnd(callback),
 
-        installPlugin: (plugins: RisuPlugin[]) => handlePluginInstallViaPlugin(plugins, plugin.name, 'installPlugin'),
+        installPlugin: handlePluginInstallViaPlugin,
 
         // --- Color Scheme APIs ---
         changeColorScheme: (name: string) => {
@@ -1467,7 +1458,6 @@ const makeRisuaiAPIV3 = (
                     isTauri ? 'tauri' :
                     forageStorage.isAccount ? 'account' :
                     'local',
-                structuredLocalPluginStorage: isTauri,
             }
         },
         getLocalPluginStorage: () => {
@@ -1871,7 +1861,7 @@ export async function executePluginV3(plugin:RisuPlugin, isCurrent: () => boolea
     const api = makeRisuaiAPIV3(iframe, plugin, claimSession);
     const host = new SandboxHost(api, isTauri ? createPluginDownloadHandler({
         fetch: api.nativeFetch,
-        save: (name, bytes) => downloadFile(name, bytes),
+        save: (name, bytes) => downloadFile(name, bytes, { saveDialog: true }),
         reportError: error => alertError(String(error)),
     }) : undefined);
     host.onActivityChanged?.(notifyPluginActivity);

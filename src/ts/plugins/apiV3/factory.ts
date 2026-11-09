@@ -4,7 +4,6 @@ import { consoleLog, installConsoleCapture, isConsoleLogLevel } from '../../cons
 import { attachPluginReadProvenance, collectPluginReadProvenance, type PluginReadProvenance } from '../pluginReadBaselines'
 import { type PluginDownloadHandler } from './pluginDownload'
 import { installWebviewBridge } from '../../webviewDownload'
-import { installCanvasWebpCompatibility } from './canvasWebp'
 
 type MsgType =
     | 'CALL_ROOT'
@@ -22,7 +21,6 @@ interface RpcMessage {
     type: MsgType;
     reqId?: string;
     id?: string;
-    ids?: string[];
     method?: string;
     args?: any[];
     result?: any;
@@ -59,21 +57,6 @@ await (async function() {
     // WeakMap so dropped proxies do not pin their ref ids for the whole
     // plugin lifetime; release() also removes the mapping explicitly.
     const proxyRefRegistry = new WeakMap();
-    const releaseBuffer = [];
-    const flushReleases = () => {
-        if (releaseBuffer.length === 0) return;
-        const ids = releaseBuffer.splice(0);
-        try {
-            send({ type: 'RELEASE_INSTANCE', ids: ids });
-        } catch (_) {
-            // Frame is tearing down; host clears its registry anyway
-        }
-    };
-    const releaseRegistry = new FinalizationRegistry((id) => {
-        // Schedule one flush per burst: first push arms the microtask.
-        if (releaseBuffer.length === 0) queueMicrotask(flushReleases);
-        releaseBuffer.push(id);
-    });
     const abortControllers = new Map();
     const readProvenance = new WeakMap();
 
@@ -149,25 +132,15 @@ await (async function() {
                             send({ type: 'RELEASE_INSTANCE', id: val.id });
                         };
                     }
-                    return (...args) => {
-                        // Extracted methods must pin their owning proxy:
-                        // without this reference the proxy could be
-                        // collected (and auto-released) while this
-                        // function is still callable.
-                        void proxy;
-                        return sendRequest('CALL_INSTANCE', {
-                            id: val.id,
-                            method: prop,
-                            args: args
-                        });
-                    };
+                    return (...args) => sendRequest('CALL_INSTANCE', {
+                        id: val.id,
+                        method: prop,
+                        args: args
+                    });
                 }
             });
             // Store the mapping so we can serialize it back
             proxyRefRegistry.set(proxy, val.id);
-            // Held value must be the id string, never the proxy itself:
-            // the registry holds it strongly until cleanup fires.
-            releaseRegistry.register(proxy, val.id);
             return proxy;
         }
         if (val && typeof val === 'object' && val.__type === 'CALLBACK_STREAMS') {
@@ -249,11 +222,8 @@ await (async function() {
         }
     }
 
-    // Each object is visited once, so cycles end and a buffer reached twice is
-    // listed once.
-    function collectTransferables(obj, transferables = [], seen = new Set(transferables)) {
-        if (!obj || typeof obj !== 'object' || seen.has(obj)) return transferables;
-        seen.add(obj);
+    function collectTransferables(obj, transferables = []) {
+        if (!obj || typeof obj !== 'object') return transferables;
 
         if (obj instanceof ArrayBuffer ||
             obj instanceof MessagePort ||
@@ -262,28 +232,16 @@ await (async function() {
             transferables.push(obj);
         }
         else if (ArrayBuffer.isView(obj) && obj.buffer instanceof ArrayBuffer) {
-            if (!seen.has(obj.buffer)) {
-                seen.add(obj.buffer);
-                transferables.push(obj.buffer);
-            }
+            transferables.push(obj.buffer);
         }
         else if (Array.isArray(obj)) {
-            obj.forEach(item => collectTransferables(item, transferables, seen));
+            obj.forEach(item => collectTransferables(item, transferables));
         }
         else if (obj.constructor === Object) {
-            Object.values(obj).forEach(value => collectTransferables(value, transferables, seen));
+            Object.values(obj).forEach(value => collectTransferables(value, transferables));
         }
 
         return transferables;
-    }
-
-    // Same rule as the host: a failed stream never reaches the other side as a clean end.
-    function streamErrorMessage(error) {
-        try {
-            if (error && typeof error.message === 'string' && error.message) return error.message;
-            if (error !== undefined && error !== null && error !== '') return String(error);
-        } catch (_) {}
-        return 'Stream failed';
     }
 
     function replaceStreamsWithPorts(obj) {
@@ -325,7 +283,7 @@ await (async function() {
                         ch.port1.postMessage({ done: false, value });
                     }
                 } catch (e) {
-                    try { ch.port1.postMessage({ done: true, error: streamErrorMessage(e) }); } catch(_) {}
+                    try { ch.port1.postMessage({ done: true, error: e.message }); } catch(_) {}
                     finish();
                 } finally {
                     reading = false;
@@ -368,8 +326,7 @@ await (async function() {
                 start(controller) {
                     port.onmessage = (e) => {
                         if (e.data.done) {
-                            // A failed read is a TypeError, as fetch reports a body that fails midway.
-                            if (e.data.error) controller.error(new TypeError(e.data.error));
+                            if (e.data.error) controller.error(new Error(e.data.error));
                             else controller.close();
                             port.onmessage = null;
                             port.close();
@@ -392,13 +349,8 @@ await (async function() {
         if (obj.__type === 'STREAM_PORT') return reconstruct(obj);
         if (Object.prototype.toString.call(obj) === '[object Object]') {
             const out = {};
-            let changed = false;
-            for (const k of Object.keys(obj)) {
-                out[k] = reconstruct(obj[k]);
-                if (!Object.is(out[k], obj[k])) changed = true;
-            }
-            // Without streams the result is kept as it is, so references back to it stay intact.
-            return changed ? out : obj;
+            for (const k of Object.keys(obj)) out[k] = reconstruct(obj[k]);
+            return out;
         }
 
         return obj;
@@ -658,17 +610,6 @@ await (async function() {
 const requestSignalKeys = new Map([['nativeFetch', 'signal'], ['risuFetch', 'abortSignal']]);
 export const UNREAD_PLUGIN_STREAM_TIMEOUT_MS = 60_000;
 
-// A stream may fail with any value (plugin-http fails with plain strings), so
-// the other side gets a message that is never empty.
-function streamErrorMessage(error: unknown): string {
-    try {
-        const message = (error as { message?: unknown } | null | undefined)?.message;
-        if (typeof message === 'string' && message) return message;
-        if (error !== undefined && error !== null && error !== '') return String(error);
-    } catch (_) {}
-    return 'Stream failed';
-}
-
 export class SandboxHost {
     private iframe: HTMLIFrameElement;
     private apiFactory: any;
@@ -677,7 +618,6 @@ export class SandboxHost {
     private csp = `connect-src 'none'; script-src 'nonce-${this.nonce}' 'wasm-unsafe-eval'; frame-src 'none'; object-src 'none'; style-src * 'unsafe-inline'; default-src 'none'; img-src * data: blob:; font-src * data: blob:; media-src * data: blob:; base-uri 'none';`;
 
     private instanceRegistry = new Map<string, any>();
-    private refIdCounter = 0;
     private abortControllers = new Map<string, AbortController>();
     private messageHandlerRef: ((event: MessageEvent) => void) | null = null;
     private disposeConsoleClear: (() => void) | null = null;
@@ -773,11 +713,8 @@ export class SandboxHost {
         });
     }
 
-    // Each object is visited once, so cycles end and a buffer reached twice is
-    // listed once.
-    private collectTransferables(obj: any, transferables: Transferable[] = [], seen = new Set<unknown>(transferables)): Transferable[] {
-        if (!obj || typeof obj !== 'object' || seen.has(obj)) return transferables;
-        seen.add(obj);
+    private collectTransferables(obj: any, transferables: Transferable[] = []): Transferable[] {
+        if (!obj || typeof obj !== 'object') return transferables;
 
         if (obj instanceof ArrayBuffer ||
             obj instanceof MessagePort ||
@@ -788,16 +725,13 @@ export class SandboxHost {
             transferables.push(obj);
         }
         else if (ArrayBuffer.isView(obj) && obj.buffer instanceof ArrayBuffer) {
-            if (!seen.has(obj.buffer)) {
-                seen.add(obj.buffer);
-                transferables.push(obj.buffer);
-            }
+            transferables.push(obj.buffer);
         }
         else if (Array.isArray(obj)) {
-            obj.forEach(item => this.collectTransferables(item, transferables, seen));
+            obj.forEach(item => this.collectTransferables(item, transferables));
         }
         else if (obj.constructor === Object) {
-            Object.values(obj).forEach(value => this.collectTransferables(value, transferables, seen));
+            Object.values(obj).forEach(value => this.collectTransferables(value, transferables));
         }
 
         return transferables;
@@ -814,7 +748,7 @@ export class SandboxHost {
             if (Array.isArray(val)) return val;
 
 
-            const id = 'ref_' + (++this.refIdCounter);
+            const id = 'ref_' + Math.random().toString(36).substring(2);
             this.instanceRegistry.set(id, val);
             return { __type: 'REMOTE_REF', id } as RemoteRef;
         }
@@ -998,8 +932,8 @@ export class SandboxHost {
                         if (done) { ch.port1.postMessage({ done: true }); finish(); return; }
                         ch.port1.postMessage({ done: false, value });
                     }
-                } catch (e) {
-                    try { ch.port1.postMessage({ done: true, error: streamErrorMessage(e) }); } catch(_) {}
+                } catch (e: any) {
+                    try { ch.port1.postMessage({ done: true, error: e.message }); } catch(_) {}
                     finish();
                 } finally {
                     reading = false;
@@ -1025,8 +959,7 @@ export class SandboxHost {
         if (obj.constructor === Object) {
             const out: any = {};
             for (const k of Object.keys(obj)) out[k] = replace(obj[k]);
-            // Without streams the object is sent as it is, so references back to it stay intact.
-            return { result: ports.length ? out : obj, ports, cleanups };
+            return { result: out, ports, cleanups };
         }
 
         return { result: obj, ports, cleanups };
@@ -1207,8 +1140,7 @@ export class SandboxHost {
 
 
             if (data.type === 'RELEASE_INSTANCE') {
-                if (data.id) this.instanceRegistry.delete(data.id!);
-                if (Array.isArray(data.ids)) for (const id of data.ids) this.instanceRegistry.delete(id);
+                this.instanceRegistry.delete(data.id!);
                 return;
             }
 
@@ -1265,11 +1197,7 @@ export class SandboxHost {
 
 
                     if (data.type === 'CALL_ROOT') {
-                        if (data.method === '_encodeCanvasWebp') {
-                            if (!isTauri) throw new Error('Native WebP encoding is unavailable')
-                            const { encodeNativeCanvasWebp } = await import('./nativeCanvasWebp')
-                            result = await encodeNativeCanvasWebp(args[0], args[1], args[2], args[3], () => this.terminated);
-                        } else if (downloadSignal) {
+                        if (downloadSignal) {
                             result = await this.download!(args[0], args[1], downloadSignal);
                         } else {
                             const fn = this.apiFactory[data.method!];
@@ -1417,7 +1345,6 @@ export class SandboxHost {
             window.addEventListener('unhandledrejection', event => reportPluginError(event.reason));
             (async () => {
                 ${GUEST_BRIDGE_SCRIPT}
-                ${isTauri ? `(${installCanvasWebpCompatibility.toString()})((data, width, height, quality) => window.risuai._encodeCanvasWebp(data, width, height, quality));` : ''}
                 ${this.download ? `(${installWebviewBridge.toString()})((name, source) => window.risuai._downloadFile(name, source), reportPluginError);` : ''}
                     
                 const settled = () => {

@@ -132,23 +132,17 @@ impl PersistentStore {
         &mut self,
         scope: &OrphanAliasScope<'_>,
     ) -> StoreResult<Vec<UnreferencedAlias>> {
-        let Some(mut search) = self.search_unreferenced_asset_aliases(scope)? else {
+        let Some(search) = self.search_unreferenced_asset_aliases(scope)? else {
             return Ok(Vec::new());
         };
         if search.unreferenced.is_empty() {
             return Ok(Vec::new());
         }
+        let roots = self.collect_asset_gc_roots_without_unreferenced_aliases(&search, false)?;
         let cas = crate::asset_repository::PayloadCas::new(&self.repository_root)?;
         let residency = crate::server_sync::residency::Residency::open(&self.repository_root)
             .map_err(|error| std::io::Error::other(error.code))?;
-        let mark = |search: &OrphanAliasSearch| -> StoreResult<AssetGcMarks> {
-            let roots = self.collect_asset_gc_roots_without_unreferenced_aliases(search, false)?;
-            Ok(mark_asset_roots_with_remote(&cas, roots.into_iter().map(|(_, roots)| roots), |hash| residency.gc_size(hash))?)
-        };
-        let mut marks = mark(&search)?;
-        if self.keep_aliases_archives_name(&mut search, &marks, scope)? {
-            marks = mark(&search)?;
-        }
+        let marks = mark_asset_roots_with_remote(&cas, roots.into_iter().map(|(_, roots)| roots), |hash| residency.gc_size(hash))?;
         let (orphans, _) = search.orphans(&marks, scope);
         if orphans.is_empty() {
             return Ok(Vec::new());
@@ -168,8 +162,6 @@ impl PersistentStore {
                 // Rows can be received without moving the revision, so the commit also requires
                 // the ones the search read.
                 gallery_pending_fence: Some(search.pending_fence),
-                // Recovery of an interrupted commit checks the plugin values against it too.
-                device_plugin_fence: search.device_fence.clone(),
                 unit_mutations: Some(unit_mutations),
                 ..Default::default()
             },
@@ -179,72 +171,6 @@ impl PersistentStore {
             },
         )?;
         Ok(orphans)
-    }
-
-    /// Takes out of `search` the aliases the unused-file cleanup would delete now that an archived
-    /// character's text names, and returns whether it took out any; the roots then have to be
-    /// marked again. Archives written before their records listed the keys inside longer text,
-    /// such as an `<img src>` in a chat, name those only in their payload.
-    pub(crate) fn keep_aliases_archives_name(
-        &self,
-        search: &mut OrphanAliasSearch,
-        marks: &AssetGcMarks,
-        scope: &OrphanAliasScope<'_>,
-    ) -> StoreResult<bool> {
-        // A permanent delete runs after every delete with the store held, so it reads no payload.
-        if !matches!(scope, OrphanAliasScope::Cleanup { .. }) {
-            return Ok(false);
-        }
-        // An alias still within the grace is checked once the grace has passed.
-        let candidates = search.orphans(marks, scope).0.into_iter().map(|alias| alias.key).collect::<BTreeSet<_>>();
-        if candidates.is_empty() {
-            return Ok(false);
-        }
-        let mut matcher = AssetKeyMatcher::new(candidates.iter().cloned());
-        let kept = if self.observe_archive_payloads(&mut matcher)? {
-            let unreferenced = matcher.unreferenced().collect::<BTreeSet<_>>();
-            candidates.difference(&unreferenced).cloned().collect()
-        } else {
-            // A payload this device cannot read could name any of them.
-            candidates
-        };
-        if kept.is_empty() {
-            return Ok(false);
-        }
-        search.unreferenced.retain(|alias| !kept.contains(&alias.key));
-        Ok(true)
-    }
-
-    /// Feeds the payload of every archived character, the one a restore reads, to `matcher`.
-    /// Returns false when one is not held on this device or cannot be read.
-    fn observe_archive_payloads(&self, matcher: &mut AssetKeyMatcher) -> StoreResult<bool> {
-        let generation = super::active_generation(&self.connection)?;
-        let cas = crate::asset_repository::PayloadCas::new(&self.repository_root)?;
-        let mut statement = self.connection.prepare(
-            "SELECT archived_object FROM characters WHERE generation = ?1 AND archived_object IS NOT NULL",
-        )?;
-        let mut rows = statement.query([generation])?;
-        while let Some(row) = rows.next()? {
-            if matcher.is_complete() {
-                break;
-            }
-            let ValueRef::Text(record) = row.get_ref(0)? else { return Ok(false) };
-            let Ok(archived) = serde_json::from_slice::<super::archive::ArchivedObject>(record) else {
-                return Ok(false);
-            };
-            let Some(file) = cas.open_object(&archived.object_hash)? else { return Ok(false) };
-            let mut output = TextWriter { stream: matcher.stream(false), held: Vec::new() };
-            let read = super::archive::read_payload_text(file, |bytes| {
-                io::Write::write_all(&mut output, bytes)?;
-                Ok(!output.stream.matcher.is_complete())
-            });
-            // A read that stopped once every key was found can end inside a character.
-            if read.is_err() || !output.held.is_empty() && !output.stream.matcher.is_complete() {
-                return Ok(false);
-            }
-            output.stream.finish();
-        }
-        Ok(true)
     }
 
     /// Marks every key `matcher` finds in the active generation, its owner manifests, the stored
@@ -271,8 +197,8 @@ impl PersistentStore {
         let device = self.device_store()?;
         readable &= observe_text_rows(
             device.connection(),
-            "SELECT value FROM device_settings WHERE key <> ?1",
-            [PUBLICATION_LEDGER_SETTING],
+            "SELECT value FROM device_settings WHERE key NOT IN (?1, ?2, ?3)",
+            [PUBLICATION_LEDGER_SETTING, super::generation::JOURNAL_KEY, super::lww::NATIVE_RECEIVE_RECEIPT_SETTING],
             false,
             matcher,
         )?;
@@ -742,8 +668,7 @@ fn ascii_escaped(text: &str, uppercase: bool) -> String {
 
 impl PersistentStore {
     /// The owned keys the conversations of `character_ids` name in their details and messages, by
-    /// the rules the renderer applies to a deleted owner's own data, and the keys of archived
-    /// characters, up to `limit` keys.
+    /// the rules the renderer applies to a deleted owner's own data, up to `limit` keys.
     pub(crate) fn character_conversation_asset_keys(
         &self,
         character_ids: &[String],
@@ -776,32 +701,6 @@ impl PersistentStore {
                         return Ok(keys.into_iter().take(limit).collect());
                     }
                 }
-            }
-        }
-        // An archived character's details and chats are inside its archive, which the renderer
-        // cannot read, so its keys are the owned aliases of the objects the archive recorded.
-        let mut archived_hashes = BTreeSet::new();
-        for character_id in character_ids {
-            if let Some(archived) = super::archive::read_archived_object(&self.connection, &generation, character_id)? {
-                archived_hashes.extend(archived.asset_hashes.into_iter().chain(archived.shared_asset_hashes));
-            }
-        }
-        if archived_hashes.is_empty() {
-            return Ok(keys);
-        }
-        let mut statement = self.connection.prepare(
-            "SELECT logical_key, object_hash FROM asset_aliases
-             WHERE generation = ?1 AND kind = 'asset' AND object_hash IS NOT NULL",
-        )?;
-        let mut rows = statement.query([&generation])?;
-        while let Some(row) = rows.next()? {
-            let key = row.get::<_, String>(0)?;
-            if !archived_hashes.contains(&row.get::<_, String>(1)?) || owned_key(&key).as_ref() != Some(&key) {
-                continue;
-            }
-            keys.insert(key);
-            if keys.len() >= limit {
-                return Ok(keys.into_iter().take(limit).collect());
             }
         }
         Ok(keys)
@@ -838,20 +737,26 @@ fn collect_owned_keys(text: &str, keys: &mut BTreeSet<String>) {
     }
 }
 
-/// Adds the owned keys every string in `value` names, as `collect_owned_keys` finds them.
-pub(super) fn collect_value_owned_keys(value: &serde_json::Value, keys: &mut BTreeSet<String>) {
-    match value {
-        // Most strings name no key, and `owned_key` copies the whole string.
-        serde_json::Value::String(text) if text.contains(ANCHOR) => collect_owned_keys(text, keys),
-        serde_json::Value::Array(values) => values.iter().for_each(|value| collect_value_owned_keys(value, keys)),
-        serde_json::Value::Object(values) => values.values().for_each(|value| collect_value_owned_keys(value, keys)),
-        _ => {}
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::AssetKeyMatcher;
+
+    #[test]
+    fn operational_generation_records_do_not_hold_assets_but_other_settings_do() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::persistent_store::PersistentStore::open(directory.path()).unwrap();
+        let db = store.device_store().unwrap().connection();
+        for (key, asset) in [
+            (crate::persistent_store::generation::JOURNAL_KEY, "assets/operation.png"),
+            ("official-account.pending-assets.v1", "assets/pending.png"),
+            ("native-generation-journal-v1-extra", "assets/other.png"),
+        ] {
+            db.execute("INSERT INTO device_settings(key,value) VALUES(?1,?2)", rusqlite::params![key, serde_json::to_string(asset).unwrap()]).unwrap();
+        }
+        let mut matcher = AssetKeyMatcher::new(["assets/operation.png", "assets/pending.png", "assets/other.png"].map(str::to_owned));
+        assert!(store.observe_asset_key_references(&store.library_identity().unwrap(), &mut matcher).unwrap().is_some());
+        assert_eq!(matcher.unreferenced().collect::<Vec<_>>(), ["assets/operation.png"]);
+    }
 
     fn unreferenced(keys: &[&str], texts: &[&str], plugin: bool) -> Vec<String> {
         let mut matcher = AssetKeyMatcher::new(keys.iter().map(|key| key.to_string()));

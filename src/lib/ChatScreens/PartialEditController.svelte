@@ -582,7 +582,12 @@
                 const elementAtPoint = document.elementFromPoint(lastMouseX, lastMouseY);
                 if (elementAtPoint) {
                     const block = elementAtPoint.closest(SELECTOR) as HTMLElement | null;
-                    if (block && block !== bodyRoot && bodyRoot.contains(block) && hasTextContent(block)) {
+                    // The rendered body is wrapped in a display:contents span;
+                    // offering it as a block would target the entire message,
+                    // which the bodyRoot exclusion is meant to prevent.
+                    if (block && block !== bodyRoot && bodyRoot.contains(block)
+                        && getComputedStyle(block).display !== 'contents'
+                        && hasTextContent(block)) {
                         showBlockButton(block);
                         return;
                     }

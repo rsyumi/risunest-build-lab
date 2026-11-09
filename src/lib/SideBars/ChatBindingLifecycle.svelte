@@ -11,7 +11,6 @@
         flushPendingData,
     } from 'src/ts/storage/persistentDataRuntime.svelte'
     import { alertError } from 'src/ts/alert'
-    import { refreshAuthorNoteCopy } from 'src/ts/chatBindings.svelte'
     let recovering = new Set<string>()
     $effect(() => {
         const character = DBState.db?.characters?.[$selectedCharID]
@@ -63,13 +62,5 @@
             flushEffectiveToggleEdits(db)
             deriveEffectiveToggleVariables(db, chat && !isConversationSummaryStub(chat) ? chat : undefined)
         })
-    })
-    // Runs when another conversation is selected or finishes loading, not on every preset edit.
-    $effect(() => {
-        const character = DBState.db?.characters?.[$selectedCharID]
-        const chat = character?.chats?.[character.chatPage]
-        if (!chat || untrack(() => isConversationSummaryStub(chat))) return
-        // A failed copy is retried on the next selection; readers resolve the preset meanwhile.
-        untrack(() => refreshAuthorNoteCopy()).catch(() => {})
     })
 </script>

@@ -4,6 +4,7 @@
     import { activeRerollConversations } from 'src/ts/durableReroll'
     import { innerWidth } from 'svelte/reactivity/window'
     import { doingChat } from 'src/ts/process/index.svelte'
+    import { captureNativeGenerationMessageEdit } from 'src/ts/process/generationState'
     import { ArrowLeft, ArrowLeftRightIcon, ArrowRight, BookmarkIcon, BotIcon, CopyIcon, PowerOff, GitBranch, HamburgerIcon, LanguagesIcon, MenuIcon, PencilIcon, RefreshCcwIcon, SplitIcon, TrashIcon, UserIcon, Volume2Icon, Scissors } from "@lucide/svelte"
     import { aiLawApplies, changeChatTo, foldChatToMessage, getFileSrc, createChatCopyName } from "src/ts/globalApi.svelte"
     import { ColorSchemeTypeStore } from "src/ts/gui/colorscheme"
@@ -15,7 +16,6 @@
     import { risuChatParser } from "src/ts/process/scripts"
     import { DisplayReadRecord, recordChatVariableReads, registerDisplayRow } from 'src/ts/process/scriptVariableReads'
     import { rebuildScriptDisplayRow } from 'src/ts/process/scriptDisplayRefresh'
-    import { holdScriptRun } from 'src/ts/process/generationBackground'
     import { runTrigger } from 'src/ts/process/triggers'
     import { sayTTS } from "src/ts/process/tts"
     import { DBState, ReloadChatPointer, CurrentTriggerIdStore, popupStore } from 'src/ts/stores.svelte'
@@ -560,9 +560,16 @@
     }
 
     async function edit(){
-        if (mutationBlocked()) return false
         const retainedIntent = editIntent
         const retainedTarget = editTarget
+        const retainedEvidence = editEvidence
+        const retainedDraft = editDraft
+        const target = retainedIntent?.selection ?? (retainedTarget ? {
+            characterId: retainedTarget.character.chaId, conversationId: retainedTarget.conversation.id,
+        } : null)
+        const nativeEdit = target?.conversationId && !$activeRerollConversations.includes(target.conversationId)
+            ? captureNativeGenerationMessageEdit({ characterId: target.characterId, conversationId: target.conversationId }) : null
+        if (!nativeEdit && mutationBlocked()) return false
         const acquired = await acquireEditMessage(
             retainedIntent,
             retainedTarget,
@@ -570,9 +577,15 @@
         )
         if (!acquired) return reportRowActionRefused()
         try {
-            if (mutationBlocked()) return false
-            if (retainedTarget && !isEqual(resolveChatMessageTarget(retainedTarget, chatMessageContext)?.message, editEvidence)) return reportRowActionRefused()
-            const result = saveCapturedChatMessage(acquired.target, chatMessageContext, editDraft)
+            if (!editMode || editIntent !== retainedIntent || editTarget !== retainedTarget || editDraft !== retainedDraft) return reportRowActionRefused()
+            if (retainedTarget && !isEqual(resolveChatMessageTarget(retainedTarget, chatMessageContext)?.message, retainedEvidence)) return reportRowActionRefused()
+            if (nativeEdit) {
+                const current = acquired.target
+                if ((current.kind !== 'session' && current.kind !== 'windowed') || !current.conversation.id
+                    || $activeRerollConversations.includes(current.conversation.id)
+                    || !nativeEdit.isCurrent({ characterId: current.character.chaId, conversationId: current.conversation.id })) return reportRowActionRefused()
+            } else if (mutationBlocked()) return false
+            const result = saveCapturedChatMessage(acquired.target, chatMessageContext, retainedDraft)
             if (result.saved) {
                 editIntent = null
                 editTarget = null
@@ -1002,36 +1015,34 @@
             currentChat: ReturnType<typeof getCurrentChat>,
         ) => Promise<{ chat: ReturnType<typeof getCurrentChat> } | null | undefined>,
     ) {
-        await holdScriptRun(async () => {
-            if (selectedConversationOperations) {
-                try {
-                    await selectedConversationOperations.withCompleteSelectedConversation(
-                        'manual-chat-trigger',
-                        async (context) => {
-                            const authority = context.requireCurrent()
+        if (selectedConversationOperations) {
+            try {
+                await selectedConversationOperations.withCompleteSelectedConversation(
+                    'manual-chat-trigger',
+                    async (context) => {
+                        const authority = context.requireCurrent()
 
-                            const triggerResult = await runManualTrigger(
-                                authority.character,
-                                authority.conversation,
-                            )
-                            context.requireCurrent()
-                            if (triggerResult) setCurrentChat(triggerResult.chat)
-                            if (triggerResult) rebuildScriptDisplayRow(idx)
-                        },
-                    )
-                } catch (error) {
-                    if (!(error instanceof SelectedConversationPromotionStaleError)) throw error
-                }
-            } else {
-                const currentChar = getCurrentCharacter()
-                if(!currentChar) return
-                const triggerResult = await runManualTrigger(currentChar, getCurrentChat())
-                if(triggerResult) {
-                    setCurrentChat(triggerResult.chat)
-                    rebuildScriptDisplayRow(idx)
-                }
+                        const triggerResult = await runManualTrigger(
+                            authority.character,
+                            authority.conversation,
+                        )
+                        context.requireCurrent()
+                        if (triggerResult) setCurrentChat(triggerResult.chat)
+                        if (triggerResult) rebuildScriptDisplayRow(idx)
+                    },
+                )
+            } catch (error) {
+                if (!(error instanceof SelectedConversationPromotionStaleError)) throw error
             }
-        })
+        } else {
+            const currentChar = getCurrentCharacter()
+            if(!currentChar) return
+            const triggerResult = await runManualTrigger(currentChar, getCurrentChat())
+            if(triggerResult) {
+                setCurrentChat(triggerResult.chat)
+                rebuildScriptDisplayRow(idx)
+            }
+        }
     }
 
     let isBookmarked = $derived(

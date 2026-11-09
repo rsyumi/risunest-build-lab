@@ -359,6 +359,23 @@ function classifyConversationAccess(
     return access
 }
 
+/**
+ * Whether an editprocess run for `char` can change something besides the text it returns: a plugin handler, or a
+ * regex script that injects into the conversation or sets an emotion.
+ */
+export function editProcessHasEffects(char: character | simpleCharacterArgument): boolean {
+    if (pluginV2.editprocess.size > 0) return true
+    const scripts = [
+        ...(getDatabase().presetRegex ?? []),
+        ...char.customscript,
+        ...getModuleRegexScripts(),
+    ]
+    return getRegexExecutionPlan(scripts, 'editprocess').entries.some((entry) =>
+        entry.actions.includes('inject') ||
+        entry.replacement.startsWith('@@inject') ||
+        entry.replacement.startsWith('@@emo '))
+}
+
 export class PromptScriptOperationScope {
     private operation: ConversationOperationContext | null = null
     private compatibilityPin: ActiveConversationPin | null
@@ -926,7 +943,7 @@ async function processScriptFullImpl(char:character|simpleCharacterArgument, dat
             record: (keys) => { for (const key of keys) parseReads.note(key) },
         } : undefined,
         signal: options.signal, scope: options.regexScope, worker: options.regexWorker,
-        onTimeout: noticeRegexTimeout, skipTimedOutRules: mode === 'editdisplay',
+        onTimeout: noticeRegexTimeout,
     })
 
     async function executeScript(entry:RegexExecutionPlanEntry){

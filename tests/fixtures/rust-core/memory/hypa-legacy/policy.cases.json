@@ -1,0 +1,973 @@
+{
+  "schema": 1,
+  "cases": [
+    {
+      "id": "under-limit-unchanged",
+      "input": {
+        "settings": {},
+        "charName": "Kai",
+        "room": {},
+        "summaries": [],
+        "invocations": [
+          {
+            "currentTokens": 50,
+            "maxContextTokens": 60
+          }
+        ],
+        "chats": [
+          {
+            "role": "user",
+            "content": "c message 0",
+            "memo": "c0"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 1",
+            "memo": "c1"
+          },
+          {
+            "role": "user",
+            "content": "c message 2",
+            "memo": "c2"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 3",
+            "memo": "c3"
+          }
+        ]
+      }
+    },
+    {
+      "id": "first-run-writes-hypa-record",
+      "input": {
+        "settings": {},
+        "charName": "Kai",
+        "room": {},
+        "summaries": [
+          {
+            "reply": {
+              "type": "success",
+              "result": "Sum A."
+            }
+          }
+        ],
+        "invocations": [
+          {
+            "currentTokens": 66,
+            "maxContextTokens": 60
+          }
+        ],
+        "chats": [
+          {
+            "role": "user",
+            "content": "c message 0",
+            "memo": "c0"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 1",
+            "memo": "c1"
+          },
+          {
+            "role": "user",
+            "content": "c message 2",
+            "memo": "c2"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 3",
+            "memo": "c3"
+          },
+          {
+            "role": "user",
+            "content": "c message 4",
+            "memo": "c4"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 5",
+            "memo": "c5"
+          },
+          {
+            "role": "user",
+            "content": "c message 6",
+            "memo": "c6"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 7",
+            "memo": "c7"
+          }
+        ]
+      }
+    },
+    {
+      "id": "plain-record-ignored",
+      "input": {
+        "settings": {},
+        "charName": "Kai",
+        "room": {
+          "supaMemoryData": "c2\nEarlier events."
+        },
+        "summaries": [
+          {
+            "reply": {
+              "type": "success",
+              "result": "Sum A."
+            }
+          }
+        ],
+        "invocations": [
+          {
+            "currentTokens": 66,
+            "maxContextTokens": 60
+          }
+        ],
+        "chats": [
+          {
+            "role": "user",
+            "content": "c message 0",
+            "memo": "c0"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 1",
+            "memo": "c1"
+          },
+          {
+            "role": "user",
+            "content": "c message 2",
+            "memo": "c2"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 3",
+            "memo": "c3"
+          },
+          {
+            "role": "user",
+            "content": "c message 4",
+            "memo": "c4"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 5",
+            "memo": "c5"
+          },
+          {
+            "role": "user",
+            "content": "c message 6",
+            "memo": "c6"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 7",
+            "memo": "c7"
+          }
+        ]
+      }
+    },
+    {
+      "id": "stored-record-retrieves-past-events",
+      "input": {
+        "settings": {},
+        "charName": "Kai",
+        "room": {
+          "supaMemoryData": "hypa:\n[\n  {\n    \"id\": \"c2\",\n    \"supa\": \"Old summary.\",\n    \"hypa\": [\n      \"Alpha event.\",\n      \"Beta event.\",\n      \"Gamma event.\",\n      \"Delta event.\",\n      \"x\",\n      \"Old summary.\"\n    ]\n  }\n]"
+        },
+        "summaries": [
+          {
+            "reply": {
+              "type": "success",
+              "result": "Chunk."
+            }
+          }
+        ],
+        "invocations": [
+          {
+            "currentTokens": 51,
+            "maxContextTokens": 60
+          }
+        ],
+        "chats": [
+          {
+            "role": "user",
+            "content": "c message 0",
+            "memo": "c0"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 1",
+            "memo": "c1"
+          },
+          {
+            "role": "user",
+            "content": "c message 2",
+            "memo": "c2"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 3",
+            "memo": "c3"
+          },
+          {
+            "role": "user",
+            "content": "c message 4",
+            "memo": "c4"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 5",
+            "memo": "c5"
+          },
+          {
+            "role": "user",
+            "content": "c message 6",
+            "memo": "c6"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 7",
+            "memo": "c7"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ran-out-updates-first-entry-in-place",
+      "input": {
+        "settings": {},
+        "charName": "Kai",
+        "room": {
+          "supaMemoryData": "hypa:\n[\n  {\n    \"supa\": \"A b c d\",\n    \"extra\": \"kept\",\n    \"id\": \"c1\",\n    \"hypa\": [\n      \"Alpha event.\"\n    ]\n  }\n]"
+        },
+        "summaries": [
+          {
+            "reply": {
+              "type": "success",
+              "result": "Short."
+            }
+          }
+        ],
+        "invocations": [
+          {
+            "currentTokens": 51,
+            "maxContextTokens": 60
+          }
+        ],
+        "chats": [
+          {
+            "role": "user",
+            "content": "c message 0",
+            "memo": "c0"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 1",
+            "memo": "c1"
+          },
+          {
+            "role": "user",
+            "content": "c message 2",
+            "memo": "c2"
+          }
+        ],
+        "tokenizer": {
+          "overrides": [
+            {
+              "text": "A b c d",
+              "length": 15
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "record-not-array-after-newchat-trim",
+      "input": {
+        "settings": {},
+        "charName": "Kai",
+        "room": {
+          "supaMemoryData": "hypa:\n {\"id\": \"c1\"} "
+        },
+        "summaries": [],
+        "invocations": [
+          {
+            "currentTokens": 55,
+            "maxContextTokens": 60
+          }
+        ],
+        "chats": [
+          {
+            "role": "user",
+            "content": "before",
+            "memo": "b0"
+          },
+          {
+            "role": "assistant",
+            "content": "greeting",
+            "memo": "NewChat"
+          },
+          {
+            "role": "user",
+            "content": "c message 0",
+            "memo": "c0"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 1",
+            "memo": "c1"
+          },
+          {
+            "role": "user",
+            "content": "c message 2",
+            "memo": "c2"
+          }
+        ]
+      }
+    },
+    {
+      "id": "record-id-not-found-counts-every-entry",
+      "input": {
+        "settings": {},
+        "charName": "Kai",
+        "room": {
+          "supaMemoryData": "hypa:\n[\n  {\n    \"id\": \"zz\",\n    \"supa\": \"s\",\n    \"hypa\": []\n  },\n  {\n    \"id\": \"yy\",\n    \"supa\": \"t\",\n    \"hypa\": []\n  }\n]"
+        },
+        "summaries": [],
+        "invocations": [
+          {
+            "currentTokens": 55,
+            "maxContextTokens": 60
+          }
+        ],
+        "chats": [
+          {
+            "role": "user",
+            "content": "c message 0",
+            "memo": "c0"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 1",
+            "memo": "c1"
+          },
+          {
+            "role": "user",
+            "content": "c message 2",
+            "memo": "c2"
+          }
+        ]
+      }
+    },
+    {
+      "id": "second-entry-selected-with-punctuation-removed",
+      "input": {
+        "settings": {
+          "removePunctuationHypa": true
+        },
+        "charName": "Kai",
+        "room": {
+          "supaMemoryData": "hypa:\n[\n  {\n    \"id\": \"zz\",\n    \"supa\": \"s\",\n    \"hypa\": []\n  },\n  {\n    \"id\": \"c1\",\n    \"supa\": \"Second.\",\n    \"hypa\": [\n      \"Alpha event.\",\n      \"Alpha event.\",\n      \"Beta, event!\"\n    ]\n  }\n]"
+        },
+        "summaries": [
+          {
+            "reply": {
+              "type": "success",
+              "result": "Chunk."
+            }
+          }
+        ],
+        "invocations": [
+          {
+            "currentTokens": 51,
+            "maxContextTokens": 60
+          }
+        ],
+        "chats": [
+          {
+            "role": "user",
+            "content": "c message 0",
+            "memo": "c0"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 1",
+            "memo": "c1"
+          },
+          {
+            "role": "user",
+            "content": "c message 2",
+            "memo": "c2"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 3",
+            "memo": "c3"
+          },
+          {
+            "role": "user",
+            "content": "c message 4",
+            "memo": "c4"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 5",
+            "memo": "c5"
+          },
+          {
+            "role": "user",
+            "content": "c message 6",
+            "memo": "c6"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 7",
+            "memo": "c7"
+          }
+        ]
+      }
+    },
+    {
+      "id": "merge-after-three-entries",
+      "input": {
+        "settings": {},
+        "charName": "Kai",
+        "room": {
+          "supaMemoryData": "hypa:\n[\n  {\n    \"id\": \"c0\",\n    \"supa\": \"A one\\n\\nB two\\n\\nC three\",\n    \"hypa\": []\n  }\n]"
+        },
+        "summaries": [
+          {
+            "reply": {
+              "type": "success",
+              "result": "Chunk\n\nsum."
+            }
+          },
+          {
+            "reply": {
+              "type": "success",
+              "result": "Merged."
+            }
+          }
+        ],
+        "invocations": [
+          {
+            "currentTokens": 51,
+            "maxContextTokens": 60
+          }
+        ],
+        "chats": [
+          {
+            "role": "user",
+            "content": "c message 0",
+            "memo": "c0"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 1",
+            "memo": "c1"
+          },
+          {
+            "role": "user",
+            "content": "c message 2",
+            "memo": "c2"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 3",
+            "memo": "c3"
+          },
+          {
+            "role": "user",
+            "content": "c message 4",
+            "memo": "c4"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 5",
+            "memo": "c5"
+          },
+          {
+            "role": "user",
+            "content": "c message 6",
+            "memo": "c6"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 7",
+            "memo": "c7"
+          }
+        ]
+      }
+    },
+    {
+      "id": "second-invocation-reparses-written-record",
+      "input": {
+        "settings": {},
+        "charName": "Kai",
+        "room": {},
+        "summaries": [
+          {
+            "reply": {
+              "type": "success",
+              "result": "Sum A."
+            }
+          }
+        ],
+        "invocations": [
+          {
+            "currentTokens": 66,
+            "maxContextTokens": 60
+          },
+          {
+            "currentTokens": 66,
+            "maxContextTokens": 60,
+            "persistPrevious": true
+          }
+        ],
+        "chats": [
+          {
+            "role": "user",
+            "content": "c message 0",
+            "memo": "c0"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 1",
+            "memo": "c1"
+          },
+          {
+            "role": "user",
+            "content": "c message 2",
+            "memo": "c2"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 3",
+            "memo": "c3"
+          },
+          {
+            "role": "user",
+            "content": "c message 4",
+            "memo": "c4"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 5",
+            "memo": "c5"
+          },
+          {
+            "role": "user",
+            "content": "c message 6",
+            "memo": "c6"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 7",
+            "memo": "c7"
+          },
+          {
+            "role": "user",
+            "content": "c message 8",
+            "memo": "c8"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 9",
+            "memo": "c9"
+          }
+        ]
+      }
+    },
+    {
+      "id": "memo-less-break-writes-entry-without-id",
+      "input": {
+        "settings": {},
+        "charName": "Kai",
+        "room": {},
+        "summaries": [
+          {
+            "reply": {
+              "type": "success",
+              "result": "Sum A."
+            }
+          }
+        ],
+        "invocations": [
+          {
+            "currentTokens": 66,
+            "maxContextTokens": 60
+          },
+          {
+            "currentTokens": 66,
+            "maxContextTokens": 60,
+            "persistPrevious": true
+          }
+        ],
+        "chats": [
+          {
+            "role": "user",
+            "content": "c message 0",
+            "memo": "c0"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 1",
+            "memo": "c1"
+          },
+          {
+            "role": "user",
+            "content": "c message 2",
+            "memo": "c2"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 3",
+            "memo": "c3"
+          },
+          {
+            "role": "user",
+            "content": "no memo here"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 5",
+            "memo": "c5"
+          },
+          {
+            "role": "user",
+            "content": "c message 6",
+            "memo": "c6"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 7",
+            "memo": "c7"
+          }
+        ]
+      }
+    },
+    {
+      "id": "query-skips-system-and-inlay-and-names-speakers",
+      "input": {
+        "settings": {},
+        "charName": "Kai",
+        "room": {
+          "supaMemoryData": "hypa:\n[\n  {\n    \"id\": \"c4\",\n    \"supa\": \"Base.\",\n    \"hypa\": [\n      \"Alpha event.\",\n      \"Beta event.\",\n      \"Gamma event.\",\n      \"Delta event.\"\n    ]\n  }\n]"
+        },
+        "summaries": [],
+        "invocations": [
+          {
+            "currentTokens": 52,
+            "maxContextTokens": 60
+          }
+        ],
+        "chats": [
+          {
+            "role": "user",
+            "content": "c message 0",
+            "memo": "c0"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 1",
+            "memo": "c1"
+          },
+          {
+            "role": "user",
+            "content": "c message 2",
+            "memo": "c2"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 3",
+            "memo": "c3"
+          },
+          {
+            "role": "user",
+            "content": "start",
+            "memo": "c4"
+          },
+          {
+            "role": "system",
+            "content": "note",
+            "memo": "n5"
+          },
+          {
+            "role": "user",
+            "content": "img",
+            "memo": "inlayImage-6"
+          },
+          {
+            "role": "user",
+            "content": "named",
+            "memo": "c7",
+            "name": "Someone"
+          },
+          {
+            "role": "assistant",
+            "content": "reply",
+            "memo": "c8"
+          },
+          {
+            "role": "user",
+            "content": "last",
+            "memo": "c9"
+          }
+        ]
+      }
+    },
+    {
+      "id": "document-embedding-failure-throws",
+      "input": {
+        "settings": {},
+        "charName": "Kai",
+        "room": {
+          "supaMemoryData": "hypa:\n[\n  {\n    \"id\": \"c1\",\n    \"supa\": \"Base.\",\n    \"hypa\": [\n      \"Alpha event.\"\n    ]\n  }\n]"
+        },
+        "summaries": [],
+        "invocations": [
+          {
+            "currentTokens": 51,
+            "maxContextTokens": 60
+          }
+        ],
+        "chats": [
+          {
+            "role": "user",
+            "content": "c message 0",
+            "memo": "c0"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 1",
+            "memo": "c1"
+          },
+          {
+            "role": "user",
+            "content": "c message 2",
+            "memo": "c2"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 3",
+            "memo": "c3"
+          },
+          {
+            "role": "user",
+            "content": "c message 4",
+            "memo": "c4"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 5",
+            "memo": "c5"
+          },
+          {
+            "role": "user",
+            "content": "c message 6",
+            "memo": "c6"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 7",
+            "memo": "c7"
+          }
+        ],
+        "embeddings": {
+          "fail": {
+            "purpose": "document",
+            "message": "embed down"
+          }
+        }
+      }
+    },
+    {
+      "id": "query-embedding-failure-throws",
+      "input": {
+        "settings": {},
+        "charName": "Kai",
+        "room": {
+          "supaMemoryData": "hypa:\n[\n  {\n    \"id\": \"c1\",\n    \"supa\": \"Base.\",\n    \"hypa\": [\n      \"Alpha event.\"\n    ]\n  }\n]"
+        },
+        "summaries": [],
+        "invocations": [
+          {
+            "currentTokens": 51,
+            "maxContextTokens": 60
+          }
+        ],
+        "chats": [
+          {
+            "role": "user",
+            "content": "c message 0",
+            "memo": "c0"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 1",
+            "memo": "c1"
+          },
+          {
+            "role": "user",
+            "content": "c message 2",
+            "memo": "c2"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 3",
+            "memo": "c3"
+          },
+          {
+            "role": "user",
+            "content": "c message 4",
+            "memo": "c4"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 5",
+            "memo": "c5"
+          },
+          {
+            "role": "user",
+            "content": "c message 6",
+            "memo": "c6"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 7",
+            "memo": "c7"
+          }
+        ],
+        "embeddings": {
+          "fail": {
+            "purpose": "query",
+            "message": "query down"
+          }
+        }
+      }
+    },
+    {
+      "id": "utf16-chunks-round-trip",
+      "input": {
+        "settings": {},
+        "charName": "Kai",
+        "room": {},
+        "summaries": [
+          {
+            "reply": {
+              "type": "success",
+              "result": {
+                "$utf16": [
+                  83,
+                  117,
+                  114,
+                  114,
+                  111,
+                  103,
+                  97,
+                  116,
+                  101,
+                  32,
+                  57343,
+                  32,
+                  115,
+                  117,
+                  109,
+                  109,
+                  97,
+                  114,
+                  121,
+                  46
+                ]
+              }
+            }
+          }
+        ],
+        "invocations": [
+          {
+            "currentTokens": 66,
+            "maxContextTokens": 60
+          },
+          {
+            "currentTokens": 66,
+            "maxContextTokens": 60,
+            "persistPrevious": true
+          }
+        ],
+        "chats": [
+          {
+            "role": "user",
+            "content": {
+              "$utf16": [
+                108,
+                111,
+                110,
+                101,
+                32,
+                55296,
+                32,
+                117,
+                110,
+                105,
+                116
+              ]
+            },
+            "memo": {
+              "$utf16": [
+                117,
+                56320
+              ]
+            }
+          },
+          {
+            "role": "assistant",
+            "content": "c message 1",
+            "memo": "c1"
+          },
+          {
+            "role": "user",
+            "content": "c message 2",
+            "memo": "c2"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 3",
+            "memo": "c3"
+          },
+          {
+            "role": "user",
+            "content": "c message 4",
+            "memo": "c4"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 5",
+            "memo": "c5"
+          },
+          {
+            "role": "user",
+            "content": "c message 6",
+            "memo": "c6"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 7",
+            "memo": "c7"
+          },
+          {
+            "role": "user",
+            "content": "c message 8",
+            "memo": "c8"
+          },
+          {
+            "role": "assistant",
+            "content": "c message 9",
+            "memo": "c9"
+          }
+        ]
+      }
+    }
+  ]
+}

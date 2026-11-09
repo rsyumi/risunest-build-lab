@@ -1,0 +1,963 @@
+{
+  "schema": 1,
+  "baseDb": {
+    "usePlainFetch": true,
+    "hordeConfig": {
+      "apiKey": "",
+      "model": "",
+      "softPrompt": ""
+    },
+    "instructChatTemplate": "chatml",
+    "username": "Mina",
+    "maxContext": 4000,
+    "maxResponse": 300,
+    "temperature": 80,
+    "top_k": 40,
+    "repetition_penalty": 1.1,
+    "min_p": 0.05,
+    "top_a": 0.2,
+    "top_p": 0.9,
+    "frequencyPenalty": 20,
+    "PresensePenalty": 30,
+    "thinkingTokens": 1024,
+    "reasoningEffort": 1,
+    "verbosity": 1,
+    "seperateParametersEnabled": false,
+    "seperateParametersByModel": false,
+    "applyAdditionalParamsToAll": false,
+    "additionalParams": [],
+    "systemContentReplacement": "",
+    "systemRoleReplacement": "",
+    "proxyKey": "sk-synthetic-proxy",
+    "forceReplaceUrl": "",
+    "customProxyRequestModel": "my-proxy-model",
+    "customAPIFormat": 16,
+    "enableCustomFlags": false,
+    "customFlags": [],
+    "localNetworkMode": false
+  },
+  "cases": [
+    {
+      "id": "basic",
+      "model": "horde:::koboldcpp/Synth-7B",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 202,
+          "json": {
+            "id": "job-1",
+            "kudos": 10
+          }
+        },
+        {
+          "json": {
+            "is_possible": true,
+            "done": true,
+            "generations": [
+              {
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "multi-turn",
+      "model": "horde:::koboldcpp/Synth-7B",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "replies": [
+        {
+          "status": 202,
+          "json": {
+            "id": "job-1",
+            "kudos": 10
+          }
+        },
+        {
+          "json": {
+            "is_possible": true,
+            "done": true,
+            "generations": [
+              {
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "auto-model",
+      "model": "horde:::auto",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 202,
+          "json": {
+            "id": "job-1",
+            "kudos": 10
+          }
+        },
+        {
+          "json": {
+            "is_possible": true,
+            "done": true,
+            "generations": [
+              {
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "auto-spaced-keeps-models",
+      "model": "horde::: auto",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 202,
+          "json": {
+            "id": "job-1",
+            "kudos": 10
+          }
+        },
+        {
+          "json": {
+            "is_possible": true,
+            "done": true,
+            "generations": [
+              {
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "spaced-model",
+      "model": "horde:::  Synth Model  ",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 202,
+          "json": {
+            "id": "job-1",
+            "kudos": 10
+          }
+        },
+        {
+          "json": {
+            "is_possible": true,
+            "done": true,
+            "generations": [
+              {
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "extra-separator",
+      "model": "horde:::first:::second",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 202,
+          "json": {
+            "id": "job-1",
+            "kudos": 10
+          }
+        },
+        {
+          "json": {
+            "is_possible": true,
+            "done": true,
+            "generations": [
+              {
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "empty-model-name",
+      "model": "horde:::",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 202,
+          "json": {
+            "id": "job-1",
+            "kudos": 10
+          }
+        },
+        {
+          "json": {
+            "is_possible": true,
+            "done": true,
+            "generations": [
+              {
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "api-key",
+      "model": "horde:::koboldcpp/Synth-7B",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 202,
+          "json": {
+            "id": "job-1",
+            "kudos": 10
+          }
+        },
+        {
+          "json": {
+            "is_possible": true,
+            "done": true,
+            "generations": [
+              {
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "db": {
+        "hordeConfig": {
+          "apiKey": "synthetic-horde-key",
+          "model": "",
+          "softPrompt": ""
+        }
+      }
+    },
+    {
+      "id": "api-key-two-units",
+      "model": "horde:::koboldcpp/Synth-7B",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 202,
+          "json": {
+            "id": "job-1",
+            "kudos": 10
+          }
+        },
+        {
+          "json": {
+            "is_possible": true,
+            "done": true,
+            "generations": [
+              {
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "db": {
+        "hordeConfig": {
+          "apiKey": "ab",
+          "model": "",
+          "softPrompt": ""
+        }
+      }
+    },
+    {
+      "id": "api-key-three-units",
+      "model": "horde:::koboldcpp/Synth-7B",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 202,
+          "json": {
+            "id": "job-1",
+            "kudos": 10
+          }
+        },
+        {
+          "json": {
+            "is_possible": true,
+            "done": true,
+            "generations": [
+              {
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "db": {
+        "hordeConfig": {
+          "apiKey": "abc",
+          "model": "",
+          "softPrompt": ""
+        }
+      }
+    },
+    {
+      "id": "settings-values",
+      "model": "horde:::koboldcpp/Synth-7B",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 202,
+          "json": {
+            "id": "job-1",
+            "kudos": 10
+          }
+        },
+        {
+          "json": {
+            "is_possible": true,
+            "done": true,
+            "generations": [
+              {
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "db": {
+        "maxContext": 8192,
+        "maxResponse": 512,
+        "temperature": 0,
+        "top_k": 0,
+        "top_p": 1
+      }
+    },
+    {
+      "id": "settings-fractions",
+      "model": "horde:::koboldcpp/Synth-7B",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 202,
+          "json": {
+            "id": "job-1",
+            "kudos": 10
+          }
+        },
+        {
+          "json": {
+            "is_possible": true,
+            "done": true,
+            "generations": [
+              {
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "db": {
+        "maxContext": 1000.5,
+        "temperature": 75,
+        "top_p": 0.95
+      }
+    },
+    {
+      "id": "max-tokens-argument-ignored",
+      "model": "horde:::koboldcpp/Synth-7B",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 202,
+          "json": {
+            "id": "job-1",
+            "kudos": 10
+          }
+        },
+        {
+          "json": {
+            "is_possible": true,
+            "done": true,
+            "generations": [
+              {
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "maxTokens": 77
+    },
+    {
+      "id": "unicode-and-escapes",
+      "model": "horde:::koboldcpp/Synth-7B",
+      "messages": [
+        {
+          "role": "system",
+          "content": "日本語 😀"
+        },
+        {
+          "role": "user",
+          "content": "\"quoted\" \\ back\nline"
+        }
+      ],
+      "replies": [
+        {
+          "status": 202,
+          "json": {
+            "id": "job-1",
+            "kudos": 10
+          }
+        },
+        {
+          "json": {
+            "is_possible": true,
+            "done": true,
+            "generations": [
+              {
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "empty-messages",
+      "model": "horde:::koboldcpp/Synth-7B",
+      "messages": [],
+      "replies": [
+        {
+          "status": 202,
+          "json": {
+            "id": "job-1",
+            "kudos": 10
+          }
+        },
+        {
+          "json": {
+            "is_possible": true,
+            "done": true,
+            "generations": [
+              {
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "additional-number",
+      "model": "horde:::koboldcpp/Synth-7B",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 202,
+          "json": {
+            "id": "job-1",
+            "kudos": 10
+          }
+        },
+        {
+          "json": {
+            "is_possible": true,
+            "done": true,
+            "generations": [
+              {
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "seed",
+            "7"
+          ]
+        ],
+        "applyAdditionalParamsToAll": true
+      }
+    },
+    {
+      "id": "additional-nested",
+      "model": "horde:::koboldcpp/Synth-7B",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 202,
+          "json": {
+            "id": "job-1",
+            "kudos": 10
+          }
+        },
+        {
+          "json": {
+            "is_possible": true,
+            "done": true,
+            "generations": [
+              {
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "params.n",
+            "2"
+          ],
+          [
+            "params.singleline",
+            "true"
+          ]
+        ],
+        "applyAdditionalParamsToAll": true
+      }
+    },
+    {
+      "id": "additional-removes-prompt",
+      "model": "horde:::koboldcpp/Synth-7B",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 202,
+          "json": {
+            "id": "job-1",
+            "kudos": 10
+          }
+        },
+        {
+          "json": {
+            "is_possible": true,
+            "done": true,
+            "generations": [
+              {
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "prompt",
+            "{{none}}"
+          ]
+        ],
+        "applyAdditionalParamsToAll": true
+      }
+    },
+    {
+      "id": "additional-header",
+      "model": "horde:::koboldcpp/Synth-7B",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 202,
+          "json": {
+            "id": "job-1",
+            "kudos": 10
+          }
+        },
+        {
+          "json": {
+            "is_possible": true,
+            "done": true,
+            "generations": [
+              {
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "db": {
+        "additionalParams": [
+          [
+            "header::apikey",
+            "override"
+          ],
+          [
+            "header::X-Test",
+            "on"
+          ]
+        ],
+        "applyAdditionalParamsToAll": true
+      }
+    },
+    {
+      "id": "system-content-replacement",
+      "model": "horde:::koboldcpp/Synth-7B",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 202,
+          "json": {
+            "id": "job-1",
+            "kudos": 10
+          }
+        },
+        {
+          "json": {
+            "is_possible": true,
+            "done": true,
+            "generations": [
+              {
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "db": {
+        "systemContentReplacement": "Sys: {{slot}}",
+        "systemRoleReplacement": "user"
+      }
+    },
+    {
+      "id": "chat-template-llama3",
+      "model": "horde:::koboldcpp/Synth-7B",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a narrator."
+        },
+        {
+          "role": "user",
+          "content": "Open the door."
+        },
+        {
+          "role": "assistant",
+          "content": "The door creaks open."
+        },
+        {
+          "role": "user",
+          "content": "Walk in."
+        }
+      ],
+      "replies": [
+        {
+          "status": 202,
+          "json": {
+            "id": "job-1",
+            "kudos": 10
+          }
+        },
+        {
+          "json": {
+            "is_possible": true,
+            "done": true,
+            "generations": [
+              {
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "db": {
+        "instructChatTemplate": "llama3"
+      }
+    },
+    {
+      "id": "submodel-mode",
+      "model": "horde:::koboldcpp/Synth-7B",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 202,
+          "json": {
+            "id": "job-1",
+            "kudos": 10
+          }
+        },
+        {
+          "json": {
+            "is_possible": true,
+            "done": true,
+            "generations": [
+              {
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "mode": "submodel"
+    },
+    {
+      "id": "reverse-proxy-throws",
+      "model": "reverse_proxy",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 202,
+          "json": {
+            "id": "job-1",
+            "kudos": 10
+          }
+        },
+        {
+          "json": {
+            "is_possible": true,
+            "done": true,
+            "generations": [
+              {
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "custom-model",
+      "model": "xcustom:::synth",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be brief."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "replies": [
+        {
+          "status": 202,
+          "json": {
+            "id": "job-1",
+            "kudos": 10
+          }
+        },
+        {
+          "json": {
+            "is_possible": true,
+            "done": true,
+            "generations": [
+              {
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "customModels": [
+        {
+          "id": "xcustom:::synth",
+          "name": "H",
+          "internalId": "h",
+          "url": "https://ignored.example.test/",
+          "key": "sk-synthetic-custom",
+          "format": 16,
+          "flags": [],
+          "tokenizer": 0,
+          "params": ""
+        }
+      ]
+    }
+  ]
+}

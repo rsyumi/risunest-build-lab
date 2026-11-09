@@ -1,6 +1,6 @@
 use super::lww_client::*;
 use crate::persistent_store::{
-    lww::{Header, UnitMutation},
+    lww::{ApplyReceive, Header, UnitMutation},
     PersistentStore, WorkingSetCommit,
 };
 use risunest_sync_server::{http, store::Store};
@@ -12,7 +12,6 @@ use risunest_sync_wire::{
 };
 use std::sync::Arc;
 
-mod format_levels;
 mod metadata_restore;
 
 pub(crate) struct LocalServerFixture {
@@ -55,18 +54,6 @@ impl LocalServerFixture {
     }
     pub(crate) fn root(&self) -> &std::path::Path {
         self._root.path()
-    }
-    /// A device as a request of this client's format level presents it.
-    pub(crate) fn device(&self, library_id: &str, token: &str) -> risunest_sync_server::store::Device {
-        let mut device = self.server.authenticate(library_id, token).unwrap();
-        device.format_level = Some(super::library_format::LEVEL);
-        device
-    }
-    /// Raises the library to this client's format level, as another device does.
-    pub(crate) fn switch_format(&self) {
-        let credential = self.server.add_device().unwrap();
-        let device = self.device(&credential.library_id, &credential.token);
-        ServerWriter::level(&self.server, &device, &credential.library_id, &uuid::Uuid::new_v4().to_string());
     }
     pub(crate) fn client(&self, store: &PersistentStore) -> LwwClient {
         let (config, stored) = self.candidate(store);
@@ -384,7 +371,6 @@ fn equal_stamp_different_value_stops_sync_after_original_is_superseded() {
 #[test]
 fn lost_accepted_response_is_recovered_after_reopen_and_keeps_a_later_edit_pending() {
     let server = LocalServerFixture::new();
-    server.switch_format();
     let (root, mut store) = local();
     let core = server.client(&store);
     save(&mut store, &["root", "language"], serde_json::json!("ja"));
@@ -805,7 +791,6 @@ fn publication(client: &LwwClient, store: &PersistentStore) -> Publication {
 #[test]
 fn initial_state_retry_settles_original_acceptance_without_republishing_acked_units() {
     let server = LocalServerFixture::new();
-    server.switch_format();
     let (root, mut store) = local();
     let client = server.client(&store);
     save(&mut store, &["root", "language"], serde_json::json!("ja"));
@@ -1462,28 +1447,15 @@ struct ServerWriter {
 }
 impl ServerWriter {
     const WRITER: &'static str = "00000000-0000-4000-8000-0000000000aa";
-    /// A writer at this client's format level, which has switched the library.
     fn new(server: &Arc<Store>) -> Self {
         let credential = server.add_device().unwrap();
-        let mut device = server.authenticate(&credential.library_id, &credential.token).unwrap();
-        device.format_level = Some(super::library_format::LEVEL);
-        Self::level(server, &device, &credential.library_id, Self::WRITER);
-        Self { server: server.clone(), device, library_id: credential.library_id }
-    }
-    fn level(server: &Store, device: &risunest_sync_server::store::Device, library_id: &str, writer: &str) {
-        let level = risunest_sync_wire::library_format::value(super::library_format::LEVEL).unwrap();
-        let change = UnitChange {
-            key: risunest_sync_wire::library_format::key(),
-            stamp: Stamp { physical_ms: 1.into(), logical: 0, writer_id: writer.into() },
-            value: level,
-        };
-        let request = PushRequest {
-            library_id: library_id.into(),
-            writer_id: writer.into(),
-            operation_id: uuid::Uuid::new_v4().to_string(),
-            changes: vec![change],
-        };
-        server.push(device, &request).unwrap();
+        Self {
+            server: server.clone(),
+            device: server
+                .authenticate(&credential.library_id, &credential.token)
+                .unwrap(),
+            library_id: credential.library_id,
+        }
     }
     fn push(&self, operation: &str, key: &UnitKey, physical: u64, value: UnitValue) {
         self.server
@@ -1581,16 +1553,15 @@ fn a_state_read_plans_its_listing_from_the_units_its_pin_holds() {
         let upper = client.admission().unwrap();
         client.state(&mut store, upper).unwrap().1
     });
-    // The pushed units and the library format unit.
-    assert_eq!(changes.len(), 2051);
+    assert_eq!(changes.len(), 2050);
     let read = lane.snapshot("binding");
-    assert_eq!(read.listed, 2051);
+    assert_eq!(read.listed, 2050);
     let listing = read.listing.unwrap();
-    assert_eq!((listing.done, listing.total), (2051, 2051));
+    assert_eq!((listing.done, listing.total), (2050, 2050));
     // Every state page was requested with the whole total already planned.
     let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), 3);
-    assert!(seen.iter().all(|total| *total == 2051));
+    assert!(seen.iter().all(|total| *total == 2050));
 }
 
 #[test]
@@ -1628,14 +1599,13 @@ fn a_restarted_state_read_does_not_double_its_listing_total() {
         let upper = client.admission().unwrap();
         client.state(&mut store, upper).unwrap().1
     });
-    // The pushed units and the library format unit.
-    assert_eq!(changes.len(), 1027);
+    assert_eq!(changes.len(), 1026);
     let read = lane.snapshot("binding");
-    assert!(read.listed > 1027);
+    assert!(read.listed > 1026);
     assert!(read.received_bytes > 0);
     let listing = read.listing.unwrap();
-    assert_eq!((listing.done, listing.total), (1027, 1027));
-    assert_eq!(*seen.lock().unwrap(), [(0, 1027), (1024, 1027), (0, 1027), (1024, 1027)]);
+    assert_eq!((listing.done, listing.total), (1026, 1026));
+    assert_eq!(*seen.lock().unwrap(), [(0, 1026), (1024, 1026), (0, 1026), (1024, 1026)]);
 }
 
 fn publication_ids(client: &LwwClient) -> Vec<String> {
@@ -1980,4 +1950,141 @@ fn receive_frontier_survives_retry_and_old_page_readers() {
     assert!(!complete.more);
     assert_eq!(complete.receive_frontier, Some(complete.page.progress.cursor));
     assert_eq!(b.query_plugin_storage(None).unwrap().items.len(), 300);
+}
+
+
+#[test]
+fn stored_receive_is_local_exact_and_recovers_the_result_through_ack_retry() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let reject_ack = Arc::new(AtomicBool::new(true));
+    let reject = reject_ack.clone();
+    let server = LocalServerFixture::with_router(move |router| router.layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let reject = reject.clone();
+            async move {
+                if request.uri().path() == "/ack" && reject.load(Ordering::Relaxed) {
+                    return axum::response::Response::builder().status(503).body(axum::body::Body::empty()).unwrap();
+                }
+                next.run(request).await
+            }
+        },
+    )));
+    let (_source_dir, mut source) = local();
+    let (target_dir, mut target) = local();
+    let source_client = server.client(&source);
+    let mut target_client = server.client(&target);
+    target_client.client.retry_transient = false;
+    save(&mut source, &["root", "language"], serde_json::json!("ja"));
+    push(&source_client, &mut source);
+    let descriptor = target_client.receive_descriptor(&mut target, &header(&source)).unwrap();
+    assert_eq!(descriptor.incoming_keys, vec![UnitKey::new(&["root", "language"]).unwrap()]);
+    let io = target_client.client.test_io.as_ref().unwrap().clone();
+    io.reset();
+    let request = ApplyReceive { header: descriptor.header.clone(), generating: vec![] };
+    let wrong_request = ApplyReceive { header: Header { request_id: "another-page".into(), ..request.header.clone() }, generating: vec![] };
+    assert_eq!(target_client.apply_stored_receive(&mut target, &wrong_request).unwrap_err().code, "receive-page-changed");
+    let wrong_binding = ApplyReceive { header: Header { binding_authority: 1.into(), ..request.header.clone() }, generating: vec![] };
+    let rejected = target_client.apply_stored_receive(&mut target, &wrong_binding).unwrap_err();
+    assert_eq!(rejected.code, "binding-authority-changed");
+    assert_eq!(rejected.receive_not_applied, Some(true));
+    let result = target_client.apply_stored_receive(&mut target, &request).unwrap();
+    assert_eq!(target.read_root(None).unwrap().value["language"], "ja");
+    assert_eq!(io.snapshot(), [0, 0, 0], "stored apply must not access the transport");
+    let config = target_client.client.config();
+    drop(target_client);
+    drop(target);
+    let mut target = PersistentStore::open(target_dir.path()).unwrap();
+    let mut target_client = LwwClient::new(target_dir.path(), config).unwrap();
+    target_client.client.retry_transient = false;
+    let replayed = target_client.apply_stored_receive(&mut target, &request).unwrap();
+    let mut expected_replay = result.clone();
+    expected_replay.current_state_recovery_required = true;
+    assert_eq!(serde_json::to_value(&replayed).unwrap(), serde_json::to_value(&expected_replay).unwrap());
+    target.lww_finish_receive(&request.header).unwrap();
+    assert!(target_client.finish_receive(&target, &request.header).is_err());
+    assert_eq!(serde_json::to_value(target_client.apply_stored_receive(&mut target, &request).unwrap()).unwrap(), serde_json::to_value(expected_replay).unwrap());
+    assert_eq!(target.revision().unwrap(), replayed.revision);
+    reject_ack.store(false, Ordering::Relaxed);
+    target_client.finish_receive(&target, &request.header).unwrap();
+    assert_eq!(target_client.apply_stored_receive(&mut target, &request).unwrap_err().code, "receive-page-missing");
+    assert_eq!(target.device_store().unwrap().connection().query_row("SELECT count(*) FROM device_settings WHERE key='native-server-receive-receipt.v1'", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
+}
+
+#[test]
+fn stored_native_receive_settles_on_the_transport_acknowledgment_before_its_page_is_deleted() {
+    use crate::persistent_store::receive_batches::{AdvanceRequest, AdvanceResult, BeginRequest, BeginResult, DeliveryRequest, Outcome, Phase, RetireRequest, RetireResult, Source};
+    for superseded in [false, true] {
+    let server = LocalServerFixture::new();
+    let (_a, mut source) = local();
+    let (target_dir, mut target) = local();
+    let a = server.client(&source);
+    let b = server.client(&target);
+    save(&mut source, &["root", "language"], serde_json::json!("ja"));
+    push(&a, &mut source);
+    let request_header = header(&target);
+    let page = b.receive_page(&mut target, &request_header).unwrap();
+    target.lww_stage_receive(&page).unwrap();
+    let stored = Source::Stored { header: page.header.clone() };
+    let lease = target.acquire_revision(target.revision().unwrap()).unwrap().lease;
+    let baseline = target.read_native_receive_evidence(&lease).unwrap();
+    target.release_revision(&lease).unwrap();
+    let request = BeginRequest { candidate: target.prepare_native_receive(&stored).unwrap(), source: stored, native_baseline: Some(baseline) };
+    let (BeginResult::Admitted { mut state } | BeginResult::Existing { mut state }) = target.begin_stored_native_receive(&b.log.0, &request).unwrap()
+        else { panic!("fresh stored admission expected") };
+    let mut changed_identity = false;
+    for _ in 0..1000 {
+        if state.phase == Phase::Sealed { break; }
+        let advance = AdvanceRequest { capability: state.capability.clone(), expected_progress_token: state.progress_token.clone(), generating: vec![] };
+        let AdvanceResult::Advanced { state: next, .. } = target.advance_stored_native_receive(&b.log.0, &advance).unwrap() else { panic!("current token was stale") };
+        state = next;
+        if superseded && !changed_identity && target.read_root(None).unwrap().value["language"] == "ja" {
+            let peer = rusqlite::Connection::open(target_dir.path().join("persistent").join(crate::persistent_store::DATABASE_FILE)).unwrap();
+            peer.execute("UPDATE library_sync_selection SET selection_epoch='synthetic-foreign-selection' WHERE singleton=1", []).unwrap();
+            changed_identity = true;
+        }
+    }
+    assert_eq!((state.phase, state.outcome), (Phase::Sealed, Some(if superseded { Outcome::Superseded } else { Outcome::Processed })));
+    assert_eq!(target.read_root(None).unwrap().value["language"], "ja");
+    let roots = state.roots.clone().unwrap();
+    if superseded {
+        assert!(changed_identity && roots.library.pages.0 > 0);
+        target.lww_apply_receive(&ApplyReceive { header: page.header.clone(), generating: vec![] }).unwrap();
+        target.lww_finish_receive(&page.header).unwrap();
+        b.finish_receive(&target, &page.header).unwrap();
+        assert_eq!(b.log.0.query_row("SELECT count(*) FROM receive_pages", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        let BeginResult::Existing { state: retained } = target.begin_stored_native_receive(&b.log.0, &request).unwrap()
+            else { panic!("the superseded history must remain owned") };
+        assert_eq!((retained.phase, retained.roots.as_ref()), (Phase::Sealed, Some(&roots)));
+        let read = crate::persistent_store::receive_batches::ReadPage { capability: state.capability.clone(),
+            partition: crate::persistent_store::receive_batches::Partition::Library,
+            kind: crate::persistent_store::receive_batches::PageKind::Effects, ordinal: 0.into(), previous_digest: "0".repeat(64) };
+        target.read_native_receive_page(&read).unwrap();
+        assert!(target.cleanup_native_receive(&state.capability).is_err());
+        let lease = target.acquire_revision(target.revision().unwrap()).unwrap().lease;
+        let projection = target.read_native_receive_evidence(&lease).unwrap();
+        target.release_revision(&lease).unwrap();
+        let delivery = DeliveryRequest { capability: state.capability.clone(), roots: roots.clone(), projection };
+        assert_eq!(target.acknowledge_native_receive_delivery(&delivery).unwrap().phase, Phase::Delivered);
+        assert!(matches!(target.retire_native_receive(Some(&b.log.0), &RetireRequest { capability: state.capability.clone(), roots }).unwrap(), RetireResult::Retired));
+        for _ in 0..1000 { if target.cleanup_native_receive(&state.capability).unwrap() { break; } }
+        assert!(target.read_native_receive_page(&read).is_err());
+        let next_header = header(&target);
+        assert!(b.receive_page(&mut target, &next_header).unwrap().changes.is_empty());
+        continue;
+    }
+    let lease = target.acquire_revision(target.revision().unwrap()).unwrap().lease;
+    let delivery = DeliveryRequest { capability: state.capability.clone(), roots: roots.clone(), projection: target.read_native_receive_evidence(&lease).unwrap() };
+    target.release_revision(&lease).unwrap();
+    assert_eq!(target.acknowledge_native_receive_delivery(&delivery).unwrap().phase, Phase::Delivered);
+    target.lww_finish_receive(&page.header).unwrap();
+    let retire = RetireRequest { capability: state.capability.clone(), roots };
+    assert!(matches!(target.retire_native_receive(Some(&b.log.0), &retire).unwrap(), RetireResult::Pending));
+    b.finish_receive(&target, &page.header).unwrap();
+    let pending: i64 = b.log.0.query_row("SELECT count(*) FROM receive_pages", [], |row| row.get(0)).unwrap();
+    assert_eq!(pending, 0);
+    // The acknowledgment settled both partitions; a repeated exact delivery reports it.
+    assert_eq!(target.acknowledge_native_receive_delivery(&delivery).unwrap().phase, Phase::Settled);
+    let next_header = header(&target);
+    assert!(b.receive_page(&mut target, &next_header).unwrap().changes.is_empty());
+    }
 }
